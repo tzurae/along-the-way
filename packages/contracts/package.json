@@ -1,0 +1,8 @@
+{
+  "name": "@along-the-way/contracts",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./trip-summary": "./src/trip-summary.ts"
+  }
+}

@@ -1,0 +1,152 @@
+name: along-the-way
+
+x-migration-environment: &migration-environment
+  DATABASE_URL: "postgresql://${POSTGRES_ADMIN_USER:-along_the_way_admin}:${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in .env}@db:5432/${POSTGRES_DB:-along_the_way}"
+
+x-api-environment: &api-environment
+  DATABASE_URL: "postgresql://${APP_DATABASE_USER:-along_the_way_app}:${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in .env}@db:5432/${POSTGRES_DB:-along_the_way}"
+
+services:
+  db:
+    image: postgis/postgis:17-3.5-alpine@sha256:fae81f3e8da88b8e684c58c8a8616aadda72e6fc1affcb050b490891ecb3db1c
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-along_the_way}"
+      POSTGRES_USER: "${POSTGRES_ADMIN_USER:-along_the_way_admin}"
+      POSTGRES_PASSWORD: "${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in .env}"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - private
+
+  migrate:
+    image: "along-the-way-api:${RELEASE_IMAGE_TAG:-local}"
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment: *migration-environment
+    command:
+      [
+        "sh",
+        "-c",
+        "bun apps/api/src/database/migrate.ts && bun apps/api/src/database/seed.ts",
+      ]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - private
+
+  provision-app-role:
+    image: postgis/postgis:17-3.5-alpine@sha256:fae81f3e8da88b8e684c58c8a8616aadda72e6fc1affcb050b490891ecb3db1c
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGDATABASE: "${POSTGRES_DB:-along_the_way}"
+      PGUSER: "${POSTGRES_ADMIN_USER:-along_the_way_admin}"
+      PGPASSWORD: "${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in .env}"
+      APP_DATABASE_USER: "${APP_DATABASE_USER:-along_the_way_app}"
+      APP_DATABASE_PASSWORD: "${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in .env}"
+    command: ["sh", "/provision-app-role.sh"]
+    volumes:
+      - ./infra/postgres/provision-app-role.sh:/provision-app-role.sh:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+    networks:
+      - private
+
+  api:
+    image: "along-the-way-api:${RELEASE_IMAGE_TAG:-local}"
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *api-environment
+      PORT: "3000"
+    depends_on:
+      provision-app-role:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "const response = await fetch('http://127.0.0.1:3000/ready'); if (!response.ok) process.exit(1)",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    expose:
+      - "3000"
+    networks:
+      - private
+
+  web:
+    image: "along-the-way-web:${RELEASE_IMAGE_TAG:-local}"
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    environment:
+      PORT: "4173"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "const response = await fetch('http://127.0.0.1:4173'); if (!response.ok) process.exit(1)",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    expose:
+      - "4173"
+    networks:
+      - private
+
+  caddy:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    environment:
+      SITE_ADDRESS: "${SITE_ADDRESS:-http://localhost}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    networks:
+      - private
+
+networks:
+  private:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:

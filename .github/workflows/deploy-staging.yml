@@ -1,0 +1,95 @@
+name: Deploy staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Deploy the selected commit or roll back one release
+        required: true
+        default: deploy
+        type: choice
+        options:
+          - deploy
+          - rollback
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: staging
+  cancel-in-progress: false
+
+jobs:
+  staging:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      STAGING_HOST: ${{ vars.STAGING_HOST }}
+      STAGING_SSH_KEY_FILE: /home/runner/.ssh/along-the-way-staging
+      STAGING_SSH_USER: ubuntu
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Require a verified main commit
+        if: inputs.operation == 'deploy'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          conclusion=$(gh run list \
+            --workflow Verify \
+            --branch main \
+            --commit "$GITHUB_SHA" \
+            --status completed \
+            --limit 1 \
+            --json conclusion \
+            --jq '.[0].conclusion')
+          test "$conclusion" = "success"
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.STAGING_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.STAGING_SSH_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" >"$STAGING_SSH_KEY_FILE"
+          chmod 600 "$STAGING_SSH_KEY_FILE"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" >~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          test -s ~/.ssh/known_hosts
+
+      - name: Prepare staging environment
+        if: inputs.operation == 'deploy'
+        env:
+          POSTGRES_ADMIN_PASSWORD: ${{ secrets.STAGING_POSTGRES_ADMIN_PASSWORD }}
+          APP_DATABASE_PASSWORD: ${{ secrets.STAGING_APP_DATABASE_PASSWORD }}
+          CONFIGURED_SITE_ADDRESS: ${{ vars.STAGING_SITE_ADDRESS }}
+        run: |
+          site_address="$CONFIGURED_SITE_ADDRESS"
+          if [ -z "$site_address" ]; then
+            sslip_host="${STAGING_HOST//./-}"
+            site_address="https://${sslip_host}.sslip.io"
+          fi
+          umask 077
+          {
+            printf 'POSTGRES_DB=along_the_way\n'
+            printf 'POSTGRES_ADMIN_USER=along_the_way_admin\n'
+            printf 'POSTGRES_ADMIN_PASSWORD=%s\n' "$POSTGRES_ADMIN_PASSWORD"
+            printf 'APP_DATABASE_USER=along_the_way_app\n'
+            printf 'APP_DATABASE_PASSWORD=%s\n' "$APP_DATABASE_PASSWORD"
+            printf 'SITE_ADDRESS=%s\n' "$site_address"
+            printf 'RELEASE_IMAGE_TAG=%s\n' "$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          } >"$RUNNER_TEMP/along-the-way.env"
+
+      - name: Deploy
+        if: inputs.operation == 'deploy'
+        env:
+          RELEASE_ID: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          STAGING_ENV_FILE: ${{ runner.temp }}/along-the-way.env
+        run: sh ./scripts/deploy-staging.sh
+
+      - name: Roll back
+        if: inputs.operation == 'rollback'
+        run: sh ./scripts/rollback-staging.sh

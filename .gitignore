@@ -1,0 +1,10 @@
+node_modules/
+apps/api/dist/
+apps/web/dist/
+.env
+.env.*
+!.env.example
+coverage/
+playwright-report/
+test-results/
+*.log

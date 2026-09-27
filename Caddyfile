@@ -1,0 +1,19 @@
+{$SITE_ADDRESS:http://localhost} {
+  encode zstd gzip
+
+  @backend path /api/* /health /ready
+  handle @backend {
+    reverse_proxy api:3000
+  }
+
+  handle {
+    reverse_proxy web:4173
+  }
+
+  header -Server
+
+  log {
+    output stdout
+    format console
+  }
+}

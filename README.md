@@ -1,11 +1,45 @@
-# Hong Kong Trip Site
+# Along the Way
 
-Offline-first static travel companion for 27–31 August 2026.
+Along the Way helps people shape a trip together: what matters now, what still
+needs a decision, and how to keep the plan comfortable in real life.
 
-## Publish with GitHub Pages
+This repository currently contains two deliberately separate surfaces:
 
-1. Push the files in this folder to the repository root.
-2. In GitHub, open **Settings → Pages**.
-3. Set **Deploy from a branch**, choose `main` and `/ (root)`, then save.
+- The original static Hong Kong itinerary at the repository root. GitHub Pages
+  can keep serving it without a build step.
+- The new full-stack foundation under `apps/`, backed by PostgreSQL/PostGIS and
+  exposed through Caddy.
 
-The site has no build step and works directly from `index.html`.
+## Run the full stack
+
+```sh
+cp .env.example .env
+# Replace both database passwords in .env.
+docker compose up --detach --build --wait
+```
+
+Open `http://localhost`. The page requests its sample trip summary from the API,
+which reads it from PostgreSQL rather than embedding it in the browser bundle.
+
+Useful checks:
+
+```sh
+curl http://localhost/health
+curl http://localhost/ready
+curl http://localhost/api/trips/hong-kong-together/summary
+```
+
+Development verification:
+
+```sh
+bun install --frozen-lockfile
+bun run typecheck
+bun run test
+bun run build
+```
+
+Staging setup, HTTPS deployment, persistent data, and rollback are documented in
+[`docs/operations/staging.md`](docs/operations/staging.md).
+
+The existing static site remains available at
+<https://tzurae.github.io/along-the-way/>.
