@@ -154,8 +154,9 @@ async function createTrip(
   for (const [index, stop] of input.countryStops.entries()) {
     const search = dialog.getByLabel("Add a country");
     await search.fill(stop.query);
-    await expect(page.getByRole("option", { name: new RegExp(`\\(${stop.code}\\)`) })).toBeVisible();
-    await search.press("Enter");
+    const option = page.getByRole("option", { name: new RegExp(`\\(${stop.code}\\)`) });
+    await expect(option).toBeVisible();
+    await option.dispatchEvent("click");
     await expect(
       dialog.locator('section[aria-labelledby="country-route-heading"] li'),
     ).toHaveCount(index + 1);

@@ -5,6 +5,7 @@ import { PostgresRateLimiter } from "./private-trips/postgres-rate-limiter";
 import { PostgresReadinessProbe } from "./private-trips/postgres-readiness-probe";
 import { PostgresTripWorkspaceModule } from "./private-trips/postgres-trip-workspace-module";
 import { TokenIssuer } from "./private-trips/token-issuer";
+import { PostgresTripSkeletonModule } from "./trip-skeleton/postgres-trip-skeleton-module";
 
 function requireSetting(name: string) {
   const value = process.env[name]?.trim();
@@ -20,6 +21,7 @@ const identityAccess = new PostgresIdentityAccessModule({
   tokenIssuer: new TokenIssuer(tokenSecret),
 });
 const tripWorkspace = new PostgresTripWorkspaceModule({ database });
+const tripSkeleton = new PostgresTripSkeletonModule({ database });
 const rateLimiter = new PostgresRateLimiter(database, tokenSecret);
 const readiness = new PostgresReadinessProbe(database);
 const app = createApp({
@@ -27,6 +29,7 @@ const app = createApp({
   rateLimiter,
   readiness,
   siteAddress,
+  tripSkeleton,
   tripWorkspace,
 });
 const port = Number(process.env.PORT ?? 3000);

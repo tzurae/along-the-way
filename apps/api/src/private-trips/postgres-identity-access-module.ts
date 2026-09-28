@@ -373,15 +373,6 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
     const key = requireIdempotencyKey(rawKey);
     const now = this.now();
     return this.database.transaction().execute(async (transaction) => {
-      await lockMutation(transaction, userId, "accept_invite", key);
-      const replay = await replayed(transaction, userId, "accept_invite", key);
-      if (replay) return { tripId: storedTripId(replay) };
-
-      const user = await transaction
-        .selectFrom("users")
-        .select("email")
-        .where("id", "=", userId)
-        .executeTakeFirstOrThrow();
       const invite = await transaction
         .selectFrom("invites")
         .select([
@@ -396,6 +387,16 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         .forUpdate()
         .executeTakeFirst();
       if (!invite) throw new AppError("invalid_invite", "This invitation is invalid");
+      const operation = `ia:${invite.tripId}:${invite.id}`;
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return { tripId: storedTripId(replay) };
+
+      const user = await transaction
+        .selectFrom("users")
+        .select("email")
+        .where("id", "=", userId)
+        .executeTakeFirstOrThrow();
       if (invite.revoked_at) {
         throw new AppError("revoked_invite", "This invitation was revoked", 409);
       }
@@ -443,14 +444,19 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         summary: "Accepted an editor invitation",
       });
       const response = { tripId: invite.tripId };
-      await remember(transaction, userId, "accept_invite", key, response);
+      await remember(transaction, userId, operation, key, response);
       return response;
     });
   }
 
-  async revokeInvite(userId: string, tripId: string, inviteId: string) {
+  async revokeInvite(userId: string, tripId: string, inviteId: string, rawKey: string) {
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `ri:${tripId}:${inviteId}`;
     await this.database.transaction().execute(async (transaction) => {
       await requireOwner(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return;
       const invite = await transaction
         .selectFrom("invites")
         .select(["id", "accepted_at", "revoked_at"])
@@ -477,12 +483,18 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         targetId: inviteId,
         summary: "Revoked an editor invitation",
       });
+      await remember(transaction, userId, operation, key, { deleted: true });
     });
   }
 
-  async removeMember(userId: string, tripId: string, memberUserId: string) {
+  async removeMember(userId: string, tripId: string, memberUserId: string, rawKey: string) {
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `rm:${tripId}:${memberUserId}`;
     await this.database.transaction().execute(async (transaction) => {
       await requireOwner(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return;
       const member = await transaction
         .selectFrom("trip_members")
         .select(["user_id", "role", "removed_at"])
@@ -510,6 +522,7 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         targetId: memberUserId,
         summary: "Removed an editor",
       });
+      await remember(transaction, userId, operation, key, { deleted: true });
     });
   }
 }

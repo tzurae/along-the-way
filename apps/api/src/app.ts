@@ -2,6 +2,17 @@ import { randomUUID } from "node:crypto";
 
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import type {
+  ConstraintInput,
+  CreateItineraryItemInput,
+  CreatePlaceInput,
+  ItineraryItemDetails,
+  ItineraryItemType,
+  PlaceType,
+  UpdateItineraryItemInput,
+  UpdatePlaceInput,
+  ZonedEndpointInput,
+} from "@along-the-way/contracts/trip-skeleton";
 
 import {
   AppError,
@@ -12,6 +23,7 @@ import {
   type TripWorkspaceModule,
 } from "./private-trips/private-trip-module";
 import type { RateLimiter } from "./private-trips/postgres-rate-limiter";
+import type { TripSkeletonModule } from "./trip-skeleton/trip-skeleton-module";
 
 const SESSION_COOKIE = "along_the_way_session";
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
@@ -22,6 +34,7 @@ interface AppDependencies {
   readiness: ReadinessProbe;
   siteAddress: string;
   tripWorkspace: TripWorkspaceModule;
+  tripSkeleton: TripSkeletonModule;
 }
 
 function objectBody(value: unknown) {
@@ -37,6 +50,107 @@ function stringField(body: Record<string, unknown>, name: string) {
     throw new AppError("validation_error", `${name} must be a string`);
   }
   return value;
+}
+
+function optionalStringField(body: Record<string, unknown>, name: string) {
+  const value = body[name];
+  if (value === undefined || value === null) return value;
+  if (typeof value !== "string") {
+    throw new AppError("validation_error", `${name} must be a string or null`);
+  }
+  return value;
+}
+
+function numberField(body: Record<string, unknown>, name: string) {
+  const value = body[name];
+  if (typeof value !== "number") {
+    throw new AppError("validation_error", `${name} must be a number`);
+  }
+  return value;
+}
+
+function optionalNumberField(body: Record<string, unknown>, name: string) {
+  const value = body[name];
+  if (value === undefined || value === null) return value;
+  if (typeof value !== "number") {
+    throw new AppError("validation_error", `${name} must be a number or null`);
+  }
+  return value;
+}
+
+function arrayField(body: Record<string, unknown>, name: string) {
+  const value = body[name];
+  if (!Array.isArray(value)) {
+    throw new AppError("validation_error", `${name} must be an array`);
+  }
+  return value;
+}
+
+function placeInput(body: Record<string, unknown>): CreatePlaceInput {
+  return {
+    name: stringField(body, "name"),
+    type: stringField(body, "type") as PlaceType,
+    address: optionalStringField(body, "address"),
+    latitude: optionalNumberField(body, "latitude"),
+    longitude: optionalNumberField(body, "longitude"),
+    timeZone: optionalStringField(body, "timeZone"),
+    sourceUrl: optionalStringField(body, "sourceUrl"),
+    notes: optionalStringField(body, "notes"),
+  };
+}
+
+function endpointInput(value: unknown): ZonedEndpointInput {
+  const endpoint = objectBody(value);
+  return {
+    role: stringField(endpoint, "role") as ZonedEndpointInput["role"],
+    countryStopId: stringField(endpoint, "countryStopId"),
+    placeId: stringField(endpoint, "placeId"),
+    localDateTime: stringField(endpoint, "localDateTime"),
+    timeZone: stringField(endpoint, "timeZone"),
+    utcOffset: optionalStringField(endpoint, "utcOffset"),
+  };
+}
+
+function constraintInput(value: unknown): ConstraintInput {
+  const constraint = objectBody(value);
+  return {
+    type: stringField(constraint, "type") as ConstraintInput["type"],
+    status: stringField(constraint, "status") as ConstraintInput["status"],
+    minimumBufferMinutes: optionalNumberField(
+      constraint,
+      "minimumBufferMinutes",
+    ),
+  };
+}
+
+function itineraryItemInput(
+  body: Record<string, unknown>,
+): CreateItineraryItemInput {
+  const details = objectBody(body.details);
+  const moneyValue = body.money;
+  const money =
+    moneyValue === undefined || moneyValue === null
+      ? null
+      : (() => {
+          const value = objectBody(moneyValue);
+          return {
+            amountMinor: numberField(value, "amountMinor"),
+            currency: stringField(value, "currency"),
+          };
+        })();
+  return {
+    type: stringField(body, "type") as ItineraryItemType,
+    title: stringField(body, "title"),
+    notes: optionalStringField(body, "notes"),
+    sourceUrl: optionalStringField(body, "sourceUrl"),
+    money,
+    endpoints: arrayField(body, "endpoints").map(endpointInput),
+    details: details as unknown as ItineraryItemDetails,
+    constraints:
+      body.constraints === undefined
+        ? undefined
+        : arrayField(body, "constraints").map(constraintInput),
+  };
 }
 
 function uuidParam(context: Context, name: string) {
@@ -82,6 +196,7 @@ export function createApp({
   rateLimiter,
   readiness,
   siteAddress,
+  tripSkeleton,
   tripWorkspace,
 }: AppDependencies) {
   const app = new Hono();
@@ -228,6 +343,188 @@ export function createApp({
     return context.json({ trip });
   });
 
+  app.get("/api/trips/:tripId/skeleton", async (context) => {
+    const { user } = await authenticated(context);
+    const skeleton = await tripSkeleton.getSkeleton(
+      user.id,
+      uuidParam(context, "tripId"),
+    );
+    return context.json({ skeleton });
+  });
+
+  app.post("/api/trips/:tripId/places", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const place = await tripSkeleton.createPlace(
+      user.id,
+      uuidParam(context, "tripId"),
+      idempotencyKey(context),
+      numberField(body, "expectedTripVersion"),
+      placeInput(body),
+    );
+    return context.json({ place }, 201);
+  });
+
+  app.patch("/api/trips/:tripId/places/:placeId", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const place = await tripSkeleton.updatePlace(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "placeId"),
+      idempotencyKey(context),
+      {
+        ...placeInput(body),
+        expectedVersion: numberField(body, "expectedVersion"),
+      } satisfies UpdatePlaceInput,
+    );
+    return context.json({ place });
+  });
+
+  app.delete("/api/trips/:tripId/places/:placeId", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    await tripSkeleton.deletePlace(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "placeId"),
+      idempotencyKey(context),
+      numberField(body, "expectedVersion"),
+    );
+    return context.body(null, 204);
+  });
+
+  app.post("/api/trips/:tripId/items", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const item = await tripSkeleton.createItem(
+      user.id,
+      uuidParam(context, "tripId"),
+      idempotencyKey(context),
+      numberField(body, "expectedTripVersion"),
+      itineraryItemInput(body),
+    );
+    return context.json({ item }, 201);
+  });
+
+  app.patch("/api/trips/:tripId/items/:itemId", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const { constraints: _constraints, ...input } = itineraryItemInput(body);
+    const item = await tripSkeleton.updateItem(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "itemId"),
+      idempotencyKey(context),
+      {
+        ...input,
+        expectedVersion: numberField(body, "expectedVersion"),
+      } satisfies UpdateItineraryItemInput,
+    );
+    return context.json({ item });
+  });
+
+  app.delete("/api/trips/:tripId/items/:itemId", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    await tripSkeleton.deleteItem(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "itemId"),
+      idempotencyKey(context),
+      numberField(body, "expectedVersion"),
+    );
+    return context.body(null, 204);
+  });
+
+  app.post("/api/trips/:tripId/items/:itemId/lock", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const item = await tripSkeleton.lockItem(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "itemId"),
+      idempotencyKey(context),
+      numberField(body, "expectedVersion"),
+    );
+    return context.json({ item });
+  });
+
+  app.post("/api/trips/:tripId/items/:itemId/unlock", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const item = await tripSkeleton.unlockItem(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "itemId"),
+      idempotencyKey(context),
+      numberField(body, "expectedVersion"),
+    );
+    return context.json({ item });
+  });
+
+  app.post("/api/trips/:tripId/items/:itemId/constraints", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const item = await tripSkeleton.createConstraint(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "itemId"),
+      idempotencyKey(context),
+      numberField(body, "expectedItemVersion"),
+      constraintInput(body),
+    );
+    return context.json({ item }, 201);
+  });
+
+  app.patch(
+    "/api/trips/:tripId/items/:itemId/constraints/:constraintId",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const body = await jsonBody(context);
+      const item = await tripSkeleton.updateConstraint(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "itemId"),
+        uuidParam(context, "constraintId"),
+        idempotencyKey(context),
+        numberField(body, "expectedItemVersion"),
+        numberField(body, "expectedVersion"),
+        constraintInput(body),
+      );
+      return context.json({ item });
+    },
+  );
+
+  app.delete(
+    "/api/trips/:tripId/items/:itemId/constraints/:constraintId",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const body = await jsonBody(context);
+      const item = await tripSkeleton.deleteConstraint(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "itemId"),
+        uuidParam(context, "constraintId"),
+        idempotencyKey(context),
+        numberField(body, "expectedItemVersion"),
+        numberField(body, "expectedVersion"),
+      );
+      return context.json({ item });
+    },
+  );
+
   app.post("/api/trips/:tripId/invites", async (context) => {
     const { user } = await authenticated(context);
     await rateLimiter.consume("trip_invite", clientIp(context), user.id);
@@ -259,6 +556,7 @@ export function createApp({
       user.id,
       uuidParam(context, "tripId"),
       uuidParam(context, "inviteId"),
+      idempotencyKey(context),
     );
     return context.body(null, 204);
   });
@@ -269,6 +567,7 @@ export function createApp({
       user.id,
       uuidParam(context, "tripId"),
       uuidParam(context, "memberUserId"),
+      idempotencyKey(context),
     );
     return context.body(null, 204);
   });
@@ -279,7 +578,15 @@ export function createApp({
         context.header("Retry-After", String(error.retryAfterSeconds));
       }
       return context.json(
-        { error: { code: error.code, message: error.message } },
+        {
+          error: {
+            code: error.code,
+            message: error.message,
+            ...(error.currentVersion === undefined
+              ? {}
+              : { currentVersion: error.currentVersion }),
+          },
+        },
         error.status,
       );
     }

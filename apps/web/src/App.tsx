@@ -14,6 +14,7 @@ import {
 import { countryOptions } from "@along-the-way/contracts/countries";
 
 import { CreateTripDialog } from "./CreateTripDialog";
+import { TripSkeletonWorkspace } from "./TripSkeletonWorkspace";
 
 const countryNames = new Map(
   countryOptions("zh-Hant").map((country) => [
@@ -42,9 +43,14 @@ class ApiRequestError extends Error {
     readonly code: string,
     message: string,
     readonly correlationId?: string,
+    readonly currentVersion?: number,
   ) {
     super(
-      correlationId ? `${message} Reference: ${correlationId}` : message,
+      [
+        message,
+        currentVersion === undefined ? "" : `Current version: ${currentVersion}.`,
+        correlationId ? `Reference: ${correlationId}` : "",
+      ].filter(Boolean).join(" "),
     );
   }
 }
@@ -70,6 +76,7 @@ async function requestJson<T>(url: string, options: RequestOptions = {}) {
       parsed.error.code,
       parsed.error.message,
       parsed.error.correlationId,
+      parsed.error.currentVersion,
     );
   }
   return (options.parse ? options.parse(value) : value) as T;
@@ -173,6 +180,15 @@ function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
   const [inviteEmail, setInviteEmail] = useState("");
   const [message, setMessage] = useState("");
   const inviteKey = useRef<string | null>(null);
+  const actionKeys = useRef(new Map<string, string>());
+
+  function actionKey(identity: string) {
+    const existing = actionKeys.current.get(identity);
+    if (existing) return existing;
+    const created = crypto.randomUUID();
+    actionKeys.current.set(identity, created);
+    return created;
+  }
 
   async function inviteMember(event: FormEvent) {
     event.preventDefault();
@@ -197,16 +213,22 @@ function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
   }
 
   async function removeMember(userId: string) {
+    const identity = `remove-member:${userId}`;
     await requestJson(`/api/trips/${trip.id}/members/${userId}`, {
       method: "DELETE",
+      headers: { "Idempotency-Key": actionKey(identity) },
     });
+    actionKeys.current.delete(identity);
     await onChanged();
   }
 
   async function revokeInvite(inviteId: string) {
+    const identity = `revoke-invite:${inviteId}`;
     await requestJson(`/api/trips/${trip.id}/invites/${inviteId}`, {
       method: "DELETE",
+      headers: { "Idempotency-Key": actionKey(identity) },
     });
+    actionKeys.current.delete(identity);
     await onChanged();
   }
 
@@ -410,7 +432,7 @@ export function App() {
   const inviteToken = tokenParameter("inviteToken");
 
   return (
-    <main className="mx-auto min-h-screen w-[min(100%-1.25rem,72rem)] py-5 sm:py-8">
+    <main className="mx-auto min-h-screen w-[min(100%-1.25rem,96rem)] py-5 sm:py-8">
       <header className="flex flex-wrap items-center justify-between gap-4 rounded-panel bg-surface/90 px-5 py-4 shadow-feedback">
         <div><p className="text-xs font-bold tracking-[0.14em] text-accent-strong">ALONG THE WAY</p><p className="text-sm text-muted-foreground">Signed in as {user.email}</p></div>
         <button className="min-h-10 rounded-lg border px-4 font-bold" onClick={() => void logout()}>Sign out</button>
@@ -437,7 +459,14 @@ export function App() {
           </nav>
         </aside>
         {selectedTrip ? (
-          <TripWorkspace trip={selectedTrip} currentUser={user} onChanged={() => loadTrip(selectedTrip.id)} />
+          <div className="grid gap-5">
+            <TripWorkspace trip={selectedTrip} currentUser={user} onChanged={() => loadTrip(selectedTrip.id)} />
+            <TripSkeletonWorkspace
+              trip={selectedTrip}
+              request={requestJson}
+              onTripChanged={() => loadTrip(selectedTrip.id)}
+            />
+          </div>
         ) : (
           <section className="grid min-h-72 place-items-center rounded-card border border-dashed border-ink/20 bg-surface/50 p-8 text-center text-muted-foreground">Choose or create a trip.</section>
         )}
