@@ -23,12 +23,10 @@ interface MailpitMessage {
 }
 
 interface TripInput {
-  currency: string;
-  destinations: string;
+  countryStops: Array<{ code: string; query: string }>;
   endDate: string;
   name: string;
   startDate: string;
-  timeZone: string;
 }
 
 function mailpitMessages(value: unknown): MailpitMessage[] {
@@ -120,19 +118,50 @@ async function signIn(page: Page, request: APIRequestContext, email: string) {
   await expect(page.getByText(`Signed in as ${email}`)).toBeVisible();
 }
 
-async function createTrip(page: Page, input: TripInput) {
+function localDateLabel(date: string) {
+  const [year, month, day] = date.split("-").map(Number);
+  return new Date(year!, month! - 1, day!).toLocaleDateString("en-US");
+}
+
+async function selectDateRange(
+  page: Page,
+  dialog: ReturnType<Page["getByRole"]>,
+  startDate: string,
+  endDate: string,
+) {
+  await dialog.getByRole("button", { name: "Choose a date range" }).click();
+  const [year, month] = startDate.split("-").map(Number);
+  const current = new Date();
+  const monthOffset = year! * 12 + month! - 1 -
+    (current.getFullYear() * 12 + current.getMonth());
+  const direction = monthOffset >= 0 ? "Next" : "Previous";
+  for (let step = 0; step < Math.abs(monthOffset); step += 1) {
+    await page.getByRole("button", { name: new RegExp(direction, "i") }).click();
+  }
+  await page.locator(`[data-day="${localDateLabel(startDate)}"]`).click();
+  await page.locator(`[data-day="${localDateLabel(endDate)}"]`).click();
+}
+
+async function createTrip(
+  page: Page,
+  input: TripInput,
+  beforeSubmit?: (dialog: ReturnType<Page["getByRole"]>) => Promise<void>,
+) {
   await page.getByRole("button", { name: "Create trip" }).click();
-  await page.getByLabel("Trip name").fill(input.name);
-  await page.getByLabel("Start date").fill(input.startDate);
-  await page.getByLabel("End date").fill(input.endDate);
-  await page
-    .getByLabel("Destinations, separated by commas")
-    .fill(input.destinations);
-  await page.getByLabel("IANA time zone").fill(input.timeZone);
-  await page.getByLabel("Currency").fill(input.currency);
-  await page
-    .getByRole("button", { name: "Create trip", exact: true })
-    .click();
+  const dialog = page.getByRole("dialog", { name: "Create a trip" });
+  await dialog.getByLabel("Trip name").fill(input.name);
+  await selectDateRange(page, dialog, input.startDate, input.endDate);
+  for (const [index, stop] of input.countryStops.entries()) {
+    const search = dialog.getByLabel("Add a country");
+    await search.fill(stop.query);
+    await expect(page.getByRole("option", { name: new RegExp(`\\(${stop.code}\\)`) })).toBeVisible();
+    await search.press("Enter");
+    await expect(
+      dialog.locator('section[aria-labelledby="country-route-heading"] li'),
+    ).toHaveCount(index + 1);
+  }
+  await beforeSubmit?.(dialog);
+  await dialog.getByRole("button", { name: "Create trip", exact: true }).click();
   await expect(page.getByRole("heading", { name: input.name })).toBeVisible();
 }
 
@@ -218,15 +247,65 @@ test("private trips work across four identities, viewports, and rejection paths"
 
   await page.goto("/");
   await signIn(page, request, "owner@example.test");
+  const createTripTrigger = page.getByRole("button", { name: "Create trip" });
+  await createTripTrigger.click();
+  await expect(page.getByRole("dialog", { name: "Create a trip" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Create a trip" })).toHaveCount(0);
+  await expect(createTripTrigger).toBeFocused();
+
   await createTrip(page, {
     name: "大阪京都家庭旅行",
     startDate: "2026-10-21",
     endDate: "2026-10-27",
-    destinations: "大阪, 京都",
-    timeZone: "Asia/Tokyo",
-    currency: "JPY",
+    countryStops: [
+      { code: "JP", query: "日本" },
+      { code: "KR", query: "kr" },
+      { code: "JP", query: "Japan" },
+      { code: "TW", query: "Taiwan" },
+    ],
+  }, async (dialog) => {
+    const bounds = await dialog.boundingBox();
+    expect(bounds?.width).toBeGreaterThan(272);
+
+    const moveTaiwanUp = dialog.getByRole("button", { name: "Move stop 4 up" });
+    await moveTaiwanUp.focus();
+    await moveTaiwanUp.press("Enter");
+    await expect(dialog.getByRole("button", { name: "Move stop 3 up" })).toBeFocused();
+    await expect(dialog.getByRole("listitem").nth(2)).toContainText("(TW)");
+    await dialog.getByRole("button", { name: "Remove stop 3" }).click();
+
+    const routeItems = dialog.locator('section[aria-labelledby="country-route-heading"] li');
+    await expect(routeItems).toHaveCount(3);
+
+    const routeBeforeInvalidRemoval = await routeItems.allTextContents();
+    await dialog.getByRole("button", { name: "Remove stop 2" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("Removing that stop");
+    expect(await routeItems.allTextContents()).toEqual(routeBeforeInvalidRemoval);
+    await expect(routeItems.nth(2)).toContainText("(JP)");
+
+    const search = dialog.getByLabel("Add a country");
+    await search.fill("Japan");
+    await expect(page.getByRole("option", { name: /\(JP\)/ })).toBeDisabled();
+    await search.press("Enter");
+    await expect(dialog).toBeVisible();
+    await expect(routeItems).toHaveCount(3);
+    await search.press("Tab");
+    await expect(page.getByRole("option", { name: /\(JP\)/ })).toHaveCount(0);
+
+    const routeBeforeInvalidMove = await dialog.getByRole("listitem").allTextContents();
+    await dialog.getByRole("button", { name: "Move stop 1 down" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("identical countries");
+    expect(await dialog.getByRole("listitem").allTextContents()).toEqual(routeBeforeInvalidMove);
   });
   await expect(page.getByText("7 days", { exact: true })).toBeVisible();
+  await expect(page.getByText("No inferred default currency")).toBeVisible();
+  const countryRoute = page.locator('section[aria-labelledby="trip-country-route"]');
+  await expect(countryRoute.getByRole("listitem").nth(0)).toContainText("(JP)");
+  await expect(countryRoute.getByRole("listitem").nth(1)).toContainText("(KR)");
+  await expect(countryRoute.getByRole("listitem").nth(2)).toContainText("(JP)");
+  await expect(countryRoute.getByText("Asia/Tokyo", { exact: true })).toHaveCount(2);
+  await expect(countryRoute.getByText("Asia/Seoul", { exact: true })).toBeVisible();
   const osakaTripId = await tripId(page, "大阪京都家庭旅行");
 
   const editorPages: Page[] = [];
@@ -262,10 +341,15 @@ test("private trips work across four identities, viewports, and rejection paths"
     name: "手機建立的台北旅程",
     startDate: "2027-01-15",
     endDate: "2027-01-16",
-    destinations: "台北",
-    timeZone: "Asia/Taipei",
-    currency: "TWD",
+    countryStops: [{ code: "TW", query: "台灣" }],
+  }, async (dialog) => {
+    const bounds = await dialog.boundingBox();
+    expect(bounds?.x).toBeGreaterThanOrEqual(0);
+    expect(bounds ? bounds.x + bounds.width : Number.POSITIVE_INFINITY)
+      .toBeLessThanOrEqual(390);
   });
+  await expect(wifePage.getByText("Default currency TWD")).toBeVisible();
+  await expect(wifePage.getByText("Asia/Taipei", { exact: true })).toBeVisible();
   await wifePage
     .getByRole("button", { name: /大阪京都家庭旅行/ })
     .click();
@@ -357,9 +441,7 @@ test("private trips work across four identities, viewports, and rejection paths"
     name: "首爾週末",
     startDate: "2027-03-05",
     endDate: "2027-03-07",
-    destinations: "首爾",
-    timeZone: "Asia/Seoul",
-    currency: "KRW",
+    countryStops: [{ code: "KR", query: "kr" }],
   });
   await expect(page.getByText("3 days", { exact: true })).toBeVisible();
 

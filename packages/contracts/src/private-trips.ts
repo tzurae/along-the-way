@@ -30,14 +30,20 @@ export interface TripDayDto {
   title: string | null;
 }
 
+export interface CountryStopDto {
+  id: string;
+  countryCode: string;
+  position: number;
+  timeZone: string | null;
+}
+
 export interface TripDto {
   id: string;
   name: string;
   startDate: string;
   endDate: string;
-  timeZone: string;
-  currency: string;
-  destinations: string[];
+  defaultCurrency: string | null;
+  countryStops: CountryStopDto[];
   days: TripDayDto[];
   members: TripMemberDto[];
   invites: InviteDto[];
@@ -52,20 +58,18 @@ export interface TripSummaryDto {
   name: string;
   startDate: string;
   endDate: string;
-  timeZone: string;
-  currency: string;
-  destinations: string[];
+  defaultCurrency: string | null;
+  countryStops: CountryStopDto[];
   memberCount: number;
   dayCount: number;
   role: MemberRole;
 }
+
 export interface CreateTripInput {
   name: string;
   startDate: string;
   endDate: string;
-  timeZone: string;
-  currency: string;
-  destinations: string[];
+  countryCodes: string[];
 }
 
 export interface SessionResponse {
@@ -115,8 +119,19 @@ function roleValue(value: unknown): MemberRole {
   return value === "owner" || value === "editor" ? value : invalidResponse();
 }
 
-function stringArray(value: unknown) {
-  return Array.isArray(value) ? value.map(stringValue) : invalidResponse();
+function countryCodeValue(value: unknown) {
+  const code = stringValue(value);
+  return /^[A-Z]{2}$/.test(code) ? code : invalidResponse();
+}
+
+function countryStopValue(value: unknown): CountryStopDto {
+  if (!isRecord(value)) return invalidResponse();
+  return {
+    id: stringValue(value.id),
+    countryCode: countryCodeValue(value.countryCode),
+    position: countValue(value.position),
+    timeZone: nullableString(value.timeZone),
+  };
 }
 
 function userValue(value: unknown): UserDto {
@@ -175,9 +190,10 @@ function summaryValue(value: unknown): TripSummaryDto {
     name: stringValue(value.name),
     startDate: stringValue(value.startDate),
     endDate: stringValue(value.endDate),
-    timeZone: stringValue(value.timeZone),
-    currency: stringValue(value.currency),
-    destinations: stringArray(value.destinations),
+    defaultCurrency: nullableString(value.defaultCurrency),
+    countryStops: Array.isArray(value.countryStops)
+      ? value.countryStops.map(countryStopValue)
+      : invalidResponse(),
     memberCount: countValue(value.memberCount),
     dayCount: countValue(value.dayCount),
     role: roleValue(value.role),

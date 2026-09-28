@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./countries": "./src/countries.ts",
     "./private-trips": "./src/private-trips.ts"
   }
 }

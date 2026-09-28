@@ -46,6 +46,7 @@ export interface TripTable {
   end_date: DateOnly;
   time_zone: string;
   currency: string;
+  default_currency: string | null;
   status: "planning";
   version: Generated<number>;
   created_at: Timestamp;
@@ -57,6 +58,14 @@ export interface TripDestinationTable {
   trip_id: string;
   name: string;
   position: number;
+}
+
+export interface TripCountryStopTable {
+  id: Generated<string>;
+  trip_id: string;
+  country_code: string;
+  position: number;
+  time_zone: string | null;
 }
 
 export interface TripDayTable {
@@ -137,6 +146,7 @@ export interface AlongTheWayDatabase {
   sessions: SessionTable;
   trips: TripTable;
   trip_destinations: TripDestinationTable;
+  trip_country_stops: TripCountryStopTable;
   trip_days: TripDayTable;
   trip_members: TripMemberTable;
   invites: InviteTable;

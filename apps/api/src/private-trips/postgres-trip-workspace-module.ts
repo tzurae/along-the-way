@@ -1,3 +1,7 @@
+import {
+  inferCountryRoute,
+  MAX_TRIP_COUNTRY_STOPS,
+} from "@along-the-way/contracts/countries";
 import { parseTripResponse } from "@along-the-way/contracts/private-trips";
 import { sql, type Kysely } from "kysely";
 
@@ -22,8 +26,6 @@ import {
   requireIdempotencyKey,
 } from "./postgres-private-trip-store";
 
-const ISO_CURRENCIES = new Set(Intl.supportedValuesOf("currency"));
-
 interface ModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
   now?: () => Date;
@@ -31,8 +33,18 @@ interface ModuleOptions {
 
 function validateTripInput(input: CreateTripInput) {
   const name = input.name.trim();
-  const destinations = input.destinations.map((value) => value.trim()).filter(Boolean);
-  const timeZone = input.timeZone.trim();
+  if (input.countryCodes.length === 0) {
+    throw new AppError("validation_error", "At least one country is required");
+  }
+  if (input.countryCodes.length > MAX_TRIP_COUNTRY_STOPS) {
+    throw new AppError(
+      "validation_error",
+      `A trip can have at most ${MAX_TRIP_COUNTRY_STOPS} country stops`,
+    );
+  }
+  const countryCodes = input.countryCodes.map((value) =>
+    value.trim().toUpperCase(),
+  );
   const start = parseDateOnly(input.startDate, "startDate");
   const end = parseDateOnly(input.endDate, "endDate");
 
@@ -46,29 +58,42 @@ function validateTripInput(input: CreateTripInput) {
   if (dayCount > 366) {
     throw new AppError("validation_error", "A trip cannot exceed 366 days");
   }
-  if (destinations.length === 0 || destinations.some((value) => value.length > 160)) {
-    throw new AppError("validation_error", "At least one destination is required");
+  for (let index = 1; index < countryCodes.length; index += 1) {
+    if (countryCodes[index] === countryCodes[index - 1]) {
+      throw new AppError(
+        "adjacent_country_stops",
+        "Adjacent country stops must be different",
+      );
+    }
   }
-  if (!timeZone || timeZone.startsWith("+") || timeZone.startsWith("-")) {
-    throw new AppError("validation_error", "timeZone must be a named IANA time zone");
+
+  const route = inferCountryRoute(countryCodes);
+  if (!route) {
+    throw new AppError("validation_error", "countryCodes contains an unknown country");
   }
-  try {
-    new Intl.DateTimeFormat("en", { timeZone }).format(start);
-  } catch {
-    throw new AppError("validation_error", "timeZone must be a named IANA time zone");
-  }
-  const currency = input.currency.trim().toUpperCase();
-  if (!ISO_CURRENCIES.has(currency)) {
-    throw new AppError("validation_error", "currency must be a valid ISO 4217 code");
-  }
+
+  const countryStops = route.countries.map((country, position) => ({
+    countryCode: country.code,
+    position,
+    timeZone: country.timeZones.length === 1 ? country.timeZones[0]! : null,
+  }));
+  const stopTimeZones = new Set(
+    countryStops.flatMap((stop) => (stop.timeZone ? [stop.timeZone] : [])),
+  );
+  const sharedTimeZone =
+    countryStops.every((stop) => stop.timeZone !== null) &&
+    stopTimeZones.size === 1
+      ? (stopTimeZones.values().next().value ?? null)
+      : null;
 
   return {
     name,
     startDate: input.startDate,
     endDate: input.endDate,
-    timeZone,
-    currency,
-    destinations,
+    countryStops,
+    defaultCurrency: route.defaultCurrency,
+    compatibilityTimeZone: sharedTimeZone ?? "",
+    compatibilityCurrency: route.defaultCurrency ?? "",
     dayCount,
   };
 }
@@ -90,33 +115,40 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
     this.now = options.now ?? (() => new Date());
   }
 
-
   async listTrips(userId: string): Promise<TripSummaryReadModel[]> {
     const result = await sql<{
       id: string;
       name: string;
       startDate: Date | string;
       endDate: Date | string;
-      timeZone: string;
-      currency: string;
+      defaultCurrency: string | null;
       role: "owner" | "editor";
       memberCount: string | number;
       dayCount: string | number;
-      destinations: string[];
+      countryStops: Array<{
+        id: string;
+        countryCode: string;
+        position: number;
+        timeZone: string | null;
+      }>;
     }>`
       select
         trips.id,
         trips.name,
         trips.start_date as "startDate",
         trips.end_date as "endDate",
-        trips.time_zone as "timeZone",
-        trips.currency,
+        trips.default_currency as "defaultCurrency",
         trip_members.role,
         (select count(*) from trip_members members
           where members.trip_id = trips.id and members.removed_at is null) as "memberCount",
         (select count(*) from trip_days where trip_days.trip_id = trips.id) as "dayCount",
-        coalesce((select jsonb_agg(name order by position)
-          from trip_destinations where trip_destinations.trip_id = trips.id), '[]'::jsonb) as destinations
+        coalesce((select jsonb_agg(jsonb_build_object(
+          'id', id,
+          'countryCode', country_code,
+          'position', position,
+          'timeZone', time_zone
+        ) order by position)
+          from trip_country_stops where trip_country_stops.trip_id = trips.id), '[]'::jsonb) as "countryStops"
       from trips
       join trip_members on trip_members.trip_id = trips.id
       where trip_members.user_id = ${userId}
@@ -129,9 +161,8 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
       name: row.name,
       startDate: dateOnly(row.startDate),
       endDate: dateOnly(row.endDate),
-      timeZone: row.timeZone,
-      currency: row.currency,
-      destinations: row.destinations,
+      defaultCurrency: row.defaultCurrency,
+      countryStops: row.countryStops,
       memberCount: Number(row.memberCount),
       dayCount: Number(row.dayCount),
       role: row.role,
@@ -157,20 +188,24 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
           name: validated.name,
           start_date: validated.startDate,
           end_date: validated.endDate,
-          time_zone: validated.timeZone,
-          currency: validated.currency,
+          // Retained only so the previous release can read rows after rollback.
+          // Empty strings mean unknown; the current API never exposes these columns.
+          time_zone: validated.compatibilityTimeZone,
+          currency: validated.compatibilityCurrency,
+          default_currency: validated.defaultCurrency,
           status: "planning",
         })
         .returning("id")
         .executeTakeFirstOrThrow();
 
       await transaction
-        .insertInto("trip_destinations")
+        .insertInto("trip_country_stops")
         .values(
-          validated.destinations.map((name, position) => ({
+          validated.countryStops.map((stop) => ({
             trip_id: trip.id,
-            name,
-            position,
+            country_code: stop.countryCode,
+            position: stop.position,
+            time_zone: stop.timeZone,
           })),
         )
         .execute();
@@ -227,8 +262,7 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
         "trips.name",
         "trips.start_date",
         "trips.end_date",
-        "trips.time_zone",
-        "trips.currency",
+        "trips.default_currency",
         "trips.version",
         "trip_members.role",
       ])
@@ -238,9 +272,9 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
       .executeTakeFirst();
     if (!trip) throw new AppError("trip_not_found", "Trip not found", 404);
 
-    const destinations = await executor
-      .selectFrom("trip_destinations")
-      .select("name")
+    const countryStops = await executor
+      .selectFrom("trip_country_stops")
+      .select(["id", "country_code", "position", "time_zone"])
       .where("trip_id", "=", tripId)
       .orderBy("position")
       .execute();
@@ -283,9 +317,13 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
       name: trip.name,
       startDate: dateOnly(trip.start_date),
       endDate: dateOnly(trip.end_date),
-      timeZone: trip.time_zone,
-      currency: trip.currency,
-      destinations: destinations.map((destination) => destination.name),
+      defaultCurrency: trip.default_currency,
+      countryStops: countryStops.map((stop) => ({
+        id: stop.id,
+        countryCode: stop.country_code,
+        position: stop.position,
+        timeZone: stop.time_zone,
+      })),
       days: days.map((day) => ({
         id: day.id,
         date: dateOnly(day.date),

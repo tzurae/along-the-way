@@ -1,3 +1,4 @@
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import tailwindcss from "@tailwindcss/vite";
@@ -9,6 +10,11 @@ const appRoot = fileURLToPath(new URL(".", import.meta.url));
 export default defineConfig({
   root: appRoot,
   plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      "@": path.resolve(appRoot, "src"),
+    },
+  },
   build: {
     outDir: "dist",
     emptyOutDir: true,
