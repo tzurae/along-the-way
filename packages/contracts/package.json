@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     "./countries": "./src/countries.ts",
-    "./private-trips": "./src/private-trips.ts"
+    "./private-trips": "./src/private-trips.ts",
+    "./trip-skeleton": "./src/trip-skeleton.ts"
   }
 }

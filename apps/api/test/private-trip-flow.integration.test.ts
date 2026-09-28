@@ -24,6 +24,7 @@ import { PostgresRateLimiter } from "../src/private-trips/postgres-rate-limiter"
 import { PostgresReadinessProbe } from "../src/private-trips/postgres-readiness-probe";
 import { PostgresTripWorkspaceModule } from "../src/private-trips/postgres-trip-workspace-module";
 import { TokenIssuer } from "../src/private-trips/token-issuer";
+import { PostgresTripSkeletonModule } from "../src/trip-skeleton/postgres-trip-skeleton-module";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required");
@@ -83,6 +84,10 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
   beforeEach(async () => {
     await sql`
       truncate table
+        itinerary_constraints,
+        itinerary_endpoints,
+        itinerary_items,
+        places,
         change_events,
         rate_limit_windows,
         worker_heartbeats,
@@ -131,6 +136,10 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       ),
       readiness: new PostgresReadinessProbe(database, () => new Date(now)),
       siteAddress: "https://app.example.test",
+      tripSkeleton: new PostgresTripSkeletonModule({
+        database,
+        now: () => new Date(now),
+      }),
       tripWorkspace,
     });
   });
@@ -614,6 +623,23 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       }
     }
 
+    const secondTrip = await createTrip(owner.cookie, "create-second-invite-scope");
+    const secondInvitation = await invite(
+      owner.cookie,
+      secondTrip.trip.id,
+      "wife@example.test",
+      "invite-wife-second-trip",
+    );
+    const secondAcceptance = await accept(
+      editorSessions[0]!.cookie,
+      secondInvitation.token,
+      editorSessions[0]!.acceptKey,
+    );
+    expect(secondAcceptance.status).toBe(200);
+    expect(parseTripResponse(await secondAcceptance.json()).trip.id).toBe(
+      secondTrip.trip.id,
+    );
+
     const ownerView = await app.request(`/api/trips/${tripId}`, {
       headers: { cookie: owner.cookie },
     });
@@ -627,6 +653,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         headers: {
           cookie: owner.cookie,
           origin: "https://app.example.test",
+          "idempotency-key": "reject-owner-removal",
         },
       },
     );
@@ -689,10 +716,26 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       `/api/trips/${tripId}/invites/${revokedInvite.inviteId}`,
       {
         method: "DELETE",
-        headers: { cookie: owner.cookie, origin: "https://app.example.test" },
+        headers: {
+          cookie: owner.cookie,
+          "idempotency-key": "revoke-editor-invite",
+          origin: "https://app.example.test",
+        },
       },
     );
     expect(revoke.status).toBe(204);
+    const replayedRevoke = await app.request(
+      `/api/trips/${tripId}/invites/${revokedInvite.inviteId}`,
+      {
+        method: "DELETE",
+        headers: {
+          cookie: owner.cookie,
+          "idempotency-key": "revoke-editor-invite",
+          origin: "https://app.example.test",
+        },
+      },
+    );
+    expect(replayedRevoke.status).toBe(204);
     const revokedUser = await login("revoked@example.test");
     const revoked = await accept(
       revokedUser.cookie,
@@ -721,10 +764,26 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       `/api/trips/${tripId}/members/${removed.userId}`,
       {
         method: "DELETE",
-        headers: { cookie: owner.cookie, origin: "https://app.example.test" },
+        headers: {
+          cookie: owner.cookie,
+          "idempotency-key": "remove-editor",
+          origin: "https://app.example.test",
+        },
       },
     );
     expect(remove.status).toBe(204);
+    const replayedRemove = await app.request(
+      `/api/trips/${tripId}/members/${removed.userId}`,
+      {
+        method: "DELETE",
+        headers: {
+          cookie: owner.cookie,
+          "idempotency-key": "remove-editor",
+          origin: "https://app.example.test",
+        },
+      },
+    );
+    expect(replayedRemove.status).toBe(204);
     expect(
       (
         await app.request(`/api/trips/${tripId}`, {

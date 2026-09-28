@@ -8,6 +8,7 @@ import { Pool } from "pg";
 
 type Timestamp = ColumnType<Date, Date | string | undefined, Date | string>;
 type DateOnly = ColumnType<Date, string, string>;
+type BigInteger = ColumnType<string, number, number>;
 
 export interface UserTable {
   id: Generated<string>;
@@ -73,6 +74,73 @@ export interface TripDayTable {
   trip_id: string;
   date: DateOnly;
   title: string | null;
+}
+
+export interface PlaceTable {
+  id: Generated<string>;
+  trip_id: string;
+  name: string;
+  place_type: "airport" | "station" | "lodging" | "restaurant" | "activity" | "other";
+  address: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  time_zone: string | null;
+  source_url: string | null;
+  notes: string | null;
+  version: Generated<number>;
+  created_by: string;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface ItineraryItemTable {
+  id: Generated<string>;
+  trip_id: string;
+  item_type:
+    | "flight"
+    | "lodging"
+    | "transport"
+    | "reservation"
+    | "meal"
+    | "activity"
+    | "free-time";
+  title: string;
+  notes: string | null;
+  source_url: string | null;
+  amount_minor: BigInteger | null;
+  currency: string | null;
+  details: unknown;
+  locked_at: Timestamp | null;
+  locked_by: string | null;
+  version: Generated<number>;
+  created_by: string;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface ItineraryEndpointTable {
+  itinerary_item_id: string;
+  trip_id: string;
+  endpoint_role: "start" | "end";
+  country_stop_id: string;
+  place_id: string;
+  local_date_time: string;
+  time_zone: string;
+  utc_offset_minutes: number;
+  instant: Timestamp;
+}
+
+export interface ItineraryConstraintTable {
+  id: Generated<string>;
+  trip_id: string;
+  itinerary_item_id: string;
+  constraint_type: "fixed_time" | "immovable" | "minimum_buffer";
+  status: "confirmed" | "unknown" | "conflicted";
+  minimum_buffer_minutes: number | null;
+  version: Generated<number>;
+  created_by: string;
+  created_at: Timestamp;
+  updated_at: Timestamp;
 }
 
 export interface TripMemberTable {
@@ -148,6 +216,10 @@ export interface AlongTheWayDatabase {
   trip_destinations: TripDestinationTable;
   trip_country_stops: TripCountryStopTable;
   trip_days: TripDayTable;
+  places: PlaceTable;
+  itinerary_items: ItineraryItemTable;
+  itinerary_endpoints: ItineraryEndpointTable;
+  itinerary_constraints: ItineraryConstraintTable;
   trip_members: TripMemberTable;
   invites: InviteTable;
   mutation_requests: MutationRequestTable;

@@ -38,8 +38,18 @@ export interface IdentityAccessModule {
     idempotencyKey: string,
     token: string,
   ): Promise<AcceptedInvite>;
-  revokeInvite(userId: string, tripId: string, inviteId: string): Promise<void>;
-  removeMember(userId: string, tripId: string, memberUserId: string): Promise<void>;
+  revokeInvite(
+    userId: string,
+    tripId: string,
+    inviteId: string,
+    idempotencyKey: string,
+  ): Promise<void>;
+  removeMember(
+    userId: string,
+    tripId: string,
+    memberUserId: string,
+    idempotencyKey: string,
+  ): Promise<void>;
 }
 
 export interface ReadinessProbe {
@@ -62,6 +72,13 @@ export class AppError extends Error {
       | "validation_error"
       | "adjacent_country_stops"
       | "rate_limited"
+      | "invalid_local_time"
+      | "ambiguous_local_time"
+      | "place_not_found"
+      | "item_not_found"
+      | "constraint_not_found"
+      | "item_locked"
+      | "place_in_use"
       | "unauthenticated"
       | "forbidden"
       | "trip_not_found"
@@ -79,6 +96,7 @@ export class AppError extends Error {
     message: string,
     readonly status: 400 | 401 | 403 | 404 | 409 | 429 = 400,
     readonly retryAfterSeconds?: number,
+    readonly currentVersion?: number,
   ) {
     super(message);
   }

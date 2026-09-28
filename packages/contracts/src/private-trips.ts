@@ -93,6 +93,7 @@ export interface ApiErrorResponse {
     code: string;
     message: string;
     correlationId?: string;
+    currentVersion?: number;
   };
 }
 
@@ -242,11 +243,19 @@ export function parseApiError(value: unknown): ApiErrorResponse {
   if (correlationId !== undefined && typeof correlationId !== "string") {
     return invalidResponse();
   }
+  const currentVersion = value.error.currentVersion;
+  if (
+    currentVersion !== undefined &&
+    (typeof currentVersion !== "number" || !Number.isSafeInteger(currentVersion))
+  ) {
+    return invalidResponse();
+  }
   return {
     error: {
       code: stringValue(value.error.code),
       message: stringValue(value.error.message),
       ...(correlationId ? { correlationId } : {}),
+      ...(currentVersion === undefined ? {} : { currentVersion }),
     },
   };
 }
