@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 import { isRecord } from "@along-the-way/contracts/private-trips";
 const execFileAsync = promisify(execFile);
+const MAILPIT_API_URL = process.env.MAILPIT_API_URL ?? "http://127.0.0.1:8025";
 
 
 interface MailpitMessage {
@@ -27,6 +28,44 @@ function messages(value: unknown): MailpitMessage[] {
       }),
     };
   });
+}
+function colorChannels(value: string) {
+  const channels = value.match(/[\d.]+/g)?.slice(0, 3).map(Number);
+  if (!channels || channels.length !== 3) throw new Error(`Unsupported color: ${value}`);
+  return channels.map((channel) => channel / 255);
+}
+
+function relativeLuminance(value: string) {
+  const [red, green, blue] = colorChannels(value).map((channel) =>
+    channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+  );
+  return 0.2126 * red! + 0.7152 * green! + 0.0722 * blue!;
+}
+
+function contrastRatio(foreground: string, background: string) {
+  const lighter = Math.max(relativeLuminance(foreground), relativeLuminance(background));
+  const darker = Math.min(relativeLuminance(foreground), relativeLuminance(background));
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+async function expectReadableText(locator: Locator, pseudoElement?: "::placeholder") {
+  const sample = await locator.evaluate((element, pseudo) => {
+    const foregroundStyle = getComputedStyle(element, pseudo);
+    let backgroundElement: Element | null = element;
+    let background = "rgba(0, 0, 0, 0)";
+    while (backgroundElement) {
+      background = getComputedStyle(backgroundElement).backgroundColor;
+      if (!background.endsWith(", 0)")) break;
+      backgroundElement = backgroundElement.parentElement;
+    }
+    return {
+      foreground: foregroundStyle.color,
+      background,
+      opacity: foregroundStyle.opacity,
+    };
+  }, pseudoElement);
+  expect(Number(sample.opacity)).toBe(1);
+  expect(contrastRatio(sample.foreground, sample.background)).toBeGreaterThanOrEqual(4.5);
 }
 
 async function executeDatabase(command: string) {
@@ -63,13 +102,13 @@ test.afterAll(cleanupSkeletonTrips);
 
 async function signIn(page: Page, request: APIRequestContext, email: string) {
   await page.goto("/");
-  const previousResponse = await request.get("http://127.0.0.1:8025/api/v1/messages");
+  const previousResponse = await request.get(`${MAILPIT_API_URL}/api/v1/messages`);
   const previousMessageIds = new Set(messages(await previousResponse.json()).map((message) => message.id));
   await page.getByLabel("Email").fill(email);
   await page.getByRole("button", { name: "Email me a sign-in link" }).click();
   let messageId = "";
   await expect.poll(async () => {
-    const response = await request.get("http://127.0.0.1:8025/api/v1/messages");
+    const response = await request.get(`${MAILPIT_API_URL}/api/v1/messages`);
     messageId = messages(await response.json()).find(
       (message) =>
         !previousMessageIds.has(message.id) &&
@@ -78,7 +117,7 @@ async function signIn(page: Page, request: APIRequestContext, email: string) {
     )?.id ?? "";
     return messageId;
   }).not.toBe("");
-  const detail = await request.get(`http://127.0.0.1:8025/api/v1/message/${messageId}`);
+  const detail = await request.get(`${MAILPIT_API_URL}/api/v1/message/${messageId}`);
   const value: unknown = await detail.json();
   if (!isRecord(value) || typeof value.Text !== "string") throw new Error("Invalid Mailpit body");
   const link = value.Text.match(/https?:\/\/\S+/)?.[0];
@@ -314,7 +353,7 @@ async function openTrip(page: Page, name: string) {
 
 test("the seven-day Osaka Kyoto pilot works on desktop and mobile", async ({ browser, request }) => {
   test.setTimeout(240_000);
-  await request.delete("http://127.0.0.1:8025/api/v1/messages");
+  await request.delete(`${MAILPIT_API_URL}/api/v1/messages`);
   const name = `大阪京都家庭旅行 ${Date.now()}`;
   const desktopContext = await browser.newContext({
     timezoneId: "Pacific/Honolulu",
@@ -332,9 +371,12 @@ test("the seven-day Osaka Kyoto pilot works on desktop and mobile", async ({ bro
       { query: "Taiwan", code: "TW" },
     ],
   });
+  await expectReadableText(page.locator(".empty-state").first());
 
   await page.getByRole("button", { name: "Add place" }).click();
   const invalidPlaceDialog = page.getByRole("dialog", { name: "Add a place" });
+  await expectReadableText(invalidPlaceDialog.locator('[data-slot="dialog-description"]'));
+  await expectReadableText(invalidPlaceDialog.getByLabel("IANA time zone"), "::placeholder");
   await invalidPlaceDialog.getByLabel("Place name").fill("Invalid coordinates");
   await invalidPlaceDialog.getByLabel("Latitude").fill("north");
   await invalidPlaceDialog.getByLabel("Longitude").fill("135");
@@ -466,7 +508,7 @@ test("the seven-day Osaka Kyoto pilot works on desktop and mobile", async ({ bro
 
 test("a US to Japan skeleton survives locking, concurrent edits, reload, and mobile", async ({ browser, request }) => {
   test.setTimeout(240_000);
-  await request.delete("http://127.0.0.1:8025/api/v1/messages");
+  await request.delete(`${MAILPIT_API_URL}/api/v1/messages`);
   const name = `US Japan pilot ${Date.now()}`;
   const desktopContext = await browser.newContext({
     timezoneId: "America/Los_Angeles",
