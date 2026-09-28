@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql, type Kysely } from "kysely";
+import { MAX_TRIP_COUNTRY_STOPS } from "@along-the-way/contracts/countries";
 import type { Hono } from "hono";
 import {
   parseInviteResponse,
@@ -90,6 +91,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         invites,
         trip_members,
         trip_days,
+        trip_country_stops,
         trip_destinations,
         trips,
         sessions,
@@ -180,12 +182,10 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         origin: "https://app.example.test",
       },
       body: body({
-        name: "大阪京都家庭旅行",
+        name: "日本韓國家庭旅行",
         startDate: "2026-10-21",
         endDate: "2026-10-27",
-        timeZone: "Asia/Tokyo",
-        currency: "JPY",
-        destinations: ["大阪", "京都"],
+        countryCodes: ["JP", "KR", "JP"],
       }),
     });
     expect(response.status).toBe(201);
@@ -375,57 +375,65 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       error: { code: "validation_error" },
     });
 
-    const invalidCurrency = await app.request("/api/trips", {
+    const tooManyStops = await app.request("/api/trips", {
       method: "POST",
       headers: {
         cookie,
         "content-type": "application/json",
-        "idempotency-key": "invalid-currency",
+        "idempotency-key": "too-many-country-stops",
         origin: "https://app.example.test",
       },
       body: body({
-        name: "Invalid currency",
+        name: "Unbounded route",
         startDate: "2027-01-01",
         endDate: "2027-01-02",
-        timeZone: "Asia/Tokyo",
-        currency: "ZZZ",
-        destinations: ["東京"],
+        countryCodes: Array.from(
+          { length: MAX_TRIP_COUNTRY_STOPS + 1 },
+          (_, index) => (index % 2 === 0 ? "JP" : "KR"),
+        ),
       }),
     });
-    expect(invalidCurrency.status).toBe(400);
-    expect(await invalidCurrency.json()).toMatchObject({
+    expect(tooManyStops.status).toBe(400);
+    expect(await tooManyStops.json()).toMatchObject({
       error: { code: "validation_error" },
     });
-    const offsetTimeZone = await app.request("/api/trips", {
+    const emptyList = await app.request("/api/trips", { headers: { cookie } });
+    expect(parseTripListResponse(await emptyList.json()).trips).toEqual([]);
+
+    const adjacentCountries = await app.request("/api/trips", {
       method: "POST",
       headers: {
         cookie,
         "content-type": "application/json",
-        "idempotency-key": "invalid-time-zone",
+        "idempotency-key": "adjacent-countries",
         origin: "https://app.example.test",
       },
       body: body({
-        name: "Invalid time zone",
+        name: "Invalid route",
         startDate: "2027-01-01",
         endDate: "2027-01-02",
-        timeZone: "+01:00",
-        currency: "JPY",
-        destinations: ["東京"],
+        countryCodes: ["JP", "JP"],
       }),
     });
-    expect(offsetTimeZone.status).toBe(400);
-    expect(await offsetTimeZone.json()).toMatchObject({
-      error: { code: "validation_error" },
+    expect(adjacentCountries.status).toBe(400);
+    expect(await adjacentCountries.json()).toMatchObject({
+      error: { code: "adjacent_country_stops" },
     });
     const first = await createTrip(cookie);
     const replay = await createTrip(cookie);
 
     expect(replay.trip.id).toBe(first.trip.id);
     expect(first.trip).toMatchObject({
-      name: "大阪京都家庭旅行",
+      name: "日本韓國家庭旅行",
+      defaultCurrency: null,
       memberCount: 1,
       dayCount: 7,
       members: [{ email: "owner@example.test", role: "owner" }],
+      countryStops: [
+        { countryCode: "JP", position: 0, timeZone: "Asia/Tokyo" },
+        { countryCode: "KR", position: 1, timeZone: "Asia/Seoul" },
+        { countryCode: "JP", position: 2, timeZone: "Asia/Tokyo" },
+      ],
     });
     expect(first.trip.days.map((day) => day.date)).toEqual([
       "2026-10-21",
@@ -446,24 +454,63 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         origin: "https://app.example.test",
       },
       body: body({
-        name: "首爾週末",
+        name: "日本週末",
         startDate: "2027-03-05",
         endDate: "2027-03-07",
-        timeZone: "Asia/Seoul",
-        currency: "KRW",
-        destinations: ["首爾"],
+        countryCodes: ["JP"],
       }),
     });
     expect(second.status).toBe(201);
+    expect(parseTripResponse(await second.json()).trip).toMatchObject({
+      defaultCurrency: "JPY",
+      countryStops: [
+        { countryCode: "JP", position: 0, timeZone: "Asia/Tokyo" },
+      ],
+    });
+    const ambiguousTimeZone = await app.request("/api/trips", {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        "idempotency-key": "create-united-states",
+        origin: "https://app.example.test",
+      },
+      body: body({
+        name: "美國公路旅行",
+        startDate: "2027-04-10",
+        endDate: "2027-04-11",
+        countryCodes: ["US"],
+      }),
+    });
+    expect(ambiguousTimeZone.status).toBe(201);
+    expect(parseTripResponse(await ambiguousTimeZone.json()).trip).toMatchObject({
+      defaultCurrency: "USD",
+      countryStops: [{ countryCode: "US", position: 0, timeZone: null }],
+    });
+    const compatibilityRows = await database
+      .selectFrom("trips")
+      .select(["time_zone", "currency"])
+      .orderBy("start_date")
+      .execute();
+    expect(
+      compatibilityRows.map((trip) => ({
+        timeZone: trip.time_zone.trim(),
+        currency: trip.currency.trim(),
+      })),
+    ).toEqual([
+      { timeZone: "", currency: "" },
+      { timeZone: "Asia/Tokyo", currency: "JPY" },
+      { timeZone: "", currency: "USD" },
+    ]);
     const list = await app.request("/api/trips", { headers: { cookie } });
     const listBody = parseTripListResponse(await list.json());
-    expect(listBody.trips.map((trip) => trip.dayCount)).toEqual([7, 3]);
+    expect(listBody.trips.map((trip) => trip.dayCount)).toEqual([7, 3, 2]);
 
     const counts = await database
       .selectFrom("trips")
       .select(({ fn }) => fn.countAll<number>().as("count"))
       .executeTakeFirstOrThrow();
-    expect(Number(counts.count)).toBe(2);
+    expect(Number(counts.count)).toBe(3);
     const legacy = await sql<{ count: number }>`
       select count(*)::int as count from trip_summaries
     `.execute(database);

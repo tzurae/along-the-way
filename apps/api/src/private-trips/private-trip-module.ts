@@ -60,6 +60,7 @@ export class AppError extends Error {
   constructor(
     readonly code:
       | "validation_error"
+      | "adjacent_country_stops"
       | "rate_limited"
       | "unauthenticated"
       | "forbidden"

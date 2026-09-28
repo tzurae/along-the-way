@@ -196,24 +196,23 @@ export function createApp({
 
   app.post("/api/trips", async (context) => {
     const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_create", clientIp(context), user.id);
     const body = await jsonBody(context);
-    const destinations = body.destinations;
+    const countryCodes = body.countryCodes;
     if (
-      !Array.isArray(destinations) ||
-      destinations.some((value) => typeof value !== "string")
+      !Array.isArray(countryCodes) ||
+      countryCodes.some((value) => typeof value !== "string")
     ) {
       throw new AppError(
         "validation_error",
-        "destinations must be an array of strings",
+        "countryCodes must be an array of strings",
       );
     }
     const input: CreateTripInput = {
       name: stringField(body, "name"),
       startDate: stringField(body, "startDate"),
       endDate: stringField(body, "endDate"),
-      timeZone: stringField(body, "timeZone"),
-      currency: stringField(body, "currency"),
-      destinations,
+      countryCodes,
     };
     const trip = await tripWorkspace.createTrip(
       user.id,

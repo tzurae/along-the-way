@@ -6,10 +6,25 @@ import {
   parseSessionResponse,
   parseTripListResponse,
   parseTripResponse,
+  type CreateTripInput,
   type TripDto,
   type TripSummaryDto,
   type UserDto,
 } from "@along-the-way/contracts/private-trips";
+import { countryOptions } from "@along-the-way/contracts/countries";
+
+import { CreateTripDialog } from "./CreateTripDialog";
+
+const countryNames = new Map(
+  countryOptions("zh-Hant").map((country) => [
+    country.code,
+    `${country.flag} ${country.localizedName} (${country.code})`,
+  ]),
+);
+
+function countryStopLabel(countryCode: string) {
+  return countryNames.get(countryCode) ?? countryCode;
+}
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -114,7 +129,7 @@ function LoginPanel({
         <h1 className="font-display text-4xl leading-tight text-ink-strong">
           Plan a private trip together
         </h1>
-        <p className="mt-4 text-muted">
+        <p className="mt-4 text-muted-foreground">
           Sign in with the email your family uses for this trip. No password or
           public registration.
         </p>
@@ -147,99 +162,6 @@ function LoginPanel({
   );
 }
 
-function CreateTripForm({ onCreated }: { onCreated: (trip: TripDto) => void }) {
-  const [open, setOpen] = useState(false);
-  const [error, setError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const key = useRef<string | null>(null);
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setSubmitting(true);
-    setError("");
-    const form = new FormData(event.currentTarget);
-    key.current ??= crypto.randomUUID();
-    try {
-      const response = await requestJson<{ trip: TripDto }>("/api/trips", {
-        method: "POST",
-        headers: { "Idempotency-Key": key.current },
-        body: JSON.stringify({
-          name: form.get("name"),
-          startDate: form.get("startDate"),
-          endDate: form.get("endDate"),
-          timeZone: form.get("timeZone"),
-          currency: form.get("currency"),
-          destinations: String(form.get("destinations") ?? "")
-            .split(",")
-            .map((value) => value.trim())
-            .filter(Boolean),
-        }),
-        parse: (value) => parseTripResponse(value),
-      });
-      key.current = null;
-      setOpen(false);
-      onCreated(response.trip);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to create trip");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  if (!open) {
-    return (
-      <button
-        className="min-h-11 rounded-xl bg-accent-strong px-5 font-bold text-white outline-none focus:ring-4 focus:ring-focus/40"
-        onClick={() => setOpen(true)}
-      >
-        Create trip
-      </button>
-    );
-  }
-
-  return (
-    <form className="grid gap-4 rounded-panel bg-surface p-5 shadow-feedback" onSubmit={submit}>
-      <h2 className="font-display text-2xl">Create a private trip</h2>
-      <label className="grid gap-1 font-semibold">
-        Trip name
-        <input className="min-h-11 rounded-lg border px-3" name="name" required />
-      </label>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <label className="grid gap-1 font-semibold">
-          Start date
-          <input className="min-h-11 rounded-lg border px-3" name="startDate" type="date" required />
-        </label>
-        <label className="grid gap-1 font-semibold">
-          End date
-          <input className="min-h-11 rounded-lg border px-3" name="endDate" type="date" required />
-        </label>
-      </div>
-      <label className="grid gap-1 font-semibold">
-        Destinations, separated by commas
-        <input className="min-h-11 rounded-lg border px-3" name="destinations" required />
-      </label>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <label className="grid gap-1 font-semibold">
-          IANA time zone
-          <input className="min-h-11 rounded-lg border px-3" name="timeZone" placeholder="Asia/Tokyo" required />
-        </label>
-        <label className="grid gap-1 font-semibold">
-          Currency
-          <input className="min-h-11 rounded-lg border px-3 uppercase" name="currency" maxLength={3} placeholder="JPY" required />
-        </label>
-      </div>
-      {error ? <p role="alert" className="text-accent-strong">{error}</p> : null}
-      <div className="flex flex-wrap gap-3">
-        <button className="min-h-11 rounded-xl bg-ink-strong px-5 font-bold text-white" disabled={submitting}>
-          {submitting ? "Creating…" : "Create trip"}
-        </button>
-        <button className="min-h-11 rounded-xl border px-5" type="button" onClick={() => setOpen(false)}>
-          Cancel
-        </button>
-      </div>
-    </form>
-  );
-}
 
 interface TripWorkspaceProps {
   trip: TripDto;
@@ -294,9 +216,25 @@ function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
         {trip.role} · version {trip.version}
       </p>
       <h2 className="mt-2 font-display text-3xl text-ink-strong sm:text-4xl">{trip.name}</h2>
-      <p className="mt-2 text-muted">
-        {trip.destinations.join(" · ")} · {trip.startDate} – {trip.endDate} · {trip.timeZone} · {trip.currency}
+      <p className="mt-2 text-muted-foreground">
+        {trip.startDate} – {trip.endDate}
+        {trip.defaultCurrency ? ` · Default currency ${trip.defaultCurrency}` : " · No inferred default currency"}
       </p>
+      <section className="mt-5" aria-labelledby="trip-country-route">
+        <h3 id="trip-country-route" className="font-semibold">Country route</h3>
+        {trip.countryStops.length > 0 ? (
+          <ol className="mt-2 grid gap-2">
+            {trip.countryStops.map((stop) => (
+              <li key={stop.id} className="flex items-center justify-between gap-3 rounded-xl bg-surface-subtle px-4 py-3">
+                <span><strong className="mr-3">{stop.position + 1}.</strong>{countryStopLabel(stop.countryCode)}</span>
+                <small className="text-muted-foreground">{stop.timeZone ?? "Time zone not inferred"}</small>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="mt-2 rounded-xl bg-surface-subtle p-4 text-muted-foreground">Country route not set for this legacy trip.</p>
+        )}
+      </section>
       <div className="mt-5 grid grid-cols-2 gap-px overflow-hidden rounded-xl bg-ink/10 sm:max-w-sm">
         <div className="bg-surface-subtle p-4"><strong className="block text-2xl">{trip.memberCount}</strong> members</div>
         <div className="bg-surface-subtle p-4"><strong className="block text-2xl">{trip.dayCount}</strong> days</div>
@@ -308,7 +246,7 @@ function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
           <ul className="mt-3 grid gap-3">
             {trip.members.map((member) => (
               <li key={member.userId} className="flex min-h-14 items-center justify-between gap-3 rounded-xl bg-surface-subtle px-4 py-3">
-                <span><strong className="block">{member.displayName ?? member.email}</strong><small className="text-muted">{member.role}{member.userId === currentUser.id ? " · you" : ""}</small></span>
+                <span><strong className="block">{member.displayName ?? member.email}</strong><small className="text-muted-foreground">{member.role}{member.userId === currentUser.id ? " · you" : ""}</small></span>
                 {trip.role === "owner" && member.role === "editor" ? (
                   <button className="min-h-10 rounded-lg border border-accent-strong px-3 text-sm font-bold text-accent-strong" onClick={() => void removeMember(member.userId)}>
                     Remove
@@ -330,7 +268,7 @@ function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
                 ) : null}
               </li>
             ))}
-            {trip.invites.every((invite) => invite.status !== "pending") ? <li className="text-muted">No pending invitations.</li> : null}
+            {trip.invites.every((invite) => invite.status !== "pending") ? <li className="text-muted-foreground">No pending invitations.</li> : null}
           </ul>
           {trip.role === "owner" ? (
             <form className="mt-5 grid gap-3" onSubmit={inviteMember}>
@@ -355,6 +293,7 @@ export function App() {
   const [error, setError] = useState("");
   const [accepting, setAccepting] = useState(false);
   const inviteKey = useRef<string | null>(null);
+  const createTripKey = useRef<string | null>(null);
   const [signInError, setSignInError] = useState("");
 
   const refreshTrips = useCallback(async () => {
@@ -436,6 +375,19 @@ export function App() {
     }
   }
 
+  async function createTrip(input: CreateTripInput) {
+    createTripKey.current ??= crypto.randomUUID();
+    const response = await requestJson<{ trip: TripDto }>("/api/trips", {
+      method: "POST",
+      headers: { "Idempotency-Key": createTripKey.current },
+      body: JSON.stringify(input),
+      parse: (value) => parseTripResponse(value),
+    });
+    createTripKey.current = null;
+    setSelectedTrip(response.trip);
+    await refreshTrips();
+  }
+
   async function logout() {
     await requestJson("/api/logout", { method: "POST" });
     setUser(null);
@@ -460,7 +412,7 @@ export function App() {
   return (
     <main className="mx-auto min-h-screen w-[min(100%-1.25rem,72rem)] py-5 sm:py-8">
       <header className="flex flex-wrap items-center justify-between gap-4 rounded-panel bg-surface/90 px-5 py-4 shadow-feedback">
-        <div><p className="text-xs font-bold tracking-[0.14em] text-accent-strong">ALONG THE WAY</p><p className="text-sm text-muted">Signed in as {user.email}</p></div>
+        <div><p className="text-xs font-bold tracking-[0.14em] text-accent-strong">ALONG THE WAY</p><p className="text-sm text-muted-foreground">Signed in as {user.email}</p></div>
         <button className="min-h-10 rounded-lg border px-4 font-bold" onClick={() => void logout()}>Sign out</button>
       </header>
 
@@ -474,20 +426,20 @@ export function App() {
 
       <div className="my-6 grid gap-5 lg:grid-cols-[17rem_1fr]">
         <aside className="grid content-start gap-4">
-          <CreateTripForm onCreated={(trip) => { setSelectedTrip(trip); void refreshTrips(); }} />
+          <CreateTripDialog createTrip={createTrip} />
           <nav aria-label="Trips" className="grid gap-2">
             {trips.map((trip) => (
               <button key={trip.id} className={`min-h-14 rounded-xl border px-4 py-3 text-left outline-none focus:ring-4 focus:ring-focus/30 ${selectedTrip?.id === trip.id ? "border-accent-strong bg-surface" : "border-ink/10 bg-surface/70"}`} onClick={() => void loadTrip(trip.id)}>
-                <strong className="block">{trip.name}</strong><small className="text-muted">{trip.memberCount} members · {trip.dayCount} days</small>
+                <strong className="block">{trip.name}</strong><small className="text-muted-foreground">{trip.memberCount} members · {trip.dayCount} days</small>
               </button>
             ))}
-            {trips.length === 0 ? <p className="rounded-xl bg-surface/70 p-4 text-muted">Create your first private trip.</p> : null}
+            {trips.length === 0 ? <p className="rounded-xl bg-surface/70 p-4 text-muted-foreground">Create your first private trip.</p> : null}
           </nav>
         </aside>
         {selectedTrip ? (
           <TripWorkspace trip={selectedTrip} currentUser={user} onChanged={() => loadTrip(selectedTrip.id)} />
         ) : (
-          <section className="grid min-h-72 place-items-center rounded-card border border-dashed border-ink/20 bg-surface/50 p-8 text-center text-muted">Choose or create a trip.</section>
+          <section className="grid min-h-72 place-items-center rounded-card border border-dashed border-ink/20 bg-surface/50 p-8 text-center text-muted-foreground">Choose or create a trip.</section>
         )}
       </div>
     </main>

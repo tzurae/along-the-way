@@ -5,7 +5,7 @@ import type { Kysely } from "kysely";
 import type { AlongTheWayDatabase } from "../database/database";
 import { AppError } from "./private-trip-module";
 
-export type RateLimitedAction = "magic_link" | "trip_invite";
+export type RateLimitedAction = "magic_link" | "trip_invite" | "trip_create";
 
 export interface RateLimiter {
   consume(action: RateLimitedAction, clientIp: string, account: string): Promise<void>;
@@ -20,6 +20,7 @@ interface Rule {
 const RULES: Record<RateLimitedAction, Rule> = {
   magic_link: { windowSeconds: 15 * 60, ipLimit: 30, accountLimit: 5 },
   trip_invite: { windowSeconds: 60 * 60, ipLimit: 100, accountLimit: 20 },
+  trip_create: { windowSeconds: 60 * 60, ipLimit: 100, accountLimit: 20 },
 };
 
 export class PostgresRateLimiter implements RateLimiter {
