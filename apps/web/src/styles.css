@@ -22,7 +22,6 @@
   --color-surface-subtle: #fbf8f2;
   --color-ink: #24372f;
   --color-ink-strong: #1f3029;
-  --color-muted: #52645c;
   --color-accent: #d37551;
   --color-accent-strong: #b55737;
   --color-on-dark: #fffaf2;
@@ -121,6 +120,12 @@
   button {
     font: inherit;
   }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--muted-foreground);
+    opacity: 1;
+  }
 }
 
 @layer components {
@@ -183,7 +188,7 @@
 
   .empty-state {
     padding: 1rem;
-    color: var(--color-muted);
+    color: var(--muted-foreground);
   }
 
   .locked-badge {
@@ -206,7 +211,7 @@
   [data-status="unknown"] {
     border-style: dashed;
     background: transparent;
-    color: var(--color-muted);
+    color: var(--muted-foreground);
   }
 
   [data-status="conflicted"] {
@@ -236,7 +241,7 @@
 
   .day-context {
     margin-top: 0.5rem;
-    color: var(--color-muted);
+    color: var(--muted-foreground);
     font-size: 0.82rem;
   }
 
