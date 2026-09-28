@@ -7,6 +7,15 @@ export POSTGRES_ADMIN_PASSWORD="${POSTGRES_ADMIN_PASSWORD:-ci-only-admin-secret}
 export APP_DATABASE_USER="${APP_DATABASE_USER:-along_the_way_app_test}"
 export APP_DATABASE_PASSWORD="${APP_DATABASE_PASSWORD:-ci-only-app-secret}"
 export SITE_ADDRESS="${SITE_ADDRESS:-http://localhost}"
+export BOOTSTRAP_OWNER_EMAIL="${BOOTSTRAP_OWNER_EMAIL:-owner@example.test}"
+export SMTP_HOST="${SMTP_HOST:-mailpit}"
+export SMTP_PORT="${SMTP_PORT:-1025}"
+export EMAIL_FROM="${EMAIL_FROM:-Along the Way <along-the-way@example.test>}"
+export SMTP_SECURE="${SMTP_SECURE:-false}"
+export SMTP_REQUIRE_TLS="${SMTP_REQUIRE_TLS:-false}"
+export SMTP_USERNAME="${SMTP_USERNAME:-}"
+export SMTP_PASSWORD="${SMTP_PASSWORD:-}"
+export TOKEN_SECRET="${TOKEN_SECRET:-ci-only-token-secret-at-least-thirty-two-bytes}"
 smoke_project="along-the-way-smoke-${GITHUB_RUN_ID:-$$}"
 export RELEASE_IMAGE_TAG="${RELEASE_IMAGE_TAG:-$smoke_project}"
 rollback_root=""
@@ -63,15 +72,33 @@ wait_for_ready() {
   done
 }
 
+assert_private_api() {
+  curl --connect-timeout 2 --max-time 5 --silent --show-error \
+    http://localhost/api/trips |
+    grep --fixed-strings '"code":"unauthenticated"' >/dev/null
+}
+
 compose up --detach --build --wait --wait-timeout 180
 wait_for_ready
 
 curl --connect-timeout 2 --max-time 5 --fail --silent --show-error \
   http://localhost/health |
   grep --fixed-strings '"status":"ok"' >/dev/null
-curl --connect-timeout 2 --max-time 5 --fail --silent --show-error \
-  http://localhost/api/trips/hong-kong-together/summary |
-  grep --fixed-strings '"title":"一起走的香港四日"' >/dev/null
+assert_private_api
+
+compose stop worker
+compose exec --no-TTY db psql \
+  --username "$POSTGRES_ADMIN_USER" \
+  --dbname "$POSTGRES_DB" \
+  --set ON_ERROR_STOP=1 \
+  --command "UPDATE worker_heartbeats SET last_seen_at = now() - interval '10 minutes' WHERE worker_name = 'email_delivery'"
+if curl --connect-timeout 2 --max-time 5 --fail --silent \
+  http://localhost/ready >/dev/null 2>&1; then
+  echo "Readiness stayed healthy with a stale worker heartbeat" >&2
+  exit 1
+fi
+compose start worker
+wait_for_ready
 
 # Simulate a newer release having recorded an additive migration unknown to this
 # release. Its migrator must reject the state, while the migration-free rollback
@@ -120,6 +147,15 @@ write_release_environment() {
     printf 'APP_DATABASE_USER=%s\n' "$APP_DATABASE_USER"
     printf 'APP_DATABASE_PASSWORD=%s\n' "$app_password"
     printf 'SITE_ADDRESS=%s\n' "$SITE_ADDRESS"
+    printf 'BOOTSTRAP_OWNER_EMAIL=%s\n' "$BOOTSTRAP_OWNER_EMAIL"
+    printf 'SMTP_HOST=%s\n' "$SMTP_HOST"
+    printf 'SMTP_PORT=%s\n' "$SMTP_PORT"
+    printf 'EMAIL_FROM=%s\n' "$EMAIL_FROM"
+    printf 'SMTP_SECURE=%s\n' "$SMTP_SECURE"
+    printf 'SMTP_REQUIRE_TLS=%s\n' "$SMTP_REQUIRE_TLS"
+    printf 'SMTP_USERNAME=%s\n' "$SMTP_USERNAME"
+    printf 'SMTP_PASSWORD=%s\n' "$SMTP_PASSWORD"
+    printf 'TOKEN_SECRET=%s\n' "$TOKEN_SECRET"
     printf 'RELEASE_IMAGE_TAG=%s\n' "$image_tag"
   } >"$environment_file"
   chmod 600 "$environment_file"
@@ -161,17 +197,13 @@ if app_password_connects "$APP_DATABASE_PASSWORD" >/dev/null 2>&1; then
   exit 1
 fi
 
-curl --connect-timeout 2 --max-time 5 --fail --silent --show-error \
-  http://localhost/api/trips/hong-kong-together/summary |
-  grep --fixed-strings '"title":"一起走的香港四日"' >/dev/null
+assert_private_api
 
 if [ "${RUN_BROWSER_TESTS:-0}" = "1" ]; then
-  bun run test:e2e
+  E2E_COMPOSE_PROJECT="$smoke_project" bun run test:e2e
 fi
 
-compose restart db api
+compose restart db api worker
 wait_for_ready
 
-curl --connect-timeout 2 --max-time 5 --fail --silent --show-error \
-  http://localhost/api/trips/hong-kong-together/summary |
-  grep --fixed-strings '"title":"一起走的香港四日"' >/dev/null
+assert_private_api

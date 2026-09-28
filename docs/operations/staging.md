@@ -1,20 +1,25 @@
 # Staging operations
 
 The staging stack runs the same `compose.yaml` used locally: Caddy is the only
-public entry point, while the Web, API, and PostgreSQL/PostGIS services remain on
-the private Docker network.
+public entry point, while the Web, API, email worker, and PostgreSQL/PostGIS
+services remain on the private Docker network.
 
 ## Local stack
 
-1. Copy `.env.example` to `.env` and replace both database passwords.
+1. Copy `.env.example` to `.env`, replace both database passwords, set a random
+   `TOKEN_SECRET` of at least 32 bytes, and set `BOOTSTRAP_OWNER_EMAIL`.
 2. Run `docker compose up --detach --build --wait`.
-3. Open `http://localhost`.
-4. Check liveness at `/health`, readiness at `/ready`, and the sample data at
-   `/api/trips/hong-kong-together/summary`.
+3. Open `http://localhost`, request a sign-in link for that Owner, and open the
+   captured message at `http://localhost:8025`.
+4. Check liveness at `/health` and database readiness at `/ready`.
 
-Migrations and the seed run with the administrative role before the API starts.
-Both are safe to run again. The API receives a separate non-superuser role with
-only application-schema privileges.
+Migrations and the idempotent Owner bootstrap run with the administrative role
+before the API starts. The API and worker receive a separate non-superuser role
+with only application-schema privileges. The worker claims PostgreSQL email jobs,
+publishes a durable heartbeat used by `/ready`, and sends them through Mailpit
+locally; Mailpit does not bypass magic-link authentication. Raw magic-link and
+invitation tokens are derived only while sending and are never persisted.
+
 The database and Caddy state live in named Docker volumes, so a container or host
 restart does not discard them. `docker compose down` preserves data;
 `docker compose down --volumes` intentionally removes it.
@@ -69,7 +74,16 @@ Add these environment values:
 | Secret | `STAGING_SSH_KNOWN_HOSTS` | Verified `known_hosts` line from the server console |
 | Secret | `STAGING_POSTGRES_ADMIN_PASSWORD` | Long URL-safe random value |
 | Secret | `STAGING_APP_DATABASE_PASSWORD` | A different long URL-safe random value |
+| Secret | `STAGING_TOKEN_SECRET` | Random value of at least 32 bytes used to derive one-time tokens |
 | Optional variable | `STAGING_SITE_ADDRESS` | A custom `https://` hostname |
+| Variable | `STAGING_BOOTSTRAP_OWNER_EMAIL` | Initial private Beta Owner email |
+| Optional variable | `STAGING_SMTP_HOST` | SMTP host; defaults to the Compose Mailpit service |
+| Optional variable | `STAGING_SMTP_PORT` | SMTP port; defaults to `1025` |
+| Optional variable | `STAGING_SMTP_SECURE` | `true` for implicit TLS SMTP, otherwise `false` |
+| Optional variable | `STAGING_SMTP_REQUIRE_TLS` | `true` to require STARTTLS; defaults to `true` with SMTP credentials and `false` otherwise |
+| Optional secret | `STAGING_SMTP_USERNAME` | SMTP username; set together with the password |
+| Optional secret | `STAGING_SMTP_PASSWORD` | SMTP password; set together with the username |
+| Optional variable | `STAGING_EMAIL_FROM` | Sender address shown in authentication email |
 
 Get the SSH host key from a trusted Lightsail console session on the instance,
 not from an unauthenticated network scan:
@@ -104,8 +118,9 @@ Rollback verifies that the previous application remains compatible with the
 forward schema; it never performs a risky automatic down migration.
 
 Rollback starts the retained, commit-tagged API and Web images with `--no-build`
-and `--no-deps`; it does not invoke the older release's migrator. Do not prune
-images belonging to the `current` or `previous` release.
+and `--no-deps`; it also starts the worker when that retained release defines
+one. It does not invoke the older release's migrator. Do not prune images
+belonging to the `current` or `previous` release.
 
 ## Rotate the administrative database password
 
@@ -126,6 +141,8 @@ runtime application password can be changed through a normal deployment because
 the managed app-role step is repeatable and rollback restores its prior value.
 
 ## Routine checks
+`/ready` returns success only while PostgreSQL is reachable and the email
+worker's durable heartbeat is fresh.
 
 ```sh
 curl --fail https://YOUR-STAGING-HOST/health
@@ -135,6 +152,5 @@ ssh ubuntu@STATIC_IP 'docker compose \
   --file /opt/along-the-way/current/compose.yaml ps'
 ```
 
-Do not run `docker compose down --volumes` on staging. Automated backups,
-monitoring, authentication, email, and background workers are intentionally
-outside this foundation ticket.
+Do not run `docker compose down --volumes` on staging. Automated backups and
+monitoring remain outside this foundation ticket.

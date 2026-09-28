@@ -2,9 +2,22 @@ name: along-the-way
 
 x-migration-environment: &migration-environment
   DATABASE_URL: "postgresql://${POSTGRES_ADMIN_USER:-along_the_way_admin}:${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in .env}@db:5432/${POSTGRES_DB:-along_the_way}"
+  BOOTSTRAP_OWNER_EMAIL: "${BOOTSTRAP_OWNER_EMAIL:?Set BOOTSTRAP_OWNER_EMAIL in .env}"
 
-x-api-environment: &api-environment
+x-app-environment: &app-environment
   DATABASE_URL: "postgresql://${APP_DATABASE_USER:-along_the_way_app}:${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in .env}@db:5432/${POSTGRES_DB:-along_the_way}"
+  SITE_ADDRESS: "${SITE_ADDRESS:-http://localhost}"
+  TOKEN_SECRET: "${TOKEN_SECRET:?Set TOKEN_SECRET in .env}"
+
+x-worker-environment: &worker-environment
+  <<: *app-environment
+  SMTP_HOST: "${SMTP_HOST:-mailpit}"
+  SMTP_PORT: "${SMTP_PORT:-1025}"
+  EMAIL_FROM: "${EMAIL_FROM:-Along the Way <along-the-way@example.test>}"
+  SMTP_SECURE: "${SMTP_SECURE:-false}"
+  SMTP_REQUIRE_TLS: "${SMTP_REQUIRE_TLS:-false}"
+  SMTP_USERNAME: "${SMTP_USERNAME:-}"
+  SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
 
 services:
   db:
@@ -68,6 +81,29 @@ services:
     networks:
       - private
 
+  mailpit:
+    image: axllent/mailpit:v1.31.3@sha256:ed9b00c609e77e99c79b93f1178255ebc271868920f2c69a8d166bd5634ed10d
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8025:8025"
+    expose:
+      - "1025"
+    networks:
+      - private
+
+  worker:
+    image: "along-the-way-api:${RELEASE_IMAGE_TAG:-local}"
+    restart: unless-stopped
+    environment: *worker-environment
+    command: ["bun", "apps/api/src/email-worker.ts"]
+    depends_on:
+      provision-app-role:
+        condition: service_completed_successfully
+      mailpit:
+        condition: service_started
+    networks:
+      - private
+
   api:
     image: "along-the-way-api:${RELEASE_IMAGE_TAG:-local}"
     build:
@@ -75,7 +111,7 @@ services:
       dockerfile: apps/api/Dockerfile
     restart: unless-stopped
     environment:
-      <<: *api-environment
+      <<: *app-environment
       PORT: "3000"
     depends_on:
       provision-app-role:
