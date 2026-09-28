@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./trip-summary": "./src/trip-summary.ts"
+    "./private-trips": "./src/private-trips.ts"
   }
 }

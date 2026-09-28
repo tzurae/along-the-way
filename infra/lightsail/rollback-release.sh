@@ -41,6 +41,15 @@ compose_for_release() {
     -u APP_DATABASE_USER \
     -u APP_DATABASE_PASSWORD \
     -u SITE_ADDRESS \
+    -u BOOTSTRAP_OWNER_EMAIL \
+    -u SMTP_HOST \
+    -u SMTP_PORT \
+    -u EMAIL_FROM \
+    -u SMTP_SECURE \
+    -u SMTP_REQUIRE_TLS \
+    -u SMTP_USERNAME \
+    -u SMTP_PASSWORD \
+    -u TOKEN_SECRET \
     -u RELEASE_IMAGE_TAG \
     docker compose \
       --env-file "$environment_file" \
@@ -64,6 +73,12 @@ require_release_images() {
 start_without_migrations() {
   release="$1"
   environment_file="$2"
+  services="api web caddy"
+
+  if compose_for_release \
+    "$release" "$environment_file" config --services | grep -qx worker; then
+    services="$services worker"
+  fi
 
   compose_for_release \
     "$release" "$environment_file" \
@@ -71,7 +86,16 @@ start_without_migrations() {
     compose_for_release \
       "$release" "$environment_file" \
       up --detach --no-build --no-deps --wait --wait-timeout 180 \
-      api web caddy
+      $services
+}
+
+stop_worker_if_present() {
+  release="$1"
+  environment_file="$2"
+  if compose_for_release \
+    "$release" "$environment_file" config --services | grep -qx worker; then
+    compose_for_release "$release" "$environment_file" stop worker
+  fi
 }
 
 check_ready() {
@@ -97,6 +121,8 @@ restore_current() {
 # Verify both directions before changing the managed application-role password.
 require_release_images "$previous_env"
 require_release_images "$current_env"
+
+stop_worker_if_present "$current_release" "$current_env"
 
 if ! start_without_migrations "$previous_release" "$previous_env"; then
   restore_current || true

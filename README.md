@@ -14,19 +14,22 @@ This repository currently contains two deliberately separate surfaces:
 
 ```sh
 cp .env.example .env
-# Replace both database passwords in .env.
+# Replace both database passwords, set TOKEN_SECRET, and set BOOTSTRAP_OWNER_EMAIL.
 docker compose up --detach --build --wait
 ```
 
-Open `http://localhost`. The page requests its sample trip summary from the API,
-which reads it from PostgreSQL rather than embedding it in the browser bundle.
+Open `http://localhost`, request a sign-in link for the configured Owner, then
+open the captured message at `http://localhost:8025`. A PostgreSQL-backed worker
+delivers queued authentication and invitation email. The same magic-link,
+session, Trip, membership, and invitation path is used outside local
+development; Mailpit replaces only the SMTP destination.
 
 Useful checks:
 
 ```sh
 curl http://localhost/health
 curl http://localhost/ready
-curl http://localhost/api/trips/hong-kong-together/summary
+curl http://localhost/api/trips # returns unauthenticated until signed in
 ```
 
 Development verification:

@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude \"**/*.integration.test.ts\" --exclude \"apps/web/e2e/**\"",
     "test:watch": "vitest --exclude \"**/*.integration.test.ts\" --exclude \"apps/web/e2e/**\"",
-    "test:integration": "vitest run apps/api/test/postgres-trip-summary-store.integration.test.ts",
+    "test:integration": "vitest run apps/api/test/private-trip-flow.integration.test.ts",
     "test:e2e": "playwright test",
     "db:migrate": "bun apps/api/src/database/migrate.ts",
     "db:seed": "bun apps/api/src/database/seed.ts"
@@ -23,6 +23,7 @@
     "@along-the-way/contracts": "workspace:*",
     "hono": "4.13.2",
     "kysely": "0.29.5",
+    "nodemailer": "10.0.11",
     "pg": "8.23.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"

@@ -1,10 +1,33 @@
 import { createApp } from "./app";
 import { createDatabase, requireDatabaseUrl } from "./database/database";
-import { PostgresTripSummaryStore } from "./trips/postgres-trip-summary-store";
+import { PostgresIdentityAccessModule } from "./private-trips/postgres-identity-access-module";
+import { PostgresRateLimiter } from "./private-trips/postgres-rate-limiter";
+import { PostgresReadinessProbe } from "./private-trips/postgres-readiness-probe";
+import { PostgresTripWorkspaceModule } from "./private-trips/postgres-trip-workspace-module";
+import { TokenIssuer } from "./private-trips/token-issuer";
+
+function requireSetting(name: string) {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name} is required`);
+  return value;
+}
 
 const database = createDatabase(requireDatabaseUrl());
+const siteAddress = requireSetting("SITE_ADDRESS");
+const tokenSecret = requireSetting("TOKEN_SECRET");
+const identityAccess = new PostgresIdentityAccessModule({
+  database,
+  tokenIssuer: new TokenIssuer(tokenSecret),
+});
+const tripWorkspace = new PostgresTripWorkspaceModule({ database });
+const rateLimiter = new PostgresRateLimiter(database, tokenSecret);
+const readiness = new PostgresReadinessProbe(database);
 const app = createApp({
-  tripSummaries: new PostgresTripSummaryStore(database),
+  identityAccess,
+  rateLimiter,
+  readiness,
+  siteAddress,
+  tripWorkspace,
 });
 const port = Number(process.env.PORT ?? 3000);
 

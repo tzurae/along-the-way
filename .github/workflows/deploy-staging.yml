@@ -65,12 +65,45 @@ jobs:
         env:
           POSTGRES_ADMIN_PASSWORD: ${{ secrets.STAGING_POSTGRES_ADMIN_PASSWORD }}
           APP_DATABASE_PASSWORD: ${{ secrets.STAGING_APP_DATABASE_PASSWORD }}
+          TOKEN_SECRET: ${{ secrets.STAGING_TOKEN_SECRET }}
           CONFIGURED_SITE_ADDRESS: ${{ vars.STAGING_SITE_ADDRESS }}
+          BOOTSTRAP_OWNER_EMAIL: ${{ vars.STAGING_BOOTSTRAP_OWNER_EMAIL }}
+          SMTP_HOST: ${{ vars.STAGING_SMTP_HOST }}
+          SMTP_PORT: ${{ vars.STAGING_SMTP_PORT }}
+          EMAIL_FROM: ${{ vars.STAGING_EMAIL_FROM }}
+          SMTP_SECURE: ${{ vars.STAGING_SMTP_SECURE }}
+          SMTP_REQUIRE_TLS: ${{ vars.STAGING_SMTP_REQUIRE_TLS }}
+          SMTP_USERNAME: ${{ secrets.STAGING_SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.STAGING_SMTP_PASSWORD }}
         run: |
           site_address="$CONFIGURED_SITE_ADDRESS"
           if [ -z "$site_address" ]; then
             sslip_host="${STAGING_HOST//./-}"
             site_address="https://${sslip_host}.sslip.io"
+          fi
+          test -n "$BOOTSTRAP_OWNER_EMAIL"
+          test -n "$TOKEN_SECRET"
+          smtp_host="${SMTP_HOST:-mailpit}"
+          smtp_port="${SMTP_PORT:-1025}"
+          email_from="${EMAIL_FROM:-Along the Way <along-the-way@example.test>}"
+          smtp_secure="${SMTP_SECURE:-false}"
+          smtp_require_tls="${SMTP_REQUIRE_TLS:-}"
+          if { [ -n "$SMTP_USERNAME" ] && [ -z "$SMTP_PASSWORD" ]; } || \
+            { [ -z "$SMTP_USERNAME" ] && [ -n "$SMTP_PASSWORD" ]; }; then
+            echo "STAGING_SMTP_USERNAME and STAGING_SMTP_PASSWORD must be set together" >&2
+            exit 1
+          fi
+          if [ -z "$smtp_require_tls" ]; then
+            if [ -n "$SMTP_USERNAME" ]; then
+              smtp_require_tls=true
+            else
+              smtp_require_tls=false
+            fi
+          fi
+          if [ -n "$SMTP_USERNAME" ] && \
+            [ "$smtp_secure" != true ] && [ "$smtp_require_tls" != true ]; then
+            echo "Authenticated SMTP requires TLS" >&2
+            exit 1
           fi
           umask 077
           {
@@ -80,6 +113,15 @@ jobs:
             printf 'APP_DATABASE_USER=along_the_way_app\n'
             printf 'APP_DATABASE_PASSWORD=%s\n' "$APP_DATABASE_PASSWORD"
             printf 'SITE_ADDRESS=%s\n' "$site_address"
+            printf 'BOOTSTRAP_OWNER_EMAIL=%s\n' "$BOOTSTRAP_OWNER_EMAIL"
+            printf 'SMTP_HOST=%s\n' "$smtp_host"
+            printf 'SMTP_PORT=%s\n' "$smtp_port"
+            printf 'EMAIL_FROM=%s\n' "$email_from"
+            printf 'SMTP_SECURE=%s\n' "$smtp_secure"
+            printf 'SMTP_REQUIRE_TLS=%s\n' "$smtp_require_tls"
+            printf 'SMTP_USERNAME=%s\n' "$SMTP_USERNAME"
+            printf 'SMTP_PASSWORD=%s\n' "$SMTP_PASSWORD"
+            printf 'TOKEN_SECRET=%s\n' "$TOKEN_SECRET"
             printf 'RELEASE_IMAGE_TAG=%s\n' "$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           } >"$RUNNER_TEMP/along-the-way.env"
 

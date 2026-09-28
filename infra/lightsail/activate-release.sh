@@ -31,6 +31,15 @@ if [ -L "$app_root/current-env" ]; then
   old_env=$(readlink -f "$app_root/current-env")
 fi
 
+compose_has_worker() {
+  release="$1"
+  environment_file="$2"
+  docker compose \
+    --env-file "$environment_file" \
+    --file "$release/compose.yaml" \
+    config --services | grep -qx worker
+}
+
 restore_previous() {
   if [ -n "$old_release" ] && [ -f "$old_release/compose.yaml" ] && \
     [ -n "$old_env" ] && [ -f "$old_env" ]; then
@@ -47,17 +56,28 @@ restore_previous() {
       return 1
     fi
 
+    if compose_has_worker "$release_dir" "$release_env"; then
+      docker compose \
+        --env-file "$release_env" \
+        --file "$release_dir/compose.yaml" \
+        stop worker || true
+    fi
+
     if ! docker compose \
       --env-file "$old_env" \
       --file "$old_release/compose.yaml" \
       run --rm --no-deps provision-app-role; then
       return 1
     fi
+    old_services="api web caddy"
+    if compose_has_worker "$old_release" "$old_env"; then
+      old_services="$old_services worker"
+    fi
     if ! docker compose \
       --env-file "$old_env" \
       --file "$old_release/compose.yaml" \
       up --detach --no-build --no-deps --wait --wait-timeout 180 \
-      api web caddy; then
+      $old_services; then
       return 1
     fi
 
