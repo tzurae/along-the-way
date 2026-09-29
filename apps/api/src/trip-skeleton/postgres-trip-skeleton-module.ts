@@ -31,6 +31,7 @@ import {
   requireIdempotencyKey,
   type DatabaseExecutor,
 } from "../private-trips/postgres-private-trip-store";
+import { suggestPossibleTripPlaceDuplicates } from "../trip-places/postgres-trip-place-module";
 import type { TripSkeletonModule } from "./trip-skeleton-module";
 import {
   canonicalNamedTimeZone,
@@ -429,8 +430,59 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
           notes: place.notes,
           created_by: userId,
         })
-        .returning("id")
+        .returning(["id", "version"])
         .executeTakeFirstOrThrow();
+      await transaction.insertInto("place_identities").values({
+        id: created.id,
+        provider: "manual",
+        provider_place_id: null,
+        canonical_name: place.name,
+        canonical_type: place.type,
+        canonical_address: place.address,
+        latitude: place.latitude,
+        longitude: place.longitude,
+        time_zone: place.timeZone,
+        provider_observed_at: null,
+        provider_expires_at: null,
+        provider_attribution: null,
+      }).execute();
+      await transaction.insertInto("trip_places").values({
+        id: created.id,
+        trip_id: tripId,
+        place_id: created.id,
+        legacy_place_id: created.id,
+        legacy_place_version: created.version,
+        facts_source: "member",
+        name: place.name,
+        place_type: place.type,
+        address: place.address,
+        latitude: place.latitude,
+        longitude: place.longitude,
+        time_zone: place.timeZone,
+        duration_minutes: null,
+        budget_amount_minor: null,
+        budget_currency: null,
+        notes: place.notes,
+        provider_unavailable: false,
+        archived_at: null,
+        created_by: userId,
+      }).execute();
+      await transaction.insertInto("trip_place_contributions").values({
+        trip_id: tripId,
+        trip_place_id: created.id,
+        member_user_id: userId,
+        intake_method: "manual",
+        source_url: place.sourceUrl,
+        original_note: place.notes,
+        provider_observed_at: null,
+        withdrawn_at: null,
+      }).execute();
+      await suggestPossibleTripPlaceDuplicates(
+        transaction,
+        tripId,
+        created.id,
+        place,
+      );
       const response = await this.readPlace(transaction, tripId, created.id);
       await recordEvent(transaction, {
         tripId,
@@ -460,7 +512,6 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedPlace(replay);
-      await this.lockTripContent(transaction, tripId);
       const current = await transaction.selectFrom("places")
         .select("version")
         .where("trip_id", "=", tripId)
@@ -501,9 +552,39 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         .where("trip_id", "=", tripId)
         .where("id", "=", placeId)
         .where("version", "=", input.expectedVersion)
-        .returning("id")
+        .returning(["id", "version"])
         .executeTakeFirst();
       if (!updated) await this.throwPlaceConflict(transaction, tripId, placeId);
+      const tripPlace = await transaction.selectFrom("trip_places")
+        .select(["id", "place_id"])
+        .where("trip_id", "=", tripId)
+        .where("legacy_place_id", "=", placeId)
+        .executeTakeFirst();
+      if (tripPlace) {
+        await transaction.updateTable("trip_places").set({
+          name: place.name,
+          place_type: place.type,
+          address: place.address,
+          latitude: place.latitude,
+          longitude: place.longitude,
+          time_zone: place.timeZone,
+          notes: place.notes,
+          legacy_place_version: updated!.version,
+          facts_source: "member",
+          version: sql`version + 1`,
+          updated_at: this.now(),
+        }).where("id", "=", tripPlace.id).execute();
+        await transaction.updateTable("place_identities").set({
+          canonical_name: place.name,
+          canonical_type: place.type,
+          canonical_address: place.address,
+          latitude: place.latitude,
+          longitude: place.longitude,
+          time_zone: place.timeZone,
+          updated_at: this.now(),
+        }).where("id", "=", tripPlace.place_id)
+          .where("provider", "=", "manual").execute();
+      }
       const response = await this.readPlace(transaction, tripId, placeId);
       await recordEvent(transaction, {
         tripId,
@@ -532,7 +613,6 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return;
-      await this.lockTripContent(transaction, tripId);
       const current = await transaction
         .selectFrom("places")
         .select("version")
@@ -542,6 +622,44 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         .executeTakeFirst();
       if (!current) throw new AppError("place_not_found", "Place not found", 404);
       this.requireExpectedVersion(current.version, expectedVersion);
+      const tripPlace = await transaction.selectFrom("trip_places")
+        .select(["id", "place_id"])
+        .where("trip_id", "=", tripId)
+        .where("legacy_place_id", "=", placeId)
+        .executeTakeFirst();
+      if (tripPlace) {
+        const [retainedByAnotherMember, activeContributions, activePreference] = await Promise.all([
+          transaction.selectFrom("trip_place_contributions")
+            .select("id")
+            .where("trip_place_id", "=", tripPlace.id)
+            .where("member_user_id", "!=", userId)
+            .where("withdrawn_at", "is", null)
+            .executeTakeFirst(),
+          transaction.selectFrom("trip_place_contributions")
+            .select((builder) => builder.fn.countAll().as("count"))
+            .where("trip_place_id", "=", tripPlace.id)
+            .where("withdrawn_at", "is", null)
+            .executeTakeFirstOrThrow(),
+          transaction.selectFrom("member_place_preferences as preference")
+            .innerJoin("trip_members as member", "member.user_id", "preference.member_user_id")
+            .select("preference.member_user_id")
+            .where("preference.trip_place_id", "=", tripPlace.id)
+            .where("member.trip_id", "=", tripId)
+            .where("member.removed_at", "is", null)
+            .executeTakeFirst(),
+        ]);
+        if (
+          retainedByAnotherMember ||
+          Number(activeContributions.count) > 1 ||
+          activePreference
+        ) {
+          throw new AppError(
+            "place_in_use",
+            "A member still retains this place",
+            409,
+          );
+        }
+      }
       const referenced = await transaction
         .selectFrom("itinerary_endpoints")
         .select((builder) => builder.fn.countAll().as("count"))
@@ -642,7 +760,6 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedItem(replay);
-      await this.lockTripContent(transaction, tripId);
       const current = await this.lockItemRow(transaction, tripId, itemId);
       this.requireExpectedVersion(current.version, input.expectedVersion);
       this.requireUnlocked(current.locked_at);
@@ -691,7 +808,6 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return;
-      await this.lockTripContent(transaction, tripId);
       const current = await this.lockItemRow(transaction, tripId, itemId);
       this.requireExpectedVersion(current.version, expectedVersion);
       this.requireUnlocked(current.locked_at);
@@ -743,7 +859,6 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedItem(replay);
-      await this.lockTripContent(transaction, tripId);
       const item = await this.lockItemRow(transaction, tripId, itemId);
       this.requireExpectedVersion(item.version, expectedItemVersion);
       this.requireUnlocked(item.locked_at);
@@ -788,7 +903,6 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedItem(replay);
-      await this.lockTripContent(transaction, tripId);
       const item = await this.lockItemRow(transaction, tripId, itemId);
       this.requireExpectedVersion(item.version, expectedItemVersion);
       this.requireUnlocked(item.locked_at);
@@ -837,7 +951,6 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedItem(replay);
-      await this.lockTripContent(transaction, tripId);
       const item = await this.lockItemRow(transaction, tripId, itemId);
       this.requireExpectedVersion(item.version, expectedItemVersion);
       this.requireUnlocked(item.locked_at);
@@ -879,7 +992,6 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedItem(replay);
-      await this.lockTripContent(transaction, tripId);
       const current = await this.lockItemRow(transaction, tripId, itemId);
       this.requireExpectedVersion(current.version, expectedVersion);
       if ((locked && current.locked_at) || (!locked && !current.locked_at)) {
@@ -924,6 +1036,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     userId: string,
     tripId: string,
   ) {
+    await this.lockTripContent(transaction, tripId);
     const membership = await transaction.selectFrom("trip_members")
       .select("role")
       .where("trip_id", "=", tripId)

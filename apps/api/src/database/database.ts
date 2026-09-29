@@ -93,6 +93,98 @@ export interface PlaceTable {
   updated_at: Timestamp;
 }
 
+export interface LegacyPlaceOriginTable {
+  trip_id: string;
+  place_id: string;
+  created_by: string;
+  source_url: string | null;
+  original_note: string | null;
+  created_at: Timestamp;
+}
+
+export interface PlaceIdentityTable {
+  id: Generated<string>;
+  provider: "google" | "manual";
+  provider_place_id: string | null;
+  canonical_name: string;
+  canonical_type: "airport" | "station" | "lodging" | "restaurant" | "activity" | "other";
+  canonical_address: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  time_zone: string | null;
+  provider_observed_at: Timestamp | null;
+  provider_expires_at: Timestamp | null;
+  provider_attribution: string | null;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface TripPlaceTable {
+  id: Generated<string>;
+  trip_id: string;
+  place_id: string;
+  legacy_place_id: string;
+  legacy_place_version: number;
+  facts_source: "provider" | "member";
+  name: string;
+  place_type: "airport" | "station" | "lodging" | "restaurant" | "activity" | "other";
+  address: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  time_zone: string | null;
+  duration_minutes: number | null;
+  budget_amount_minor: BigInteger | null;
+  budget_currency: string | null;
+  notes: string | null;
+  provider_unavailable: Generated<boolean>;
+  archived_at: Timestamp | null;
+  version: Generated<number>;
+  created_by: string;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface TripPlaceContributionTable {
+  id: Generated<string>;
+  trip_id: string;
+  trip_place_id: string;
+  member_user_id: string;
+  intake_method: "google-maps-url" | "search" | "manual";
+  source_url: string | null;
+  original_note: string | null;
+  provider_observed_at: Timestamp | null;
+  withdrawn_at: Timestamp | null;
+  created_at: Timestamp;
+}
+
+export interface MemberPlacePreferenceTable {
+  trip_id: string;
+  trip_place_id: string;
+  member_user_id: string;
+  preference: "must" | "want" | "optional" | "neutral" | "dislike";
+  version: Generated<number>;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface TripPlaceDayTable {
+  trip_id: string;
+  trip_place_id: string;
+  trip_day_id: string;
+}
+
+export interface TripPlaceDuplicateSuggestionTable {
+  id: Generated<string>;
+  trip_id: string;
+  first_trip_place_id: string;
+  second_trip_place_id: string;
+  reason: string;
+  status: "pending" | "kept-separate";
+  decided_by: string | null;
+  decided_at: Timestamp | null;
+  created_at: Timestamp;
+}
+
 export interface ItineraryItemTable {
   id: Generated<string>;
   trip_id: string;
@@ -217,6 +309,14 @@ export interface AlongTheWayDatabase {
   trip_country_stops: TripCountryStopTable;
   trip_days: TripDayTable;
   places: PlaceTable;
+  legacy_place_origins: LegacyPlaceOriginTable;
+  place_identities: PlaceIdentityTable;
+  trip_places: TripPlaceTable;
+  trip_place_contributions: TripPlaceContributionTable;
+  member_place_preferences: MemberPlacePreferenceTable;
+  trip_place_desired_days: TripPlaceDayTable;
+  trip_place_excluded_days: TripPlaceDayTable;
+  trip_place_duplicate_suggestions: TripPlaceDuplicateSuggestionTable;
   itinerary_items: ItineraryItemTable;
   itinerary_endpoints: ItineraryEndpointTable;
   itinerary_constraints: ItineraryConstraintTable;

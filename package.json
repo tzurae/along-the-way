@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude \"**/*.integration.test.ts\" --exclude \"apps/web/e2e/**\"",
     "test:watch": "vitest --exclude \"**/*.integration.test.ts\" --exclude \"apps/web/e2e/**\"",
-    "test:integration": "vitest run --no-file-parallelism apps/api/test/private-trip-flow.integration.test.ts apps/api/test/trip-skeleton-flow.integration.test.ts",
+    "test:integration": "vitest run --no-file-parallelism apps/api/test/private-trip-flow.integration.test.ts apps/api/test/trip-skeleton-flow.integration.test.ts apps/api/test/trip-place-flow.integration.test.ts",
     "test:e2e": "playwright test",
     "db:migrate": "bun apps/api/src/database/migrate.ts",
     "db:seed": "bun apps/api/src/database/seed.ts"
