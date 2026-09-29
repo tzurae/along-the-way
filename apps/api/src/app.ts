@@ -13,6 +13,13 @@ import type {
   UpdatePlaceInput,
   ZonedEndpointInput,
 } from "@along-the-way/contracts/trip-skeleton";
+import type {
+  CreateTripPlaceInput,
+  MergeTripPlacesInput,
+  PreferenceLevel,
+  UpdateMemberPreferenceInput,
+  UpdateTripPlacePlanningInput,
+} from "@along-the-way/contracts/trip-places";
 
 import {
   AppError,
@@ -24,6 +31,7 @@ import {
 } from "./private-trips/private-trip-module";
 import type { RateLimiter } from "./private-trips/postgres-rate-limiter";
 import type { TripSkeletonModule } from "./trip-skeleton/trip-skeleton-module";
+import type { TripPlaceModule } from "./trip-places/trip-place-module";
 
 const SESSION_COOKIE = "along_the_way_session";
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
@@ -35,6 +43,7 @@ interface AppDependencies {
   siteAddress: string;
   tripWorkspace: TripWorkspaceModule;
   tripSkeleton: TripSkeletonModule;
+  tripPlaces: TripPlaceModule;
 }
 
 function objectBody(value: unknown) {
@@ -152,6 +161,70 @@ function itineraryItemInput(
         : arrayField(body, "constraints").map(constraintInput),
   };
 }
+function stringArrayField(body: Record<string, unknown>, name: string) {
+  const values = arrayField(body, name);
+  if (values.some((value) => typeof value !== "string")) {
+    throw new AppError("validation_error", `${name} must be an array of strings`);
+  }
+  return values as string[];
+}
+
+function tripPlaceInput(body: Record<string, unknown>): CreateTripPlaceInput {
+  const method = stringField(body, "method");
+  if (method === "manual") {
+    return {
+      method,
+      name: stringField(body, "name"),
+      type: stringField(body, "type") as PlaceType,
+      address: optionalStringField(body, "address"),
+      latitude: optionalNumberField(body, "latitude"),
+      longitude: optionalNumberField(body, "longitude"),
+      timeZone: optionalStringField(body, "timeZone"),
+      sourceUrl: optionalStringField(body, "sourceUrl"),
+      originalNote: optionalStringField(body, "originalNote"),
+    };
+  }
+  if (method === "google-maps-url" || method === "search") {
+    return {
+      method,
+      providerPlaceId: stringField(body, "providerPlaceId"),
+      sourceUrl: optionalStringField(body, "sourceUrl"),
+      originalNote: optionalStringField(body, "originalNote"),
+    };
+  }
+  throw new AppError("validation_error", "method is invalid");
+}
+
+function planningInput(
+  body: Record<string, unknown>,
+): UpdateTripPlacePlanningInput {
+  return {
+    expectedVersion: numberField(body, "expectedVersion"),
+    durationMinutes: optionalNumberField(body, "durationMinutes"),
+    desiredDayIds: stringArrayField(body, "desiredDayIds"),
+    excludedDayIds: stringArrayField(body, "excludedDayIds"),
+    budgetAmountMinor: optionalNumberField(body, "budgetAmountMinor"),
+    budgetCurrency: optionalStringField(body, "budgetCurrency"),
+    notes: optionalStringField(body, "notes"),
+  };
+}
+
+function preferenceInput(
+  body: Record<string, unknown>,
+): UpdateMemberPreferenceInput {
+  return {
+    level: stringField(body, "level") as PreferenceLevel,
+    expectedVersion: optionalNumberField(body, "expectedVersion"),
+  };
+}
+
+function mergeInput(body: Record<string, unknown>): MergeTripPlacesInput {
+  return {
+    targetTripPlaceId: stringField(body, "targetTripPlaceId"),
+    expectedSourceVersion: numberField(body, "expectedSourceVersion"),
+    expectedTargetVersion: numberField(body, "expectedTargetVersion"),
+  };
+}
 
 function uuidParam(context: Context, name: string) {
   const value = context.req.param(name);
@@ -196,6 +269,7 @@ export function createApp({
   rateLimiter,
   readiness,
   siteAddress,
+  tripPlaces,
   tripSkeleton,
   tripWorkspace,
 }: AppDependencies) {
@@ -351,6 +425,133 @@ export function createApp({
     );
     return context.json({ skeleton });
   });
+  app.get("/api/trips/:tripId/trip-places", async (context) => {
+    const { user } = await authenticated(context);
+    return context.json({
+      tripPlaces: await tripPlaces.list(user.id, uuidParam(context, "tripId")),
+    });
+  });
+
+  app.post("/api/trips/:tripId/trip-places/search", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json(
+      await tripPlaces.search(
+        user.id,
+        uuidParam(context, "tripId"),
+        stringField(body, "query"),
+      ),
+    );
+  });
+
+  app.post("/api/trips/:tripId/trip-places/resolve-url", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json(
+      await tripPlaces.resolveUrl(
+        user.id,
+        uuidParam(context, "tripId"),
+        stringField(body, "url"),
+      ),
+    );
+  });
+
+  app.post("/api/trips/:tripId/trip-places", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const tripPlace = await tripPlaces.add(
+      user.id,
+      uuidParam(context, "tripId"),
+      idempotencyKey(context),
+      tripPlaceInput(body),
+    );
+    return context.json({ tripPlace }, 201);
+  });
+
+  app.patch(
+    "/api/trips/:tripId/trip-places/:tripPlaceId/planning",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const body = await jsonBody(context);
+      const tripPlace = await tripPlaces.updatePlanning(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "tripPlaceId"),
+        idempotencyKey(context),
+        planningInput(body),
+      );
+      return context.json({ tripPlace });
+    },
+  );
+
+  app.put(
+    "/api/trips/:tripId/trip-places/:tripPlaceId/preference",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const body = await jsonBody(context);
+      const tripPlace = await tripPlaces.setOwnPreference(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "tripPlaceId"),
+        idempotencyKey(context),
+        preferenceInput(body),
+      );
+      return context.json({ tripPlace });
+    },
+  );
+
+  app.post(
+    "/api/trips/:tripId/trip-places/:tripPlaceId/merge",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const body = await jsonBody(context);
+      const tripPlace = await tripPlaces.merge(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "tripPlaceId"),
+        idempotencyKey(context),
+        mergeInput(body),
+      );
+      return context.json({ tripPlace });
+    },
+  );
+
+  app.post(
+    "/api/trips/:tripId/trip-places/duplicates/:suggestionId/keep-separate",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      await tripPlaces.keepSeparate(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "suggestionId"),
+        idempotencyKey(context),
+      );
+      return context.body(null, 204);
+    },
+  );
+
+  app.post(
+    "/api/trips/:tripId/trip-places/:tripPlaceId/contributions/:contributionId/withdraw",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const tripPlace = await tripPlaces.withdrawContribution(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "tripPlaceId"),
+        uuidParam(context, "contributionId"),
+        idempotencyKey(context),
+      );
+      return context.json({ tripPlace });
+    },
+  );
 
   app.post("/api/trips/:tripId/places", async (context) => {
     const { user } = await authenticated(context);

@@ -414,6 +414,12 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         );
       }
 
+      const trip = await transaction.selectFrom("trips")
+        .select("id")
+        .where("id", "=", invite.tripId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!trip) throw new AppError("trip_not_found", "Trip not found", 404);
       await transaction
         .insertInto("trip_members")
         .values({
@@ -495,6 +501,12 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return;
+      const trip = await transaction.selectFrom("trips")
+        .select("id")
+        .where("id", "=", tripId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!trip) throw new AppError("trip_not_found", "Trip not found", 404);
       const member = await transaction
         .selectFrom("trip_members")
         .select(["user_id", "role", "removed_at"])

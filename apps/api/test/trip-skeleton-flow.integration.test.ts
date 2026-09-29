@@ -7,6 +7,7 @@ import {
   parseTripSkeletonResponse,
 } from "@along-the-way/contracts/trip-skeleton";
 import { parseTripResponse } from "@along-the-way/contracts/private-trips";
+import { parseTripPlaceListResponse } from "@along-the-way/contracts/trip-places";
 
 import { createApp } from "../src/app";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
@@ -20,6 +21,8 @@ import { PostgresReadinessProbe } from "../src/private-trips/postgres-readiness-
 import { PostgresTripWorkspaceModule } from "../src/private-trips/postgres-trip-workspace-module";
 import { TokenIssuer } from "../src/private-trips/token-issuer";
 import { PostgresTripSkeletonModule } from "../src/trip-skeleton/postgres-trip-skeleton-module";
+import { GooglePlacesProvider } from "../src/trip-places/google-places-provider";
+import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required");
@@ -68,6 +71,14 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         itinerary_constraints,
         itinerary_endpoints,
         itinerary_items,
+        trip_place_duplicate_suggestions,
+        trip_place_excluded_days,
+        trip_place_desired_days,
+        member_place_preferences,
+        trip_place_contributions,
+        trip_places,
+        place_identities,
+        legacy_place_origins,
         places,
         change_events,
         rate_limit_windows,
@@ -109,6 +120,11 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       readiness: new PostgresReadinessProbe(database, now),
       siteAddress: "https://app.example.test",
       tripSkeleton: new PostgresTripSkeletonModule({ database, now }),
+      tripPlaces: new PostgresTripPlaceModule({
+        database,
+        provider: new GooglePlacesProvider(),
+        now,
+      }),
       tripWorkspace: new PostgresTripWorkspaceModule({ database, now }),
     });
   });
@@ -233,6 +249,36 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     expect(replay.status).toBe(201);
     expect(parsePlaceResponse(await replay.json()).place.id).toBe(created.id);
 
+    const update = await app.request(`/api/trips/${trip.id}/places/${created.id}`, {
+      method: "PATCH",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        "idempotency-key": "update-manual-place",
+        origin: "https://app.example.test",
+      },
+      body: body({
+        expectedVersion: created.version,
+        name: created.name,
+        type: created.type,
+        address: created.address,
+        latitude: created.latitude,
+        longitude: created.longitude,
+        timeZone: created.timeZone,
+        sourceUrl: created.sourceUrl,
+        notes: "共享規劃備註已更新",
+      }),
+    });
+    expect(update.status).toBe(200);
+    const updated = parsePlaceResponse(await update.json()).place;
+    const wishlist = await app.request(`/api/trips/${trip.id}/trip-places`, {
+      headers: { cookie },
+    });
+    expect(wishlist.status).toBe(200);
+    const [projected] = parseTripPlaceListResponse(await wishlist.json()).tripPlaces;
+    expect(projected?.notes).toBe("共享規劃備註已更新");
+    expect(projected?.contributions[0]?.originalNote).toBe("入口待確認");
+
     const staleCreate = await app.request(`/api/trips/${trip.id}/places`, {
       ...request,
       headers: {
@@ -247,7 +293,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
 
     const read = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie } });
     expect(read.status).toBe(200);
-    expect(parseTripSkeletonResponse(await read.json()).skeleton.places).toEqual([created]);
+    expect(parseTripSkeletonResponse(await read.json()).skeleton.places).toEqual([updated]);
   });
 
   it("keeps cross-timezone endpoints ordered and requires unlock before mutation", async () => {
@@ -1423,7 +1469,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     expect(await removedEditorMutation.json()).toMatchObject({
       error: { code: "trip_not_found" },
     });
-    const forbiddenPlace = await database.selectFrom("places")
+    const forbiddenPlace = await database.selectFrom("trip_places")
       .select("id")
       .where("trip_id", "=", trip.id)
       .where("name", "=", "Must not be created after removal")

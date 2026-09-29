@@ -6,6 +6,8 @@ import { PostgresReadinessProbe } from "./private-trips/postgres-readiness-probe
 import { PostgresTripWorkspaceModule } from "./private-trips/postgres-trip-workspace-module";
 import { TokenIssuer } from "./private-trips/token-issuer";
 import { PostgresTripSkeletonModule } from "./trip-skeleton/postgres-trip-skeleton-module";
+import { GooglePlacesProvider } from "./trip-places/google-places-provider";
+import { PostgresTripPlaceModule } from "./trip-places/postgres-trip-place-module";
 
 function requireSetting(name: string) {
   const value = process.env[name]?.trim();
@@ -22,6 +24,12 @@ const identityAccess = new PostgresIdentityAccessModule({
 });
 const tripWorkspace = new PostgresTripWorkspaceModule({ database });
 const tripSkeleton = new PostgresTripSkeletonModule({ database });
+const tripPlaces = new PostgresTripPlaceModule({
+  database,
+  provider: new GooglePlacesProvider({
+    apiKey: process.env.GOOGLE_MAPS_API_KEY,
+  }),
+});
 const rateLimiter = new PostgresRateLimiter(database, tokenSecret);
 const readiness = new PostgresReadinessProbe(database);
 const app = createApp({
@@ -30,6 +38,7 @@ const app = createApp({
   readiness,
   siteAddress,
   tripSkeleton,
+  tripPlaces,
   tripWorkspace,
 });
 const port = Number(process.env.PORT ?? 3000);

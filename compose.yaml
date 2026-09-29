@@ -8,6 +8,7 @@ x-app-environment: &app-environment
   DATABASE_URL: "postgresql://${APP_DATABASE_USER:-along_the_way_app}:${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in .env}@db:5432/${POSTGRES_DB:-along_the_way}"
   SITE_ADDRESS: "${SITE_ADDRESS:-http://localhost}"
   TOKEN_SECRET: "${TOKEN_SECRET:?Set TOKEN_SECRET in .env}"
+  GOOGLE_MAPS_API_KEY: "${GOOGLE_MAPS_API_KEY:-}"
 
 x-worker-environment: &worker-environment
   <<: *app-environment

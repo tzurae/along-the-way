@@ -25,6 +25,8 @@ import { PostgresReadinessProbe } from "../src/private-trips/postgres-readiness-
 import { PostgresTripWorkspaceModule } from "../src/private-trips/postgres-trip-workspace-module";
 import { TokenIssuer } from "../src/private-trips/token-issuer";
 import { PostgresTripSkeletonModule } from "../src/trip-skeleton/postgres-trip-skeleton-module";
+import { GooglePlacesProvider } from "../src/trip-places/google-places-provider";
+import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required");
@@ -87,6 +89,14 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         itinerary_constraints,
         itinerary_endpoints,
         itinerary_items,
+        trip_place_duplicate_suggestions,
+        trip_place_excluded_days,
+        trip_place_desired_days,
+        member_place_preferences,
+        trip_place_contributions,
+        trip_places,
+        place_identities,
+        legacy_place_origins,
         places,
         change_events,
         rate_limit_windows,
@@ -138,6 +148,11 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       siteAddress: "https://app.example.test",
       tripSkeleton: new PostgresTripSkeletonModule({
         database,
+        now: () => new Date(now),
+      }),
+      tripPlaces: new PostgresTripPlaceModule({
+        database,
+        provider: new GooglePlacesProvider(),
         now: () => new Date(now),
       }),
       tripWorkspace,
