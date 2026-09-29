@@ -39,6 +39,8 @@ interface TripSkeletonWorkspaceProps {
   trip: TripDto;
   request: JsonRequest;
   onTripChanged(): Promise<void>;
+  placesRevision: number;
+  onPlacesChanged(): void;
 }
 
 const itemTypeLabels: Record<ItineraryItemDto["type"], string> = {
@@ -107,7 +109,13 @@ function ConstraintBadge({ constraint }: { constraint: ConstraintDto }) {
   );
 }
 
-export function TripSkeletonWorkspace({ trip, request, onTripChanged }: TripSkeletonWorkspaceProps) {
+export function TripSkeletonWorkspace({
+  trip,
+  request,
+  onTripChanged,
+  placesRevision,
+  onPlacesChanged,
+}: TripSkeletonWorkspaceProps) {
   const [skeleton, setSkeleton] = useState<TripSkeletonDto | null>(null);
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -140,7 +148,7 @@ export function TripSkeletonWorkspace({ trip, request, onTripChanged }: TripSkel
   useEffect(() => {
     setSkeleton(null);
     void load();
-  }, [load]);
+  }, [load, placesRevision]);
 
   const placesById = useMemo(
     () => new Map(skeleton?.places.map((place) => [place.id, place]) ?? []),
@@ -179,6 +187,7 @@ export function TripSkeletonWorkspace({ trip, request, onTripChanged }: TripSkel
     );
     if (updateIdentity) actionKeys.current.delete(updateIdentity);
     await load();
+    onPlacesChanged();
     if (!place) {
       placeCreateKey.current = null;
       await onTripChanged();
@@ -197,6 +206,7 @@ export function TripSkeletonWorkspace({ trip, request, onTripChanged }: TripSkel
       });
       actionKeys.current.delete(identity);
       await load();
+      onPlacesChanged();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not delete place");
     } finally {
@@ -224,6 +234,7 @@ export function TripSkeletonWorkspace({ trip, request, onTripChanged }: TripSkel
     );
     if (updateIdentity) actionKeys.current.delete(updateIdentity);
     await load();
+    onPlacesChanged();
     if (!item) {
       itemCreateKey.current = null;
       await onTripChanged();
@@ -252,6 +263,7 @@ export function TripSkeletonWorkspace({ trip, request, onTripChanged }: TripSkel
       actionKeys.current.delete(identity);
       setUnlockingItem(null);
       await load();
+      if (action === "delete") onPlacesChanged();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : `Could not ${action} item`);
     } finally {

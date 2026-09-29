@@ -82,6 +82,10 @@ export class AppError extends Error {
       | "unauthenticated"
       | "forbidden"
       | "trip_not_found"
+      | "trip_place_not_found"
+      | "contribution_not_found"
+      | "duplicate_suggestion_not_found"
+      | "provider_unavailable"
       | "invite_not_found"
       | "conflict"
       | "invalid_magic_link"
@@ -94,7 +98,7 @@ export class AppError extends Error {
       | "revoked_invite"
       | "invite_email_mismatch",
     message: string,
-    readonly status: 400 | 401 | 403 | 404 | 409 | 429 = 400,
+    readonly status: 400 | 401 | 403 | 404 | 409 | 429 | 503 = 400,
     readonly retryAfterSeconds?: number,
     readonly currentVersion?: number,
   ) {

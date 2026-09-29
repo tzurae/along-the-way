@@ -15,6 +15,7 @@ import { countryOptions } from "@along-the-way/contracts/countries";
 
 import { CreateTripDialog } from "./CreateTripDialog";
 import { TripSkeletonWorkspace } from "./TripSkeletonWorkspace";
+import { TripPlaceWorkspace } from "./TripPlaceWorkspace";
 
 const countryNames = new Map(
   countryOptions("zh-Hant").map((country) => [
@@ -317,6 +318,10 @@ export function App() {
   const inviteKey = useRef<string | null>(null);
   const createTripKey = useRef<string | null>(null);
   const [signInError, setSignInError] = useState("");
+  const [placesRevision, setPlacesRevision] = useState(0);
+  const placesChanged = useCallback(() => {
+    setPlacesRevision((revision) => revision + 1);
+  }, []);
 
   const refreshTrips = useCallback(async () => {
     const response = await requestJson<{ trips: TripSummaryDto[] }>("/api/trips", {
@@ -461,10 +466,18 @@ export function App() {
         {selectedTrip ? (
           <div className="grid gap-5">
             <TripWorkspace trip={selectedTrip} currentUser={user} onChanged={() => loadTrip(selectedTrip.id)} />
+            <TripPlaceWorkspace
+              trip={selectedTrip}
+              request={requestJson}
+              placesRevision={placesRevision}
+              onPlacesChanged={placesChanged}
+            />
             <TripSkeletonWorkspace
               trip={selectedTrip}
               request={requestJson}
               onTripChanged={() => loadTrip(selectedTrip.id)}
+              placesRevision={placesRevision}
+              onPlacesChanged={placesChanged}
             />
           </div>
         ) : (

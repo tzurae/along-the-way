@@ -180,7 +180,9 @@ async function createPlace(
   await dialog.getByLabel("IANA time zone").fill(input.timeZone);
   await dialog.getByRole("button", { name: "Save place" }).click();
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: input.name })).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Places" }).getByRole("heading", { name: input.name }),
+  ).toBeVisible();
 }
 
 async function chooseEndpoint(
