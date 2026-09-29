@@ -44,6 +44,17 @@ interface ModuleOptions {
   now?: () => Date;
 }
 
+interface ManualPlaceFacts {
+  name: string;
+  type: PlaceType;
+  address: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  timeZone: string | null;
+  sourceUrl: string | null;
+  originalNote: string | null;
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PREFERENCE_LEVELS = new Set<PreferenceLevel>([
   "must",
@@ -344,18 +355,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     if (earlyReplay) return replayedTripPlace(earlyReplay);
 
     let candidate: ProviderPlaceCandidateDto | null = null;
-    let manual:
-      | {
-          name: string;
-          type: PlaceType;
-          address: string | null;
-          latitude: number | null;
-          longitude: number | null;
-          timeZone: string | null;
-          sourceUrl: string | null;
-          originalNote: string | null;
-        }
-      | null = null;
+    let manual: ManualPlaceFacts | null = null;
     if (input.method === "manual") {
       const point = coordinates(input.latitude, input.longitude);
       manual = {
@@ -389,6 +389,54 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     const sourceUrl = optionalUrl(input.sourceUrl) ?? candidate?.sourceUrl ?? manual?.sourceUrl ?? null;
     const originalNote = optionalText(input.originalNote, "originalNote", 10_000);
 
+    return this.persistPlace(
+      userId,
+      tripId,
+      key,
+      operation,
+      input.method,
+      candidate,
+      manual,
+      sourceUrl,
+      originalNote,
+    );
+  }
+
+  async addObservedCandidate(
+    userId: string,
+    tripId: string,
+    rawKey: string,
+    candidate: ProviderPlaceCandidateDto,
+  ) {
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `tp:add:${tripId}`;
+    await this.requireMember(this.database, userId, tripId);
+    const earlyReplay = await replayed(this.database, userId, operation, key);
+    if (earlyReplay) return replayedTripPlace(earlyReplay);
+    return this.persistPlace(
+      userId,
+      tripId,
+      key,
+      operation,
+      "search",
+      candidate,
+      null,
+      optionalUrl(candidate.sourceUrl),
+      null,
+    );
+  }
+
+  private async persistPlace(
+    userId: string,
+    tripId: string,
+    key: string,
+    operation: string,
+    intakeMethod: CreateTripPlaceInput["method"],
+    candidate: ProviderPlaceCandidateDto | null,
+    manual: ManualPlaceFacts | null,
+    sourceUrl: string | null,
+    originalNote: string | null,
+  ) {
     return this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
@@ -463,7 +511,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         trip_id: tripId,
         trip_place_id: tripPlace.id,
         member_user_id: userId,
-        intake_method: input.method,
+        intake_method: intakeMethod,
         source_url: sourceUrl,
         original_note: originalNote,
         provider_observed_at: candidate ? candidate.observedAt : null,
@@ -480,7 +528,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         targetId: tripPlace.id,
         summary: existing
           ? "Added a member contribution to an existing place"
-          : `Added a ${input.method} place`,
+          : `Added a ${intakeMethod} place`,
       });
       const response = await this.readOne(transaction, userId, tripId, tripPlace.id);
       await remember(transaction, userId, operation, key, response);
@@ -1148,7 +1196,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     if (placeRows.length === 0) return [];
     const ids = placeRows.map((row) => row.id);
     const legacyPlaceIds = placeRows.map((row) => row.legacy_place_id);
-    const [contributions, members, preferenceRows, desiredRows, excludedRows, duplicateRows, scheduledRows] = await Promise.all([
+    const [contributions, members, preferenceRows, desiredRows, excludedRows, duplicateRows, scheduledRows, aiProposalRows] = await Promise.all([
       executor.selectFrom("trip_place_contributions as contribution")
         .innerJoin("users", "users.id", "contribution.member_user_id")
         .select([
@@ -1174,8 +1222,18 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         .where("second_trip_place_id", "in", ids).execute(),
       executor.selectFrom("itinerary_endpoints").select("place_id")
         .where("trip_id", "=", tripId).where("place_id", "in", legacyPlaceIds).execute(),
+      executor.selectFrom("candidate_proposals")
+        .select(["id", "accepted_trip_place_id"])
+        .where("trip_id", "=", tripId)
+        .where("accepted_trip_place_id", "in", ids)
+        .execute(),
     ]);
     const scheduled = new Set(scheduledRows.map((row) => row.place_id));
+    const aiProposalByTripPlaceId = new Map(
+      aiProposalRows.flatMap((proposal) => proposal.accepted_trip_place_id
+        ? [[proposal.accepted_trip_place_id, proposal.id] as const]
+        : []),
+    );
     const preferencesByKey = new Map(preferenceRows.map((row) => [
       `${row.trip_place_id}:${row.member_user_id}`,
       row,
@@ -1242,6 +1300,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         id: row.id,
         tripId: row.trip_id,
         placeId: row.place_id,
+        aiProposalId: aiProposalByTripPlaceId.get(row.id) ?? null,
         provider: row.provider,
         providerPlaceId: row.provider_place_id,
         providerObservedAt: providerFacts && row.provider_observed_at

@@ -31,6 +31,7 @@ import {
   type PlaceProvider,
 } from "../src/trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
+import { unrelatedDiscoveryModule } from "./discovery-test-support";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required");
@@ -183,6 +184,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       now,
     });
     app = createApp({
+      discovery: unrelatedDiscoveryModule,
       identityAccess,
       rateLimiter: new PostgresRateLimiter(
         database,

@@ -1,0 +1,900 @@
+import type {
+  CandidateProposalDto,
+  CreateDiscoveryFeedbackInput,
+  DecideCandidateProposalInput,
+  DecideDiscoveryFeedbackInput,
+  DiscoveryFeedbackDto,
+  DiscoveryWorkspaceDto,
+  GenerateDiscoveryInput,
+  SaveDiscoveryBriefInput,
+} from "@along-the-way/contracts/discovery";
+import { parseDiscoveryWorkspaceResponse } from "@along-the-way/contracts/discovery";
+import type { ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
+import { sql, type Kysely, type Transaction } from "kysely";
+
+import type { AlongTheWayDatabase } from "../database/database";
+import { AppError } from "../private-trips/private-trip-module";
+import {
+  dateOnly,
+  isoTimestamp,
+  lockMutation,
+  recordEvent,
+  remember,
+  replayed,
+  requireIdempotencyKey,
+  type DatabaseExecutor,
+} from "../private-trips/postgres-private-trip-store";
+import {
+  DiscoveryModelResponseError,
+  DiscoveryModelUnavailableError,
+  type DiscoveryModel,
+  type DiscoverySearchPlan,
+  type DiscoveryTripFacts,
+  type InterpretedDiscoveryFeedback,
+  type StructuredDiscoveryBrief,
+} from "./discovery-model";
+import type { DiscoveryModule } from "./discovery-module";
+import {
+  ProviderUnavailableError,
+  type PlaceProvider,
+} from "../trip-places/google-places-provider";
+import type { TripPlaceModule } from "../trip-places/trip-place-module";
+
+interface PostgresDiscoveryModuleOptions {
+  database: Kysely<AlongTheWayDatabase>;
+  model: DiscoveryModel;
+  placeProvider: PlaceProvider;
+  tripPlaces: TripPlaceModule;
+  now?: () => Date;
+  policyVersion?: string;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const EMPTY_PLAN: DiscoverySearchPlan = {
+  queries: [],
+  areas: [],
+  categories: [],
+  exclusions: [],
+  dateRange: { start: "", end: "" },
+};
+
+function requiredText(value: unknown, field: string, maximum: number) {
+  if (typeof value !== "string") throw new AppError("validation_error", `${field} must be a string`);
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maximum) {
+    throw new AppError("validation_error", `${field} is required and must be at most ${maximum} characters`);
+  }
+  return normalized;
+}
+
+function expectedVersion(value: unknown) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new AppError("validation_error", "expectedVersion must be a positive integer");
+  }
+  return value;
+}
+
+function uuid(value: string, field: string) {
+  if (!UUID.test(value)) throw new AppError("validation_error", `${field} must be a UUID`);
+  return value;
+}
+
+function jsonObject(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function jsonStrings(value: unknown) {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function replayedWorkspace(value: unknown) {
+  return parseDiscoveryWorkspaceResponse({ discovery: value }).discovery;
+}
+
+const AI_REQUEST_STATE = "discovery-ai-request-state";
+
+function aiRequestReplay(value: unknown) {
+  const item = jsonObject(value);
+  if (item.type !== AI_REQUEST_STATE) return replayedWorkspace(value);
+  if (item.state === "in-progress") {
+    throw new AppError("conflict", "This discovery request is already in progress", 409);
+  }
+  const message = typeof item.message === "string"
+    ? item.message
+    : "The discovery request failed and was not charged again";
+  if (item.code === "provider_unavailable") {
+    throw new AppError("provider_unavailable", message, 503);
+  }
+  if (item.code === "conflict") {
+    throw new AppError("conflict", message, 409);
+  }
+  throw new AppError("model_unavailable", message, 503);
+}
+
+function isAiRequestClaim(value: unknown) {
+  return jsonObject(value).type === AI_REQUEST_STATE;
+}
+
+export class PostgresDiscoveryModule implements DiscoveryModule {
+  private readonly database: Kysely<AlongTheWayDatabase>;
+  private readonly model: DiscoveryModel;
+  private readonly placeProvider: PlaceProvider;
+  private readonly tripPlaces: TripPlaceModule;
+  private readonly now: () => Date;
+  private readonly policyVersion: string;
+
+  constructor(options: PostgresDiscoveryModuleOptions) {
+    this.database = options.database;
+    this.model = options.model;
+    this.placeProvider = options.placeProvider;
+    this.tripPlaces = options.tripPlaces;
+    this.now = options.now ?? (() => new Date());
+    this.policyVersion = options.policyVersion ?? "discovery-v1";
+  }
+
+  async getWorkspace(userId: string, tripId: string) {
+    uuid(tripId, "tripId");
+    await this.requireMember(this.database, userId, tripId);
+    return this.readWorkspace(this.database, tripId);
+  }
+
+  async saveBrief(
+    userId: string,
+    tripId: string,
+    rawKey: string,
+    input: SaveDiscoveryBriefInput,
+  ) {
+    uuid(tripId, "tripId");
+    const key = requireIdempotencyKey(rawKey);
+    const originalText = requiredText(input.originalText, "originalText", 5_000);
+    const operation = `discovery:brief:${tripId}`;
+    return this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return replayedWorkspace(replay);
+      const current = await transaction.selectFrom("discovery_briefs")
+        .select(["version", "original_text"])
+        .where("trip_id", "=", tripId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (current) {
+        const version = expectedVersion(input.expectedVersion);
+        if (current.version !== version) {
+          throw new AppError("conflict", "The discovery brief changed; reload before saving", 409, undefined, current.version);
+        }
+        await transaction.updateTable("discovery_briefs").set({
+          original_text: originalText,
+          structured_brief: null,
+          unresolved_questions: JSON.stringify([]),
+          version: sql`version + 1`,
+          updated_by: userId,
+          updated_at: this.now(),
+        }).where("trip_id", "=", tripId).execute();
+      } else {
+        if (input.expectedVersion !== undefined && input.expectedVersion !== null) {
+          throw new AppError("conflict", "The discovery brief does not exist", 409);
+        }
+        await transaction.insertInto("discovery_briefs").values({
+          trip_id: tripId,
+          original_text: originalText,
+          structured_brief: null,
+          unresolved_questions: JSON.stringify([]),
+          updated_by: userId,
+        }).execute();
+      }
+      await recordEvent(transaction, {
+        tripId,
+        actorId: userId,
+        eventType: current ? "discovery.brief_updated" : "discovery.brief_created",
+        targetType: "discovery_brief",
+        targetId: tripId,
+        summary: "Saved the trip discovery brief",
+      });
+      const response = await this.readWorkspace(transaction, tripId);
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
+  async generate(
+    userId: string,
+    tripId: string,
+    rawKey: string,
+    input: GenerateDiscoveryInput,
+  ) {
+    uuid(tripId, "tripId");
+    const key = requireIdempotencyKey(rawKey);
+    const version = expectedVersion(input.expectedBriefVersion);
+    const operation = `discovery:generate:${tripId}`;
+    await this.requireMember(this.database, userId, tripId);
+    const earlyReplay = await replayed(this.database, userId, operation, key);
+    if (earlyReplay) return aiRequestReplay(earlyReplay);
+    const brief = await this.database.selectFrom("discovery_briefs")
+      .select(["original_text", "version"])
+      .where("trip_id", "=", tripId)
+      .executeTakeFirst();
+    if (!brief) throw new AppError("validation_error", "Save a discovery brief first");
+    if (brief.version !== version) {
+      throw new AppError("conflict", "The discovery brief changed; reload before generating", 409, undefined, brief.version);
+    }
+    const trip = await this.tripFacts(userId, tripId);
+    const feedback = await this.confirmedFeedback(tripId);
+    const rejectedProviderPlaceIds = await this.database.selectFrom("candidate_proposals")
+      .select("provider_place_id")
+      .where("trip_id", "=", tripId)
+      .where("status", "=", "rejected")
+      .execute();
+    const claimedReplay = await this.database.transaction().execute(async (transaction) => {
+      await lockMutation(transaction, userId, operation, key);
+      const existing = await replayed(transaction, userId, operation, key);
+      if (existing) return existing;
+      await remember(transaction, userId, operation, key, {
+        type: AI_REQUEST_STATE,
+        state: "in-progress",
+      });
+      return null;
+    });
+    if (claimedReplay) return aiRequestReplay(claimedReplay);
+    try {
+      const plan = await this.model.plan({
+        brief: brief.original_text,
+        trip,
+        confirmedFeedback: feedback,
+      });
+      plan.searchPlan.dateRange = { start: trip.startDate, end: trip.endDate };
+      const byProviderId = new Map<string, ProviderPlaceCandidateDto>();
+      let providerSucceeded = false;
+      for (const query of plan.searchPlan.queries.slice(0, 6)) {
+        try {
+          const returned = await this.placeProvider.search(query);
+          providerSucceeded = true;
+          for (const candidate of returned) {
+            if (!byProviderId.has(candidate.providerPlaceId) && byProviderId.size < 24) {
+              byProviderId.set(candidate.providerPlaceId, candidate);
+            }
+          }
+        } catch (error) {
+          if (!(error instanceof ProviderUnavailableError)) throw error;
+        }
+      }
+      if (!providerSucceeded && byProviderId.size === 0) {
+        throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
+      }
+      const candidates = [...byProviderId.values()];
+      const synthesis = await this.model.synthesize({
+        brief: plan.structuredBrief,
+        searchPlan: plan.searchPlan,
+        trip,
+        candidates,
+        confirmedFeedback: feedback,
+        rejectedProviderPlaceIds: rejectedProviderPlaceIds.map((item) => item.provider_place_id),
+      });
+      const candidateById = new Map(candidates.map((candidate) => [candidate.providerPlaceId, candidate]));
+      return await this.database.transaction().execute(async (transaction) => {
+        await this.requireMember(transaction, userId, tripId);
+        await lockMutation(transaction, userId, operation, key);
+        const replay = await replayed(transaction, userId, operation, key);
+        if (replay && !isAiRequestClaim(replay)) return replayedWorkspace(replay);
+        const lockedBrief = await transaction.selectFrom("discovery_briefs")
+          .select("version")
+          .where("trip_id", "=", tripId)
+          .forUpdate()
+          .executeTakeFirstOrThrow();
+        if (lockedBrief.version !== version) {
+          throw new AppError("conflict", "The discovery brief changed while candidates were generated", 409, undefined, lockedBrief.version);
+        }
+        await transaction.updateTable("discovery_briefs").set({
+          structured_brief: plan.structuredBrief,
+          unresolved_questions: JSON.stringify(plan.unresolvedQuestions),
+          updated_at: this.now(),
+        }).where("trip_id", "=", tripId).execute();
+        const run = await transaction.insertInto("discovery_runs").values({
+          trip_id: tripId,
+          brief_version: version,
+          policy_version: this.policyVersion,
+          model_id: synthesis.modelId || plan.modelId,
+          status: "completed",
+          search_plan: plan.searchPlan,
+          error_code: null,
+          created_by: userId,
+          completed_at: this.now(),
+        }).returning("id").executeTakeFirstOrThrow();
+        const sourceEvidence = new Map<string, string>();
+        const usedSourceUrls = new Set(synthesis.candidates.flatMap((candidate) => candidate.sourceUrls));
+        for (const source of synthesis.sources) {
+          if (!usedSourceUrls.has(source.url)) continue;
+          const row = await transaction.insertInto("discovery_evidence").values({
+            trip_id: tripId,
+            run_id: run.id,
+            evidence_kind: "web-source",
+            provider_place_id: null,
+            source_url: source.url,
+            title: source.title,
+            attribution: "OpenAI web search source",
+            observed_at: this.now(),
+            expires_at: null,
+            facts: { sourceOnly: true },
+          }).returning("id").executeTakeFirstOrThrow();
+          sourceEvidence.set(source.url, row.id);
+        }
+        for (const candidateSynthesis of synthesis.candidates) {
+          if (rejectedProviderPlaceIds.some((entry) => entry.provider_place_id === candidateSynthesis.providerPlaceId)) continue;
+          const candidate = candidateById.get(candidateSynthesis.providerPlaceId);
+          if (!candidate) continue;
+          const googleUrl = candidate.sourceUrl ?? `https://www.google.com/maps/search/?api=1&query_place_id=${encodeURIComponent(candidate.providerPlaceId)}`;
+          const googleEvidence = await transaction.insertInto("discovery_evidence").values({
+            trip_id: tripId,
+            run_id: run.id,
+            evidence_kind: "google-place",
+            provider_place_id: candidate.providerPlaceId,
+            source_url: googleUrl,
+            title: candidate.name,
+            attribution: candidate.attribution,
+            observed_at: candidate.observedAt,
+            expires_at: candidate.expiresAt,
+            facts: candidate,
+          }).returning("id").executeTakeFirstOrThrow();
+          const proposal = await transaction.insertInto("candidate_proposals").values({
+            trip_id: tripId,
+            run_id: run.id,
+            provider_place_id: candidate.providerPlaceId,
+            name: candidate.name,
+            place_type: candidate.type,
+            address: candidate.address,
+            latitude: candidate.latitude,
+            longitude: candidate.longitude,
+            source_url: candidate.sourceUrl,
+            recommendation: candidateSynthesis.recommendation,
+            matched_needs: JSON.stringify(candidateSynthesis.matchedNeeds),
+            tradeoffs: JSON.stringify(candidateSynthesis.tradeoffs),
+            unknowns: JSON.stringify(candidateSynthesis.unknowns),
+            confidence: candidateSynthesis.confidence,
+            status: "pending",
+            accepted_trip_place_id: null,
+            decided_by: null,
+            decided_at: null,
+          }).returning("id").executeTakeFirstOrThrow();
+          const evidenceIds = [
+            googleEvidence.id,
+            ...candidateSynthesis.sourceUrls.map((url) => sourceEvidence.get(url)).filter((id): id is string => Boolean(id)),
+          ];
+          await transaction.insertInto("candidate_proposal_evidence").values(
+            evidenceIds.map((evidenceId) => ({ proposal_id: proposal.id, evidence_id: evidenceId })),
+          ).execute();
+        }
+        await recordEvent(transaction, {
+          tripId,
+          actorId: userId,
+          eventType: "discovery.generated",
+          targetType: "discovery_run",
+          targetId: run.id,
+          summary: `Generated ${synthesis.candidates.length} source-grounded place proposals`,
+        });
+        const response = await this.readWorkspace(transaction, tripId);
+        await transaction.updateTable("mutation_requests").set({ response })
+          .where("actor_id", "=", userId)
+          .where("operation", "=", operation)
+          .where("idempotency_key", "=", key)
+          .execute();
+        return response;
+      });
+    } catch (error) {
+      const failure = error instanceof AppError
+        ? error
+        : error instanceof DiscoveryModelUnavailableError
+          ? new AppError("model_unavailable", error.message, 503)
+          : error instanceof DiscoveryModelResponseError
+            ? new AppError("model_unavailable", error.message, 503)
+            : null;
+      if (!failure) throw error;
+      const replayCode = failure.code === "provider_unavailable"
+        ? "provider_unavailable"
+        : failure.code === "conflict"
+          ? "conflict"
+          : "model_unavailable";
+      await this.database.updateTable("mutation_requests").set({
+        response: {
+          type: AI_REQUEST_STATE,
+          state: "failed",
+          code: replayCode,
+          message: failure.message,
+        },
+      })
+        .where("actor_id", "=", userId)
+        .where("operation", "=", operation)
+        .where("idempotency_key", "=", key)
+        .execute();
+      throw failure;
+    }
+  }
+
+  async acceptProposal(
+    userId: string,
+    tripId: string,
+    proposalId: string,
+    rawKey: string,
+    input: DecideCandidateProposalInput,
+  ) {
+    uuid(tripId, "tripId");
+    uuid(proposalId, "proposalId");
+    const key = requireIdempotencyKey(rawKey);
+    const version = expectedVersion(input.expectedVersion);
+    const operation = `discovery:accept:${proposalId}`;
+    await this.requireMember(this.database, userId, tripId);
+    const replay = await replayed(this.database, userId, operation, key);
+    if (replay) return replayedWorkspace(replay);
+    const proposal = await this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const existingReplay = await replayed(transaction, userId, operation, key);
+      if (existingReplay) return null;
+      const row = await transaction.selectFrom("candidate_proposals")
+        .selectAll()
+        .where("id", "=", proposalId)
+        .where("trip_id", "=", tripId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!row) throw new AppError("discovery_proposal_not_found", "Candidate proposal not found", 404);
+      if (row.status === "accepting" && row.version === version + 1) return row;
+      if (row.status !== "pending" || row.version !== version) {
+        throw new AppError("conflict", "The candidate proposal changed; reload before accepting", 409, undefined, row.version);
+      }
+      await transaction.updateTable("candidate_proposals").set({
+        status: "accepting",
+        version: sql`version + 1`,
+        updated_at: this.now(),
+      }).where("id", "=", proposalId).execute();
+      return row;
+    });
+    if (!proposal) {
+      const completed = await replayed(this.database, userId, operation, key);
+      if (completed) return replayedWorkspace(completed);
+      throw new AppError("conflict", "Candidate acceptance is already in progress", 409);
+    }
+    try {
+      const evidence = await this.database.selectFrom("discovery_evidence as evidence")
+        .innerJoin("candidate_proposal_evidence as link", "link.evidence_id", "evidence.id")
+        .select("evidence.facts")
+        .where("link.proposal_id", "=", proposalId)
+        .where("evidence.evidence_kind", "=", "google-place")
+        .executeTakeFirstOrThrow();
+      const facts = jsonObject(evidence.facts);
+      const candidate: ProviderPlaceCandidateDto = {
+        provider: "google",
+        providerPlaceId: proposal.provider_place_id,
+        name: proposal.name,
+        type: proposal.place_type,
+        address: proposal.address,
+        latitude: proposal.latitude,
+        longitude: proposal.longitude,
+        timeZone: typeof facts.timeZone === "string" ? facts.timeZone : null,
+        sourceUrl: proposal.source_url,
+        attribution: typeof facts.attribution === "string" ? facts.attribution : this.placeProvider.attribution,
+        observedAt: typeof facts.observedAt === "string" ? facts.observedAt : isoTimestamp(proposal.created_at),
+        expiresAt: typeof facts.expiresAt === "string" ? facts.expiresAt : isoTimestamp(this.now()),
+      };
+      const tripPlace = await this.tripPlaces.addObservedCandidate(
+        userId,
+        tripId,
+        `${key}:trip-place`,
+        candidate,
+      );
+      return await this.database.transaction().execute(async (transaction) => {
+        await lockMutation(transaction, userId, operation, key);
+        const existingReplay = await replayed(transaction, userId, operation, key);
+        if (existingReplay) return replayedWorkspace(existingReplay);
+        const updated = await transaction.updateTable("candidate_proposals").set({
+          status: "accepted",
+          accepted_trip_place_id: tripPlace.id,
+          decided_by: userId,
+          decided_at: this.now(),
+          version: sql`version + 1`,
+          updated_at: this.now(),
+        }).where("id", "=", proposalId)
+          .where("trip_id", "=", tripId)
+          .where("status", "=", "accepting")
+          .returning("id")
+          .executeTakeFirst();
+        if (!updated) throw new AppError("conflict", "Candidate acceptance state changed", 409);
+        await recordEvent(transaction, {
+          tripId,
+          actorId: userId,
+          eventType: "discovery.proposal_accepted",
+          targetType: "candidate_proposal",
+          targetId: proposalId,
+          summary: "Accepted an AI place proposal into the shared wishlist",
+        });
+        const response = await this.readWorkspace(transaction, tripId);
+        await remember(transaction, userId, operation, key, response);
+        return response;
+      });
+    } catch (error) {
+      await this.database.updateTable("candidate_proposals").set({
+        status: "pending",
+        version: sql`version + 1`,
+        updated_at: this.now(),
+      }).where("id", "=", proposalId).where("status", "=", "accepting").execute();
+      throw error;
+    }
+  }
+
+  async rejectProposal(
+    userId: string,
+    tripId: string,
+    proposalId: string,
+    rawKey: string,
+    input: DecideCandidateProposalInput,
+  ) {
+    uuid(tripId, "tripId");
+    uuid(proposalId, "proposalId");
+    const key = requireIdempotencyKey(rawKey);
+    const version = expectedVersion(input.expectedVersion);
+    const operation = `discovery:reject:${proposalId}`;
+    return this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return replayedWorkspace(replay);
+      const updated = await transaction.updateTable("candidate_proposals").set({
+        status: "rejected",
+        decided_by: userId,
+        decided_at: this.now(),
+        version: sql`version + 1`,
+        updated_at: this.now(),
+      }).where("id", "=", proposalId)
+        .where("trip_id", "=", tripId)
+        .where("status", "=", "pending")
+        .where("version", "=", version)
+        .returning("id")
+        .executeTakeFirst();
+      if (!updated) {
+        const current = await transaction.selectFrom("candidate_proposals").select("version")
+          .where("id", "=", proposalId).where("trip_id", "=", tripId).executeTakeFirst();
+        if (!current) throw new AppError("discovery_proposal_not_found", "Candidate proposal not found", 404);
+        throw new AppError("conflict", "The candidate proposal changed; reload before rejecting", 409, undefined, current.version);
+      }
+      await recordEvent(transaction, {
+        tripId,
+        actorId: userId,
+        eventType: "discovery.proposal_rejected",
+        targetType: "candidate_proposal",
+        targetId: proposalId,
+        summary: "Rejected an AI place proposal",
+      });
+      const response = await this.readWorkspace(transaction, tripId);
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
+  async createFeedback(
+    userId: string,
+    tripId: string,
+    rawKey: string,
+    input: CreateDiscoveryFeedbackInput,
+  ) {
+    uuid(tripId, "tripId");
+    const key = requireIdempotencyKey(rawKey);
+    const originalText = requiredText(input.originalText, "originalText", 2_000);
+    const proposalId = input.proposalId ? uuid(input.proposalId, "proposalId") : null;
+    const operation = `discovery:feedback:${tripId}`;
+    await this.requireMember(this.database, userId, tripId);
+    const earlyReplay = await replayed(this.database, userId, operation, key);
+    if (earlyReplay) return aiRequestReplay(earlyReplay);
+    const proposal = proposalId
+      ? await this.database.selectFrom("candidate_proposals").select("name")
+        .where("id", "=", proposalId).where("trip_id", "=", tripId).executeTakeFirst()
+      : null;
+    if (proposalId && !proposal) throw new AppError("discovery_proposal_not_found", "Candidate proposal not found", 404);
+    const claimedReplay = await this.database.transaction().execute(async (transaction) => {
+      await lockMutation(transaction, userId, operation, key);
+      const existing = await replayed(transaction, userId, operation, key);
+      if (existing) return existing;
+      await remember(transaction, userId, operation, key, {
+        type: AI_REQUEST_STATE,
+        state: "in-progress",
+      });
+      return null;
+    });
+    if (claimedReplay) return aiRequestReplay(claimedReplay);
+    let interpretation: InterpretedDiscoveryFeedback;
+    try {
+      interpretation = await this.model.interpretFeedback({ text: originalText, proposalName: proposal?.name ?? null });
+    } catch (error) {
+      const failure = error instanceof DiscoveryModelUnavailableError || error instanceof DiscoveryModelResponseError
+        ? new AppError("model_unavailable", error.message, 503)
+        : null;
+      if (!failure) throw error;
+      await this.database.updateTable("mutation_requests").set({
+        response: {
+          type: AI_REQUEST_STATE,
+          state: "failed",
+          code: "model_unavailable",
+          message: failure.message,
+        },
+      })
+        .where("actor_id", "=", userId)
+        .where("operation", "=", operation)
+        .where("idempotency_key", "=", key)
+        .execute();
+      throw failure;
+    }
+    return this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay && !isAiRequestClaim(replay)) return replayedWorkspace(replay);
+      const feedback = await transaction.insertInto("discovery_feedback").values({
+        trip_id: tripId,
+        proposal_id: proposalId,
+        actor_id: userId,
+        original_text: originalText,
+        interpretation: {
+          interests: interpretation.interests,
+          exclusions: interpretation.exclusions,
+          pace: interpretation.pace,
+          budget: interpretation.budget,
+          summary: interpretation.summary,
+        },
+        status: "pending",
+        decided_at: null,
+      }).returning("id").executeTakeFirstOrThrow();
+      await recordEvent(transaction, {
+        tripId,
+        actorId: userId,
+        eventType: "discovery.feedback_interpreted",
+        targetType: "discovery_feedback",
+        targetId: feedback.id,
+        summary: "Interpreted discovery feedback for member confirmation",
+      });
+      const response = await this.readWorkspace(transaction, tripId);
+      await transaction.updateTable("mutation_requests").set({ response })
+        .where("actor_id", "=", userId)
+        .where("operation", "=", operation)
+        .where("idempotency_key", "=", key)
+        .execute();
+      return response;
+    });
+  }
+
+  async decideFeedback(
+    userId: string,
+    tripId: string,
+    feedbackId: string,
+    rawKey: string,
+    input: DecideDiscoveryFeedbackInput,
+  ) {
+    uuid(tripId, "tripId");
+    uuid(feedbackId, "feedbackId");
+    const key = requireIdempotencyKey(rawKey);
+    const version = expectedVersion(input.expectedVersion);
+    if (input.decision !== "confirm" && input.decision !== "reject") {
+      throw new AppError("validation_error", "decision must be confirm or reject");
+    }
+    const operation = `discovery:feedback-decision:${feedbackId}`;
+    return this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return replayedWorkspace(replay);
+      const updated = await transaction.updateTable("discovery_feedback").set({
+        status: input.decision === "confirm" ? "confirmed" : "rejected",
+        decided_at: this.now(),
+        version: sql`version + 1`,
+        updated_at: this.now(),
+      }).where("id", "=", feedbackId)
+        .where("trip_id", "=", tripId)
+        .where("actor_id", "=", userId)
+        .where("status", "=", "pending")
+        .where("version", "=", version)
+        .returning("id")
+        .executeTakeFirst();
+      if (!updated) {
+        const current = await transaction.selectFrom("discovery_feedback").select(["version", "actor_id"])
+          .where("id", "=", feedbackId).where("trip_id", "=", tripId).executeTakeFirst();
+        if (!current) throw new AppError("discovery_feedback_not_found", "Discovery feedback not found", 404);
+        if (current.actor_id !== userId) throw new AppError("forbidden", "Only the feedback author can decide it", 403);
+        throw new AppError("conflict", "The discovery feedback changed; reload before deciding", 409, undefined, current.version);
+      }
+      await recordEvent(transaction, {
+        tripId,
+        actorId: userId,
+        eventType: input.decision === "confirm" ? "discovery.feedback_confirmed" : "discovery.feedback_rejected",
+        targetType: "discovery_feedback",
+        targetId: feedbackId,
+        summary: input.decision === "confirm" ? "Confirmed interpreted discovery feedback" : "Rejected interpreted discovery feedback",
+      });
+      const response = await this.readWorkspace(transaction, tripId);
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
+  private async requireMember(executor: DatabaseExecutor, userId: string, tripId: string) {
+    const member = await executor.selectFrom("trip_members").select("user_id")
+      .where("trip_id", "=", tripId)
+      .where("user_id", "=", userId)
+      .where("removed_at", "is", null)
+      .executeTakeFirst();
+    if (!member) throw new AppError("trip_not_found", "Trip not found", 404);
+  }
+
+  private async tripFacts(userId: string, tripId: string): Promise<DiscoveryTripFacts> {
+    await this.requireMember(this.database, userId, tripId);
+    const trip = await this.database.selectFrom("trips").select([
+      "name", "start_date", "end_date", "time_zone", "currency",
+    ]).where("id", "=", tripId).executeTakeFirst();
+    if (!trip) throw new AppError("trip_not_found", "Trip not found", 404);
+    const countries = await this.database.selectFrom("trip_country_stops")
+      .select(["country_code", "position"])
+      .where("trip_id", "=", tripId)
+      .orderBy("position")
+      .execute();
+    return {
+      name: trip.name,
+      startDate: dateOnly(trip.start_date),
+      endDate: dateOnly(trip.end_date),
+      timeZone: trip.time_zone,
+      currency: trip.currency,
+      countries: countries.map((country) => ({ code: country.country_code, position: country.position })),
+    };
+  }
+
+  private async confirmedFeedback(tripId: string) {
+    const rows = await this.database.selectFrom("discovery_feedback")
+      .select(["original_text", "interpretation"])
+      .where("trip_id", "=", tripId)
+      .where("status", "=", "confirmed")
+      .orderBy("created_at")
+      .execute();
+    return rows.map((row) => `${row.original_text}\nInterpretation: ${JSON.stringify(row.interpretation)}`);
+  }
+
+  private async readWorkspace(
+    executor: DatabaseExecutor,
+    tripId: string,
+  ): Promise<DiscoveryWorkspaceDto> {
+    const briefRow = await executor.selectFrom("discovery_briefs").selectAll()
+      .where("trip_id", "=", tripId).executeTakeFirst();
+    const run = await executor.selectFrom("discovery_runs").selectAll()
+      .where("trip_id", "=", tripId)
+      .orderBy("created_at", "desc")
+      .orderBy("id", "desc")
+      .executeTakeFirst();
+    const proposalRows = run
+      ? await executor.selectFrom("candidate_proposals").selectAll()
+        .where("run_id", "=", run.id)
+        .orderBy("created_at")
+        .orderBy("id")
+        .execute()
+      : [];
+    const proposalIds = proposalRows.map((proposal) => proposal.id);
+    const evidenceRows = proposalIds.length
+      ? await executor.selectFrom("candidate_proposal_evidence as link")
+        .innerJoin("discovery_evidence as evidence", "evidence.id", "link.evidence_id")
+        .select([
+          "link.proposal_id",
+          "evidence.id",
+          "evidence.evidence_kind",
+          "evidence.provider_place_id",
+          "evidence.source_url",
+          "evidence.title",
+          "evidence.attribution",
+          "evidence.observed_at",
+          "evidence.expires_at",
+        ])
+        .where("link.proposal_id", "in", proposalIds)
+        .orderBy("evidence.evidence_kind")
+        .orderBy("evidence.id")
+        .execute()
+      : [];
+    const evidenceByProposal = new Map<string, CandidateProposalDto["evidence"]>();
+    for (const row of evidenceRows) {
+      const values = evidenceByProposal.get(row.proposal_id) ?? [];
+      values.push({
+        id: row.id,
+        kind: row.evidence_kind,
+        providerPlaceId: row.provider_place_id,
+        sourceUrl: row.source_url,
+        title: row.title,
+        attribution: row.attribution,
+        observedAt: isoTimestamp(row.observed_at),
+        expiresAt: row.expires_at ? isoTimestamp(row.expires_at) : null,
+      });
+      evidenceByProposal.set(row.proposal_id, values);
+    }
+    const feedbackRows = await executor.selectFrom("discovery_feedback").selectAll()
+      .where("trip_id", "=", tripId)
+      .orderBy("created_at", "desc")
+      .orderBy("id", "desc")
+      .execute();
+    return {
+      brief: briefRow ? {
+        originalText: briefRow.original_text,
+        structured: briefRow.structured_brief ? this.readStructuredBrief(briefRow.structured_brief) : null,
+        unresolvedQuestions: jsonStrings(briefRow.unresolved_questions),
+        version: briefRow.version,
+        updatedAt: isoTimestamp(briefRow.updated_at),
+      } : null,
+      latestRun: run ? {
+        id: run.id,
+        status: run.status,
+        modelId: run.model_id,
+        policyVersion: run.policy_version,
+        briefVersion: run.brief_version,
+        searchPlan: this.readSearchPlan(run.search_plan),
+        generatedAt: isoTimestamp(run.completed_at),
+        errorCode: run.error_code,
+      } : null,
+      proposals: proposalRows.map((proposal) => ({
+        id: proposal.id,
+        runId: proposal.run_id,
+        providerPlaceId: proposal.provider_place_id,
+        name: proposal.name,
+        type: proposal.place_type,
+        address: proposal.address,
+        latitude: proposal.latitude,
+        longitude: proposal.longitude,
+        sourceUrl: proposal.source_url,
+        recommendation: proposal.recommendation,
+        matchedNeeds: jsonStrings(proposal.matched_needs),
+        tradeoffs: jsonStrings(proposal.tradeoffs),
+        unknowns: jsonStrings(proposal.unknowns),
+        confidence: proposal.confidence,
+        status: proposal.status,
+        evidence: evidenceByProposal.get(proposal.id) ?? [],
+        acceptedTripPlaceId: proposal.accepted_trip_place_id,
+        version: proposal.version,
+      })),
+      feedback: feedbackRows.map((feedback): DiscoveryFeedbackDto => {
+        const interpretation = jsonObject(feedback.interpretation);
+        return {
+          id: feedback.id,
+          proposalId: feedback.proposal_id,
+          originalText: feedback.original_text,
+          interpretation: {
+            interests: jsonStrings(interpretation.interests),
+            exclusions: jsonStrings(interpretation.exclusions),
+            pace: typeof interpretation.pace === "string" ? interpretation.pace : null,
+            budget: typeof interpretation.budget === "string" ? interpretation.budget : null,
+            summary: typeof interpretation.summary === "string" ? interpretation.summary : "",
+          },
+          status: feedback.status,
+          version: feedback.version,
+          createdAt: isoTimestamp(feedback.created_at),
+        };
+      }),
+      modelAvailable: this.model.available,
+      placeProviderAvailable: this.placeProvider.available !== false,
+    };
+  }
+
+  private readStructuredBrief(value: unknown): StructuredDiscoveryBrief {
+    const item = jsonObject(value);
+    return {
+      interests: jsonStrings(item.interests),
+      pace: typeof item.pace === "string" ? item.pace : null,
+      budget: typeof item.budget === "string" ? item.budget : null,
+      exclusions: jsonStrings(item.exclusions),
+      areas: jsonStrings(item.areas),
+    };
+  }
+
+  private readSearchPlan(value: unknown): DiscoverySearchPlan {
+    const item = jsonObject(value);
+    const dateRange = jsonObject(item.dateRange);
+    return {
+      queries: jsonStrings(item.queries),
+      areas: jsonStrings(item.areas),
+      categories: jsonStrings(item.categories),
+      exclusions: jsonStrings(item.exclusions),
+      dateRange: {
+        start: typeof dateRange.start === "string" ? dateRange.start : EMPTY_PLAN.dateRange.start,
+        end: typeof dateRange.end === "string" ? dateRange.end : EMPTY_PLAN.dateRange.end,
+      },
+    };
+  }
+}

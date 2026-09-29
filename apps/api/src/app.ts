@@ -20,6 +20,7 @@ import type {
   UpdateMemberPreferenceInput,
   UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
+import type { DiscoveryModule } from "./discovery/discovery-module";
 
 import {
   AppError,
@@ -37,6 +38,7 @@ const SESSION_COOKIE = "along_the_way_session";
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
 interface AppDependencies {
+  discovery: DiscoveryModule;
   identityAccess: IdentityAccessModule;
   rateLimiter: RateLimiter;
   readiness: ReadinessProbe;
@@ -265,6 +267,7 @@ async function jsonBody(context: Context) {
 }
 
 export function createApp({
+  discovery,
   identityAccess,
   rateLimiter,
   readiness,
@@ -429,6 +432,113 @@ export function createApp({
     const { user } = await authenticated(context);
     return context.json({
       tripPlaces: await tripPlaces.list(user.id, uuidParam(context, "tripId")),
+    });
+  });
+
+  app.get("/api/trips/:tripId/discovery", async (context) => {
+    const { user } = await authenticated(context);
+    return context.json({
+      discovery: await discovery.getWorkspace(user.id, uuidParam(context, "tripId")),
+    });
+  });
+
+  app.put("/api/trips/:tripId/discovery/brief", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json({
+      discovery: await discovery.saveBrief(
+        user.id,
+        uuidParam(context, "tripId"),
+        idempotencyKey(context),
+        {
+          originalText: stringField(body, "originalText"),
+          expectedVersion: optionalNumberField(body, "expectedVersion"),
+        },
+      ),
+    });
+  });
+
+  app.post("/api/trips/:tripId/discovery/generate", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json({
+      discovery: await discovery.generate(
+        user.id,
+        uuidParam(context, "tripId"),
+        idempotencyKey(context),
+        { expectedBriefVersion: numberField(body, "expectedBriefVersion") },
+      ),
+    });
+  });
+
+  app.post("/api/trips/:tripId/discovery/proposals/:proposalId/accept", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json({
+      discovery: await discovery.acceptProposal(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "proposalId"),
+        idempotencyKey(context),
+        { expectedVersion: numberField(body, "expectedVersion") },
+      ),
+    });
+  });
+
+  app.post("/api/trips/:tripId/discovery/proposals/:proposalId/reject", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json({
+      discovery: await discovery.rejectProposal(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "proposalId"),
+        idempotencyKey(context),
+        { expectedVersion: numberField(body, "expectedVersion") },
+      ),
+    });
+  });
+
+  app.post("/api/trips/:tripId/discovery/feedback", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json({
+      discovery: await discovery.createFeedback(
+        user.id,
+        uuidParam(context, "tripId"),
+        idempotencyKey(context),
+        {
+          originalText: stringField(body, "originalText"),
+          proposalId: optionalStringField(body, "proposalId"),
+        },
+      ),
+    });
+  });
+
+  app.post("/api/trips/:tripId/discovery/feedback/:feedbackId/decision", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const decision = stringField(body, "decision");
+    if (decision !== "confirm" && decision !== "reject") {
+      throw new AppError("validation_error", "decision must be confirm or reject");
+    }
+    return context.json({
+      discovery: await discovery.decideFeedback(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "feedbackId"),
+        idempotencyKey(context),
+        {
+          expectedVersion: numberField(body, "expectedVersion"),
+          decision,
+        },
+      ),
     });
   });
 

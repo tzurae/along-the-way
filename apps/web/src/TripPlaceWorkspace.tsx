@@ -535,7 +535,7 @@ export function TripPlaceWorkspace({
             <article aria-label={`${place.name} at ${place.address ?? "unknown address"}`} key={place.id} className="grid content-start gap-4 rounded-panel border border-ink/10 bg-surface-subtle p-4 sm:p-5">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{factsLabel}</p>
+                  <p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{factsLabel}{place.aiProposalId ? " · AI proposal" : ""}</p>
                   <h3 className="font-display text-2xl text-ink-strong">{place.name}</h3>
                   <p className="mt-1 text-sm text-muted-foreground">{place.address ?? "Address unknown"}</p>
                 </div>

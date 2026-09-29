@@ -23,6 +23,7 @@ import { TokenIssuer } from "../src/private-trips/token-issuer";
 import { PostgresTripSkeletonModule } from "../src/trip-skeleton/postgres-trip-skeleton-module";
 import { GooglePlacesProvider } from "../src/trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
+import { unrelatedDiscoveryModule } from "./discovery-test-support";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required");
@@ -115,6 +116,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       now,
     });
     app = createApp({
+      discovery: unrelatedDiscoveryModule,
       identityAccess,
       rateLimiter: new PostgresRateLimiter(database, "trip-skeleton-rate-secret-at-least-32-bytes", now),
       readiness: new PostgresReadinessProbe(database, now),
