@@ -14,6 +14,7 @@ import {
 import { countryOptions } from "@along-the-way/contracts/countries";
 
 import { CreateTripDialog } from "./CreateTripDialog";
+import { DiscoveryWorkspace } from "./DiscoveryWorkspace";
 import { TripSkeletonWorkspace } from "./TripSkeletonWorkspace";
 import { TripPlaceWorkspace } from "./TripPlaceWorkspace";
 
@@ -466,6 +467,11 @@ export function App() {
         {selectedTrip ? (
           <div className="grid gap-5">
             <TripWorkspace trip={selectedTrip} currentUser={user} onChanged={() => loadTrip(selectedTrip.id)} />
+            <DiscoveryWorkspace
+              trip={selectedTrip}
+              request={requestJson}
+              onPlacesChanged={placesChanged}
+            />
             <TripPlaceWorkspace
               trip={selectedTrip}
               request={requestJson}

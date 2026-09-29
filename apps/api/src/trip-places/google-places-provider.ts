@@ -11,6 +11,7 @@ export class ProviderUnavailableError extends Error {
 
 export interface PlaceProvider {
   readonly attribution: string;
+  readonly available?: boolean;
   search(query: string): Promise<ProviderPlaceCandidateDto[]>;
   getPlace(providerPlaceId: string): Promise<ProviderPlaceCandidateDto>;
 }
@@ -81,6 +82,7 @@ function record(value: unknown): Record<string, unknown> | null {
 
 export class GooglePlacesProvider implements PlaceProvider {
   readonly attribution = "Google Maps";
+  readonly available: boolean;
   private readonly apiKey: string | undefined;
   private readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   private readonly now: () => Date;
@@ -88,6 +90,7 @@ export class GooglePlacesProvider implements PlaceProvider {
 
   constructor(options: GooglePlacesProviderOptions = {}) {
     this.apiKey = options.apiKey?.trim() || undefined;
+    this.available = Boolean(this.apiKey);
     this.fetch = options.fetch ?? ((input, init) => fetch(input, init));
     this.now = options.now ?? (() => new Date());
     this.timeoutMs = options.timeoutMs ?? 3_000;

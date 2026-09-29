@@ -185,6 +185,89 @@ export interface TripPlaceDuplicateSuggestionTable {
   created_at: Timestamp;
 }
 
+export interface DiscoveryBriefTable {
+  trip_id: string;
+  original_text: string;
+  structured_brief: unknown | null;
+  unresolved_questions: unknown;
+  version: Generated<number>;
+  updated_by: string;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface DiscoveryRunTable {
+  id: Generated<string>;
+  trip_id: string;
+  brief_version: number;
+  policy_version: string;
+  model_id: string;
+  status: "completed" | "failed";
+  search_plan: unknown;
+  error_code: string | null;
+  created_by: string;
+  created_at: Timestamp;
+  completed_at: Timestamp;
+}
+
+export interface DiscoveryEvidenceTable {
+  id: Generated<string>;
+  trip_id: string;
+  run_id: string;
+  evidence_kind: "google-place" | "web-source";
+  provider_place_id: string | null;
+  source_url: string;
+  title: string;
+  attribution: string;
+  observed_at: Timestamp;
+  expires_at: Timestamp | null;
+  facts: unknown;
+}
+
+export interface CandidateProposalTable {
+  id: Generated<string>;
+  trip_id: string;
+  run_id: string;
+  provider_place_id: string;
+  name: string;
+  place_type: "airport" | "station" | "lodging" | "restaurant" | "activity" | "other";
+  address: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  source_url: string | null;
+  recommendation: string;
+  matched_needs: unknown;
+  tradeoffs: unknown;
+  unknowns: unknown;
+  confidence: "high" | "medium" | "low";
+  status: "pending" | "accepting" | "accepted" | "rejected";
+  accepted_trip_place_id: string | null;
+  decided_by: string | null;
+  decided_at: Timestamp | null;
+  version: Generated<number>;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface CandidateProposalEvidenceTable {
+  proposal_id: string;
+  evidence_id: string;
+}
+
+export interface DiscoveryFeedbackTable {
+  id: Generated<string>;
+  trip_id: string;
+  proposal_id: string | null;
+  actor_id: string;
+  original_text: string;
+  interpretation: unknown;
+  status: "pending" | "confirmed" | "rejected";
+  version: Generated<number>;
+  decided_at: Timestamp | null;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
 export interface ItineraryItemTable {
   id: Generated<string>;
   trip_id: string;
@@ -317,6 +400,12 @@ export interface AlongTheWayDatabase {
   trip_place_desired_days: TripPlaceDayTable;
   trip_place_excluded_days: TripPlaceDayTable;
   trip_place_duplicate_suggestions: TripPlaceDuplicateSuggestionTable;
+  discovery_briefs: DiscoveryBriefTable;
+  discovery_runs: DiscoveryRunTable;
+  discovery_evidence: DiscoveryEvidenceTable;
+  candidate_proposals: CandidateProposalTable;
+  candidate_proposal_evidence: CandidateProposalEvidenceTable;
+  discovery_feedback: DiscoveryFeedbackTable;
   itinerary_items: ItineraryItemTable;
   itinerary_endpoints: ItineraryEndpointTable;
   itinerary_constraints: ItineraryConstraintTable;

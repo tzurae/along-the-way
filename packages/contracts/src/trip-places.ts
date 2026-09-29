@@ -65,6 +65,7 @@ export interface TripPlaceDto {
   tripId: string;
   placeId: string;
   provider: "google" | "manual";
+  aiProposalId: string | null;
   providerPlaceId: string | null;
   providerObservedAt: string | null;
   providerExpiresAt: string | null;
@@ -283,6 +284,7 @@ function tripPlace(value: unknown): TripPlaceDto {
     tripId: text(row.tripId),
     placeId: text(row.placeId),
     provider: row.provider,
+    aiProposalId: nullableText(row.aiProposalId),
     providerPlaceId: nullableText(row.providerPlaceId),
     providerObservedAt: nullableText(row.providerObservedAt),
     providerExpiresAt: nullableText(row.providerExpiresAt),

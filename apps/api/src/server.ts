@@ -1,5 +1,7 @@
 import { createApp } from "./app";
 import { createDatabase, requireDatabaseUrl } from "./database/database";
+import { OpenAiResponsesDiscoveryModel } from "./discovery/openai-responses-discovery-model";
+import { PostgresDiscoveryModule } from "./discovery/postgres-discovery-module";
 import { PostgresIdentityAccessModule } from "./private-trips/postgres-identity-access-module";
 import { PostgresRateLimiter } from "./private-trips/postgres-rate-limiter";
 import { PostgresReadinessProbe } from "./private-trips/postgres-readiness-probe";
@@ -24,15 +26,26 @@ const identityAccess = new PostgresIdentityAccessModule({
 });
 const tripWorkspace = new PostgresTripWorkspaceModule({ database });
 const tripSkeleton = new PostgresTripSkeletonModule({ database });
+const placeProvider = new GooglePlacesProvider({
+  apiKey: process.env.GOOGLE_MAPS_API_KEY,
+});
 const tripPlaces = new PostgresTripPlaceModule({
   database,
-  provider: new GooglePlacesProvider({
-    apiKey: process.env.GOOGLE_MAPS_API_KEY,
+  provider: placeProvider,
+});
+const discovery = new PostgresDiscoveryModule({
+  database,
+  model: new OpenAiResponsesDiscoveryModel({
+    apiKey: process.env.OPENAI_API_KEY,
+    model: process.env.OPENAI_MODEL,
   }),
+  placeProvider,
+  tripPlaces,
 });
 const rateLimiter = new PostgresRateLimiter(database, tokenSecret);
 const readiness = new PostgresReadinessProbe(database);
 const app = createApp({
+  discovery,
   identityAccess,
   rateLimiter,
   readiness,
