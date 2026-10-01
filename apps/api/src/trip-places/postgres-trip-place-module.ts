@@ -1,4 +1,5 @@
 import {
+  parseTripPlaceListResponse,
   parseTripPlaceResponse,
   type CreateTripPlaceInput,
   type MergeTripPlacesInput,
@@ -7,6 +8,7 @@ import {
   type ProviderPlaceCandidateDto,
   type TripPlaceDto,
   type UpdateMemberPreferenceInput,
+  type UpdateTripPlaceDayAssignmentsInput,
   type UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
 import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
@@ -181,6 +183,10 @@ function timeZone(value: unknown) {
 
 function replayedTripPlace(value: unknown) {
   return parseTripPlaceResponse({ tripPlace: value }).tripPlace;
+}
+
+function replayedTripPlaces(value: unknown) {
+  return parseTripPlaceListResponse(value).tripPlaces;
 }
 
 function normalizedSimilarity(value: string | null) {
@@ -565,11 +571,6 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     if (budgetCurrency && !ISO_CURRENCIES.has(budgetCurrency)) {
       throw new AppError("validation_error", "budgetCurrency must be an ISO 4217 currency");
     }
-    const desired = [...new Set(input.desiredDayIds.map((value) => uuid(value, "desiredDayId")))];
-    const excluded = [...new Set(input.excludedDayIds.map((value) => uuid(value, "excludedDayId")))];
-    if (desired.some((dayId) => excluded.includes(dayId))) {
-      throw new AppError("validation_error", "A day cannot be both desired and excluded");
-    }
     const notes = optionalText(input.notes, "notes", 10_000);
 
     return this.database.transaction().execute(async (transaction) => {
@@ -580,22 +581,6 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       await this.reconcileLegacyPlaces(transaction, tripId);
       const current = await this.lockTripPlace(transaction, tripId, tripPlaceId);
       this.expectedVersion(current.version, input.expectedVersion);
-      const allDayIds = [...new Set([...desired, ...excluded])];
-      if (allDayIds.length > 0) {
-        const validDays = await transaction.selectFrom("trip_days").select("id")
-          .where("trip_id", "=", tripId).where("id", "in", allDayIds).execute();
-        if (validDays.length !== allDayIds.length) {
-          throw new AppError("validation_error", "Date preferences must use days from this trip");
-        }
-      }
-      await transaction.deleteFrom("trip_place_desired_days").where("trip_place_id", "=", tripPlaceId).execute();
-      await transaction.deleteFrom("trip_place_excluded_days").where("trip_place_id", "=", tripPlaceId).execute();
-      if (desired.length) await transaction.insertInto("trip_place_desired_days").values(
-        desired.map((tripDayId) => ({ trip_id: tripId, trip_place_id: tripPlaceId, trip_day_id: tripDayId })),
-      ).execute();
-      if (excluded.length) await transaction.insertInto("trip_place_excluded_days").values(
-        excluded.map((tripDayId) => ({ trip_id: tripId, trip_place_id: tripPlaceId, trip_day_id: tripDayId })),
-      ).execute();
       const updatedAt = this.now();
       const legacy = await transaction.updateTable("places").set({
         notes,
@@ -623,6 +608,121 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       });
       const response = await this.readOne(transaction, userId, tripId, tripPlaceId);
       await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
+  async updateDayAssignments(
+    userId: string,
+    tripId: string,
+    rawKey: string,
+    input: UpdateTripPlaceDayAssignmentsInput,
+  ) {
+    if (!Array.isArray(input.assignments) || input.assignments.length === 0 || input.assignments.length > 100) {
+      throw new AppError("validation_error", "assignments must contain between 1 and 100 places");
+    }
+    const assignments = input.assignments.map((assignment) => ({
+      tripPlaceId: uuid(assignment.tripPlaceId, "tripPlaceId"),
+      tripDayId: assignment.tripDayId === null ? null : uuid(assignment.tripDayId, "tripDayId"),
+      expectedVersion: assignment.expectedVersion,
+    }));
+    if (new Set(assignments.map((assignment) => assignment.tripPlaceId)).size !== assignments.length) {
+      throw new AppError("validation_error", "assignments cannot contain the same place twice");
+    }
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `tp:day-assignments:${tripId}`;
+    return this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return replayedTripPlaces(replay);
+      await this.lockTripContent(transaction, tripId);
+      await this.reconcileLegacyPlaces(transaction, tripId);
+      const ids = assignments.map((assignment) => assignment.tripPlaceId).sort();
+      const places = await transaction.selectFrom("trip_places")
+        .select(["id", "legacy_place_id", "version"])
+        .where("trip_id", "=", tripId)
+        .where("id", "in", ids)
+        .where("archived_at", "is", null)
+        .orderBy("id")
+        .forUpdate()
+        .execute();
+      if (places.length !== ids.length) {
+        throw new AppError("trip_place_not_found", "Trip place not found", 404);
+      }
+      const placeById = new Map(places.map((place) => [place.id, place]));
+      for (const assignment of assignments) {
+        this.expectedVersion(
+          placeById.get(assignment.tripPlaceId)!.version,
+          assignment.expectedVersion,
+        );
+      }
+      const dayIds = [...new Set(assignments.flatMap((assignment) =>
+        assignment.tripDayId === null ? [] : [assignment.tripDayId]
+      ))];
+      if (dayIds.length > 0) {
+        const validDays = await transaction.selectFrom("trip_days").select("id")
+          .where("trip_id", "=", tripId)
+          .where("id", "in", dayIds)
+          .execute();
+        if (validDays.length !== dayIds.length) {
+          throw new AppError("validation_error", "Assignments must use days from this trip");
+        }
+      }
+      const assigningLegacyIds = assignments.flatMap((assignment) =>
+        assignment.tripDayId === null
+          ? []
+          : [placeById.get(assignment.tripPlaceId)!.legacy_place_id]
+      );
+      if (assigningLegacyIds.length > 0) {
+        const scheduled = await transaction.selectFrom("itinerary_endpoints")
+          .select("place_id")
+          .where("trip_id", "=", tripId)
+          .where("place_id", "in", assigningLegacyIds)
+          .executeTakeFirst();
+        if (scheduled) {
+          throw new AppError(
+            "conflict",
+            "A place already scheduled as a timed itinerary item cannot also be assigned as an unscheduled day place",
+            409,
+          );
+        }
+      }
+      const updatedAt = this.now();
+      for (const assignment of assignments) {
+        await transaction.deleteFrom("trip_place_desired_days")
+          .where("trip_place_id", "=", assignment.tripPlaceId)
+          .execute();
+        if (assignment.tripDayId !== null) {
+          await transaction.insertInto("trip_place_desired_days").values({
+            trip_id: tripId,
+            trip_place_id: assignment.tripPlaceId,
+            trip_day_id: assignment.tripDayId,
+          }).execute();
+          await transaction.updateTable("trip_place_day_assignments").set({
+            assigned_by: userId,
+            assigned_at: updatedAt,
+          }).where("trip_place_id", "=", assignment.tripPlaceId).execute();
+        }
+        await transaction.updateTable("trip_places").set({
+          version: sql`version + 1`,
+          updated_at: updatedAt,
+        }).where("id", "=", assignment.tripPlaceId).execute();
+        await recordEvent(transaction, {
+          tripId,
+          actorId: userId,
+          eventType: assignment.tripDayId === null
+            ? "trip_place.day_unassigned"
+            : "trip_place.day_assigned",
+          targetType: "trip_place",
+          targetId: assignment.tripPlaceId,
+          summary: assignment.tripDayId === null
+            ? "Removed a place from its planned day"
+            : "Assigned a place to a planned day",
+        });
+      }
+      const response = await this.readList(transaction, userId, tripId);
+      await remember(transaction, userId, operation, key, { tripPlaces: response });
       return response;
     });
   }
@@ -732,17 +832,54 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
           409,
         );
       }
-      const [desiredDays, excludedDays] = await Promise.all([
-        transaction.selectFrom("trip_place_desired_days").select("trip_day_id")
-          .where("trip_place_id", "in", [source.id, target.id]).execute(),
-        transaction.selectFrom("trip_place_excluded_days").select("trip_day_id")
-          .where("trip_place_id", "in", [source.id, target.id]).execute(),
+      const dayAssignments = await transaction.selectFrom("trip_place_day_assignments")
+        .selectAll()
+        .where("trip_place_id", "in", [source.id, target.id])
+        .execute();
+      const sourceAssignment = dayAssignments.find((assignment) =>
+        assignment.trip_place_id === source.id
+      );
+      const targetAssignment = dayAssignments.find((assignment) =>
+        assignment.trip_place_id === target.id
+      );
+      if (
+        sourceAssignment &&
+        targetAssignment &&
+        sourceAssignment.trip_day_id !== targetAssignment.trip_day_id
+      ) {
+        throw new AppError(
+          "conflict",
+          "Move both places to the same day before merging them",
+          409,
+        );
+      }
+      const [scheduled, desiredDays, excludedDays] = await Promise.all([
+        transaction.selectFrom("itinerary_endpoints")
+          .select("place_id")
+          .where("trip_id", "=", tripId)
+          .where("place_id", "in", [source.legacy_place_id, target.legacy_place_id])
+          .executeTakeFirst(),
+        transaction.selectFrom("trip_place_desired_days")
+          .select("trip_day_id")
+          .where("trip_place_id", "in", [source.id, target.id])
+          .execute(),
+        transaction.selectFrom("trip_place_excluded_days")
+          .select("trip_day_id")
+          .where("trip_place_id", "in", [source.id, target.id])
+          .execute(),
       ]);
+      if (scheduled && (sourceAssignment || targetAssignment)) {
+        throw new AppError(
+          "conflict",
+          "A scheduled place cannot be merged with an unscheduled day assignment",
+          409,
+        );
+      }
       const desiredDayIds = new Set(desiredDays.map((row) => row.trip_day_id));
       if (excludedDays.some((row) => desiredDayIds.has(row.trip_day_id))) {
         throw new AppError(
           "conflict",
-          "Resolve desired and excluded day conflicts before merging these places",
+          "Resolve legacy preferred and excluded day conflicts before merging these places",
           409,
         );
       }
@@ -777,8 +914,20 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
             .where("member_user_id", "=", preference.member_user_id).execute();
         }
       }
-      await this.mergeDayPreferences(transaction, "trip_place_desired_days", source.id, target.id, tripId);
-      await this.mergeDayPreferences(transaction, "trip_place_excluded_days", source.id, target.id, tripId);
+      await this.mergeDayPreferences(
+        transaction,
+        "trip_place_desired_days",
+        source.id,
+        target.id,
+        tripId,
+      );
+      await this.mergeDayPreferences(
+        transaction,
+        "trip_place_excluded_days",
+        source.id,
+        target.id,
+        tripId,
+      );
       await transaction.updateTable("itinerary_endpoints")
         .set({ place_id: target.legacy_place_id })
         .where("trip_id", "=", tripId)
@@ -892,7 +1041,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         .where("withdrawn_at", "is", null)
         .returning("id").executeTakeFirst();
       if (!withdrawn) throw new AppError("contribution_not_found", "Contribution not found", 404);
-      const [remaining, scheduled, preferred] = await Promise.all([
+      const [remaining, scheduled, preferred, assigned] = await Promise.all([
         transaction.selectFrom("trip_place_contributions").select("id")
           .where("trip_place_id", "=", tripPlaceId).where("withdrawn_at", "is", null).executeTakeFirst(),
         transaction.selectFrom("itinerary_endpoints").innerJoin("trip_places", (join) =>
@@ -907,8 +1056,12 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
           .where("member.trip_id", "=", tripId)
           .where("member.removed_at", "is", null)
           .executeTakeFirst(),
+        transaction.selectFrom("trip_place_day_assignments")
+          .select("trip_place_id")
+          .where("trip_place_id", "=", tripPlaceId)
+          .executeTakeFirst(),
       ]);
-      const retained = Boolean(remaining || scheduled || preferred);
+      const retained = Boolean(remaining || scheduled || preferred || assigned);
       if (!retained) {
         await transaction.updateTable("trip_places").set({
           archived_at: this.now(),
@@ -1196,7 +1349,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     if (placeRows.length === 0) return [];
     const ids = placeRows.map((row) => row.id);
     const legacyPlaceIds = placeRows.map((row) => row.legacy_place_id);
-    const [contributions, members, preferenceRows, desiredRows, excludedRows, duplicateRows, scheduledRows, aiProposalRows] = await Promise.all([
+    const [contributions, members, preferenceRows, assignmentRows, duplicateRows, scheduledRows, aiProposalRows] = await Promise.all([
       executor.selectFrom("trip_place_contributions as contribution")
         .innerJoin("users", "users.id", "contribution.member_user_id")
         .select([
@@ -1212,9 +1365,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         .orderBy("trip_members.joined_at").execute(),
       executor.selectFrom("member_place_preferences").selectAll()
         .where("trip_place_id", "in", ids).execute(),
-      executor.selectFrom("trip_place_desired_days").selectAll()
-        .where("trip_place_id", "in", ids).execute(),
-      executor.selectFrom("trip_place_excluded_days").selectAll()
+      executor.selectFrom("trip_place_day_assignments").selectAll()
         .where("trip_place_id", "in", ids).execute(),
       executor.selectFrom("trip_place_duplicate_suggestions").selectAll()
         .where("trip_id", "=", tripId).where("status", "=", "pending")
@@ -1238,6 +1389,9 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       `${row.trip_place_id}:${row.member_user_id}`,
       row,
     ]));
+    const assignmentByPlaceId = new Map(
+      assignmentRows.map((assignment) => [assignment.trip_place_id, assignment.trip_day_id]),
+    );
     return placeRows.map((row): TripPlaceDto => {
       const placeContributions = contributions.filter((entry) => entry.trip_place_id === row.id).map((entry) => ({
         id: entry.id,
@@ -1319,8 +1473,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         status,
         scheduled: isScheduled,
         durationMinutes: row.duration_minutes,
-        desiredDayIds: desiredRows.filter((entry) => entry.trip_place_id === row.id).map((entry) => entry.trip_day_id),
-        excludedDayIds: excludedRows.filter((entry) => entry.trip_place_id === row.id).map((entry) => entry.trip_day_id),
+        assignedDayId: assignmentByPlaceId.get(row.id) ?? null,
         budgetAmountMinor: row.budget_amount_minor === null ? null : Number(row.budget_amount_minor),
         budgetCurrency: row.budget_currency,
         notes: row.notes,
@@ -1408,10 +1561,15 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         trip_id: tripId,
         trip_place_id: targetTripPlaceId,
         trip_day_id: row.trip_day_id,
-      }))).onConflict((conflict) => conflict.columns(["trip_place_id", "trip_day_id"]).doNothing()).execute();
+      }))).onConflict((conflict) =>
+        conflict.columns(["trip_place_id", "trip_day_id"]).doNothing()
+      ).execute();
     }
-    await transaction.deleteFrom(table).where("trip_place_id", "=", sourceTripPlaceId).execute();
+    await transaction.deleteFrom(table)
+      .where("trip_place_id", "=", sourceTripPlaceId)
+      .execute();
   }
+
 
   private async markProviderUnavailable(tripId: string) {
     await this.setProviderUnavailable(tripId, true);
