@@ -1,5 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
+import {
+  parseTripPlaceListResponse,
+  type TripPlaceDto,
+} from "@along-the-way/contracts/trip-places";
 import {
   parseItineraryItemResponse,
   parsePlaceResponse,
@@ -109,6 +113,85 @@ function ConstraintBadge({ constraint }: { constraint: ConstraintDto }) {
   );
 }
 
+function formatMinorAmount(amountMinor: number, currency: string) {
+  const formatter = new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency,
+  });
+  const fractionDigits = formatter.resolvedOptions().maximumFractionDigits ?? 2;
+  return formatter.format(amountMinor / (10 ** fractionDigits));
+}
+
+function DayAssignmentPicker({
+  dayId,
+  places,
+  dayLabelById,
+  busy,
+  assign,
+}: {
+  dayId: string;
+  places: TripPlaceDto[];
+  dayLabelById: Map<string, string>;
+  busy: boolean;
+  assign(places: TripPlaceDto[]): Promise<void>;
+}) {
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const selectable = places.filter((place) =>
+    !place.scheduled && place.assignedDayId !== dayId
+  );
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const selected = selectable.filter((place) => selectedIds.includes(place.id));
+    if (selected.length === 0) return;
+    await assign(selected);
+    setSelectedIds([]);
+  }
+
+  return (
+    <details className="rounded-xl border border-ink/10 bg-surface p-3">
+      <summary className="cursor-pointer font-bold">Add from shared wishlist</summary>
+      {selectable.length === 0 ? (
+        <p className="mt-3 text-sm text-muted-foreground">Every available wishlist place is already planned or scheduled.</p>
+      ) : (
+        <form className="mt-3 grid gap-3" onSubmit={(event) => void submit(event)}>
+          <fieldset className="grid max-h-64 gap-2 overflow-y-auto">
+            <legend className="sr-only">Wishlist places to add</legend>
+            {selectable.map((place) => (
+              <label key={place.id} className="flex min-h-11 items-start gap-3 rounded-lg border border-ink/10 p-3">
+                <input
+                  className="mt-1"
+                  type="checkbox"
+                  checked={selectedIds.includes(place.id)}
+                  onChange={(event) => setSelectedIds((current) =>
+                    event.target.checked
+                      ? [...current, place.id]
+                      : current.filter((id) => id !== place.id)
+                  )}
+                />
+                <span>
+                  <strong className="block">{place.name}</strong>
+                  <small className="text-muted-foreground">
+                    {place.assignedDayId
+                      ? `Currently planned for ${dayLabelById.get(place.assignedDayId) ?? "another day"}`
+                      : place.address ?? "Address unknown"}
+                  </small>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+          <button
+            className="min-h-11 rounded-lg bg-accent px-4 font-bold text-ink-strong"
+            disabled={busy || selectedIds.length === 0}
+          >
+            {busy ? "Adding…" : `Add selected (${selectedIds.length})`}
+          </button>
+        </form>
+      )}
+    </details>
+  );
+}
+
 export function TripSkeletonWorkspace({
   trip,
   request,
@@ -117,6 +200,7 @@ export function TripSkeletonWorkspace({
   onPlacesChanged,
 }: TripSkeletonWorkspaceProps) {
   const [skeleton, setSkeleton] = useState<TripSkeletonDto | null>(null);
+  const [tripPlaces, setTripPlaces] = useState<TripPlaceDto[]>([]);
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [unlockingItem, setUnlockingItem] = useState<ItineraryItemDto | null>(null);
@@ -134,11 +218,18 @@ export function TripSkeletonWorkspace({
 
   const load = useCallback(async () => {
     try {
-      const response = await request<ReturnType<typeof parseTripSkeletonResponse>>(
-        `/api/trips/${trip.id}/skeleton`,
-        { parse: parseTripSkeletonResponse },
-      );
-      setSkeleton(response.skeleton);
+      const [skeletonResponse, tripPlaceResponse] = await Promise.all([
+        request<ReturnType<typeof parseTripSkeletonResponse>>(
+          `/api/trips/${trip.id}/skeleton`,
+          { parse: parseTripSkeletonResponse },
+        ),
+        request<ReturnType<typeof parseTripPlaceListResponse>>(
+          `/api/trips/${trip.id}/trip-places`,
+          { parse: parseTripPlaceListResponse },
+        ),
+      ]);
+      setSkeleton(skeletonResponse.skeleton);
+      setTripPlaces(tripPlaceResponse.tripPlaces);
       setError("");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not load itinerary");
@@ -296,6 +387,55 @@ export function TripSkeletonWorkspace({
     }
   }
 
+  async function updateDayAssignments(
+    tripDayId: string | null,
+    places: TripPlaceDto[],
+  ) {
+    if (places.length === 0) return;
+    const moved = tripDayId === null
+      ? []
+      : places.filter((place) =>
+        place.assignedDayId !== null && place.assignedDayId !== tripDayId
+      );
+    if (
+      moved.length > 0 &&
+      !window.confirm(
+        `Move ${moved.map((place) => place.name).join(", ")} from another day?`,
+      )
+    ) return;
+    const payload = {
+      assignments: places.map((place) => ({
+        tripPlaceId: place.id,
+        tripDayId,
+        expectedVersion: place.version,
+      })),
+    };
+    const identity = `day-assignments:${tripDayId ?? "none"}:${places
+      .map((place) => `${place.id}:${place.version}`)
+      .sort()
+      .join(",")}`;
+    setBusyId(`day-assignment:${tripDayId ?? places[0]!.id}`);
+    setError("");
+    try {
+      const response = await request<ReturnType<typeof parseTripPlaceListResponse>>(
+        `/api/trips/${trip.id}/trip-place-day-assignments`,
+        {
+          method: "PUT",
+          headers: { "Idempotency-Key": actionKey(identity) },
+          body: JSON.stringify(payload),
+          parse: parseTripPlaceListResponse,
+        },
+      );
+      actionKeys.current.delete(identity);
+      setTripPlaces(response.tripPlaces);
+      onPlacesChanged();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update planned day");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   function renderItem(item: ItineraryItemDto, continuation = false) {
     const start = itemEndpoint(item, "start");
     const end = itemEndpoint(item, "end");
@@ -366,6 +506,7 @@ export function TripSkeletonWorkspace({
   if (!skeleton) {
     return <section className="trip-skeleton-shell"><p role={error ? "alert" : "status"}>{error || "Loading itinerary…"}</p></section>;
   }
+  const dayLabelById = new Map(skeleton.days.map((day) => [day.id, day.date]));
 
   const tripInformationItems = skeleton.tripInformationItemIds
     .map((id) => itemsById.get(id))
@@ -484,11 +625,45 @@ export function TripSkeletonWorkspace({
       <section className="mt-10" aria-labelledby="timeline-heading">
         <h3 id="timeline-heading" className="section-heading"><CalendarDays /> Daily timeline</h3>
         <div className="timeline-grid">
-          {skeleton.days.map((day, index) => (
+          {skeleton.days.map((day, index) => {
+            const assignedPlaces = tripPlaces.filter((place) =>
+              !place.scheduled && place.assignedDayId === day.id
+            );
+            const fullItems = day.entries.flatMap((entry) => {
+              const item = itemsById.get(entry.itemId);
+              return entry.projection === "full" && item ? [item] : [];
+            });
+            const knownCosts = new Map<string, number>();
+            for (const entry of [
+              ...assignedPlaces.map((place) => place.budgetAmountMinor === null || place.budgetCurrency === null
+                ? null
+                : { amountMinor: place.budgetAmountMinor, currency: place.budgetCurrency }),
+              ...fullItems.map((item) => item.money),
+            ]) {
+              if (entry) {
+                knownCosts.set(
+                  entry.currency,
+                  (knownCosts.get(entry.currency) ?? 0) + entry.amountMinor,
+                );
+              }
+            }
+            const unknownCostCount =
+              assignedPlaces.filter((place) => place.budgetAmountMinor === null).length
+              + fullItems.filter((item) => item.money === null).length;
+            const costSummary = [...knownCosts.entries()]
+              .map(([currency, amount]) => formatMinorAmount(amount, currency))
+              .join(" + ");
+            return (
             <section key={day.id} className="day-column" data-date={day.date}>
               <header className="day-heading">
                 <p className="text-xs font-bold uppercase tracking-wider text-accent-strong">Day {index + 1}</p>
                 <h4 className="font-display text-xl">{day.date}</h4>
+                <p className="mt-2 text-sm font-semibold">
+                  {assignedPlaces.length + day.entries.length} planned entries
+                  {" · "}
+                  {costSummary || "No known cost"}
+                  {unknownCostCount > 0 ? ` · ${unknownCostCount} cost unknown` : ""}
+                </p>
                 {index === 0 ? (
                   <aside className="day-context" data-testid="arrival-priorities">
                     <p className="font-bold">Arrival priorities from saved commitments</p>
@@ -561,13 +736,45 @@ export function TripSkeletonWorkspace({
                 ) : null}
               </header>
               <div className="grid gap-3">
-                {day.entries.length === 0 ? <p className="empty-state">Open day. Add free time or a commitment when plans become known.</p> : day.entries.map((entry) => {
+                {day.entries.length === 0 && assignedPlaces.length === 0 ? (
+                  <p className="empty-state">Open day. Add wishlist places, free time, or a commitment.</p>
+                ) : null}
+                {assignedPlaces.map((place) => (
+                  <article key={place.id} className="itinerary-card" aria-label={`Planned wishlist place ${place.name}`}>
+                    <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">Wishlist place · time not set</p>
+                    <h5 className="mt-1 font-display text-xl text-ink-strong">{place.name}</h5>
+                    <p className="mt-2 text-sm text-muted-foreground">{place.address ?? "Address unknown"}</p>
+                    <p className="mt-2 text-sm">
+                      {place.durationMinutes ? `${place.durationMinutes} min planned` : "Duration unknown"}
+                      {" · "}
+                      {place.budgetAmountMinor !== null && place.budgetCurrency
+                        ? formatMinorAmount(place.budgetAmountMinor, place.budgetCurrency)
+                        : "Cost unknown"}
+                    </p>
+                    <button
+                      className="mt-3 min-h-10 rounded-lg border px-3 font-bold"
+                      disabled={busyId !== null}
+                      onClick={() => void updateDayAssignments(null, [place])}
+                    >
+                      Remove from this day
+                    </button>
+                  </article>
+                ))}
+                {day.entries.map((entry) => {
                   const item = itemsById.get(entry.itemId);
                   return item ? renderItem(item, entry.projection === "continuation") : null;
                 })}
+                <DayAssignmentPicker
+                  dayId={day.id}
+                  places={tripPlaces}
+                  dayLabelById={dayLabelById}
+                  busy={busyId !== null}
+                  assign={(places) => updateDayAssignments(day.id, places)}
+                />
               </div>
             </section>
-          ))}
+            );
+          })}
         </div>
       </section>
 

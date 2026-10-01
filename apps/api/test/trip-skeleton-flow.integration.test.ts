@@ -298,6 +298,134 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     expect(parseTripSkeletonResponse(await read.json()).skeleton.places).toEqual([updated]);
   });
 
+  it("rejects timing a place while it has an unscheduled day assignment", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    const assignedPlace = await createPlace(cookie, trip.id, "create-assigned-place", {
+      name: "Assigned temple",
+      type: "activity",
+      address: "Kyoto east",
+      latitude: 35.001,
+      longitude: 135.77,
+      timeZone: "Asia/Tokyo",
+      sourceUrl: null,
+      notes: null,
+    });
+    const timedPlace = await createPlace(cookie, trip.id, "create-timed-place", {
+      name: "Timed museum",
+      type: "activity",
+      address: "Kyoto west",
+      latitude: 35.002,
+      longitude: 135.76,
+      timeZone: "Asia/Tokyo",
+      sourceUrl: null,
+      notes: null,
+    });
+    const wishlistResponse = await app.request(`/api/trips/${trip.id}/trip-places`, {
+      headers: { cookie },
+    });
+    const assignedCandidate = parseTripPlaceListResponse(
+      await wishlistResponse.json(),
+    ).tripPlaces.find((place) => place.placeId === assignedPlace.id)!;
+    const assignment = await app.request(
+      `/api/trips/${trip.id}/trip-place-day-assignments`,
+      {
+        method: "PUT",
+        headers: {
+          cookie,
+          "content-type": "application/json",
+          "idempotency-key": "assign-before-timing",
+          origin: "https://app.example.test",
+        },
+        body: body({
+          assignments: [{
+            tripPlaceId: assignedCandidate.id,
+            tripDayId: trip.days[0]!.id,
+            expectedVersion: assignedCandidate.version,
+          }],
+        }),
+      },
+    );
+    expect(assignment.status).toBe(200);
+    const itemInput = (placeId: string, title: string) => ({
+      type: "activity",
+      title,
+      notes: null,
+      sourceUrl: null,
+      money: null,
+      endpoints: [{
+        role: "start",
+        countryStopId: trip.countryStops[0]!.id,
+        placeId,
+        localDateTime: "2026-10-21T10:00",
+        timeZone: "Asia/Tokyo",
+      }],
+      details: {
+        durationMinutes: 60,
+        bookedBy: null,
+        confirmationStatus: "unknown",
+      },
+      constraints: [],
+    });
+
+    const rejectedCreate = await app.request(`/api/trips/${trip.id}/items`, {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        "idempotency-key": "reject-assigned-item-create",
+        origin: "https://app.example.test",
+      },
+      body: body({
+        ...itemInput(assignedPlace.id, "Must remain untimed"),
+        expectedTripVersion: await currentTripVersion(cookie, trip.id),
+      }),
+    });
+    expect(rejectedCreate.status).toBe(409);
+    expect(await rejectedCreate.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        message: "Remove the place from its unscheduled day before adding it to a timed itinerary item",
+      },
+    });
+
+    const createdResponse = await app.request(`/api/trips/${trip.id}/items`, {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        "idempotency-key": "create-other-timed-item",
+        origin: "https://app.example.test",
+      },
+      body: body({
+        ...itemInput(timedPlace.id, "Timed museum visit"),
+        expectedTripVersion: await currentTripVersion(cookie, trip.id),
+      }),
+    });
+    expect(createdResponse.status).toBe(201);
+    const created = parseItineraryItemResponse(await createdResponse.json()).item;
+    const rejectedUpdate = await app.request(
+      `/api/trips/${trip.id}/items/${created.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          cookie,
+          "content-type": "application/json",
+          "idempotency-key": "reject-assigned-item-update",
+          origin: "https://app.example.test",
+        },
+        body: body({
+          ...itemInput(assignedPlace.id, "Must still remain untimed"),
+          expectedVersion: created.version,
+        }),
+      },
+    );
+    expect(rejectedUpdate.status).toBe(409);
+    expect(await rejectedUpdate.json()).toMatchObject({
+      error: { code: "conflict" },
+    });
+  });
+
   it("keeps cross-timezone endpoints ordered and requires unlock before mutation", async () => {
     const cookie = await login();
     const trip = await createTrip(cookie, {

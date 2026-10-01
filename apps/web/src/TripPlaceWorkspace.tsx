@@ -290,12 +290,12 @@ function AddPlacePanel({
 }
 
 function PlanningEditor({
-  trip,
+  tripId,
   place,
   request,
   changed,
 }: {
-  trip: TripDto;
+  tripId: string;
   place: TripPlaceDto;
   request: TripPlaceWorkspaceProps["request"];
   changed(): Promise<void>;
@@ -310,14 +310,12 @@ function PlanningEditor({
     const payload = {
       expectedVersion: place.version,
       durationMinutes: nullableNumber(data.get("durationMinutes")),
-      desiredDayIds: data.getAll("desiredDayIds"),
-      excludedDayIds: data.getAll("excludedDayIds"),
       budgetAmountMinor: nullableNumber(data.get("budgetAmountMinor")),
       budgetCurrency: data.get("budgetCurrency") || null,
       notes: data.get("notes") || null,
     };
     try {
-      await request(`/api/trips/${trip.id}/trip-places/${place.id}/planning`, {
+      await request(`/api/trips/${tripId}/trip-places/${place.id}/planning`, {
         method: "PATCH",
         headers: { "Idempotency-Key": retryKey(retryKeys.current, operation, payload) },
         body: JSON.stringify(payload),
@@ -333,7 +331,7 @@ function PlanningEditor({
 
   return (
     <details className="rounded-xl border border-ink/10 p-3">
-      <summary className="cursor-pointer font-bold">Duration, dates, budget, and notes</summary>
+      <summary className="cursor-pointer font-bold">Duration, budget, and notes</summary>
       <form key={place.version} className="mt-4 grid gap-4" onSubmit={save}>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="grid gap-1 font-semibold">Duration in minutes<input className="min-h-11 rounded-lg border px-3" name="durationMinutes" type="number" min="1" defaultValue={place.durationMinutes ?? ""} placeholder="Unknown" /></label>
@@ -341,8 +339,6 @@ function PlanningEditor({
           <label className="grid gap-1 font-semibold">ISO currency<input className="min-h-11 rounded-lg border px-3 uppercase" name="budgetCurrency" maxLength={3} defaultValue={place.budgetCurrency ?? ""} placeholder="Unknown" /></label>
           <label className="grid gap-1 font-semibold sm:col-span-2">Shared planning note<textarea className="min-h-20 rounded-lg border p-3" name="notes" defaultValue={place.notes ?? ""} /></label>
         </div>
-        <fieldset className="grid gap-2"><legend className="font-bold">Preferred days</legend>{trip.days.map((day) => <label key={day.id} className="flex min-h-10 items-center gap-2"><input type="checkbox" name="desiredDayIds" value={day.id} defaultChecked={place.desiredDayIds.includes(day.id)} />{day.date}</label>)}</fieldset>
-        <fieldset className="grid gap-2"><legend className="font-bold">Excluded days</legend>{trip.days.map((day) => <label key={day.id} className="flex min-h-10 items-center gap-2"><input type="checkbox" name="excludedDayIds" value={day.id} defaultChecked={place.excludedDayIds.includes(day.id)} />{day.date}</label>)}</fieldset>
         <button className="min-h-11 rounded-lg bg-ink-strong px-4 font-bold text-on-dark">Save planning facts</button>
         {message ? <p role="status">{message}</p> : null}
       </form>
@@ -544,6 +540,11 @@ export function TripPlaceWorkspace({
               {place.providerObservedAt ? <p className="text-sm text-muted-foreground">Provider facts observed {new Date(place.providerObservedAt).toLocaleString()}{place.providerFactsExpired ? " · expired; not presented as current" : ""}</p> : null}
               {place.preferenceConflict ? <p className="rounded-xl border border-accent-strong bg-surface p-3 font-bold text-accent-strong" role="status">Preference conflict: at least one member marked Must go and another marked Prefer not to go. Both opinions are preserved.</p> : null}
 
+              {place.assignedDayId ? (
+                <p className="rounded-xl bg-surface p-3 font-semibold">
+                  Planned for {trip.days.find((day) => day.id === place.assignedDayId)?.date ?? "an unavailable trip day"}
+                </p>
+              ) : null}
               <section aria-label={`Member preferences for ${place.name}`}>
                 <h4 className="font-bold">Member preferences</h4>
                 <ul className="mt-2 grid gap-2 sm:grid-cols-2">
@@ -611,7 +612,7 @@ export function TripPlaceWorkspace({
                 );
               })}
 
-              <PlanningEditor trip={trip} place={place} request={request} changed={changedPlaces} />
+              <PlanningEditor tripId={trip.id} place={place} request={request} changed={changedPlaces} />
             </article>
           );
         })}

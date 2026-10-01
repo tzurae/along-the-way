@@ -128,6 +128,31 @@ async function addSkeletonPlace(
   await expect(dialog).toHaveCount(0);
 }
 
+async function addTimedActivity(
+  page: Page,
+  input: { title: string; place: string; localDateTime: string },
+) {
+  await page.getByRole("button", { name: "Add commitment" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add a commitment" });
+  await dialog.getByLabel("Type").selectOption("activity");
+  await dialog.getByLabel("Title").fill(input.title);
+  const start = dialog.getByRole("group", { name: "Start in local time" });
+  await start.getByLabel("Country stop").selectOption({ label: "1. JP" });
+  await start.getByLabel("Place").selectOption({ label: input.place });
+  await start.getByLabel("Local date and time").fill(input.localDateTime);
+  const timeZone = start.getByLabel("IANA time zone");
+  if (await timeZone.inputValue() !== "Asia/Tokyo") {
+    await timeZone.fill("Asia/Tokyo");
+  }
+  await dialog.getByLabel("Duration (minutes)").fill("60");
+  await dialog.getByLabel("Booked by").fill("Wishlist owner");
+  await dialog.getByLabel("Confirmation status").fill("Confirmed");
+  await dialog.getByLabel("Constraint").selectOption("fixed_time");
+  await dialog.getByLabel("Knowledge status").selectOption("confirmed");
+  await dialog.getByRole("button", { name: "Save item" }).click();
+  await expect(dialog).toHaveCount(0);
+}
+
 async function setPreference(page: Page, placeName: string, value: string) {
   const card = page.locator("article").filter({ has: page.getByRole("heading", { name: placeName }) });
   await card.getByLabel("Your preference").selectOption(value);
@@ -135,7 +160,12 @@ async function setPreference(page: Page, placeName: string, value: string) {
 }
 
 async function cleanup() {
-  await executeDatabase("delete from trips where name like 'Wishlist browser %'; delete from users where email like 'wishlist-%@example.test';");
+  await executeDatabase(`
+    delete from itinerary_items
+    where trip_id in (select id from trips where name like 'Wishlist browser %');
+    delete from trips where name like 'Wishlist browser %';
+    delete from users where email like 'wishlist-%@example.test';
+  `);
 }
 
 test.beforeEach(() => executeDatabase("truncate table rate_limit_windows"));
@@ -216,14 +246,14 @@ test("members keep independent wishlist contributions and preferences on desktop
   const northPlanning = ownerPage.getByRole("article", {
     name: "Cross-surface Cafe at Cross-surface north",
   });
-  await northPlanning.getByText("Duration, dates, budget, and notes").click();
+  await northPlanning.getByText("Duration, budget, and notes").click();
   await northPlanning.getByLabel("Shared planning note").fill("North planning note");
   await northPlanning.getByRole("button", { name: "Save planning facts" }).click();
   await expect(northPlanning.getByText("Planning facts saved.")).toBeVisible();
   const southPlanning = ownerPage.getByRole("article", {
     name: "Cross-surface Cafe at Cross-surface south",
   });
-  await southPlanning.getByText("Duration, dates, budget, and notes").click();
+  await southPlanning.getByText("Duration, budget, and notes").click();
   await southPlanning.getByLabel("Shared planning note").fill("South planning note");
   await southPlanning.getByRole("button", { name: "Save planning facts" }).click();
   await expect(southPlanning.getByText("Planning facts saved.")).toBeVisible();
@@ -242,6 +272,8 @@ test("members keep independent wishlist contributions and preferences on desktop
     /(?=.*North planning note)(?=.*South planning note)/s,
   );
   await mergedCard.getByLabel("Duration in minutes").fill("45");
+  await mergedCard.getByLabel("Budget in minor units").fill("1200");
+  await mergedCard.getByLabel("ISO currency").fill("JPY");
   await mergedCard.getByRole("button", { name: "Save planning facts" }).click();
   await expect(mergedCard.getByText("Planning facts saved.")).toBeVisible();
   await expect(mergedNotes).toHaveValue(
@@ -258,6 +290,62 @@ test("members keep independent wishlist contributions and preferences on desktop
   await expect(ownerPage.getByRole("article", {
     name: "Cross-surface Cafe at Cross-surface merged updated",
   })).toBeVisible();
+
+  await expect(ownerPage.getByText("Preferred days")).toHaveCount(0);
+  await expect(ownerPage.getByText("Excluded days")).toHaveCount(0);
+  const firstDay = ownerPage.locator('[data-date="2026-11-03"]');
+  await firstDay.getByText("Add from shared wishlist").click();
+  await firstDay.getByRole("checkbox", { name: /Cross-surface Cafe/ }).check();
+  await firstDay.getByRole("button", { name: "Add selected (1)" }).click();
+  await expect(firstDay.getByRole("article", {
+    name: "Planned wishlist place Cross-surface Cafe",
+  })).toBeVisible();
+  await expect(firstDay.getByText(/1 planned entries · ¥1,200/)).toBeVisible();
+  await expect(mergedCard.getByText("Planned for 2026-11-03")).toBeVisible();
+
+  const secondDay = ownerPage.locator('[data-date="2026-11-04"]');
+  await secondDay.getByText("Add from shared wishlist").click();
+  await secondDay.getByRole("checkbox", { name: /Cross-surface Cafe/ }).check();
+  ownerPage.once("dialog", (dialog) => dialog.accept());
+  await secondDay.getByRole("button", { name: "Add selected (1)" }).click();
+  await expect(firstDay.getByRole("article", {
+    name: "Planned wishlist place Cross-surface Cafe",
+  })).toHaveCount(0);
+  const movedPlace = secondDay.getByRole("article", {
+    name: "Planned wishlist place Cross-surface Cafe",
+  });
+  await expect(movedPlace).toBeVisible();
+  await movedPlace.getByRole("button", { name: "Remove from this day" }).click();
+  await expect(movedPlace).toHaveCount(0);
+
+  await addTimedActivity(ownerPage, {
+    title: "Cross-surface timed visit",
+    place: "Cross-surface Cafe",
+    localDateTime: "2026-11-04T10:00",
+  });
+  await executeDatabase(`
+    insert into trip_place_desired_days (trip_id, trip_place_id, trip_day_id)
+    select trip.id, trip_place.id, day.id
+    from trips trip
+    join trip_places trip_place on trip_place.trip_id = trip.id
+    join places place
+      on place.trip_id = trip_place.trip_id
+      and place.id = trip_place.legacy_place_id
+    join trip_days day
+      on day.trip_id = trip.id
+      and day.date = '2026-11-04'
+    where trip.name = '${tripName}'
+      and place.name = 'Cross-surface Cafe'
+    on conflict (trip_place_id, trip_day_id) do nothing;
+  `);
+  await ownerPage.reload();
+  await expect(secondDay.getByRole("heading", { name: "Cross-surface timed visit" }))
+    .toBeVisible();
+  await expect(secondDay.getByRole("article", {
+    name: "Planned wishlist place Cross-surface Cafe",
+  })).toHaveCount(0);
+  await expect(secondDay.getByText(/1 planned entries · No known cost · 1 cost unknown/))
+    .toBeVisible();
 
   await ownerPage.getByRole("button", { name: "Add wishlist place" }).click();
   const searchDialog = ownerPage.getByRole("dialog", { name: "Add a place" });

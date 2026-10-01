@@ -1082,7 +1082,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     if (roles.join(",") !== [...expectedRoles].sort().join(",")) {
       throw new AppError("validation_error", `${type} has invalid endpoint roles`);
     }
-    const [trip, placeRows, stopRows] = await Promise.all([
+    const [trip, placeRows, stopRows, assignedPlace] = await Promise.all([
       executor.selectFrom("trips").select(["start_date", "end_date"]).where("id", "=", tripId).executeTakeFirst(),
       executor.selectFrom("places").select(["id", "time_zone"]).where("trip_id", "=", tripId)
         .where("id", "in", endpoints.map((endpoint) => endpoint.placeId))
@@ -1090,8 +1090,25 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         .execute(),
       executor.selectFrom("trip_country_stops").select(["id", "time_zone"]).where("trip_id", "=", tripId)
         .where("id", "in", endpoints.map((endpoint) => endpoint.countryStopId)).execute(),
+      executor.selectFrom("trip_places as tripPlace")
+        .innerJoin(
+          "trip_place_day_assignments as assignment",
+          "assignment.trip_place_id",
+          "tripPlace.id",
+        )
+        .select("tripPlace.legacy_place_id")
+        .where("tripPlace.trip_id", "=", tripId)
+        .where("tripPlace.legacy_place_id", "in", endpoints.map((endpoint) => endpoint.placeId))
+        .executeTakeFirst(),
     ]);
     if (!trip) throw new AppError("trip_not_found", "Trip not found", 404);
+    if (assignedPlace) {
+      throw new AppError(
+        "conflict",
+        "Remove the place from its unscheduled day before adding it to a timed itinerary item",
+        409,
+      );
+    }
     const places = new Map(placeRows.map((place) => [place.id, place]));
     const stops = new Map(stopRows.map((stop) => [stop.id, stop]));
     for (const endpoint of endpoints) {

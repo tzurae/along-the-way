@@ -173,6 +173,14 @@ export interface TripPlaceDayTable {
   trip_day_id: string;
 }
 
+export interface TripPlaceDayAssignmentTable {
+  trip_id: string;
+  trip_place_id: string;
+  trip_day_id: string;
+  assigned_by: string;
+  assigned_at: Timestamp;
+}
+
 export interface TripPlaceDuplicateSuggestionTable {
   id: Generated<string>;
   trip_id: string;
@@ -399,6 +407,7 @@ export interface AlongTheWayDatabase {
   member_place_preferences: MemberPlacePreferenceTable;
   trip_place_desired_days: TripPlaceDayTable;
   trip_place_excluded_days: TripPlaceDayTable;
+  trip_place_day_assignments: TripPlaceDayAssignmentTable;
   trip_place_duplicate_suggestions: TripPlaceDuplicateSuggestionTable;
   discovery_briefs: DiscoveryBriefTable;
   discovery_runs: DiscoveryRunTable;

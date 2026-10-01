@@ -5,6 +5,7 @@ import type {
   ProviderPlaceCandidateDto,
   TripPlaceDto,
   UpdateMemberPreferenceInput,
+  UpdateTripPlaceDayAssignmentsInput,
   UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
 
@@ -39,6 +40,12 @@ export interface TripPlaceModule {
     idempotencyKey: string,
     input: UpdateTripPlacePlanningInput,
   ): Promise<TripPlaceDto>;
+  updateDayAssignments(
+    userId: string,
+    tripId: string,
+    idempotencyKey: string,
+    input: UpdateTripPlaceDayAssignmentsInput,
+  ): Promise<TripPlaceDto[]>;
   setOwnPreference(
     userId: string,
     tripId: string,

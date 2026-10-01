@@ -81,8 +81,7 @@ export interface TripPlaceDto {
   status: TripPlaceStatus;
   scheduled: boolean;
   durationMinutes: number | null;
-  desiredDayIds: string[];
-  excludedDayIds: string[];
+  assignedDayId: string | null;
   budgetAmountMinor: number | null;
   budgetCurrency: string | null;
   notes: string | null;
@@ -133,11 +132,19 @@ export type CreateTripPlaceInput =
 export interface UpdateTripPlacePlanningInput {
   expectedVersion: number;
   durationMinutes?: number | null;
-  desiredDayIds: string[];
-  excludedDayIds: string[];
   budgetAmountMinor?: number | null;
   budgetCurrency?: string | null;
   notes?: string | null;
+}
+
+export interface TripPlaceDayAssignmentInput {
+  tripPlaceId: string;
+  tripDayId: string | null;
+  expectedVersion: number;
+}
+
+export interface UpdateTripPlaceDayAssignmentsInput {
+  assignments: TripPlaceDayAssignmentInput[];
 }
 
 export interface UpdateMemberPreferenceInput {
@@ -300,8 +307,7 @@ function tripPlace(value: unknown): TripPlaceDto {
     status,
     scheduled: boolean(row.scheduled),
     durationMinutes: nullableInteger(row.durationMinutes),
-    desiredDayIds: strings(row.desiredDayIds),
-    excludedDayIds: strings(row.excludedDayIds),
+    assignedDayId: nullableText(row.assignedDayId),
     budgetAmountMinor: nullableInteger(row.budgetAmountMinor),
     budgetCurrency: nullableText(row.budgetCurrency),
     notes: nullableText(row.notes),

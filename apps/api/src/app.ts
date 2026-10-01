@@ -18,6 +18,7 @@ import type {
   MergeTripPlacesInput,
   PreferenceLevel,
   UpdateMemberPreferenceInput,
+  UpdateTripPlaceDayAssignmentsInput,
   UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
 import type { DiscoveryModule } from "./discovery/discovery-module";
@@ -203,11 +204,26 @@ function planningInput(
   return {
     expectedVersion: numberField(body, "expectedVersion"),
     durationMinutes: optionalNumberField(body, "durationMinutes"),
-    desiredDayIds: stringArrayField(body, "desiredDayIds"),
-    excludedDayIds: stringArrayField(body, "excludedDayIds"),
     budgetAmountMinor: optionalNumberField(body, "budgetAmountMinor"),
     budgetCurrency: optionalStringField(body, "budgetCurrency"),
     notes: optionalStringField(body, "notes"),
+  };
+}
+
+function dayAssignmentsInput(
+  body: Record<string, unknown>,
+): UpdateTripPlaceDayAssignmentsInput {
+  return {
+    assignments: arrayField(body, "assignments").map((value) => {
+      const assignment = objectBody(value);
+      return {
+        tripPlaceId: stringField(assignment, "tripPlaceId"),
+        tripDayId: assignment.tripDayId === null
+          ? null
+          : stringField(assignment, "tripDayId"),
+        expectedVersion: numberField(assignment, "expectedVersion"),
+      };
+    }),
   };
 }
 
@@ -595,6 +611,22 @@ export function createApp({
         planningInput(body),
       );
       return context.json({ tripPlace });
+    },
+  );
+
+  app.put(
+    "/api/trips/:tripId/trip-place-day-assignments",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const body = await jsonBody(context);
+      const assigned = await tripPlaces.updateDayAssignments(
+        user.id,
+        uuidParam(context, "tripId"),
+        idempotencyKey(context),
+        dayAssignmentsInput(body),
+      );
+      return context.json({ tripPlaces: assigned });
     },
   );
 

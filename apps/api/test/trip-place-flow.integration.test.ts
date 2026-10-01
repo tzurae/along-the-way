@@ -17,6 +17,10 @@ import {
 import { createApp } from "../src/app";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
 import { runMigrations } from "../src/database/migrate";
+import {
+  down as removeDayAssignmentMigration,
+  up as applyDayAssignmentMigration,
+} from "../src/database/migrations/007_trip_place_day_assignments";
 import { seedDatabase } from "../src/database/seed";
 import type { EmailSender } from "../src/private-trips/email-sender";
 import { PostgresEmailWorker } from "../src/private-trips/postgres-email-worker";
@@ -138,6 +142,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     await sql`
       truncate table
         trip_place_duplicate_suggestions,
+        trip_place_day_assignments,
         trip_place_excluded_days,
         trip_place_desired_days,
         member_place_preferences,
@@ -544,7 +549,81 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect((await list(owner.cookie, secondTrip.id))[0]?.contributions[0]?.originalNote).toBe("Second trip note");
   });
 
-  it("flags uncertain duplicates, enforces planning day scope, and merges only with current versions", async () => {
+  it("keeps legacy day data during migration and absorbs rollback-era preferred-day writes", async () => {
+    const owner = await login("owner@example.test");
+    const trip = await createTrip(owner.cookie, "Day assignment migration trip");
+    const first = parseTripPlaceResponse(
+      await (await addManual(
+        owner.cookie,
+        trip.id,
+        "migration-first",
+        "Migration first",
+        "Kyoto north",
+      )).json(),
+    ).tripPlace;
+    const second = parseTripPlaceResponse(
+      await (await addManual(
+        owner.cookie,
+        trip.id,
+        "migration-second",
+        "Migration second",
+        "Kyoto south",
+      )).json(),
+    ).tripPlace;
+
+    await removeDayAssignmentMigration(database as Kysely<unknown>);
+    await database.insertInto("trip_place_desired_days").values([
+      {
+        trip_id: trip.id,
+        trip_place_id: first.id,
+        trip_day_id: trip.days[0]!.id,
+      },
+      {
+        trip_id: trip.id,
+        trip_place_id: second.id,
+        trip_day_id: trip.days[1]!.id,
+      },
+      {
+        trip_id: trip.id,
+        trip_place_id: second.id,
+        trip_day_id: trip.days[2]!.id,
+      },
+    ]).execute();
+    await database.insertInto("trip_place_excluded_days").values({
+      trip_id: trip.id,
+      trip_place_id: first.id,
+      trip_day_id: trip.days[6]!.id,
+    }).execute();
+
+    await applyDayAssignmentMigration(database as Kysely<unknown>);
+
+    expect(await database.selectFrom("trip_place_desired_days").selectAll()
+      .where("trip_id", "=", trip.id).execute()).toHaveLength(3);
+    expect(await database.selectFrom("trip_place_excluded_days").selectAll()
+      .where("trip_id", "=", trip.id).execute()).toHaveLength(1);
+    expect(await database.selectFrom("trip_place_day_assignments")
+      .select(["trip_place_id", "trip_day_id"])
+      .where("trip_id", "=", trip.id)
+      .execute()).toEqual([{
+        trip_place_id: first.id,
+        trip_day_id: trip.days[0]!.id,
+      }]);
+
+    await database.deleteFrom("trip_place_desired_days")
+      .where("trip_place_id", "=", first.id)
+      .execute();
+    await database.insertInto("trip_place_desired_days").values({
+      trip_id: trip.id,
+      trip_place_id: first.id,
+      trip_day_id: trip.days[3]!.id,
+    }).execute();
+    expect(await database.selectFrom("trip_place_day_assignments")
+      .select("trip_day_id")
+      .where("trip_place_id", "=", first.id)
+      .executeTakeFirst()).toEqual({ trip_day_id: trip.days[3]!.id });
+  });
+
+  it("assigns wishlist places to trip days and merges only compatible assignments with current versions", async () => {
     const owner = await login("owner@example.test");
     const trip = await createTrip(owner.cookie, "Duplicate review trip");
     const otherTrip = await createTrip(owner.cookie, "Other days trip");
@@ -578,10 +657,10 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect(duplicateRead).toHaveLength(2);
     expect(duplicateRead.every((entry) => entry.status === "possible-duplicate")).toBe(true);
 
-    const invalidPlanning = await app.request(
-      `/api/trips/${trip.id}/trip-places/${first.id}/planning`,
+    const invalidAssignment = await app.request(
+      `/api/trips/${trip.id}/trip-place-day-assignments`,
       {
-        method: "PATCH",
+        method: "PUT",
         headers: {
           cookie: owner.cookie,
           "content-type": "application/json",
@@ -589,17 +668,15 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
           origin: "https://app.example.test",
         },
         body: json({
-          expectedVersion: first.version,
-          durationMinutes: null,
-          desiredDayIds: [otherTrip.days[0]!.id],
-          excludedDayIds: [],
-          budgetAmountMinor: null,
-          budgetCurrency: null,
-          notes: null,
+          assignments: [{
+            tripPlaceId: first.id,
+            tripDayId: otherTrip.days[0]!.id,
+            expectedVersion: first.version,
+          }],
         }),
       },
     );
-    expect(invalidPlanning.status).toBe(400);
+    expect(invalidAssignment.status).toBe(400);
 
     const staleMerge = await app.request(
       `/api/trips/${trip.id}/trip-places/${second.id}/merge`,
@@ -624,8 +701,6 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     const planning = async (
       place: ReturnType<typeof parseTripPlaceResponse>["tripPlace"],
       key: string,
-      desiredDayIds: string[],
-      excludedDayIds: string[],
       notes: string,
     ) => {
       const response = await app.request(
@@ -641,8 +716,6 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
           body: json({
             expectedVersion: place.version,
             durationMinutes: null,
-            desiredDayIds,
-            excludedDayIds,
             budgetAmountMinor: null,
             budgetCurrency: null,
             notes,
@@ -655,20 +728,91 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     const beforePlanning = await list(owner.cookie, trip.id);
     const plannedSource = await planning(
       beforePlanning.find((entry) => entry.id === second.id)!,
-      "exclude-merge-day",
-      [],
-      [trip.days[0]!.id],
+      "plan-merge-source",
       "Source planning note",
     );
     const plannedTarget = await planning(
       beforePlanning.find((entry) => entry.id === first.id)!,
-      "desire-merge-day",
-      [trip.days[0]!.id],
-      [],
+      "plan-merge-target",
       "Target planning note",
     );
+    const assigned = await app.request(
+      `/api/trips/${trip.id}/trip-place-day-assignments`,
+      {
+        method: "PUT",
+        headers: {
+          cookie: owner.cookie,
+          "content-type": "application/json",
+          "idempotency-key": "assign-different-days",
+          origin: "https://app.example.test",
+        },
+        body: json({
+          assignments: [
+            {
+              tripPlaceId: plannedSource.id,
+              tripDayId: trip.days[0]!.id,
+              expectedVersion: plannedSource.version,
+            },
+            {
+              tripPlaceId: plannedTarget.id,
+              tripDayId: trip.days[1]!.id,
+              expectedVersion: plannedTarget.version,
+            },
+          ],
+        }),
+      },
+    );
+    expect(assigned.status).toBe(200);
+    const assignedPlaces = parseTripPlaceListResponse(await assigned.json()).tripPlaces;
+    const assignedSource = assignedPlaces.find((entry) => entry.id === plannedSource.id)!;
+    const assignedTarget = assignedPlaces.find((entry) => entry.id === plannedTarget.id)!;
+    expect(assignedSource.assignedDayId).toBe(trip.days[0]!.id);
+    expect(assignedTarget.assignedDayId).toBe(trip.days[1]!.id);
+    expect(await database.selectFrom("trip_place_desired_days")
+      .select(["trip_place_id", "trip_day_id"])
+      .where("trip_place_id", "in", [plannedSource.id, plannedTarget.id])
+      .execute()).toEqual(expect.arrayContaining([
+        {
+          trip_place_id: plannedSource.id,
+          trip_day_id: trip.days[0]!.id,
+        },
+        {
+          trip_place_id: plannedTarget.id,
+          trip_day_id: trip.days[1]!.id,
+        },
+      ]));
+    const replayedAssignment = await app.request(
+      `/api/trips/${trip.id}/trip-place-day-assignments`,
+      {
+        method: "PUT",
+        headers: {
+          cookie: owner.cookie,
+          "content-type": "application/json",
+          "idempotency-key": "assign-different-days",
+          origin: "https://app.example.test",
+        },
+        body: json({
+          assignments: [
+            {
+              tripPlaceId: plannedSource.id,
+              tripDayId: trip.days[0]!.id,
+              expectedVersion: plannedSource.version,
+            },
+            {
+              tripPlaceId: plannedTarget.id,
+              tripDayId: trip.days[1]!.id,
+              expectedVersion: plannedTarget.version,
+            },
+          ],
+        }),
+      },
+    );
+    expect(replayedAssignment.status).toBe(200);
+    expect(parseTripPlaceListResponse(await replayedAssignment.json()).tripPlaces)
+      .toEqual(assignedPlaces);
+
     const conflictingMerge = await app.request(
-      `/api/trips/${trip.id}/trip-places/${plannedSource.id}/merge`,
+      `/api/trips/${trip.id}/trip-places/${assignedSource.id}/merge`,
       {
         method: "POST",
         headers: {
@@ -678,18 +822,41 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
           origin: "https://app.example.test",
         },
         body: json({
-          targetTripPlaceId: plannedTarget.id,
-          expectedSourceVersion: plannedSource.version,
-          expectedTargetVersion: plannedTarget.version,
+          targetTripPlaceId: assignedTarget.id,
+          expectedSourceVersion: assignedSource.version,
+          expectedTargetVersion: assignedTarget.version,
         }),
       },
     );
     expect(conflictingMerge.status).toBe(409);
-    const afterConflict = await list(owner.cookie, trip.id);
-    expect(afterConflict).toHaveLength(2);
-    expect(afterConflict.find((entry) => entry.id === plannedSource.id)?.excludedDayIds)
-      .toEqual([trip.days[0]!.id]);
-    await planning(plannedSource, "clear-excluded-merge-day", [], [], "Source planning note");
+    expect(await list(owner.cookie, trip.id)).toHaveLength(2);
+
+    const unassigned = await app.request(
+      `/api/trips/${trip.id}/trip-place-day-assignments`,
+      {
+        method: "PUT",
+        headers: {
+          cookie: owner.cookie,
+          "content-type": "application/json",
+          "idempotency-key": "unassign-merge-source",
+          origin: "https://app.example.test",
+        },
+        body: json({
+          assignments: [{
+            tripPlaceId: assignedSource.id,
+            tripDayId: null,
+            expectedVersion: assignedSource.version,
+          }],
+        }),
+      },
+    );
+    expect(unassigned.status).toBe(200);
+    expect(parseTripPlaceListResponse(await unassigned.json()).tripPlaces
+      .find((entry) => entry.id === assignedSource.id)?.assignedDayId).toBeNull();
+    expect(await database.selectFrom("trip_place_desired_days")
+      .select("trip_day_id")
+      .where("trip_place_id", "=", assignedSource.id)
+      .execute()).toEqual([]);
 
     const current = await list(owner.cookie, trip.id);
     const source = current.find((entry) => entry.id === second.id)!;
@@ -715,7 +882,15 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     const mergedPlace = parseTripPlaceResponse(await merged.json()).tripPlace;
     expect(mergedPlace.contributions).toHaveLength(2);
     expect(mergedPlace.notes).toBe("Target planning note\n\nSource planning note");
+    expect(mergedPlace.assignedDayId).toBe(trip.days[1]!.id);
     expect(await list(owner.cookie, trip.id)).toHaveLength(1);
+    expect(await database.selectFrom("trip_place_desired_days")
+      .select(["trip_place_id", "trip_day_id"])
+      .where("trip_place_id", "in", [source.id, target.id])
+      .execute()).toEqual([{
+        trip_place_id: target.id,
+        trip_day_id: trip.days[1]!.id,
+      }]);
 
     const skeletonResponse = await app.request(`/api/trips/${trip.id}/skeleton`, {
       headers: { cookie: owner.cookie },
@@ -755,6 +930,118 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       .toBe("Target planning note\n\nSource planning note");
   });
 
+  it("rejects merging an unscheduled day assignment into a scheduled place", async () => {
+    const owner = await login("owner@example.test");
+    const trip = await createTrip(owner.cookie, "Scheduled merge conflict trip");
+    const source = parseTripPlaceResponse(
+      await (await addManual(
+        owner.cookie,
+        trip.id,
+        "scheduled-merge-source",
+        "Scheduled merge cafe",
+        "Assignment source",
+      )).json(),
+    ).tripPlace;
+    const target = parseTripPlaceResponse(
+      await (await addManual(
+        owner.cookie,
+        trip.id,
+        "scheduled-merge-target",
+        "Scheduled merge cafe",
+        "Timed target",
+      )).json(),
+    ).tripPlace;
+    const assignment = await app.request(
+      `/api/trips/${trip.id}/trip-place-day-assignments`,
+      {
+        method: "PUT",
+        headers: {
+          cookie: owner.cookie,
+          "content-type": "application/json",
+          "idempotency-key": "assign-before-scheduled-merge",
+          origin: "https://app.example.test",
+        },
+        body: json({
+          assignments: [{
+            tripPlaceId: source.id,
+            tripDayId: trip.days[0]!.id,
+            expectedVersion: source.version,
+          }],
+        }),
+      },
+    );
+    expect(assignment.status).toBe(200);
+    const assignedSource = parseTripPlaceListResponse(
+      await assignment.json(),
+    ).tripPlaces.find((place) => place.id === source.id)!;
+    const skeletonResponse = await app.request(`/api/trips/${trip.id}/skeleton`, {
+      headers: { cookie: owner.cookie },
+    });
+    const skeleton = parseTripSkeletonResponse(await skeletonResponse.json()).skeleton;
+    const targetPlace = skeleton.places.find((place) => place.address === "Timed target")!;
+    const timedItem = await app.request(`/api/trips/${trip.id}/items`, {
+      method: "POST",
+      headers: {
+        cookie: owner.cookie,
+        "content-type": "application/json",
+        "idempotency-key": "schedule-merge-target",
+        origin: "https://app.example.test",
+      },
+      body: json({
+        expectedTripVersion: skeleton.tripVersion,
+        type: "activity",
+        title: "Timed target activity",
+        notes: null,
+        sourceUrl: null,
+        money: null,
+        endpoints: [{
+          role: "start",
+          countryStopId: trip.countryStops[0]!.id,
+          placeId: targetPlace.id,
+          localDateTime: "2026-10-21T10:00",
+          timeZone: "Asia/Tokyo",
+        }],
+        details: {
+          durationMinutes: 60,
+          bookedBy: null,
+          confirmationStatus: "unknown",
+        },
+        constraints: [],
+      }),
+    });
+    expect(timedItem.status).toBe(201);
+    const currentTarget = (await list(owner.cookie, trip.id))
+      .find((place) => place.id === target.id)!;
+    expect(currentTarget.scheduled).toBe(true);
+
+    const merge = await app.request(
+      `/api/trips/${trip.id}/trip-places/${assignedSource.id}/merge`,
+      {
+        method: "POST",
+        headers: {
+          cookie: owner.cookie,
+          "content-type": "application/json",
+          "idempotency-key": "reject-scheduled-assignment-merge",
+          origin: "https://app.example.test",
+        },
+        body: json({
+          targetTripPlaceId: currentTarget.id,
+          expectedSourceVersion: assignedSource.version,
+          expectedTargetVersion: currentTarget.version,
+        }),
+      },
+    );
+    expect(merge.status).toBe(409);
+    expect(await merge.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        message: "A scheduled place cannot be merged with an unscheduled day assignment",
+      },
+    });
+    expect((await list(owner.cookie, trip.id))
+      .find((place) => place.id === source.id)?.assignedDayId).toBe(trip.days[0]!.id);
+  });
+
   it("rejects a merge that would make planning notes impossible to edit", async () => {
     const owner = await login("owner@example.test");
     const trip = await createTrip(owner.cookie, "Planning note boundary trip");
@@ -788,8 +1075,6 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
           body: json({
             expectedVersion: place.version,
             durationMinutes: null,
-            desiredDayIds: [],
-            excludedDayIds: [],
             budgetAmountMinor: null,
             budgetCurrency: null,
             notes,
@@ -1285,8 +1570,6 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         body: json({
           expectedVersion: afterSourceOnlyChange.version,
           durationMinutes: null,
-          desiredDayIds: [],
-          excludedDayIds: [],
           budgetAmountMinor: null,
           budgetCurrency: null,
           notes: "Current planning note",
