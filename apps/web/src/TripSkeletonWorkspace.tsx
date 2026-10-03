@@ -1,4 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Temporal } from "@js-temporal/polyfill";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import {
   parseTripPlaceListResponse,
@@ -75,6 +76,43 @@ function localEndpoint(endpoint: ZonedEndpointDto, places: Map<string, PlaceDto>
 function itemEndpoint(item: ItineraryItemDto, role: ZonedEndpointDto["role"]) {
   return item.endpoints.find((endpoint) => endpoint.role === role);
 }
+// Temporal instants are limited to ±10^8 days from the epoch.
+const MAX_EPOCH_NANOSECONDS = 8_640_000_000_000_000_000_000n;
+
+function displayedEndEndpoint(
+  item: ItineraryItemDto,
+  start: ZonedEndpointDto | undefined,
+) {
+  const explicitEnd = itemEndpoint(item, "end");
+  if (explicitEnd || !start) return explicitEnd;
+  let durationMinutes: number;
+  switch (item.type) {
+    case "reservation":
+    case "meal":
+    case "activity":
+    case "free-time":
+      durationMinutes = item.details.durationMinutes;
+      break;
+    default:
+      return undefined;
+  }
+  const endNanoseconds = Temporal.Instant.from(start.instant).epochNanoseconds
+    + BigInt(durationMinutes) * 60_000_000_000n;
+  // Data written before the trip-range rule may exceed Temporal's range; report it on this card only.
+  if (endNanoseconds > MAX_EPOCH_NANOSECONDS || endNanoseconds < -MAX_EPOCH_NANOSECONDS) {
+    return "unrepresentable" as const;
+  }
+  const instant = Temporal.Instant.fromEpochNanoseconds(endNanoseconds);
+  const local = instant.toZonedDateTimeISO(start.timeZone);
+  return {
+    ...start,
+    role: "end" as const,
+    localDateTime: local.toPlainDateTime().toString({ smallestUnit: "minute" }),
+    utcOffset: local.offset,
+    instant: instant.toString(),
+  };
+}
+
 
 function byEndpointInstant(
   left: { endpoint: ZonedEndpointDto },
@@ -99,6 +137,26 @@ function itemDetails(item: ItineraryItemDto) {
       return `${item.details.durationMinutes} min`;
   }
 }
+function ParticipantSummary({ item }: { item: ItineraryItemDto }) {
+  return (
+    <div className="mt-3 text-sm" aria-label="Participants">
+      <strong>Participants:</strong>{" "}
+      {item.participants === null ? (
+        <span className="text-muted-foreground">Pending confirmation</span>
+      ) : (
+        <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+          {item.participants.map((participant) => (
+            <li key={participant.memberId} className="min-w-0 [overflow-wrap:anywhere]">
+              {participant.displayName ?? participant.email}
+              {participant.removed ? " · removed" : ""}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 
 function ConstraintBadge({ constraint }: { constraint: ConstraintDto }) {
   return (
@@ -438,7 +496,7 @@ export function TripSkeletonWorkspace({
 
   function renderItem(item: ItineraryItemDto, continuation = false) {
     const start = itemEndpoint(item, "start");
-    const end = itemEndpoint(item, "end");
+    const end = displayedEndEndpoint(item, start);
     return (
       <article key={`${item.id}-${continuation ? "continuation" : "full"}`} className="itinerary-card" data-item-id={item.id}>
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -450,12 +508,17 @@ export function TripSkeletonWorkspace({
           </div>
           {item.lockedAt ? <span className="locked-badge"><Lock className="size-3.5" /> Locked</span> : null}
         </div>
+        <div className="mt-3 grid gap-1 text-sm text-muted-foreground">
+          {start ? <p><strong>Start:</strong> {localEndpoint(start, placesById)}</p> : null}
+          {end === "unrepresentable" ? (
+            <p><strong>End:</strong> Cannot be shown because the duration exceeds the supported date range. Edit the duration.</p>
+          ) : end ? (
+            <p><strong>End:</strong> {localEndpoint(end, placesById)}</p>
+          ) : null}
+        </div>
+        <ParticipantSummary item={item} />
         {!continuation ? (
           <>
-            <div className="mt-3 grid gap-1 text-sm text-muted-foreground">
-              {start ? <p><strong>Start:</strong> {localEndpoint(start, placesById)}</p> : null}
-              {end ? <p><strong>End:</strong> {localEndpoint(end, placesById)}</p> : null}
-            </div>
             <p className="mt-3 text-sm">{itemDetails(item)}</p>
             {item.money ? (
               <p className="mt-2 text-sm font-semibold">{item.money.currency} {item.money.amountMinor} minor units</p>
@@ -472,7 +535,7 @@ export function TripSkeletonWorkspace({
                 <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => setUnlockingItem(item)}><Unlock /> Unlock</Button>
               ) : (
                 <>
-                  <ItineraryItemDialog countryStops={trip.countryStops} places={skeleton?.places ?? []} item={item} save={(input) => saveItem(input, item)} />
+                  <ItineraryItemDialog countryStops={trip.countryStops} members={trip.members} places={skeleton?.places ?? []} item={item} save={(input) => saveItem(input, item)} />
                   <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => void itemAction(item, "lock")}><Lock /> Lock</Button>
                   <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => void itemAction(item, "delete")}><Trash2 /> Delete</Button>
                 </>
@@ -487,18 +550,7 @@ export function TripSkeletonWorkspace({
               </div>
             ))}
           </>
-        ) : (
-          end ? (
-            <p className="mt-2 text-sm text-muted-foreground">
-              <strong>{item.type === "lodging" ? "Checkout" : "Arrival"}:</strong>{" "}
-              {localEndpoint(end, placesById)}
-            </p>
-          ) : (
-            <p className="mt-2 text-sm text-muted-foreground">
-              This multi-day commitment started earlier.
-            </p>
-          )
-        )}
+        ) : null}
       </article>
     );
   }
@@ -571,7 +623,7 @@ export function TripSkeletonWorkspace({
         </div>
         <div className="flex flex-wrap gap-2">
           <PlaceDialog save={(input) => savePlace(input)} />
-          <ItineraryItemDialog countryStops={trip.countryStops} places={skeleton.places} save={(input) => saveItem(input)} />
+          <ItineraryItemDialog countryStops={trip.countryStops} members={trip.members} places={skeleton.places} save={(input) => saveItem(input)} />
         </div>
       </div>
 

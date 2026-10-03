@@ -288,6 +288,7 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
       .selectFrom("trip_members")
       .innerJoin("users", "users.id", "trip_members.user_id")
       .select([
+        "trip_members.id",
         "users.id as userId",
         "users.email",
         "users.display_name as displayName",

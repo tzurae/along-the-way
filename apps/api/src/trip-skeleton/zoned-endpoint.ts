@@ -11,6 +11,31 @@ export interface ResolvedEndpoint extends ZonedEndpointInput {
 
 const LOCAL_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 const UTC_OFFSET = /^[+-](?:0\d|1[0-4]):[0-5]\d$/;
+const NANOSECONDS_PER_MINUTE = 60_000_000_000n;
+// Temporal instants are limited to ±10^8 days from the epoch.
+const MAX_EPOCH_NANOSECONDS = 8_640_000_000_000_000_000_000n;
+
+/**
+ * Whether start + duration ends on a local date, in the start's zone, within
+ * [firstDate, lastDate]: the same rule explicit end endpoints obey. A time zone
+ * transition can move the local date backward, so dates are compared, not instants.
+ */
+export function durationEndsWithinDates(
+  start: ResolvedEndpoint,
+  durationMinutes: number,
+  firstDate: string,
+  lastDate: string,
+) {
+  // Integer nanoseconds avoid Temporal.Duration overflow for any safe integer.
+  const end = Temporal.Instant.from(start.instant).epochNanoseconds
+    + BigInt(durationMinutes) * NANOSECONDS_PER_MINUTE;
+  if (end > MAX_EPOCH_NANOSECONDS) return false;
+  const endDate = Temporal.Instant.fromEpochNanoseconds(end)
+    .toZonedDateTimeISO(start.timeZone)
+    .toPlainDate();
+  return Temporal.PlainDate.compare(endDate, firstDate) >= 0
+    && Temporal.PlainDate.compare(endDate, lastDate) <= 0;
+}
 
 export function canonicalNamedTimeZone(value: string) {
   const supplied = value.trim();

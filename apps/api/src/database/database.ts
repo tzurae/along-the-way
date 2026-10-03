@@ -301,6 +301,12 @@ export interface ItineraryItemTable {
   updated_at: Timestamp;
 }
 
+export interface ItineraryItemParticipantTable {
+  trip_id: string;
+  itinerary_item_id: string;
+  member_id: string;
+}
+
 export interface ItineraryEndpointTable {
   itinerary_item_id: string;
   trip_id: string;
@@ -327,6 +333,7 @@ export interface ItineraryConstraintTable {
 }
 
 export interface TripMemberTable {
+  id: Generated<string>;
   trip_id: string;
   user_id: string;
   role: "owner" | "editor";
@@ -416,6 +423,7 @@ export interface AlongTheWayDatabase {
   candidate_proposal_evidence: CandidateProposalEvidenceTable;
   discovery_feedback: DiscoveryFeedbackTable;
   itinerary_items: ItineraryItemTable;
+  itinerary_item_participants: ItineraryItemParticipantTable;
   itinerary_endpoints: ItineraryEndpointTable;
   itinerary_constraints: ItineraryConstraintTable;
   trip_members: TripMemberTable;

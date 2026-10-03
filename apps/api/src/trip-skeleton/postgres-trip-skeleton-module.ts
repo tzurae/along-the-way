@@ -8,6 +8,7 @@ import {
   type ItineraryItemDto,
   type ItineraryItemDetails,
   type ItineraryItemType,
+  type ItineraryParticipantDto,
   type PlaceDto,
   type PlaceType,
   type PlaceLocationStatus,
@@ -35,6 +36,7 @@ import { suggestPossibleTripPlaceDuplicates } from "../trip-places/postgres-trip
 import type { TripSkeletonModule } from "./trip-skeleton-module";
 import {
   canonicalNamedTimeZone,
+  durationEndsWithinDates,
   resolveEndpoint,
   type ResolvedEndpoint,
 } from "./zoned-endpoint";
@@ -720,6 +722,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         .returning("id")
         .executeTakeFirstOrThrow();
       await this.replaceEndpoints(transaction, tripId, created.id, validated.endpoints);
+      await this.replaceParticipants(transaction, tripId, created.id, validated.participantMemberIds);
       if (validated.constraints.length > 0) {
         await transaction.insertInto("itinerary_constraints").values(
           validated.constraints.map((constraint) => ({
@@ -763,7 +766,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       const current = await this.lockItemRow(transaction, tripId, itemId);
       this.requireExpectedVersion(current.version, input.expectedVersion);
       this.requireUnlocked(current.locked_at);
-      const validated = await this.validateItem(transaction, tripId, input);
+      const validated = await this.validateItem(transaction, tripId, input, itemId);
       await transaction
         .updateTable("itinerary_items")
         .set({
@@ -780,6 +783,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         .where("id", "=", itemId)
         .execute();
       await this.replaceEndpoints(transaction, tripId, itemId, validated.endpoints);
+      await this.replaceParticipants(transaction, tripId, itemId, validated.participantMemberIds);
       await recordEvent(transaction, {
         tripId,
         actorId: userId,
@@ -1063,6 +1067,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     executor: DatabaseExecutor,
     tripId: string,
     input: CreateItineraryItemInput,
+    itemId?: string,
   ) {
     const type = itemType(input.type);
     const title = requiredText(input.title, "title", 200);
@@ -1070,6 +1075,9 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     const sourceUrl = optionalUrl(input.sourceUrl);
     const money = validateMoney(input.money);
     const details = itemDetails(type, input.details);
+    const participantMemberIds = await this.validateParticipants(
+      executor, tripId, input.participantMemberIds, itemId,
+    );
     const endpoints = input.endpoints.map((endpoint) => {
       validateUuid(endpoint.countryStopId, "countryStopId");
       validateUuid(endpoint.placeId, "placeId");
@@ -1158,6 +1166,14 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     if (end && end.instant < start.instant) {
       throw new AppError("validation_error", "End instant must not precede start instant");
     }
+    if (
+      "durationMinutes" in details &&
+      !durationEndsWithinDates(
+        start, details.durationMinutes, dateOnly(trip.start_date), dateOnly(trip.end_date),
+      )
+    ) {
+      throw new AppError("validation_error", "Duration must end within the trip date range");
+    }
     const constraints = (input.constraints ?? []).map(validateConstraint);
     return {
       type,
@@ -1168,7 +1184,71 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       endpoints,
       constraints,
       details,
+      participantMemberIds,
     };
+  }
+
+  private async validateParticipants(
+    executor: DatabaseExecutor,
+    tripId: string,
+    input: string[] | null,
+    itemId?: string,
+  ) {
+    if (input === null) return null;
+    if (!Array.isArray(input) || input.length === 0) {
+      throw new AppError("validation_error", "participantMemberIds must be null or a nonempty collection");
+    }
+    const ids = input.map((id) => {
+      if (typeof id !== "string") {
+        throw new AppError("validation_error", "participantMemberIds must contain membership UUIDs");
+      }
+      return validateUuid(id, "participantMemberIds").toLowerCase();
+    });
+    if (new Set(ids).size !== ids.length) {
+      throw new AppError("validation_error", "participantMemberIds must not contain duplicates");
+    }
+    // The trip lock held by every item mutation also serializes removal/rejoin.
+    // Only unchanged associations may retain a now-inactive member.
+    const members = await executor.selectFrom("trip_members")
+      .select(["id", "removed_at"])
+      .where("trip_id", "=", tripId)
+      .where("id", "in", ids)
+      .execute();
+    const previous = itemId
+      ? await executor.selectFrom("itinerary_item_participants")
+        .select("member_id")
+        .where("trip_id", "=", tripId)
+        .where("itinerary_item_id", "=", itemId)
+        .execute()
+      : [];
+    const retained = new Set(previous.map((participant) => participant.member_id));
+    if (
+      members.length !== ids.length ||
+      members.some((member) => member.removed_at !== null && !retained.has(member.id))
+    ) {
+      throw new AppError("validation_error", "Participants must be active members of this trip");
+    }
+    return ids;
+  }
+
+  private async replaceParticipants(
+    transaction: Transaction<AlongTheWayDatabase>,
+    tripId: string,
+    itemId: string,
+    memberIds: string[] | null,
+  ) {
+    await transaction.deleteFrom("itinerary_item_participants")
+      .where("trip_id", "=", tripId)
+      .where("itinerary_item_id", "=", itemId)
+      .execute();
+    if (memberIds === null) return;
+    await transaction.insertInto("itinerary_item_participants")
+      .values(memberIds.map((memberId) => ({
+        trip_id: tripId,
+        itinerary_item_id: itemId,
+        member_id: memberId,
+      })))
+      .execute();
   }
 
   private endpointDto(endpoint: ResolvedEndpoint): ZonedEndpointDto {
@@ -1254,11 +1334,27 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       .where("trip_id", "=", tripId).orderBy("created_at").execute();
     if (rows.length === 0) return [];
     const ids = rows.map((row) => row.id);
-    const [endpointRows, constraintRows] = await Promise.all([
+    const [endpointRows, constraintRows, participantRows] = await Promise.all([
       executor.selectFrom("itinerary_endpoints").selectAll()
         .where("itinerary_item_id", "in", ids).orderBy("endpoint_role", "desc").execute(),
       executor.selectFrom("itinerary_constraints").selectAll()
         .where("itinerary_item_id", "in", ids).orderBy("created_at").execute(),
+      executor.selectFrom("itinerary_item_participants as participant")
+        .innerJoin("trip_members as member", (join) => join
+          .onRef("member.trip_id", "=", "participant.trip_id")
+          .onRef("member.id", "=", "participant.member_id"))
+        .innerJoin("users", "users.id", "member.user_id")
+        .select([
+          "participant.itinerary_item_id",
+          "member.id as memberId",
+          "member.removed_at",
+          "users.display_name as displayName",
+          "users.email",
+        ])
+        .where("participant.trip_id", "=", tripId)
+        .where("participant.itinerary_item_id", "in", ids)
+        .orderBy("member.id")
+        .execute(),
     ]);
     const endpoints = new Map<string, ZonedEndpointDto[]>();
     for (const endpoint of endpointRows) {
@@ -1287,6 +1383,17 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       });
       constraints.set(constraint.itinerary_item_id, values);
     }
+    const participants = new Map<string, ItineraryParticipantDto[]>();
+    for (const participant of participantRows) {
+      const values = participants.get(participant.itinerary_item_id) ?? [];
+      values.push({
+        memberId: participant.memberId,
+        displayName: participant.displayName,
+        email: participant.email,
+        removed: participant.removed_at !== null,
+      });
+      participants.set(participant.itinerary_item_id, values);
+    }
     return rows.map((row) => parseItineraryItemResponse({
       item: {
         id: row.id,
@@ -1304,6 +1411,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         version: row.version,
         endpoints: endpoints.get(row.id) ?? [],
         constraints: constraints.get(row.id) ?? [],
+        participants: participants.get(row.id) ?? null,
         details: row.details,
       },
     }).item);

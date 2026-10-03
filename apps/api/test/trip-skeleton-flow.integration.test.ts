@@ -1,11 +1,17 @@
+import { promises as fs } from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql, type Kysely } from "kysely";
+import { FileMigrationProvider, Migrator } from "kysely/migration";
 import type { Hono } from "hono";
 import {
   parseItineraryItemResponse,
   parsePlaceResponse,
   parseTripSkeletonResponse,
 } from "@along-the-way/contracts/trip-skeleton";
+import type { ItineraryItemDto } from "@along-the-way/contracts/trip-skeleton";
 import { parseTripResponse } from "@along-the-way/contracts/private-trips";
 import { parseTripPlaceListResponse } from "@along-the-way/contracts/trip-places";
 
@@ -212,6 +218,347 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     return parsePlaceResponse(await response.json()).place;
   }
 
+  async function mutate(
+    cookie: string,
+    path: string,
+    key: string,
+    payload: unknown,
+    method = "POST",
+  ) {
+    return app.request(path, {
+      method,
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        "idempotency-key": key,
+        origin: "https://app.example.test",
+      },
+      body: body(payload),
+    });
+  }
+
+  async function readSkeleton(cookie: string, tripId: string) {
+    const response = await app.request(`/api/trips/${tripId}/skeleton`, {
+      headers: { cookie },
+    });
+    expect(response.status).toBe(200);
+    return parseTripSkeletonResponse(await response.json()).skeleton;
+  }
+
+  async function joinMember(
+    ownerCookie: string,
+    tripId: string,
+    address: string,
+    key: string,
+    existingCookie?: string,
+  ) {
+    const invitation = await mutate(ownerCookie, `/api/trips/${tripId}/invites`, key, {
+      email: address,
+    });
+    expect(invitation.status).toBe(201);
+    await emailWorker.runOnce();
+    const link = email.invites.at(-1)?.url;
+    const token = link && new URLSearchParams(new URL(link).hash.slice(1)).get("inviteToken");
+    if (!token) throw new Error("Invite token missing");
+    const cookie = existingCookie ?? await login(address, token);
+    const accepted = await mutate(cookie, "/api/invites/accept", `accept-${key}`, { token });
+    expect(accepted.status).toBe(200);
+    const member = parseTripResponse(await accepted.json()).trip.members
+      .find((candidate) => candidate.email === address)!;
+    return { cookie, member };
+  }
+
+  it("reloads independent activities and changes a shared party without duplicating the item", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    const owner = trip.members[0]!;
+    const editor = await joinMember(cookie, trip.id, "second@example.test", "party-second");
+    await joinMember(cookie, trip.id, "third@example.test", "party-third");
+    const fourth = await joinMember(cookie, trip.id, "fourth@example.test", "party-fourth");
+    const place = await createPlace(cookie, trip.id, "party-place", {
+      name: "Meeting point", type: "activity", timeZone: "Asia/Tokyo",
+    });
+    const base = {
+      type: "activity",
+      title: "A / 甲",
+      participantMemberIds: [owner.id],
+      endpoints: [{
+        role: "start", countryStopId: trip.countryStops[0]!.id, placeId: place.id,
+        localDateTime: "2026-10-21T10:00", timeZone: "Asia/Tokyo",
+      }],
+      details: { durationMinutes: 120, bookedBy: null, confirmationStatus: "unknown" },
+    };
+    const createPayload = {
+      ...base, expectedTripVersion: await currentTripVersion(cookie, trip.id),
+    };
+    const first = await mutate(cookie, `/api/trips/${trip.id}/items`, "party-a", createPayload);
+    expect(first.status).toBe(201);
+    const a = parseItineraryItemResponse(await first.json()).item;
+    const second = await mutate(editor.cookie, `/api/trips/${trip.id}/items`, "party-b", {
+      ...base,
+      title: "B / 乙",
+      participantMemberIds: [editor.member.id],
+      endpoints: [{ ...base.endpoints[0], localDateTime: "2026-10-21T11:00" }],
+      expectedTripVersion: await currentTripVersion(cookie, trip.id),
+    });
+    expect(second.status).toBe(201);
+    const b = parseItineraryItemResponse(await second.json()).item;
+    const pending = await mutate(cookie, `/api/trips/${trip.id}/items`, "party-pending", {
+      ...base, title: "Unspecified", participantMemberIds: null,
+      expectedTripVersion: await currentTripVersion(cookie, trip.id),
+    });
+    expect(pending.status).toBe(201);
+    const unspecified = parseItineraryItemResponse(await pending.json()).item;
+
+    const selectedIds = [fourth.member.id, owner.id, editor.member.id];
+    const updatePayload = { ...base, participantMemberIds: selectedIds, expectedVersion: a.version };
+    const updated = await mutate(
+      cookie, `/api/trips/${trip.id}/items/${a.id}`, "party-shared", updatePayload, "PATCH",
+    );
+    expect(updated.status).toBe(200);
+    const shared = parseItineraryItemResponse(await updated.json()).item;
+    expect(shared.id).toBe(a.id);
+    expect(shared.participants?.map((participant) => participant.memberId))
+      .toEqual([...selectedIds].sort());
+    expect(shared.participants).toEqual(
+      [owner, editor.member, fourth.member]
+        .sort((left, right) => left.id.localeCompare(right.id))
+        .map((member) => ({
+          memberId: member.id, displayName: member.displayName, email: member.email, removed: false,
+        })),
+    );
+    const stale = await mutate(
+      cookie, `/api/trips/${trip.id}/items/${a.id}`, "party-stale",
+      { ...updatePayload, participantMemberIds: null }, "PATCH",
+    );
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      error: { code: "conflict", currentVersion: shared.version },
+    });
+    const lockedResponse = await mutate(cookie, `/api/trips/${trip.id}/items/${a.id}/lock`, "party-lock", {
+      expectedVersion: shared.version,
+    });
+    expect(lockedResponse.status).toBe(200);
+    const locked = parseItineraryItemResponse(await lockedResponse.json()).item;
+    const rejected = await mutate(
+      cookie, `/api/trips/${trip.id}/items/${a.id}`, "party-edit-locked",
+      { ...updatePayload, expectedVersion: locked.version, participantMemberIds: null }, "PATCH",
+    );
+    expect(rejected.status).toBe(409);
+    expect(await rejected.json()).toMatchObject({ error: { code: "item_locked" } });
+    const beforeReplay = await readSkeleton(cookie, trip.id);
+    const createReplay = await mutate(cookie, `/api/trips/${trip.id}/items`, "party-a", createPayload);
+    expect(createReplay.status).toBe(201);
+    expect(parseItineraryItemResponse(await createReplay.json()).item).toEqual(a);
+    const updateReplay = await mutate(
+      cookie, `/api/trips/${trip.id}/items/${a.id}`, "party-shared", updatePayload, "PATCH",
+    );
+    expect(updateReplay.status).toBe(200);
+    expect(parseItineraryItemResponse(await updateReplay.json()).item).toEqual(shared);
+    const reloaded = await readSkeleton(editor.cookie, trip.id);
+    expect(reloaded).toEqual(beforeReplay);
+    expect(reloaded.items.map((item) => item.id).sort()).toEqual([a.id, b.id, unspecified.id].sort());
+    expect(reloaded.items.find((item) => item.id === a.id)).toEqual(locked);
+    expect(reloaded.items.find((item) => item.id === b.id)).toMatchObject({
+      participants: [{ memberId: editor.member.id }],
+      endpoints: [{ localDateTime: "2026-10-21T11:00", instant: "2026-10-21T02:00:00.000Z" }],
+      details: { durationMinutes: 120 },
+    });
+    expect(reloaded.items.find((item) => item.id === a.id)).toMatchObject({
+      endpoints: [{ localDateTime: "2026-10-21T10:00", instant: "2026-10-21T01:00:00.000Z" }],
+      details: { durationMinutes: 120 },
+    });
+    expect(reloaded.items.find((item) => item.id === unspecified.id)?.participants).toBeNull();
+  });
+
+  it("rejects invalid parties atomically and retains removed participants until explicitly deselected", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    const owner = trip.members[0]!;
+    const editor = await joinMember(cookie, trip.id, "historical@example.test", "historical-member");
+    await database.updateTable("users").set({ display_name: "Historical traveler" })
+      .where("id", "=", editor.member.userId).execute();
+    const foreignTrip = await createTrip(cookie, {
+      name: "Different membership scope", startDate: "2026-10-21", endDate: "2026-10-27",
+      countryCodes: ["US"],
+    });
+    const place = await createPlace(cookie, trip.id, "historical-place", {
+      name: "Historical visit", type: "activity", timeZone: "Asia/Tokyo",
+    });
+    const base = {
+      type: "activity", title: "Historical party",
+      participantMemberIds: [editor.member.id],
+      endpoints: [{
+        role: "start", countryStopId: trip.countryStops[0]!.id, placeId: place.id,
+        localDateTime: "2026-10-21T10:00", timeZone: "Asia/Tokyo",
+      }],
+      details: { durationMinutes: 120, bookedBy: null, confirmationStatus: "unknown" },
+    };
+    const beforeInvalid = await readSkeleton(cookie, trip.id);
+    const invalidParties: unknown[] = [
+      undefined, [], "not-an-array", [null], ["not-a-uuid"],
+      [owner.id, owner.id], [owner.id, owner.id.toUpperCase()],
+      [owner.userId], [foreignTrip.members[0]!.id],
+      ["00000000-0000-4000-8000-000000000001"],
+    ];
+    for (const [index, participantMemberIds] of invalidParties.entries()) {
+      const response = await mutate(cookie, `/api/trips/${trip.id}/items`, `invalid-party-${index}`, {
+        ...base, participantMemberIds, expectedTripVersion: beforeInvalid.tripVersion,
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code: "validation_error" } });
+    }
+    expect(await readSkeleton(cookie, trip.id)).toEqual(beforeInvalid);
+    const createdResponse = await mutate(cookie, `/api/trips/${trip.id}/items`, "invalid-party-0", {
+      ...base, expectedTripVersion: beforeInvalid.tripVersion,
+    });
+    expect(createdResponse.status).toBe(201);
+    const item = parseItineraryItemResponse(await createdResponse.json()).item;
+    const beforeBadUpdate = await readSkeleton(cookie, trip.id);
+    const badUpdate = await mutate(
+      cookie, `/api/trips/${trip.id}/items/${item.id}`, "foreign-party-update",
+      { ...base, expectedVersion: item.version, participantMemberIds: [foreignTrip.members[0]!.id] },
+      "PATCH",
+    );
+    expect(badUpdate.status).toBe(400);
+    expect(await readSkeleton(cookie, trip.id)).toEqual(beforeBadUpdate);
+
+    const removal = await mutate(
+      cookie, `/api/trips/${trip.id}/members/${editor.member.userId}`, "historical-removal", {}, "DELETE",
+    );
+    expect(removal.status).toBe(204);
+    const rosterResponse = await app.request(`/api/trips/${trip.id}`, { headers: { cookie } });
+    expect(parseTripResponse(await rosterResponse.json()).trip.members).toEqual([owner]);
+    const removedParticipant = {
+      memberId: editor.member.id, displayName: "Historical traveler",
+      email: "historical@example.test", removed: true,
+    };
+    const removedRead = await readSkeleton(cookie, trip.id);
+    expect(removedRead.items[0]?.participants).toEqual([removedParticipant]);
+    expect(removedRead.items[0]?.id).toBe(item.id);
+    await expect(database.deleteFrom("trip_members")
+      .where("trip_id", "=", trip.id).where("id", "=", editor.member.id).execute())
+      .rejects.toMatchObject({ code: "23503" });
+    expect((await readSkeleton(cookie, trip.id)).items[0]?.participants).toEqual([removedParticipant]);
+
+    const ordinaryEdit = await mutate(
+      cookie, `/api/trips/${trip.id}/items/${item.id}`, "retain-removed-party",
+      { ...base, title: "Renamed without losing history", expectedVersion: item.version }, "PATCH",
+    );
+    expect(ordinaryEdit.status).toBe(200);
+    const retained = parseItineraryItemResponse(await ordinaryEdit.json()).item;
+    expect(retained).toMatchObject({ id: item.id, participants: [removedParticipant] });
+    const inactiveCreate = await mutate(cookie, `/api/trips/${trip.id}/items`, "inactive-party", {
+      ...base, expectedTripVersion: await currentTripVersion(cookie, trip.id),
+    });
+    expect(inactiveCreate.status).toBe(400);
+    const rejoinedWithHistory = await joinMember(
+      cookie, trip.id, editor.member.email, "historical-rejoin-with-reference", editor.cookie,
+    );
+    expect(rejoinedWithHistory.member.id).toBe(editor.member.id);
+    expect((await readSkeleton(cookie, trip.id)).items[0]).toMatchObject({
+      id: item.id, version: retained.version,
+      participants: [{ ...removedParticipant, removed: false }],
+    });
+    const removedAgain = await mutate(
+      cookie, `/api/trips/${trip.id}/members/${editor.member.userId}`, "historical-remove-again", {}, "DELETE",
+    );
+    expect(removedAgain.status).toBe(204);
+
+    const clearResponse = await mutate(
+      cookie, `/api/trips/${trip.id}/items/${item.id}`, "clear-removed-party",
+      { ...base, expectedVersion: retained.version, participantMemberIds: null }, "PATCH",
+    );
+    expect(clearResponse.status).toBe(200);
+    const cleared = parseItineraryItemResponse(await clearResponse.json()).item;
+    expect(cleared.participants).toBeNull();
+    const beforeReadd = await readSkeleton(cookie, trip.id);
+    const readd = await mutate(
+      cookie, `/api/trips/${trip.id}/items/${item.id}`, "readd-inactive-party",
+      { ...base, expectedVersion: cleared.version }, "PATCH",
+    );
+    expect(readd.status).toBe(400);
+    expect(await readSkeleton(cookie, trip.id)).toEqual(beforeReadd);
+    const rejoined = await joinMember(
+      cookie, trip.id, editor.member.email, "historical-rejoin", editor.cookie,
+    );
+    expect(rejoined.member.id).toBe(editor.member.id);
+    const restoredResponse = await mutate(
+      cookie, `/api/trips/${trip.id}/items/${item.id}`, "readd-inactive-party",
+      { ...base, expectedVersion: cleared.version }, "PATCH",
+    );
+    expect(restoredResponse.status).toBe(200);
+    const restored = parseItineraryItemResponse(await restoredResponse.json()).item;
+    expect(restored).toMatchObject({
+      id: item.id, participants: [{ ...removedParticipant, removed: false }],
+    });
+    const deleted = await mutate(
+      cookie, `/api/trips/${trip.id}/items/${item.id}`, "delete-party-item",
+      { expectedVersion: restored.version }, "DELETE",
+    );
+    expect(deleted.status).toBe(204);
+    expect((await readSkeleton(cookie, trip.id)).items).toEqual([]);
+    // Item cascade must release the history FK, without deleting the membership itself.
+    const rosterAfterDeletion = await app.request(`/api/trips/${trip.id}`, { headers: { cookie } });
+    expect(parseTripResponse(await rosterAfterDeletion.json()).trip.members
+      .find((member) => member.id === editor.member.id)?.email).toBe(editor.member.email);
+    await database.deleteFrom("trip_members")
+      .where("trip_id", "=", trip.id).where("id", "=", editor.member.id).execute();
+    const rosterAfterPhysicalDeletion = await app.request(`/api/trips/${trip.id}`, { headers: { cookie } });
+    expect(parseTripResponse(await rosterAfterPhysicalDeletion.json()).trip.members).toEqual([owner]);
+  });
+
+  it("validates the participant after a concurrent membership removal commits", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    const editor = await joinMember(cookie, trip.id, "racing@example.test", "racing-member");
+    const place = await createPlace(cookie, trip.id, "racing-place", {
+      name: "Race boundary", type: "activity", timeZone: "Asia/Tokyo",
+    });
+    const before = await readSkeleton(cookie, trip.id);
+    let pending: Promise<Response> | undefined;
+    let settled = false;
+    await database.transaction().execute(async (transaction) => {
+      await transaction.selectFrom("trips").select("id").where("id", "=", trip.id)
+        .forUpdate().executeTakeFirstOrThrow();
+      pending = Promise.resolve(mutate(cookie, `/api/trips/${trip.id}/items`, "racing-party", {
+        expectedTripVersion: before.tripVersion,
+        type: "activity", title: "Must not add an inactive participant",
+        participantMemberIds: [editor.member.id],
+        endpoints: [{
+          role: "start", countryStopId: trip.countryStops[0]!.id, placeId: place.id,
+          localDateTime: "2026-10-21T10:00", timeZone: "Asia/Tokyo",
+        }],
+        details: { durationMinutes: 120, bookedBy: null, confirmationStatus: "unknown" },
+      }));
+      void pending.then(() => { settled = true; }, () => { settled = true; });
+      let waiting = false;
+      for (let attempt = 0; attempt < 1_000; attempt += 1) {
+        if (settled) throw new Error("Participant assignment bypassed the trip lifecycle lock");
+        const result = await sql<{ waiting: boolean }>`
+          select exists (
+            select 1 from pg_stat_activity
+            where datname = current_database() and pid <> pg_backend_pid()
+              and wait_event_type = 'Lock' and query ilike '%trips%'
+          ) as waiting
+        `.execute(database);
+        if (result.rows[0]?.waiting) {
+          waiting = true;
+          break;
+        }
+      }
+      if (!waiting) throw new Error("Participant assignment did not reach the trip lifecycle lock");
+      await transaction.updateTable("trip_members")
+        .set({ removed_at: new Date("2026-09-28T12:00:00.000Z") })
+        .where("trip_id", "=", trip.id).where("id", "=", editor.member.id).execute();
+    });
+    if (!pending) throw new Error("Expected an in-flight participant assignment");
+    const response = await pending;
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "validation_error" } });
+    expect(await readSkeleton(cookie, trip.id)).toEqual(before);
+  });
+
   it("creates and replays a trip-scoped place without fabricating location metadata", async () => {
     const cookie = await login();
     const trip = await createTrip(cookie);
@@ -353,6 +700,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       notes: null,
       sourceUrl: null,
       money: null,
+      participantMemberIds: null,
       endpoints: [{
         role: "start",
         countryStopId: trip.countryStops[0]!.id,
@@ -460,6 +808,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       notes: "Window seat requested",
       sourceUrl: "https://example.test/flight",
       money: { amountMinor: 125000, currency: "USD" },
+      participantMemberIds: null,
       endpoints: [
         {
           role: "start",
@@ -851,6 +1200,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       notes: null,
       sourceUrl: null,
       money: null,
+      participantMemberIds: null,
       endpoints: [
         {
           role: "start",
@@ -911,6 +1261,59 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     });
   });
 
+  it("bounds derived ends by their local date when a time zone repeats the previous date", async () => {
+    // tzdb: America/St_Johns fell back at 2009-11-01 00:01 (-02:30) to 2009-10-31 23:01 (-03:30).
+    const cookie = await login();
+    interface StJohnsTarget { tripId: string; countryStopId: string; placeId: string }
+    async function stJohnsTrip(key: string, date: string): Promise<StJohnsTarget> {
+      const response = await mutate(cookie, "/api/trips", key, {
+        name: `St. John's ${date}`, startDate: date, endDate: date, countryCodes: ["CA"],
+      });
+      expect(response.status).toBe(201);
+      const trip = parseTripResponse(await response.json()).trip;
+      const place = await createPlace(cookie, trip.id, `${key}-place`, {
+        name: "St. John's", type: "other", address: null, latitude: null, longitude: null,
+        timeZone: "America/St_Johns", sourceUrl: null, notes: null,
+      });
+      return { tripId: trip.id, countryStopId: trip.countryStops[0]!.id, placeId: place.id };
+    }
+    async function create(
+      target: StJohnsTarget, key: string, localDateTime: string,
+      durationMinutes: number, type: string, details: Record<string, unknown>,
+    ) {
+      return mutate(cookie, `/api/trips/${target.tripId}/items`, key, {
+        type, title: key, notes: null, sourceUrl: null, money: null, participantMemberIds: null,
+        endpoints: [{
+          role: "start", countryStopId: target.countryStopId, placeId: target.placeId,
+          localDateTime, timeZone: "America/St_Johns", utcOffset: "-02:30",
+        }],
+        details: { ...details, durationMinutes }, constraints: [],
+        expectedTripVersion: await currentTripVersion(cookie, target.tripId),
+      });
+    }
+    const appointment = { bookedBy: null, confirmationStatus: "unknown" };
+    const durationTypes = [
+      { type: "reservation", details: appointment },
+      { type: "meal", details: appointment },
+      { type: "activity", details: appointment },
+      { type: "free-time", details: {} },
+    ];
+    // 2009-11-01T00:00-02:30 + 30 min is 2009-10-31T23:30-03:30, before this trip's first date.
+    const novemberFirst = await stJohnsTrip("st-johns-november-first", "2009-11-01");
+    // 2009-10-31T23:30-02:30 + 60 min is 2009-10-31T23:30-03:30, still this trip's last date.
+    const octoberLast = await stJohnsTrip("st-johns-october-last", "2009-10-31");
+    for (const { type, details } of durationTypes) {
+      const early = await create(novemberFirst, `before-first-${type}`, "2009-11-01T00:00", 30, type, details);
+      expect(early.status, type).toBe(400);
+      const repeated = await create(octoberLast, `repeated-last-${type}`, "2009-10-31T23:30", 60, type, details);
+      expect(repeated.status, type).toBe(201);
+      expect(parseItineraryItemResponse(await repeated.json()).item.endpoints[0]).toMatchObject({
+        utcOffset: "-02:30", instant: "2009-11-01T02:00:00.000Z",
+      });
+    }
+    expect((await readSkeleton(cookie, novemberFirst.tripId)).items).toEqual([]);
+  });
+
   it("rejects invalid item types, details, durations, currencies, and lodging endpoints", async () => {
     const cookie = await login();
     const trip = await createTrip(cookie);
@@ -947,6 +1350,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       notes: null,
       sourceUrl: null,
       money: null,
+      participantMemberIds: null,
       endpoints: [start],
       details: {
         durationMinutes: 60,
@@ -971,6 +1375,19 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       {
         key: "invalid-negative-duration",
         payload: { ...base, details: { ...base.details, durationMinutes: -30 } },
+      },
+      {
+        // 2026-10-22T10:00 + 8040 min is 2026-10-28T00:00, after the trip's last date.
+        key: "invalid-duration-after-trip",
+        payload: { ...base, details: { ...base.details, durationMinutes: 8040 } },
+      },
+      {
+        key: "invalid-unrepresentable-duration",
+        payload: { ...base, details: { ...base.details, durationMinutes: Number.MAX_SAFE_INTEGER } },
+      },
+      {
+        key: "invalid-free-time-after-trip",
+        payload: { ...base, type: "free-time", details: { durationMinutes: Number.MAX_SAFE_INTEGER } },
       },
       {
         key: "invalid-currency",
@@ -1017,6 +1434,16 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         error: { code: "validation_error" },
       });
     }
+    expect((await readSkeleton(cookie, trip.id)).items).toEqual([]);
+
+    const lastMinute = await mutate(cookie, `/api/trips/${trip.id}/items`, "valid-duration-last-trip-minute", {
+      ...base,
+      details: { ...base.details, durationMinutes: 8039 },
+      expectedTripVersion: await currentTripVersion(cookie, trip.id),
+    });
+    expect(lastMinute.status).toBe(201);
+    expect(parseItineraryItemResponse(await lastMinute.json()).item.details)
+      .toMatchObject({ durationMinutes: 8039 });
   });
 
   it("falls back from Place to Country Stop and explicitly confirmed endpoint time zones", async () => {
@@ -1056,6 +1483,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
           notes: null,
           sourceUrl: null,
           money: null,
+          participantMemberIds: null,
           endpoints: [{
             role: "start",
             countryStopId,
@@ -1159,6 +1587,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
             notes: null,
             sourceUrl: null,
             money: null,
+            participantMemberIds: null,
             endpoints: [{
               role: "start",
               countryStopId: usTrip.countryStops[0]!.id,
@@ -1327,6 +1756,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         body: body({
           expectedTripVersion: await currentTripVersion(cookie, trip.id),
           ...item,
+          participantMemberIds: null,
           notes: null,
           sourceUrl: null,
           money:
@@ -1635,6 +2065,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         notes: null,
         sourceUrl: null,
         money: null,
+        participantMemberIds: null,
         endpoints: [
           {
             role: "start",
@@ -1804,5 +2235,314 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       await deletedResponse.json(),
     ).item;
     expect(withoutConstraint).toMatchObject({ version: 6, constraints: [] });
+  });
+
+  describe("activity participant migration in its dedicated database", () => {
+    let mainDatabase: Kysely<AlongTheWayDatabase>;
+    let migrationDatabase: Kysely<AlongTheWayDatabase>;
+    let migrator: Migrator;
+
+    beforeAll(async () => {
+      mainDatabase = database;
+      const migrationUrl = new URL(databaseUrl);
+      if (migrationUrl.pathname === "/along_the_way_participants_migration") {
+        throw new Error("The migration regression requires a database separate from TEST_DATABASE_URL");
+      }
+      migrationUrl.pathname = "/along_the_way_participants_migration";
+      // CI provisions only TEST_DATABASE_URL; create the sibling database on that same server.
+      const existing = await sql<{ present: boolean }>`
+        select exists (
+          select 1 from pg_database where datname = 'along_the_way_participants_migration'
+        ) as present
+      `.execute(mainDatabase);
+      if (!existing.rows[0]?.present) {
+        await sql`create database along_the_way_participants_migration`.execute(mainDatabase);
+      }
+      migrationDatabase = createDatabase(migrationUrl.toString());
+      database = migrationDatabase;
+      migrator = new Migrator({
+        db: migrationDatabase,
+        provider: new FileMigrationProvider({
+          fs, path,
+          migrationFolder: fileURLToPath(new URL("../src/database/migrations", import.meta.url)),
+        }),
+      });
+      await runMigrations(migrationDatabase);
+    });
+
+    afterAll(async () => {
+      database = mainDatabase;
+      await migrationDatabase?.destroy();
+    });
+
+    it("upgrades historical replies without substituting current members or item state and safely refuses missing targets", async () => {
+      const cookie = await login();
+      const trip = await createTrip(cookie);
+      const owner = trip.members[0]!;
+      const placeInput = { name: "Legacy place", type: "activity", timeZone: "Asia/Tokyo" };
+      const placeVersion = await currentTripVersion(cookie, trip.id);
+      const place = await createPlace(cookie, trip.id, "legacy-place", placeInput);
+      const itemInput = {
+        type: "activity", title: "Original historical activity", participantMemberIds: null,
+        endpoints: [{
+          role: "start", countryStopId: trip.countryStops[0]!.id, placeId: place.id,
+          localDateTime: "2026-10-21T10:00", timeZone: "Asia/Tokyo",
+        }],
+        details: { durationMinutes: 120, bookedBy: null, confirmationStatus: "unknown" },
+      };
+      const replies: Array<{
+        path: string; key: string; payload: unknown; method: string;
+        status: number; item: ItineraryItemDto;
+      }> = [];
+      async function capture(
+        requestPath: string, key: string, payload: unknown, method: string, status: number,
+      ) {
+        const response = await mutate(cookie, requestPath, key, payload, method);
+        expect(response.status).toBe(status);
+        const item = parseItineraryItemResponse(await response.json()).item;
+        replies.push({ path: requestPath, key, payload, method, status, item });
+        return item;
+      }
+      const itemsPath = `/api/trips/${trip.id}/items`;
+      let item = await capture(itemsPath, "legacy-create", {
+        ...itemInput, expectedTripVersion: await currentTripVersion(cookie, trip.id),
+      }, "POST", 201);
+      const itemPath = `${itemsPath}/${item.id}`;
+      item = await capture(itemPath, "legacy-update", {
+        ...itemInput, title: "Historical edited title", expectedVersion: item.version,
+      }, "PATCH", 200);
+      item = await capture(`${itemPath}/constraints`, "legacy-constraint-create", {
+        expectedItemVersion: item.version, type: "minimum_buffer", status: "unknown",
+        minimumBufferMinutes: 20,
+      }, "POST", 201);
+      const constraint = item.constraints[0]!;
+      const constraintPath = `${itemPath}/constraints/${constraint.id}`;
+      item = await capture(constraintPath, "legacy-constraint-update", {
+        expectedItemVersion: item.version, expectedVersion: constraint.version,
+        type: "minimum_buffer", status: "confirmed", minimumBufferMinutes: 45,
+      }, "PATCH", 200);
+      item = await capture(constraintPath, "legacy-constraint-delete", {
+        expectedItemVersion: item.version, expectedVersion: item.constraints[0]!.version,
+      }, "DELETE", 200);
+      item = await capture(`${itemPath}/lock`, "legacy-lock", { expectedVersion: item.version }, "POST", 200);
+      item = await capture(`${itemPath}/unlock`, "legacy-unlock", { expectedVersion: item.version }, "POST", 200);
+      const deleted = await mutate(cookie, itemPath, "legacy-delete", {
+        expectedVersion: item.version,
+      }, "DELETE");
+      expect(deleted.status).toBe(204);
+      const live = await capture(itemsPath, "legacy-live", {
+        ...itemInput, title: "Live legacy activity",
+        expectedTripVersion: await currentTripVersion(cookie, trip.id),
+      }, "POST", 201);
+      const editor = await joinMember(cookie, trip.id, "migration-editor@example.test", "legacy-editor");
+
+      // Reconstruct the pre-008 stored wire shape using genuine HTTP replies.
+      await sql`
+        update mutation_requests request
+        set response = jsonb_set(response, '{members}', (
+          select jsonb_agg(member.value - 'id' order by member.position)
+          from jsonb_array_elements(response -> 'members')
+            with ordinality as member(value, position)
+        ))
+        where operation = 'create_trip'
+      `.execute(database);
+      await sql`
+        update mutation_requests set response = response - 'participants'
+        where operation ~ '^(create_itinerary_item|iu|cc|cu|cd|il|in):'
+      `.execute(database);
+      await database.updateTable("trips").set({ name: "Current trip name" }).where("id", "=", trip.id).execute();
+      await database.updateTable("users").set({ display_name: "Current owner label" })
+        .where("id", "=", owner.userId).execute();
+      const downgraded = await migrator.migrateTo("007_trip_place_day_assignments");
+      if (downgraded.error) throw downgraded.error;
+
+      await database.insertInto("mutation_requests").values({
+        actor_id: owner.userId, operation: "create_trip", idempotency_key: "unresolvable-history",
+        response: {
+          ...trip,
+          members: [{
+            userId: "00000000-0000-4000-8000-000000000001",
+            email: "missing-historical@example.test", displayName: null, role: "owner",
+          }],
+        },
+      }).execute();
+      const refused = await migrator.migrateToLatest();
+      expect(refused.results).toEqual([{
+        migrationName: "008_activity_participants", direction: "Up", status: "Error",
+      }]);
+      await database.deleteFrom("mutation_requests")
+        .where("actor_id", "=", owner.userId).where("operation", "=", "create_trip")
+        .where("idempotency_key", "=", "unresolvable-history").execute();
+      // A successful retry also proves that failed migration DDL was rolled back.
+      const upgraded = await migrator.migrateToLatest();
+      if (upgraded.error) throw upgraded.error;
+
+      const currentTripResponse = await app.request(`/api/trips/${trip.id}`, { headers: { cookie } });
+      expect(currentTripResponse.status).toBe(200);
+      const currentTrip = parseTripResponse(await currentTripResponse.json()).trip;
+      const currentOwner = currentTrip.members.find((member) => member.userId === owner.userId)!;
+      const currentEditor = currentTrip.members.find((member) => member.userId === editor.member.userId)!;
+      expect(currentTrip.members.map((member) => member.email).sort())
+        .toEqual(["migration-editor@example.test", "owner@example.test"]);
+      expect(currentOwner.id).not.toBe(owner.userId);
+      expect(await createTrip(cookie)).toEqual({
+        ...trip, members: [{ ...owner, id: currentOwner.id }],
+      });
+      expect(currentTrip.name).toBe("Current trip name");
+      expect(currentOwner.displayName).toBe("Current owner label");
+      const legacyRead = await readSkeleton(cookie, trip.id);
+      expect(legacyRead.items).toEqual([live]);
+      const selectedResponse = await mutate(cookie, `${itemsPath}/${live.id}`, "post-migration-party", {
+        ...itemInput, expectedVersion: live.version, participantMemberIds: [currentEditor.id],
+      }, "PATCH");
+      expect(selectedResponse.status).toBe(200);
+      const selected = parseItineraryItemResponse(await selectedResponse.json()).item;
+      expect(selected.participants).toEqual([{
+        memberId: currentEditor.id, email: currentEditor.email, displayName: null, removed: false,
+      }]);
+      const beforeReplay = await readSkeleton(cookie, trip.id);
+      for (const reply of replies) {
+        const replay = await mutate(cookie, reply.path, reply.key, reply.payload, reply.method);
+        expect(replay.status).toBe(reply.status);
+        expect(parseItineraryItemResponse(await replay.json()).item).toEqual(reply.item);
+      }
+      const placeReplay = await mutate(cookie, `/api/trips/${trip.id}/places`, "legacy-place", {
+        ...placeInput, expectedTripVersion: placeVersion,
+      });
+      expect(placeReplay.status).toBe(201);
+      expect(parsePlaceResponse(await placeReplay.json()).place).toEqual(place);
+      const deleteReplay = await mutate(cookie, itemPath, "legacy-delete", {
+        expectedVersion: item.version,
+      }, "DELETE");
+      expect(deleteReplay.status).toBe(204);
+      expect(await readSkeleton(cookie, trip.id)).toEqual(beforeReplay);
+      expect(beforeReplay.items).toEqual([selected]);
+
+    });
+
+    it("normalizes later legacy inserts once and replays their original parties after live state changes", async () => {
+      const cookie = await login();
+      const trip = await createTrip(cookie);
+      const owner = trip.members[0]!;
+      const traveler = await joinMember(cookie, trip.id, "cache-traveler@example.test", "cache-traveler");
+      await joinMember(cookie, trip.id, "cache-unselected@example.test", "cache-unselected");
+      await database.updateTable("users").set({ display_name: "Insert-time traveler" })
+        .where("id", "=", traveler.member.userId).execute();
+      await database.updateTable("users").set({ display_name: "Current owner" })
+        .where("id", "=", owner.userId).execute();
+      await database.updateTable("trips").set({ name: "Current trip name" })
+        .where("id", "=", trip.id).execute();
+
+      const tripKey = "create-trip-skeleton-trip-JP";
+      await database.deleteFrom("mutation_requests")
+        .where("actor_id", "=", owner.userId).where("operation", "=", "create_trip")
+        .where("idempotency_key", "=", tripKey).execute();
+      await database.insertInto("mutation_requests").values({
+        actor_id: owner.userId, operation: "create_trip", idempotency_key: tripKey,
+        response: {
+          ...trip,
+          members: trip.members.map(({ id: _id, ...member }) => member),
+        },
+      }).execute();
+      const tripReplay = await createTrip(cookie);
+      expect(tripReplay).toEqual(trip);
+      expect(tripReplay.members[0]!.id).not.toBe(owner.userId);
+
+      const place = await createPlace(cookie, trip.id, "cache-place", {
+        name: "Cache venue", type: "activity", timeZone: "Asia/Tokyo",
+      });
+      const input = {
+        type: "activity", title: "Insert-time activity", participantMemberIds: [traveler.member.id],
+        endpoints: [{
+          role: "start", countryStopId: trip.countryStops[0]!.id, placeId: place.id,
+          localDateTime: "2026-10-21T10:00", timeZone: "Asia/Tokyo",
+        }],
+        details: { durationMinutes: 120, bookedBy: null, confirmationStatus: "unknown" },
+      };
+      const replies: Array<{
+        path: string; key: string; payload: unknown; method: string; status: number;
+        operation: string; item: ItineraryItemDto;
+      }> = [];
+      async function captureLegacy(
+        requestPath: string, key: string, payload: unknown, method: string, status: number,
+      ) {
+        const response = await mutate(cookie, requestPath, key, payload, method);
+        expect(response.status).toBe(status);
+        const item = parseItineraryItemResponse(await response.json()).item;
+        const stored = await database.selectFrom("mutation_requests").select("operation")
+          .where("actor_id", "=", owner.userId).where("idempotency_key", "=", key)
+          .executeTakeFirstOrThrow();
+        await database.deleteFrom("mutation_requests")
+          .where("actor_id", "=", owner.userId).where("operation", "=", stored.operation)
+          .where("idempotency_key", "=", key).execute();
+        const { participants: _participants, ...legacy } = item;
+        await database.insertInto("mutation_requests").values({
+          actor_id: owner.userId, operation: stored.operation, idempotency_key: key, response: legacy,
+        }).execute();
+        replies.push({ path: requestPath, key, payload, method, status, operation: stored.operation, item });
+        return item;
+      }
+      const itemsPath = `/api/trips/${trip.id}/items`;
+      let item = await captureLegacy(itemsPath, "cache-create", {
+        ...input, expectedTripVersion: await currentTripVersion(cookie, trip.id),
+      }, "POST", 201);
+      const itemPath = `${itemsPath}/${item.id}`;
+      const removed = await mutate(
+        cookie, `/api/trips/${trip.id}/members/${traveler.member.userId}`, "cache-remove", {}, "DELETE",
+      );
+      expect(removed.status).toBe(204);
+      item = await captureLegacy(itemPath, "cache-update", {
+        ...input, expectedVersion: item.version,
+      }, "PATCH", 200);
+      item = await captureLegacy(`${itemPath}/constraints`, "cache-constraint-create", {
+        expectedItemVersion: item.version, type: "minimum_buffer", status: "unknown",
+        minimumBufferMinutes: 20,
+      }, "POST", 201);
+      const constraintPath = `${itemPath}/constraints/${item.constraints[0]!.id}`;
+      item = await captureLegacy(constraintPath, "cache-constraint-update", {
+        expectedItemVersion: item.version, expectedVersion: item.constraints[0]!.version,
+        type: "minimum_buffer", status: "confirmed", minimumBufferMinutes: 45,
+      }, "PATCH", 200);
+      item = await captureLegacy(constraintPath, "cache-constraint-delete", {
+        expectedItemVersion: item.version, expectedVersion: item.constraints[0]!.version,
+      }, "DELETE", 200);
+      item = await captureLegacy(`${itemPath}/lock`, "cache-lock", { expectedVersion: item.version }, "POST", 200);
+      item = await captureLegacy(`${itemPath}/unlock`, "cache-unlock", { expectedVersion: item.version }, "POST", 200);
+
+      await database.updateTable("users").set({ display_name: "Current traveler" })
+        .where("id", "=", traveler.member.userId).execute();
+      const currentResponse = await mutate(cookie, itemPath, "cache-current", {
+        ...input, title: "Current activity", participantMemberIds: null, expectedVersion: item.version,
+      }, "PATCH");
+      expect(currentResponse.status).toBe(200);
+      const current = parseItineraryItemResponse(await currentResponse.json()).item;
+      expect(current.participants).toBeNull();
+      const beforeReplay = await readSkeleton(cookie, trip.id);
+      for (const reply of replies) {
+        const replay = await mutate(cookie, reply.path, reply.key, reply.payload, reply.method);
+        expect(replay.status).toBe(reply.status);
+        const historical = parseItineraryItemResponse(await replay.json()).item;
+        expect(historical.id).toBe(current.id);
+        expect(historical.version).toBe(reply.item.version);
+        expect(historical.title).toBe("Insert-time activity");
+        expect(historical.participants).toEqual([{
+          memberId: traveler.member.id, email: "cache-traveler@example.test",
+          displayName: "Insert-time traveler", removed: reply.key !== "cache-create",
+        }]);
+      }
+
+      // A complete historical reply must not be overwritten by current parties.
+      const complete = replies[1]!;
+      await database.insertInto("mutation_requests").values({
+        actor_id: owner.userId, operation: complete.operation,
+        idempotency_key: "cache-complete", response: complete.item,
+      }).execute();
+      const completeReplay = await mutate(
+        cookie, complete.path, "cache-complete", complete.payload, complete.method,
+      );
+      expect(completeReplay.status).toBe(complete.status);
+      expect(parseItineraryItemResponse(await completeReplay.json()).item).toEqual(complete.item);
+      expect(await readSkeleton(cookie, trip.id)).toEqual(beforeReplay);
+    });
   });
 });

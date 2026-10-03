@@ -994,6 +994,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         notes: null,
         sourceUrl: null,
         money: null,
+        participantMemberIds: null,
         endpoints: [{
           role: "start",
           countryStopId: trip.countryStops[0]!.id,

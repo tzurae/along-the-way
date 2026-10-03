@@ -44,6 +44,7 @@ const tripResponse = {
     ],
     members: [
       {
+        id: "77777777-7777-4777-8777-777777777777",
         userId: "33333333-3333-4333-8333-333333333333",
         email: "owner@example.test",
         displayName: null,
@@ -61,6 +62,15 @@ const tripResponse = {
 describe("private trip wire contract", () => {
   it("accepts the complete relational trip response", () => {
     expect(parseTripResponse(tripResponse)).toEqual(tripResponse);
+  });
+
+  it("rejects an account identity without a membership identity", () => {
+    expect(() => parseTripResponse({
+      trip: {
+        ...tripResponse.trip,
+        members: [{ ...tripResponse.trip.members[0], id: undefined }],
+      },
+    })).toThrow();
   });
 
   it("rejects drift in authorization and derived-count fields", () => {

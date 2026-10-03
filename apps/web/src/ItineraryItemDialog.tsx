@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { CountryStopDto } from "@along-the-way/contracts/private-trips";
+import type { CountryStopDto, TripMemberDto } from "@along-the-way/contracts/private-trips";
 import type {
   ConstraintInput,
   ConstraintStatus,
@@ -30,6 +30,7 @@ import { Textarea } from "@/components/ui/textarea";
 
 interface ItineraryItemDialogProps {
   countryStops: CountryStopDto[];
+  members: TripMemberDto[];
   places: PlaceDto[];
   item?: ItineraryItemDto;
   save(input: CreateItineraryItemInput | UpdateItineraryItemInput): Promise<void>;
@@ -235,11 +236,12 @@ function itemDraft(item?: ItineraryItemDto) {
     confirmationStatus: item && (item.type === "reservation" || item.type === "meal" || item.type === "activity")
       ? item.details.confirmationStatus ?? ""
       : "",
+    participantMemberIds: item?.participants?.map((participant) => participant.memberId) ?? [],
     expectedVersion: item?.version ?? null,
   };
 }
 
-export function ItineraryItemDialog({ countryStops, places, item, save }: ItineraryItemDialogProps) {
+export function ItineraryItemDialog({ countryStops, members, places, item, save }: ItineraryItemDialogProps) {
   const [open, setOpen] = useState(false);
   const initialDraft = itemDraft(item);
   const [type, setType] = useState<ItineraryItemType>(initialDraft.type);
@@ -258,6 +260,9 @@ export function ItineraryItemDialog({ countryStops, places, item, save }: Itiner
   const [mode, setMode] = useState(initialDraft.mode);
   const [ticketInfo, setTicketInfo] = useState(initialDraft.ticketInfo);
   const [durationMinutes, setDurationMinutes] = useState(initialDraft.durationMinutes);
+  const [participantMemberIds, setParticipantMemberIds] = useState<string[]>(
+    initialDraft.participantMemberIds,
+  );
   const [confirmationStatus, setConfirmationStatus] = useState(initialDraft.confirmationStatus);
   const [expectedVersion, setExpectedVersion] = useState<number | null>(
     initialDraft.expectedVersion,
@@ -287,6 +292,7 @@ export function ItineraryItemDialog({ countryStops, places, item, save }: Itiner
     setTicketInfo(latest.ticketInfo);
     setDurationMinutes(latest.durationMinutes);
     setConfirmationStatus(latest.confirmationStatus);
+    setParticipantMemberIds(latest.participantMemberIds);
     setExpectedVersion(latest.expectedVersion);
     setConstraintType("");
     setConstraintStatus("unknown");
@@ -327,6 +333,18 @@ export function ItineraryItemDialog({ countryStops, places, item, save }: Itiner
         return { durationMinutes: Number(durationMinutes) };
     }
   }, [bookedBy, carrier, confirmationCode, confirmationNotes, confirmationStatus, durationMinutes, mode, serviceNumber, ticketInfo, type]);
+  const participantChoices = useMemo(() => {
+    const activeIds = new Set(members.map((member) => member.id));
+    return [
+      ...members.map((member) => ({
+        memberId: member.id,
+        displayName: member.displayName,
+        email: member.email,
+        removed: false,
+      })),
+      ...(item?.participants?.filter((participant) => !activeIds.has(participant.memberId)) ?? []),
+    ];
+  }, [item?.participants, members]);
 
   async function submit() {
     const constraints: ConstraintInput[] = constraintType
@@ -337,6 +355,7 @@ export function ItineraryItemDialog({ countryStops, places, item, save }: Itiner
         }]
       : [];
     const base: CreateItineraryItemInput = {
+      participantMemberIds: participantMemberIds.length > 0 ? participantMemberIds : null,
       type,
       title,
       notes: notes || null,
@@ -410,6 +429,40 @@ export function ItineraryItemDialog({ countryStops, places, item, save }: Itiner
               />
             </Field>
           </div>
+          <FieldSet className="grid max-h-64 auto-rows-min gap-2 overflow-y-auto rounded-xl border p-4">
+            <FieldLegend>Participants</FieldLegend>
+            <FieldDescription>
+              Select only confirmed participants. Leave everyone unchecked to keep participation pending.
+            </FieldDescription>
+            {participantChoices.map((participant) => {
+              const label = participant.displayName ?? participant.email;
+              return (
+                <label
+                  key={participant.memberId}
+                  className="flex min-h-11 items-start gap-3 rounded-lg border border-ink/10 p-3"
+                >
+                  <input
+                    className="mt-1"
+                    type="checkbox"
+                    checked={participantMemberIds.includes(participant.memberId)}
+                    onChange={(event) => setParticipantMemberIds((current) =>
+                      event.target.checked
+                        ? [...current, participant.memberId]
+                        : current.filter((id) => id !== participant.memberId)
+                    )}
+                  />
+                  <span className="min-w-0 [overflow-wrap:anywhere]">
+                    <strong className="block">{label}</strong>
+                    <small className="text-muted-foreground">
+                      {participant.displayName ? `${participant.email} · ` : ""}
+                      {participant.removed ? "No longer a trip member" : "Trip member"}
+                    </small>
+                  </span>
+                </label>
+              );
+            })}
+          </FieldSet>
+
 
           <EndpointEditor role="start" draft={start} countryStops={countryStops} places={places} onChange={setStart} />
           {hasEndEndpoint(type) ? (

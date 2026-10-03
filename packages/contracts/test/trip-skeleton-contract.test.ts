@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseTripSkeletonResponse } from "../src/trip-skeleton";
+import { parseItineraryItemResponse, parseTripSkeletonResponse } from "../src/trip-skeleton";
 
 describe("trip skeleton contract", () => {
   it("parses a trip-scoped place whose location metadata is incomplete", () => {
@@ -58,6 +58,7 @@ describe("trip skeleton contract", () => {
       lockedBy: null,
       version: 1,
       endpoints: [endpoint],
+      participants: null,
       constraints: [
         {
           id: "44444444-4444-4444-8444-444444444444",
@@ -170,6 +171,51 @@ describe("trip skeleton contract", () => {
     );
   });
 
+  it("rejects missing, empty, duplicate, or incomplete participant facts rather than inferring a party", () => {
+    const participant = {
+      memberId: "88888888-8888-4888-8888-888888888888",
+      displayName: null,
+      email: "removed@example.test",
+      removed: true,
+    };
+    for (const participants of [
+      undefined,
+      [],
+      [participant, participant],
+      [{ ...participant, memberId: undefined }],
+      [{ ...participant, displayName: undefined }],
+      [{ ...participant, email: null }],
+      [{ ...participant, removed: "true" }],
+    ]) {
+      expect(() => parseItineraryItemResponse({
+        item: {
+          id: "55555555-5555-4555-8555-555555555555",
+          tripId: "22222222-2222-4222-8222-222222222222",
+          type: "activity",
+          title: "Historical activity",
+          notes: null,
+          sourceUrl: null,
+          money: null,
+          lockedAt: null,
+          lockedBy: null,
+          version: 1,
+          participants,
+          endpoints: [{
+            role: "start",
+            countryStopId: "33333333-3333-4333-8333-333333333333",
+            placeId: "11111111-1111-4111-8111-111111111111",
+            localDateTime: "2026-10-21T10:00",
+            timeZone: "Asia/Tokyo",
+            utcOffset: "+09:00",
+            instant: "2026-10-21T01:00:00.000Z",
+          }],
+          constraints: [],
+          details: { durationMinutes: 120, bookedBy: null, confirmationStatus: "unknown" },
+        },
+      })).toThrow();
+    }
+  });
+
   it("rejects malformed type-specific item data", () => {
     expect(() =>
       parseTripSkeletonResponse({
@@ -189,6 +235,7 @@ describe("trip skeleton contract", () => {
               lockedBy: null,
               version: 1,
               endpoints: [],
+              participants: null,
               constraints: [],
               details: {
                 carrier: "Japan Airlines",
