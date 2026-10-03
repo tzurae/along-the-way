@@ -40,6 +40,16 @@ function shouldStartFreshRequest(error: unknown) {
   return error.code === "model_unavailable" || error.code === "provider_unavailable";
 }
 
+// Where an outcome is reported: next to the control that caused it, or at the top.
+type NoticeArea = "general" | "find" | "again" | "feedback";
+
+function missingServices(workspace: DiscoveryWorkspaceDto, needsPlaces: boolean) {
+  return [
+    ...(workspace.modelAvailable ? [] : ["OpenAI API key and model"]),
+    ...(needsPlaces && !workspace.placeProviderAvailable ? ["Google Maps API key"] : []),
+  ];
+}
+
 const statusLabels: Record<CandidateProposalDto["status"], string> = {
   pending: "Ready for review",
   accepting: "Adding to wishlist…",
@@ -53,8 +63,10 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
   const [feedbackDraft, setFeedbackDraft] = useState("");
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState<string | null>(null);
-  const [message, setMessage] = useState("");
+  const [notice, setNotice] = useState<{ area: NoticeArea; text: string } | null>(null);
   const retryKeys = useRef<RetryKeys>(new Map());
+  const researchLabel = (idle: string) =>
+    pending === "save-brief" ? "Saving…" : pending === "generate" ? "Researching…" : idle;
 
   const apply = useCallback((value: unknown) => {
     const next = parseDiscoveryWorkspaceResponse(value).discovery;
@@ -67,9 +79,9 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
     setLoading(true);
     try {
       apply(await request(`/api/trips/${trip.id}/discovery`));
-      setMessage("");
+      setNotice(null);
     } catch (error) {
-      setMessage(errorMessage(error));
+      setNotice({ area: "general", text: errorMessage(error) });
     } finally {
       setLoading(false);
     }
@@ -79,10 +91,16 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
     void load();
   }, [load]);
 
-  async function mutate(operation: string, path: string, payload: unknown, after?: () => void) {
+  async function mutate(
+    operation: string,
+    path: string,
+    payload: unknown,
+    area: NoticeArea,
+    after?: () => void,
+  ) {
     if (pending) return;
     setPending(operation);
-    setMessage("");
+    setNotice(null);
     try {
       const next = apply(await request(path, {
         method: operation === "save-brief" ? "PUT" : "POST",
@@ -97,27 +115,36 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
       return next;
     } catch (error) {
       if (shouldStartFreshRequest(error)) clearRetryKey(retryKeys.current, operation);
-      setMessage(errorMessage(error));
+      setNotice({ area, text: errorMessage(error) });
     } finally {
       setPending(null);
     }
   }
 
-  async function saveBrief() {
-    await mutate("save-brief", `/api/trips/${trip.id}/discovery/brief`, {
-      originalText: briefDraft,
-      expectedVersion: workspace?.brief?.version ?? null,
-    });
-  }
-
-  async function generate() {
-    if (!workspace?.brief) {
-      setMessage("Save the trip brief before asking AI to research candidates.");
+  // One action: explain a missing server configuration without sending anything,
+  // otherwise store the current brief text when it changed, then research it.
+  async function research(area: "find" | "again") {
+    if (pending || !workspace) return;
+    const missing = missingServices(workspace, true);
+    if (missing.length > 0) {
+      setNotice({
+        area,
+        text: `AI research can't run: this server has no ${missing.join(" and no ")} configured. Your trip description is kept.`,
+      });
       return;
     }
+    let brief = workspace.brief;
+    if (!brief || brief.originalText !== briefDraft) {
+      const saved = await mutate("save-brief", `/api/trips/${trip.id}/discovery/brief`, {
+        originalText: briefDraft,
+        expectedVersion: brief?.version ?? null,
+      }, area);
+      if (!saved?.brief) return;
+      brief = saved.brief;
+    }
     await mutate("generate", `/api/trips/${trip.id}/discovery/generate`, {
-      expectedBriefVersion: workspace.brief.version,
-    });
+      expectedBriefVersion: brief.version,
+    }, area);
   }
 
   async function decideProposal(proposal: CandidateProposalDto, decision: "accept" | "reject") {
@@ -125,17 +152,26 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
       `${decision}:${proposal.id}`,
       `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/${decision}`,
       { expectedVersion: proposal.version },
+      "general",
       decision === "accept" ? onPlacesChanged : undefined,
     );
   }
 
   async function createFeedback() {
     const text = feedbackDraft.trim();
-    if (!text) return;
+    if (!text || pending || !workspace) return;
+    const missing = missingServices(workspace, false);
+    if (missing.length > 0) {
+      setNotice({
+        area: "feedback",
+        text: `Feedback can't be interpreted: this server has no ${missing.join(" and no ")} configured. Your feedback is kept.`,
+      });
+      return;
+    }
     await mutate("feedback", `/api/trips/${trip.id}/discovery/feedback`, {
       originalText: text,
       proposalId: null,
-    }, () => setFeedbackDraft(""));
+    }, "feedback", () => setFeedbackDraft(""));
   }
 
   async function decideFeedback(feedbackId: string, version: number, decision: "confirm" | "reject") {
@@ -143,6 +179,7 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
       `feedback-${decision}:${feedbackId}`,
       `/api/trips/${trip.id}/discovery/feedback/${feedbackId}/decision`,
       { expectedVersion: version, decision },
+      "general",
     );
   }
 
@@ -154,10 +191,11 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
           <h2 id="ai-discovery-heading" className="font-display text-3xl text-ink-strong sm:text-4xl">Let AI find and explain the options</h2>
           <p className="mt-2 max-w-3xl text-muted-foreground">Describe the trip once. AI builds a bounded search plan, checks Google Places and current web sources, then gives you a shortlist to accept or reject.</p>
         </div>
-        {workspace?.latestRun ? <button className="flex min-h-11 items-center gap-2 rounded-xl border px-4 font-bold" disabled={pending !== null || !workspace.modelAvailable || !workspace.placeProviderAvailable} onClick={() => void generate()}><RefreshCw aria-hidden="true" className="size-4" />Research again</button> : null}
+        {workspace?.latestRun ? <button className="flex min-h-11 items-center gap-2 rounded-xl border px-4 font-bold" disabled={pending !== null} onClick={() => void research("again")}><RefreshCw aria-hidden="true" className="size-4" />{researchLabel("Research again")}</button> : null}
       </div>
 
-      {message ? <p className="mt-4 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{message}</p> : null}
+      {notice?.area === "again" ? <p className="mt-4 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
+      {notice?.area === "general" ? <p className="mt-4 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
       {loading ? <p className="mt-6" role="status">Loading AI discovery…</p> : null}
 
       {!loading ? (
@@ -172,9 +210,9 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
               />
             </label>
             <div className="mt-3 flex flex-wrap gap-2">
-              <button className="min-h-11 rounded-xl border px-4 font-bold" disabled={pending !== null || !briefDraft.trim()} onClick={() => void saveBrief()}>{pending === "save-brief" ? "Saving…" : "Save trip brief"}</button>
-              <button className="flex min-h-11 items-center gap-2 rounded-xl bg-accent px-4 font-bold text-ink-strong" disabled={pending !== null || !workspace?.brief || !workspace.modelAvailable || !workspace.placeProviderAvailable} onClick={() => void generate()}><Search aria-hidden="true" className="size-4" />{pending === "generate" ? "Researching…" : "Find candidates"}</button>
+              <button className="flex min-h-11 items-center gap-2 rounded-xl bg-accent px-4 font-bold text-ink-strong" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research("find")}><Search aria-hidden="true" className="size-4" />{researchLabel("Find candidates")}</button>
             </div>
+            {notice?.area === "find" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
             {!workspace?.modelAvailable ? <p className="mt-3 text-sm text-muted-foreground">AI discovery is unavailable until the server has an OpenAI API key and model. Existing trip data remains available.</p> : null}
             {!workspace?.placeProviderAvailable ? <p className="mt-2 text-sm text-muted-foreground">Google Places is unavailable. Existing proposals remain readable, but a new grounded search cannot run.</p> : null}
           </section>
@@ -220,7 +258,8 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
           <section className="rounded-panel bg-surface-subtle p-4" aria-label="Discovery feedback">
             <h3 className="font-display text-2xl">Refine it in your own words</h3>
             <label className="mt-3 grid gap-2 font-bold">Feedback<textarea className="min-h-24 rounded-xl border bg-surface p-3 font-normal" value={feedbackDraft} onChange={(event) => setFeedbackDraft(event.target.value)} placeholder="Too many temples. Keep one garden day and add more food markets." /></label>
-            <button className="mt-3 min-h-11 rounded-xl border px-4 font-bold" disabled={pending !== null || !feedbackDraft.trim() || !workspace?.modelAvailable} onClick={() => void createFeedback()}>{pending === "feedback" ? "Interpreting…" : "Interpret feedback"}</button>
+            <button className="mt-3 min-h-11 rounded-xl border px-4 font-bold" disabled={pending !== null || !feedbackDraft.trim()} onClick={() => void createFeedback()}>{pending === "feedback" ? "Interpreting…" : "Interpret feedback"}</button>
+            {notice?.area === "feedback" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
             <div className="mt-4 grid gap-3">{workspace?.feedback.map((feedback) => <article key={feedback.id} className="rounded-xl bg-surface p-3"><p className="whitespace-pre-wrap">“{feedback.originalText}”</p><p className="mt-2"><strong>AI interpretation:</strong> {feedback.interpretation.summary}</p><p className="mt-1 text-sm text-muted-foreground">Interests: {feedback.interpretation.interests.join(", ") || "none"} · Avoid: {feedback.interpretation.exclusions.join(", ") || "none"} · Pace: {feedback.interpretation.pace ?? "unchanged"} · Budget: {feedback.interpretation.budget ?? "unchanged"}</p>{feedback.status === "pending" ? <div className="mt-3 flex gap-2"><button className="min-h-10 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null} onClick={() => void decideFeedback(feedback.id, feedback.version, "confirm")}>Confirm interpretation</button><button className="min-h-10 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideFeedback(feedback.id, feedback.version, "reject")}>Reject interpretation</button></div> : <span className="mt-2 inline-block text-sm font-bold">{feedback.status}</span>}</article>)}</div>
           </section>
         </div>

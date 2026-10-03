@@ -72,12 +72,14 @@ describe("OpenAI Responses discovery model", () => {
         exclusions: ["long walks"],
         dateRange,
       },
+      outputLanguage: "zh-tw",
     }));
 
     const result = await model(fetch).plan({ trip: facts, brief: "Food and gardens", confirmedFeedback: [] });
 
     expect(result.modelId).toBe("gpt-test-2026-01-01");
     expect(result.searchPlan.queries).toEqual(["Kyoto food markets"]);
+    expect(result.outputLanguage).toBe("zh-TW");
     const [url, init] = fetch.mock.calls[0] ?? [];
     expect(url).toBe("https://openai.example.test/v1/responses");
     expect(init?.headers).toMatchObject({ Authorization: "Bearer test-key" });
@@ -85,6 +87,21 @@ describe("OpenAI Responses discovery model", () => {
     expect(body.store).toBe(false);
     expect(body.text.format).toMatchObject({ type: "json_schema", name: "trip_discovery_plan", strict: true });
     expect(body.tools).toBeUndefined();
+  });
+
+  it("rejects a plan whose output language is not a language tag", async () => {
+    const plan = (outputLanguage: unknown) => model(vi.fn(async () => completed({
+      structuredBrief: { interests: [], pace: null, budget: null, exclusions: [], areas: [] },
+      unresolvedQuestions: [],
+      searchPlan: { queries: ["Kyoto temples"], areas: [], categories: [], exclusions: [], dateRange },
+      outputLanguage,
+    }))).plan({ trip: facts, brief: "Temples", confirmedFeedback: [] });
+
+    for (const invalid of ["Traditional Chinese", "", null]) {
+      const failure = plan(invalid);
+      await expect(failure).rejects.toBeInstanceOf(DiscoveryModelResponseError);
+      await expect(failure).rejects.toThrow(/output language/);
+    }
   });
 
   it("accepts only candidates and citations returned by the grounded search", async () => {
@@ -108,6 +125,7 @@ describe("OpenAI Responses discovery model", () => {
       candidates: [candidate],
       rejectedProviderPlaceIds: [],
       confirmedFeedback: [],
+      outputLanguage: "en",
     });
 
     expect(result.candidates[0]?.sourceUrls).toEqual([source.url]);
@@ -117,27 +135,38 @@ describe("OpenAI Responses discovery model", () => {
     expect(body.include).toEqual(["web_search_call.action.sources"]);
   });
 
-  it("rejects a citation that the web-search tool did not return", async () => {
+  it("drops citations web search did not return but keeps the recommendation", async () => {
+    const source = { url: "https://eikando.or.jp/lp/2026/index.html", title: "Eikando autumn" };
     const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => completed({
       candidates: [{
         providerPlaceId: candidate.providerPlaceId,
-        recommendation: "Invented support",
+        recommendation: "Autumn temple visit",
         matchedNeeds: [],
         tradeoffs: [],
         unknowns: [],
         confidence: "high",
-        sourceUrls: ["https://invented.example.test/fact"],
+        sourceUrls: [
+          "https://www.eikando.or.jp/lp/2026/index.html",
+          "https://invented.example.test/fact",
+          candidate.sourceUrl,
+          source.url,
+        ],
       }],
-    }));
+    }, [{ type: "web_search_call", action: { sources: [source] } }]));
 
-    await expect(model(fetch).synthesize({
+    const result = await model(fetch).synthesize({
       trip: facts,
       brief: { interests: [], pace: null, budget: null, exclusions: [], areas: [] },
-      searchPlan: { queries: ["Kyoto food markets"], areas: [], categories: [], exclusions: [], dateRange },
+      searchPlan: { queries: ["Kyoto temples"], areas: [], categories: [], exclusions: [], dateRange },
       candidates: [candidate],
       rejectedProviderPlaceIds: [],
       confirmedFeedback: [],
-    })).rejects.toBeInstanceOf(DiscoveryModelResponseError);
+      outputLanguage: "zh-TW",
+    });
+
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]?.recommendation).toBe("Autumn temple visit");
+    expect(result.candidates[0]?.sourceUrls).toEqual([source.url]);
   });
 
   it("fails closed before making a request when no server credential is configured", async () => {

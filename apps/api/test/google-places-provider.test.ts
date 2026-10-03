@@ -52,6 +52,25 @@ describe("Google Places provider adapter", () => {
     ]);
   });
 
+  it("asks Google for names and addresses in the requested language only when given", async () => {
+    const bodies: unknown[] = [];
+    const provider = new GooglePlacesProvider({
+      apiKey: "server-only-key",
+      fetch: async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return Response.json({ places: [] });
+      },
+    });
+
+    await provider.search("東福寺", { languageCode: "zh-TW" });
+    await provider.search("Tofuku-ji");
+
+    expect(bodies).toEqual([
+      { textQuery: "東福寺", maxResultCount: 8, languageCode: "zh-TW" },
+      { textQuery: "Tofuku-ji", maxResultCount: 8 },
+    ]);
+  });
+
   it("does not call the network without a server credential", async () => {
     let called = false;
     const provider = new GooglePlacesProvider({

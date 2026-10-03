@@ -9,10 +9,15 @@ export class ProviderUnavailableError extends Error {
   }
 }
 
+export interface PlaceSearchOptions {
+  /** BCP-47 language Google uses for place names and addresses. */
+  languageCode?: string;
+}
+
 export interface PlaceProvider {
   readonly attribution: string;
   readonly available?: boolean;
-  search(query: string): Promise<ProviderPlaceCandidateDto[]>;
+  search(query: string, options?: PlaceSearchOptions): Promise<ProviderPlaceCandidateDto[]>;
   getPlace(providerPlaceId: string): Promise<ProviderPlaceCandidateDto>;
 }
 
@@ -96,7 +101,7 @@ export class GooglePlacesProvider implements PlaceProvider {
     this.timeoutMs = options.timeoutMs ?? 3_000;
   }
 
-  async search(rawQuery: string) {
+  async search(rawQuery: string, options: PlaceSearchOptions = {}) {
     const query = rawQuery.trim();
     if (!query || query.length > 300) {
       throw new TypeError("Search query must contain 1 to 300 characters");
@@ -105,7 +110,11 @@ export class GooglePlacesProvider implements PlaceProvider {
       "https://places.googleapis.com/v1/places:searchText",
       {
         method: "POST",
-        body: JSON.stringify({ textQuery: query, maxResultCount: 8 }),
+        body: JSON.stringify({
+          textQuery: query,
+          maxResultCount: 8,
+          ...(options.languageCode ? { languageCode: options.languageCode } : {}),
+        }),
         headers: {
           "Content-Type": "application/json",
           "X-Goog-FieldMask": SEARCH_FIELD_MASK,

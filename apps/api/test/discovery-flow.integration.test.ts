@@ -121,6 +121,7 @@ class ControlledDiscoveryModel implements DiscoveryModel {
         exclusions: ["long walks"],
         dateRange: { start: "2026-10-21", end: "2026-10-27" },
       },
+      outputLanguage: "en",
     };
   }
 

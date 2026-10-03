@@ -30,6 +30,8 @@ export interface DiscoveryPlanResult {
   structuredBrief: StructuredDiscoveryBrief;
   unresolvedQuestions: string[];
   searchPlan: DiscoverySearchPlan;
+  /** Canonical BCP-47 tag of the brief's language; every AI-written field and place name uses it. */
+  outputLanguage: string;
 }
 
 export interface DiscoveryWebSource {
@@ -77,6 +79,7 @@ export interface DiscoveryModel {
     candidates: ProviderPlaceCandidateDto[];
     confirmedFeedback: string[];
     rejectedProviderPlaceIds: string[];
+    outputLanguage: string;
   }): Promise<DiscoverySynthesisResult>;
   interpretFeedback(input: {
     text: string;

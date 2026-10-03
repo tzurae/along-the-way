@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page, type Route } from "@playwright/test";
 import { isRecord } from "@along-the-way/contracts/private-trips";
 
 const execFileAsync = promisify(execFile);
@@ -117,19 +117,19 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   await createTrip(page, tripName);
   await expect(page.getByRole("heading", { name: "Let AI find and explain the options" })).toBeVisible();
   await expect(page.getByText("AI discovery is unavailable until the server has an OpenAI API key and model.", { exact: false })).toBeVisible();
-  await page.getByLabel("What should AI plan around?").fill("Food markets and gardens at an unhurried pace; avoid long walking days.");
-  await page.getByRole("button", { name: "Save trip brief" }).click();
-  await expect(page.getByLabel("What should AI plan around?")).toHaveValue(/Food markets and gardens/);
+  const briefText = "Food markets and gardens at an unhurried pace; avoid long walking days.";
 
   const runId = "00000000-0000-4000-8000-000000003601";
   const googleEvidenceId = "00000000-0000-4000-8000-000000003602";
   const webEvidenceId = "00000000-0000-4000-8000-000000003603";
   const proposalId = "00000000-0000-4000-8000-000000003604";
   await executeDatabase(`
-    update discovery_briefs set
-      structured_brief = '{"interests":["food markets","gardens"],"pace":"unhurried","budget":null,"exclusions":["long walking days"],"areas":["Kyoto"]}'::jsonb,
-      unresolved_questions = '[]'::jsonb
-    where trip_id = (select id from trips where name = '${tripName}');
+    insert into discovery_briefs (trip_id, original_text, structured_brief, unresolved_questions, updated_by)
+      select trip.id, '${briefText}',
+        '{"interests":["food markets","gardens"],"pace":"unhurried","budget":null,"exclusions":["long walking days"],"areas":["Kyoto"]}'::jsonb,
+        '[]'::jsonb, member.user_id
+      from trips trip join trip_members member on member.trip_id = trip.id and member.role = 'owner'
+      where trip.name = '${tripName}';
     insert into discovery_runs (id, trip_id, brief_version, policy_version, model_id, status, search_plan, error_code, created_by, completed_at)
       select '${runId}', trip.id, 1, 'discovery-v1', 'gpt-test', 'completed',
         '{"queries":["Kyoto food markets"],"areas":["Kyoto"],"categories":["market"],"exclusions":["long walks"],"dateRange":{"start":"2026-11-03","end":"2026-11-09"}}'::jsonb,
@@ -165,4 +165,133 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   const wishlist = page.getByRole("region", { name: "Shared place wishlist" });
   await expect(wishlist.getByRole("heading", { name: "Nishiki Market" })).toBeVisible();
   await expect(wishlist.getByText("AI proposal", { exact: false })).toBeVisible();
+});
+
+test("research and feedback explain missing AI configuration without sending anything", async ({ page, request }) => {
+  test.setTimeout(120_000);
+  await request.delete(`${MAILPIT_API_URL}/api/v1/messages`);
+  const suffix = Date.now();
+  const tripName = `Discovery browser unavailable ${suffix}`;
+  const email = `discovery-unavailable-${suffix}@example.test`;
+  await executeDatabase(`insert into users (email, display_name, status) values ('${email}', 'Discovery owner', 'active') on conflict (email) do nothing;`);
+  await signIn(page, request, email);
+  await createTrip(page, tripName);
+  await expect(page.getByText("AI discovery is unavailable until the server has an OpenAI API key and model.", { exact: false })).toBeVisible();
+
+  const discoveryWrites: string[] = [];
+  page.on("request", (sent) => {
+    if (sent.url().includes("/discovery") && sent.method() !== "GET") discoveryWrites.push(`${sent.method()} ${sent.url()}`);
+  });
+
+  const brief = page.getByRole("region", { name: "Trip discovery brief" });
+  const briefText = "Gardens and food markets, unhurried pace.";
+  await brief.getByLabel("What should AI plan around?").fill(briefText);
+  await expect(brief.getByRole("button", { name: "Save trip brief" })).toHaveCount(0);
+  await brief.getByRole("button", { name: "Find candidates" }).click();
+  const researchAlert = brief.getByRole("alert");
+  await expect(researchAlert).toContainText("AI research can't run");
+  await expect(researchAlert).toContainText("OpenAI API key and model");
+  await expect(researchAlert).toContainText("Google Maps API key");
+  await expect(brief.getByLabel("What should AI plan around?")).toHaveValue(briefText);
+
+  const feedback = page.getByRole("region", { name: "Discovery feedback" });
+  await feedback.getByLabel("Feedback").fill("Fewer temples, more markets.");
+  await feedback.getByRole("button", { name: "Interpret feedback" }).click();
+  await expect(feedback.getByRole("alert")).toContainText("Feedback can't be interpreted");
+  await expect(feedback.getByRole("alert")).toContainText("OpenAI API key and model");
+  await expect(feedback.getByLabel("Feedback")).toHaveValue("Fewer temples, more markets.");
+
+  expect(discoveryWrites).toEqual([]);
+  await page.reload();
+  await page.getByRole("button", { name: new RegExp(tripName) }).click();
+  await expect(page.getByLabel("What should AI plan around?")).toHaveValue("");
+});
+
+test("one Find candidates action saves changed text, researches the saved version, and reports failures beside its button", async ({ page, request }) => {
+  test.setTimeout(120_000);
+  await request.delete(`${MAILPIT_API_URL}/api/v1/messages`);
+  const suffix = Date.now();
+  const tripName = `Discovery browser sequence ${suffix}`;
+  const email = `discovery-sequence-${suffix}@example.test`;
+  await executeDatabase(`insert into users (email, display_name, status) values ('${email}', 'Discovery owner', 'active') on conflict (email) do nothing;`);
+  await signIn(page, request, email);
+  await createTrip(page, tripName);
+
+  // The test server has no AI credentials; report services as configured so the
+  // client sequencing is exercised, while the real server still persists the brief.
+  let available = { modelAvailable: true, placeProviderAvailable: true };
+  const withServices = async (route: Route) => {
+    const response = await route.fetch();
+    const body: unknown = await response.json();
+    if (isRecord(body) && isRecord(body.discovery)) Object.assign(body.discovery, available);
+    await route.fulfill({ response, json: body });
+  };
+  await page.route(/\/api\/trips\/[^/]+\/discovery$/, withServices);
+  let failSave = true;
+  await page.route(/\/discovery\/brief$/, async (route) => {
+    if (!failSave) return withServices(route);
+    failSave = false;
+    await route.fulfill({ status: 409, json: { error: { code: "conflict", message: "Version conflict; current version is 1", currentVersion: 1 } } });
+  });
+  const generateBodies: unknown[] = [];
+  await page.route(/\/discovery\/generate$/, async (route) => {
+    generateBodies.push(route.request().postDataJSON());
+    await route.fulfill({ status: 503, json: { error: { code: "model_unavailable", message: "AI discovery is temporarily unavailable" } } });
+  });
+  const writes: string[] = [];
+  page.on("request", (sent) => {
+    if (sent.url().includes("/discovery/") && sent.method() !== "GET") writes.push(new URL(sent.url()).pathname.split("/").at(-1)!);
+  });
+  await page.reload();
+  await page.getByRole("button", { name: new RegExp(tripName) }).click();
+
+  const brief = page.getByRole("region", { name: "Trip discovery brief" });
+  const text = brief.getByLabel("What should AI plan around?");
+  const find = brief.getByRole("button", { name: "Find candidates" });
+  await text.fill("Food markets and gardens.");
+
+  // A failed save stops before research and keeps the text.
+  await find.click();
+  await expect(brief.getByRole("alert")).toContainText("Version conflict");
+  await expect(text).toHaveValue("Food markets and gardens.");
+  expect(writes).toEqual(["brief"]);
+
+  // A successful save is followed by research of the saved version; its failure stays beside the button.
+  await find.click();
+  await expect(brief.getByRole("alert")).toContainText("temporarily unavailable");
+  await expect(text).toHaveValue("Food markets and gardens.");
+  expect(writes).toEqual(["brief", "brief", "generate"]);
+  expect(generateBodies).toEqual([{ expectedBriefVersion: 1 }]);
+
+  // Unchanged saved text is researched without saving again.
+  await find.click();
+  await expect(brief.getByRole("alert")).toContainText("temporarily unavailable");
+  expect(writes).toEqual(["brief", "brief", "generate", "generate"]);
+
+  // Only the missing service is named, and nothing is sent.
+  available = { modelAvailable: true, placeProviderAvailable: false };
+  await page.reload();
+  await page.getByRole("button", { name: new RegExp(tripName) }).click();
+  await brief.getByRole("button", { name: "Find candidates" }).click();
+  await expect(brief.getByRole("alert")).toContainText("no Google Maps API key configured");
+  await expect(brief.getByRole("alert")).not.toContainText("OpenAI");
+  expect(writes).toHaveLength(4);
+
+  // Research again explains missing configuration beside itself without sending anything.
+  await executeDatabase(`
+    insert into discovery_runs (trip_id, brief_version, policy_version, model_id, status, search_plan, error_code, created_by, completed_at)
+      select trip.id, 1, 'discovery-v1', 'gpt-test', 'completed',
+        '{"queries":["Kyoto markets"],"areas":["Kyoto"],"categories":["market"],"exclusions":[],"dateRange":{"start":"2026-11-03","end":"2026-11-09"}}'::jsonb,
+        null, member.user_id, now()
+      from trips trip join trip_members member on member.trip_id = trip.id and member.role = 'owner'
+      where trip.name = '${tripName}';
+  `);
+  available = { modelAvailable: false, placeProviderAvailable: true };
+  await page.reload();
+  await page.getByRole("button", { name: new RegExp(tripName) }).click();
+  const research = page.getByRole("region", { name: "Let AI find and explain the options" });
+  await research.getByRole("button", { name: "Research again" }).click();
+  await expect(research.getByRole("alert").first()).toContainText("no OpenAI API key and model configured");
+  await expect(brief.getByRole("alert")).toHaveCount(0);
+  expect(writes).toHaveLength(4);
 });
