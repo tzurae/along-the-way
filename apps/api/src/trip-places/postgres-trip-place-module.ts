@@ -621,9 +621,10 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     if (!Array.isArray(input.assignments) || input.assignments.length === 0 || input.assignments.length > 100) {
       throw new AppError("validation_error", "assignments must contain between 1 and 100 places");
     }
+    // PostgreSQL returns lowercase UUIDs; normalize so request spellings compare as identities.
     const assignments = input.assignments.map((assignment) => ({
-      tripPlaceId: uuid(assignment.tripPlaceId, "tripPlaceId"),
-      tripDayId: assignment.tripDayId === null ? null : uuid(assignment.tripDayId, "tripDayId"),
+      tripPlaceId: uuid(assignment.tripPlaceId, "tripPlaceId").toLowerCase(),
+      tripDayId: assignment.tripDayId === null ? null : uuid(assignment.tripDayId, "tripDayId").toLowerCase(),
       expectedVersion: assignment.expectedVersion,
     }));
     if (new Set(assignments.map((assignment) => assignment.tripPlaceId)).size !== assignments.length) {
@@ -684,6 +685,23 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
           throw new AppError(
             "conflict",
             "A place already scheduled as a timed itinerary item cannot also be assigned as an unscheduled day place",
+            409,
+          );
+        }
+      }
+      // A place planned for one day must be removed there before another day can take it.
+      const requestedDay = new Map(assignments.flatMap((assignment) =>
+        assignment.tripDayId === null ? [] : [[assignment.tripPlaceId, assignment.tripDayId] as const]
+      ));
+      if (requestedDay.size > 0) {
+        const current = await transaction.selectFrom("trip_place_day_assignments")
+          .select(["trip_place_id", "trip_day_id"])
+          .where("trip_place_id", "in", [...requestedDay.keys()])
+          .execute();
+        if (current.some((row) => requestedDay.get(row.trip_place_id) !== row.trip_day_id)) {
+          throw new AppError(
+            "conflict",
+            "Remove the place from its current day before adding it to another day",
             409,
           );
         }

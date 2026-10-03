@@ -123,22 +123,17 @@ function formatMinorAmount(amountMinor: number, currency: string) {
 }
 
 function DayAssignmentPicker({
-  dayId,
   places,
-  dayLabelById,
   busy,
   assign,
 }: {
-  dayId: string;
   places: TripPlaceDto[];
-  dayLabelById: Map<string, string>;
   busy: boolean;
   assign(places: TripPlaceDto[]): Promise<void>;
 }) {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const selectable = places.filter((place) =>
-    !place.scheduled && place.assignedDayId !== dayId
-  );
+  // A place planned for one day must be removed there before another day can take it.
+  const selectable = places.filter((place) => !place.scheduled && place.assignedDayId === null);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -155,7 +150,7 @@ function DayAssignmentPicker({
         <p className="mt-3 text-sm text-muted-foreground">Every available wishlist place is already planned or scheduled.</p>
       ) : (
         <form className="mt-3 grid gap-3" onSubmit={(event) => void submit(event)}>
-          <fieldset className="grid max-h-64 gap-2 overflow-y-auto">
+          <fieldset className="grid max-h-64 auto-rows-min gap-2 overflow-y-auto">
             <legend className="sr-only">Wishlist places to add</legend>
             {selectable.map((place) => (
               <label key={place.id} className="flex min-h-11 items-start gap-3 rounded-lg border border-ink/10 p-3">
@@ -169,13 +164,9 @@ function DayAssignmentPicker({
                       : current.filter((id) => id !== place.id)
                   )}
                 />
-                <span>
+                <span className="min-w-0 [overflow-wrap:anywhere]">
                   <strong className="block">{place.name}</strong>
-                  <small className="text-muted-foreground">
-                    {place.assignedDayId
-                      ? `Currently planned for ${dayLabelById.get(place.assignedDayId) ?? "another day"}`
-                      : place.address ?? "Address unknown"}
-                  </small>
+                  <small className="text-muted-foreground">{place.address ?? "Address unknown"}</small>
                 </span>
               </label>
             ))}
@@ -392,17 +383,6 @@ export function TripSkeletonWorkspace({
     places: TripPlaceDto[],
   ) {
     if (places.length === 0) return;
-    const moved = tripDayId === null
-      ? []
-      : places.filter((place) =>
-        place.assignedDayId !== null && place.assignedDayId !== tripDayId
-      );
-    if (
-      moved.length > 0 &&
-      !window.confirm(
-        `Move ${moved.map((place) => place.name).join(", ")} from another day?`,
-      )
-    ) return;
     const payload = {
       assignments: places.map((place) => ({
         tripPlaceId: place.id,
@@ -506,7 +486,6 @@ export function TripSkeletonWorkspace({
   if (!skeleton) {
     return <section className="trip-skeleton-shell"><p role={error ? "alert" : "status"}>{error || "Loading itinerary…"}</p></section>;
   }
-  const dayLabelById = new Map(skeleton.days.map((day) => [day.id, day.date]));
 
   const tripInformationItems = skeleton.tripInformationItemIds
     .map((id) => itemsById.get(id))
@@ -765,9 +744,7 @@ export function TripSkeletonWorkspace({
                   return item ? renderItem(item, entry.projection === "continuation") : null;
                 })}
                 <DayAssignmentPicker
-                  dayId={day.id}
                   places={tripPlaces}
-                  dayLabelById={dayLabelById}
                   busy={busyId !== null}
                   assign={(places) => updateDayAssignments(day.id, places)}
                 />
