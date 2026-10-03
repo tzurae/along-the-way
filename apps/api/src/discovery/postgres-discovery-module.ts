@@ -249,7 +249,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       let providerSucceeded = false;
       for (const query of plan.searchPlan.queries.slice(0, 6)) {
         try {
-          const returned = await this.placeProvider.search(query);
+          const returned = await this.placeProvider.search(query, { languageCode: plan.outputLanguage });
           providerSucceeded = true;
           for (const candidate of returned) {
             if (!byProviderId.has(candidate.providerPlaceId) && byProviderId.size < 24) {
@@ -271,6 +271,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         candidates,
         confirmedFeedback: feedback,
         rejectedProviderPlaceIds: rejectedProviderPlaceIds.map((item) => item.provider_place_id),
+        outputLanguage: plan.outputLanguage,
       });
       const candidateById = new Map(candidates.map((candidate) => [candidate.providerPlaceId, candidate]));
       return await this.database.transaction().execute(async (transaction) => {
