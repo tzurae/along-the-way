@@ -303,14 +303,28 @@ test("members keep independent wishlist contributions and preferences on desktop
   await expect(firstDay.getByText(/1 planned entries · ¥1,200/)).toBeVisible();
   await expect(mergedCard.getByText("Planned for 2026-11-03")).toBeVisible();
 
+  // A place planned for one day is not offered to another day until removed there.
   const secondDay = ownerPage.locator('[data-date="2026-11-04"]');
   await secondDay.getByText("Add from shared wishlist").click();
-  await secondDay.getByRole("checkbox", { name: /Cross-surface Cafe/ }).check();
-  ownerPage.once("dialog", (dialog) => dialog.accept());
-  await secondDay.getByRole("button", { name: "Add selected (1)" }).click();
-  await expect(firstDay.getByRole("article", {
+  await expect(secondDay.getByRole("checkbox", { name: /Cross-surface Cafe/ })).toHaveCount(0);
+  const firstDayPlace = firstDay.getByRole("article", {
     name: "Planned wishlist place Cross-surface Cafe",
-  })).toHaveCount(0);
+  });
+  // Removing reloads the timeline, which recreates (and collapses) every day picker.
+  const timelineReloaded = ownerPage.waitForResponse((response) =>
+    response.request().method() === "GET" && new URL(response.url()).pathname.endsWith("/skeleton")
+  );
+  await firstDayPlace.getByRole("button", { name: "Remove from this day" }).click();
+  await timelineReloaded;
+  await expect(firstDayPlace).toHaveCount(0);
+  const secondPicker = secondDay.locator("details").filter({ hasText: "Add from shared wishlist" });
+  const freedPlace = secondDay.getByRole("checkbox", { name: /Cross-surface Cafe/ });
+  await expect(async () => {
+    if (await secondPicker.getAttribute("open") === null) await secondPicker.locator("summary").click();
+    await expect(freedPlace).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 15_000 });
+  await freedPlace.check();
+  await secondDay.getByRole("button", { name: "Add selected (1)" }).click();
   const movedPlace = secondDay.getByRole("article", {
     name: "Planned wishlist place Cross-surface Cafe",
   });
@@ -457,5 +471,30 @@ test("manual wishlist intake remains usable on a mobile viewport", async ({ brow
   const card = page.locator("article").filter({ has: page.getByRole("heading", { name: "Private meeting point" }) });
   await expect(card.getByText("Location needed", { exact: true })).toBeVisible();
   await expect(card.getByText("Ask host for exact pin")).toBeVisible();
+
+  // Enough wrapped two-line addresses to exceed the picker's capped height.
+  for (const [index, address] of [
+    "15-chōme-778 Honmachi, Higashiyama Ward, Kyoto, 605-0981 Japan",
+    "48 Eikandōchō, Sakyo Ward, Kyoto, 606-8445 Japan",
+    "Hirata, Ine, Yoza District, Kyoto 626-0423 Japan",
+    "56 Matsuojingatanichō, Nishikyo Ward, Kyoto, 615-8286 Japan",
+  ].entries()) {
+    await addManualPlace(page, { name: `Long address place ${index + 1}`, address, note: "Day picker layout" });
+  }
+  const firstDay = page.locator("[data-date]").first();
+  await firstDay.getByText("Add from shared wishlist").click();
+  const picker = firstDay.getByRole("group", { name: "Wishlist places to add" });
+  const rows = await picker.evaluate((group) => [...group.querySelectorAll("label")].map((label) => {
+    const contents = document.createRange();
+    contents.selectNodeContents(label);
+    const row = label.getBoundingClientRect();
+    const text = contents.getBoundingClientRect();
+    return { rowBottom: row.bottom, textBottom: text.bottom, rowRight: row.right, textRight: text.right };
+  }));
+  expect(rows.length).toBeGreaterThanOrEqual(5);
+  for (const row of rows) {
+    expect(row.textBottom).toBeLessThanOrEqual(row.rowBottom);
+    expect(row.textRight).toBeLessThanOrEqual(row.rowRight);
+  }
   await context.close();
 });

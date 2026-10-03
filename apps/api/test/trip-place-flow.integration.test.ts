@@ -831,6 +831,52 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect(conflictingMerge.status).toBe(409);
     expect(await list(owner.cookie, trip.id)).toHaveLength(2);
 
+    const crossDay = await app.request(
+      `/api/trips/${trip.id}/trip-place-day-assignments`,
+      {
+        method: "PUT",
+        headers: {
+          cookie: owner.cookie,
+          "content-type": "application/json",
+          "idempotency-key": "cross-day-without-removal",
+          origin: "https://app.example.test",
+        },
+        body: json({
+          assignments: [{
+            tripPlaceId: assignedTarget.id,
+            tripDayId: trip.days[0]!.id,
+            expectedVersion: assignedTarget.version,
+          }],
+        }),
+      },
+    );
+    expect(crossDay.status).toBe(409);
+    expect((await list(owner.cookie, trip.id)).find((entry) => entry.id === assignedTarget.id))
+      .toMatchObject({ assignedDayId: trip.days[1]!.id, version: assignedTarget.version });
+    // The same day spelled with uppercase UUIDs is still the same day.
+    const sameDayUppercase = await app.request(
+      `/api/trips/${trip.id}/trip-place-day-assignments`,
+      {
+        method: "PUT",
+        headers: {
+          cookie: owner.cookie,
+          "content-type": "application/json",
+          "idempotency-key": "same-day-uppercase",
+          origin: "https://app.example.test",
+        },
+        body: json({
+          assignments: [{
+            tripPlaceId: assignedTarget.id.toUpperCase(),
+            tripDayId: trip.days[1]!.id.toUpperCase(),
+            expectedVersion: assignedTarget.version,
+          }],
+        }),
+      },
+    );
+    expect(sameDayUppercase.status).toBe(200);
+    expect(parseTripPlaceListResponse(await sameDayUppercase.json()).tripPlaces
+      .find((entry) => entry.id === assignedTarget.id)?.assignedDayId).toBe(trip.days[1]!.id);
+
     const unassigned = await app.request(
       `/api/trips/${trip.id}/trip-place-day-assignments`,
       {
