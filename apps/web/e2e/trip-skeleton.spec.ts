@@ -1,8 +1,20 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
-import { isRecord } from "@along-the-way/contracts/private-trips";
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type BrowserContext,
+  type Locator,
+  type Page,
+} from "@playwright/test";
+import {
+  isRecord,
+  parseTripListResponse,
+  parseTripResponse,
+} from "@along-the-way/contracts/private-trips";
+import { parseTripSkeletonResponse } from "@along-the-way/contracts/trip-skeleton";
 const execFileAsync = promisify(execFile);
 const MAILPIT_API_URL = process.env.MAILPIT_API_URL ?? "http://127.0.0.1:8025";
 
@@ -100,8 +112,13 @@ async function cleanupSkeletonTrips() {
 test.beforeEach(() => executeDatabase("truncate table rate_limit_windows"));
 test.afterAll(cleanupSkeletonTrips);
 
-async function signIn(page: Page, request: APIRequestContext, email: string) {
-  await page.goto("/");
+async function signIn(
+  page: Page,
+  request: APIRequestContext,
+  email: string,
+  navigate = true,
+) {
+  if (navigate) await page.goto("/");
   const previousResponse = await request.get(`${MAILPIT_API_URL}/api/v1/messages`);
   const previousMessageIds = new Set(messages(await previousResponse.json()).map((message) => message.id));
   await page.getByLabel("Email").fill(email);
@@ -125,6 +142,56 @@ async function signIn(page: Page, request: APIRequestContext, email: string) {
   await page.goto("about:blank");
   await page.goto(link);
   await expect(page.getByText(`Signed in as ${email}`)).toBeVisible();
+}
+
+async function emailLink(
+  request: APIRequestContext,
+  email: string,
+  subject: string,
+) {
+  let messageId = "";
+  await expect.poll(async () => {
+    const response = await request.get(`${MAILPIT_API_URL}/api/v1/messages`);
+    messageId = messages(await response.json()).find(
+      (message) =>
+        message.subject.includes(subject) &&
+        message.recipients.includes(email),
+    )?.id ?? "";
+    return messageId;
+  }).not.toBe("");
+  const detail = await request.get(`${MAILPIT_API_URL}/api/v1/message/${messageId}`);
+  const value: unknown = await detail.json();
+  if (!isRecord(value) || typeof value.Text !== "string") throw new Error("Invalid Mailpit body");
+  const link = value.Text.match(/https?:\/\/\S+/)?.[0];
+  if (!link) throw new Error(`Email for ${email} omitted its link`);
+  return link;
+}
+
+async function inviteEditor(
+  ownerPage: Page,
+  request: APIRequestContext,
+  tripName: string,
+  email: string,
+) {
+  await ownerPage.getByLabel("Invite editor by email").fill(email);
+  await ownerPage.getByRole("button", { name: "Send invitation" }).click();
+  await expect(ownerPage.getByRole("status")).toContainText(email);
+  return emailLink(request, email, `Join ${tripName}`);
+}
+
+async function acceptEditor(
+  context: BrowserContext,
+  request: APIRequestContext,
+  tripName: string,
+  email: string,
+  inviteLink: string,
+) {
+  const page = await context.newPage();
+  await page.goto(inviteLink);
+  await signIn(page, request, email, false);
+  await page.getByRole("button", { name: "Accept invitation" }).click();
+  await expect(page.getByRole("heading", { name: tripName })).toBeVisible();
+  return page;
 }
 
 function localDateLabel(date: string) {
@@ -347,6 +414,75 @@ async function addActivity(page: Page, input: { title: string; endpoint: Endpoin
   await expect(dialog).toHaveCount(0);
 }
 
+function escaped(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function participantCheckbox(dialog: Locator, email: string) {
+  return dialog
+    .getByRole("group", { name: "Participants" })
+    .getByRole("checkbox", { name: new RegExp(escaped(email)) });
+}
+
+async function addParticipantActivity(
+  page: Page,
+  input: {
+    title: string;
+    endpoint: EndpointSpec;
+    durationMinutes: string;
+    participantEmails: string[];
+    expectedRosterSize: number;
+  },
+) {
+  await page.getByRole("button", { name: "Add commitment" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add a commitment" });
+  await dialog.getByLabel("Type").selectOption("activity");
+  await dialog.getByLabel("Title").fill(input.title);
+  await chooseEndpoint(dialog, "Start", input.endpoint);
+  await dialog.getByLabel("Duration (minutes)").fill(input.durationMinutes);
+  const participantGroup = dialog.getByRole("group", { name: "Participants" });
+  await expect(participantGroup.getByRole("checkbox")).toHaveCount(input.expectedRosterSize);
+  for (const checkbox of await participantGroup.getByRole("checkbox").all()) {
+    await expect(checkbox).not.toBeChecked();
+  }
+  for (const email of input.participantEmails) {
+    await participantCheckbox(dialog, email).check();
+  }
+  await dialog.getByRole("button", { name: "Save item" }).click();
+  await expect(dialog).toHaveCount(0);
+}
+
+function timelineCard(page: Page, title: string) {
+  return page
+    .getByRole("region", { name: "Daily timeline", exact: true })
+    .locator(".itinerary-card")
+    .filter({ hasText: title })
+    .first();
+}
+
+async function tripIdentifier(page: Page, name: string) {
+  const value: unknown = await page.evaluate(async () =>
+    (await fetch("/api/trips")).json()
+  );
+  const trip = parseTripListResponse(value).trips.find((candidate) => candidate.name === name);
+  if (!trip) throw new Error(`Trip ${name} was not listed`);
+  return trip.id;
+}
+
+async function readTrip(page: Page, id: string) {
+  const value: unknown = await page.evaluate(async (tripId) =>
+    (await fetch(`/api/trips/${tripId}`)).json(), id
+  );
+  return parseTripResponse(value).trip;
+}
+
+async function readSkeleton(page: Page, id: string) {
+  const value: unknown = await page.evaluate(async (tripId) =>
+    (await fetch(`/api/trips/${tripId}/skeleton`)).json(), id
+  );
+  return parseTripSkeletonResponse(value).skeleton;
+}
+
 async function openTrip(page: Page, name: string) {
   await page.getByRole("button", { name: new RegExp(name) }).click();
   await expect(page.getByRole("heading", { name })).toBeVisible();
@@ -563,7 +699,6 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   const arrivalContinuation = timeline
     .locator('.day-column[data-date="2027-11-02"] .itinerary-card')
     .filter({ hasText: "SFO to Haneda" });
-  await expect(arrivalContinuation).toContainText("Arrival:");
   await expect(arrivalContinuation).toContainText("Haneda Airport");
   await expect(page.getByTestId("departure-priorities")).toContainText("大阪・京都 stay");
   await expect(page.getByText("Immovable · unknown").first()).toBeVisible();
@@ -659,4 +794,301 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   expect(shellBox ? shellBox.x + shellBox.width : Number.POSITIVE_INFINITY).toBeLessThanOrEqual(390);
 
   await Promise.all([desktopContext.close(), secondContext.close(), mobileContext.close()]);
+});
+
+test("activity participants persist exact subsets, history, times, and concurrency", async ({
+  browser,
+  request,
+}) => {
+  test.setTimeout(300_000);
+  await request.delete(`${MAILPIT_API_URL}/api/v1/messages`);
+  const stamp = Date.now();
+  const name = `大阪京都家庭旅行 participants ${stamp}`;
+  const participantA = `participant-a-${stamp}@example.test`;
+  const participantB = `participant-b-${stamp}@example.test`;
+  const fourthParticipant = `participant-four-${stamp}@example.test`;
+  const ownerEmail = "owner@example.test";
+  const ownerContext = await browser.newContext({
+    timezoneId: "Pacific/Honolulu",
+    viewport: { width: 1440, height: 1000 },
+  });
+  const page = await ownerContext.newPage();
+  await signIn(page, request, ownerEmail);
+  await createTrip(page, {
+    name,
+    startDate: "2027-03-10",
+    endDate: "2027-03-11",
+    countries: [{ query: "Japan", code: "JP" }],
+  });
+
+  const editorContexts: BrowserContext[] = [];
+  const editorPages: Page[] = [];
+  for (const email of [participantA, participantB, fourthParticipant]) {
+    const inviteLink = await inviteEditor(page, request, name, email);
+    const context = await browser.newContext();
+    editorContexts.push(context);
+    editorPages.push(
+      await acceptEditor(context, request, name, email, inviteLink),
+    );
+  }
+
+  await page.reload();
+  await openTrip(page, name);
+  await expect(page.getByText("4 members", { exact: true })).toBeVisible();
+  await createPlace(page, {
+    name: "Participant activity venue",
+    type: "activity",
+    address: "Osaka",
+    latitude: "34.6937",
+    longitude: "135.5023",
+    timeZone: "Asia/Tokyo",
+  });
+
+  await addParticipantActivity(page, {
+    title: "甲",
+    endpoint: {
+      stop: "1. JP",
+      place: "Participant activity venue",
+      local: "2027-03-10T10:00",
+      zone: "Asia/Tokyo",
+    },
+    durationMinutes: "120",
+    participantEmails: [participantA],
+    expectedRosterSize: 4,
+  });
+  await addParticipantActivity(page, {
+    title: "乙",
+    endpoint: {
+      stop: "1. JP",
+      place: "Participant activity venue",
+      local: "2027-03-10T11:00",
+      zone: "Asia/Tokyo",
+    },
+    durationMinutes: "120",
+    participantEmails: [participantB],
+    expectedRosterSize: 4,
+  });
+  await addParticipantActivity(page, {
+    title: "Participation pending",
+    endpoint: {
+      stop: "1. JP",
+      place: "Participant activity venue",
+      local: "2027-03-10T14:00",
+      zone: "Asia/Tokyo",
+    },
+    durationMinutes: "60",
+    participantEmails: [],
+    expectedRosterSize: 4,
+  });
+
+  let alphaCard = timelineCard(page, "甲");
+  let betaCard = timelineCard(page, "乙");
+  const pendingCard = timelineCard(page, "Participation pending");
+  await expect(alphaCard).toContainText("Start: 2027-03-10 10:00");
+  await expect(alphaCard).toContainText("End: 2027-03-10 12:00");
+  await expect(betaCard).toContainText("Start: 2027-03-10 11:00");
+  await expect(betaCard).toContainText("End: 2027-03-10 13:00");
+  await expect(alphaCard.locator('[aria-label="Participants"]')).toContainText(participantA);
+  await expect(alphaCard.locator('[aria-label="Participants"]')).not.toContainText(participantB);
+  await expect(betaCard.locator('[aria-label="Participants"]')).toContainText(participantB);
+  await expect(betaCard.locator('[aria-label="Participants"]')).not.toContainText(participantA);
+  await expect(pendingCard.locator('[aria-label="Participants"]')).toContainText(
+    "Pending confirmation",
+  );
+
+  await page.reload();
+  await openTrip(page, name);
+  alphaCard = timelineCard(page, "甲");
+  betaCard = timelineCard(page, "乙");
+  await expect(alphaCard).toContainText("End: 2027-03-10 12:00");
+  await expect(betaCard).toContainText("End: 2027-03-10 13:00");
+  await expect(alphaCard.locator('[aria-label="Participants"]')).toContainText(participantA);
+  await expect(alphaCard.locator('[aria-label="Participants"]')).not.toContainText(participantB);
+  await expect(betaCard.locator('[aria-label="Participants"]')).toContainText(participantB);
+  await expect(betaCard.locator('[aria-label="Participants"]')).not.toContainText(participantA);
+  await expect(
+    timelineCard(page, "Participation pending").locator('[aria-label="Participants"]'),
+  ).toContainText("Pending confirmation");
+  const id = await tripIdentifier(page, name);
+  const trip = await readTrip(page, id);
+  const memberA = trip.members.find((member) => member.email === participantA);
+  const memberB = trip.members.find((member) => member.email === participantB);
+  const memberFour = trip.members.find((member) => member.email === fourthParticipant);
+  if (!memberA || !memberB || !memberFour) throw new Error("Invited members were not returned");
+  expect(memberA.id).not.toBe(memberA.userId);
+  expect(memberB.id).not.toBe(memberB.userId);
+  expect(memberFour.id).not.toBe(memberFour.userId);
+  let skeleton = await readSkeleton(page, id);
+  let alphaItem = skeleton.items.find((item) => item.title === "甲");
+  let betaItem = skeleton.items.find((item) => item.title === "乙");
+  const pendingItem = skeleton.items.find((item) => item.title === "Participation pending");
+  if (!alphaItem || !betaItem || !pendingItem) throw new Error("Participant activities were not returned");
+  expect(alphaItem.participants?.map((participant) => participant.memberId)).toEqual([memberA.id]);
+  expect(betaItem.participants?.map((participant) => participant.memberId)).toEqual([memberB.id]);
+  expect(pendingItem.participants).toBeNull();
+
+  const stableAlphaId = alphaItem.id;
+  await alphaCard.getByRole("button", { name: "Edit 甲" }).click();
+  let editDialog = page.getByRole("dialog", { name: "Edit itinerary item" });
+  await expect(participantCheckbox(editDialog, participantA)).toBeChecked();
+  await expect(participantCheckbox(editDialog, participantB)).not.toBeChecked();
+  await participantCheckbox(editDialog, participantB).check();
+  await editDialog.getByRole("button", { name: "Save item" }).click();
+  await expect(editDialog).toHaveCount(0);
+  alphaCard = timelineCard(page, "甲");
+  await expect(alphaCard).toHaveAttribute("data-item-id", stableAlphaId);
+  await expect(alphaCard.locator('[aria-label="Participants"]')).toContainText(participantA);
+  await expect(alphaCard.locator('[aria-label="Participants"]')).toContainText(participantB);
+
+  await alphaCard.getByRole("button", { name: "Edit 甲" }).click();
+  editDialog = page.getByRole("dialog", { name: "Edit itinerary item" });
+  await participantCheckbox(editDialog, participantB).uncheck();
+  await editDialog.press("Escape");
+  await alphaCard.getByRole("button", { name: "Edit 甲" }).click();
+  editDialog = page.getByRole("dialog", { name: "Edit itinerary item" });
+  await expect(participantCheckbox(editDialog, participantB)).toBeChecked();
+  await editDialog.press("Escape");
+
+  skeleton = await readSkeleton(page, id);
+  alphaItem = skeleton.items.find((item) => item.id === stableAlphaId);
+  expect(alphaItem?.participants?.map((participant) => participant.memberId).sort()).toEqual(
+    [memberA.id, memberB.id].sort(),
+  );
+  await page.reload();
+  await openTrip(page, name);
+  alphaCard = timelineCard(page, "甲");
+  await expect(alphaCard).toHaveAttribute("data-item-id", stableAlphaId);
+  await expect(alphaCard.locator('[aria-label="Participants"]')).toContainText(participantA);
+  await expect(alphaCard.locator('[aria-label="Participants"]')).toContainText(participantB);
+
+
+  const fourthPage = editorPages[2]!;
+  await fourthPage.reload();
+  await openTrip(fourthPage, name);
+  betaCard = timelineCard(page, "乙");
+  const fourthBetaCard = timelineCard(fourthPage, "乙");
+  await betaCard.getByRole("button", { name: "Edit 乙" }).click();
+  await fourthBetaCard.getByRole("button", { name: "Edit 乙" }).click();
+  const ownerEdit = page.getByRole("dialog", { name: "Edit itinerary item" });
+  const staleEdit = fourthPage.getByRole("dialog", { name: "Edit itinerary item" });
+  await participantCheckbox(ownerEdit, fourthParticipant).check();
+  await participantCheckbox(staleEdit, participantA).check();
+  await ownerEdit.getByRole("button", { name: "Save item" }).click();
+  await expect(ownerEdit).toHaveCount(0);
+  await staleEdit.getByRole("button", { name: "Save item" }).click();
+  await expect(staleEdit.getByRole("alert")).toContainText("Version conflict");
+  await expect(staleEdit.getByRole("alert")).toContainText("Current version");
+  await expect(participantCheckbox(staleEdit, participantA)).toBeChecked();
+  await expect(participantCheckbox(staleEdit, participantB)).toBeChecked();
+  await staleEdit.press("Escape");
+
+  betaCard = timelineCard(page, "乙");
+  await expect(betaCard.locator('[aria-label="Participants"]')).toContainText(
+    fourthParticipant,
+  );
+  skeleton = await readSkeleton(page, id);
+  betaItem = skeleton.items.find((item) => item.title === "乙");
+  expect(betaItem?.participants?.map((participant) => participant.memberId).sort()).toEqual(
+    [memberB.id, memberFour.id].sort(),
+  );
+
+  await betaCard.getByRole("button", { name: "Lock" }).click();
+  await expect(betaCard.getByText("Locked", { exact: true })).toBeVisible();
+  await expect(betaCard.getByRole("button", { name: "Edit 乙" })).toHaveCount(0);
+  await betaCard.getByRole("button", { name: "Unlock" }).click();
+  const unlockDialog = page.getByRole("dialog", { name: "Unlock 乙?" });
+  await unlockDialog.getByRole("button", { name: "Unlock item" }).click();
+  await expect(betaCard.getByRole("button", { name: "Edit 乙" })).toBeVisible();
+
+  const membersPanel = page.getByRole("heading", { name: "Members" }).locator("..");
+  const memberARow = membersPanel.getByRole("listitem").filter({ hasText: participantA });
+  await memberARow.getByRole("button", { name: "Remove" }).click();
+  await expect(memberARow).toHaveCount(0);
+  await page.reload();
+  await openTrip(page, name);
+  alphaCard = timelineCard(page, "甲");
+  await expect(alphaCard).toHaveAttribute("data-item-id", stableAlphaId);
+  const alphaParticipants = alphaCard.locator('[aria-label="Participants"]');
+  await expect(alphaParticipants).toContainText(participantA);
+  await expect(alphaParticipants).toContainText("removed");
+  await expect(alphaParticipants).toContainText(participantB);
+  await expect(
+    timelineCard(page, "乙").locator('[aria-label="Participants"]'),
+  ).toContainText(fourthParticipant);
+
+  const tripAfterRemoval = await readTrip(page, id);
+  expect(tripAfterRemoval.members.some((member) => member.id === memberA.id)).toBe(false);
+  skeleton = await readSkeleton(page, id);
+  alphaItem = skeleton.items.find((item) => item.id === stableAlphaId);
+  const removedParticipant = alphaItem?.participants?.find(
+    (participant) => participant.memberId === memberA.id,
+  );
+  expect(removedParticipant).toMatchObject({
+    email: participantA,
+    removed: true,
+  });
+
+  await alphaCard.getByRole("button", { name: "Edit 甲" }).click();
+  editDialog = page.getByRole("dialog", { name: "Edit itinerary item" });
+  const participantGroup = editDialog.getByRole("group", { name: "Participants" });
+  await expect(participantGroup.getByRole("checkbox")).toHaveCount(4);
+  await expect(participantGroup).toContainText("No longer a trip member");
+  await expect(participantCheckbox(editDialog, participantA)).toBeChecked();
+  await expect(participantCheckbox(editDialog, participantB)).toBeChecked();
+  await editDialog.getByLabel("Notes", { exact: true }).fill(
+    "Ordinary edit retains the removed participant",
+  );
+  await editDialog.getByRole("button", { name: "Save item" }).click();
+  await expect(editDialog).toHaveCount(0);
+  alphaCard = timelineCard(page, "甲");
+  await expect(alphaCard.locator('[aria-label="Participants"]')).toContainText(participantA);
+  await expect(alphaCard.locator('[aria-label="Participants"]')).toContainText("removed");
+  skeleton = await readSkeleton(page, id);
+  alphaItem = skeleton.items.find((item) => item.id === stableAlphaId);
+  expect(alphaItem?.participants?.map((participant) => participant.memberId).sort()).toEqual(
+    [memberA.id, memberB.id].sort(),
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await alphaCard.scrollIntoViewIfNeeded();
+  await expect(alphaCard.locator('[aria-label="Participants"]')).toContainText(participantA);
+  await expect(alphaCard.locator('[aria-label="Participants"]')).toContainText(participantB);
+  const mobileWidths = await page.evaluate(() => ({
+    viewport: window.innerWidth,
+    document: document.documentElement.scrollWidth,
+  }));
+  expect(mobileWidths.document).toBeLessThanOrEqual(mobileWidths.viewport);
+
+  await alphaCard.getByRole("button", { name: "Edit 甲" }).click();
+  const mobileEditDialog = page.getByRole("dialog", { name: "Edit itinerary item" });
+  const mobileParticipantGroup = mobileEditDialog.getByRole("group", { name: "Participants" });
+  await expect(mobileParticipantGroup).toContainText(participantA);
+  await expect(mobileParticipantGroup).toContainText(participantB);
+  await expect(participantCheckbox(mobileEditDialog, participantA)).toBeChecked();
+  await expect(participantCheckbox(mobileEditDialog, participantB)).toBeChecked();
+  const mobilePickerWidths = await mobileParticipantGroup.evaluate((element) => ({
+    visible: element.clientWidth,
+    content: element.scrollWidth,
+    viewport: window.innerWidth,
+    document: document.documentElement.scrollWidth,
+    labels: [...element.querySelectorAll("label")].map((label) => {
+      const contents = document.createRange();
+      contents.selectNodeContents(label);
+      return {
+        rowBottom: label.getBoundingClientRect().bottom,
+        contentBottom: contents.getBoundingClientRect().bottom,
+      };
+    }),
+  }));
+  expect(mobilePickerWidths.content).toBeLessThanOrEqual(mobilePickerWidths.visible);
+  expect(mobilePickerWidths.document).toBeLessThanOrEqual(mobilePickerWidths.viewport);
+  for (const label of mobilePickerWidths.labels) {
+    expect(label.contentBottom).toBeLessThanOrEqual(label.rowBottom);
+  }
+  await mobileEditDialog.press("Escape");
+
+  await Promise.all([
+    ownerContext.close(),
+    ...editorContexts.map((context) => context.close()),
+  ]);
 });

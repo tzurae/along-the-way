@@ -153,6 +153,9 @@ function itineraryItemInput(
   return {
     type: stringField(body, "type") as ItineraryItemType,
     title: stringField(body, "title"),
+    participantMemberIds: body.participantMemberIds === null
+      ? null
+      : stringArrayField(body, "participantMemberIds"),
     notes: optionalStringField(body, "notes"),
     sourceUrl: optionalStringField(body, "sourceUrl"),
     money,

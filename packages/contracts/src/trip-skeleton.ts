@@ -122,6 +122,13 @@ export interface FreeTimeDetails {
   durationMinutes: number;
 }
 
+export interface ItineraryParticipantDto {
+  memberId: string;
+  displayName: string | null;
+  email: string;
+  removed: boolean;
+}
+
 interface ItineraryItemBase {
   id: string;
   tripId: string;
@@ -134,6 +141,7 @@ interface ItineraryItemBase {
   version: number;
   endpoints: ZonedEndpointDto[];
   constraints: ConstraintDto[];
+  participants: ItineraryParticipantDto[] | null;
 }
 
 export type ItineraryItemDto =
@@ -151,6 +159,7 @@ export type ItineraryItemDetails = ItineraryItemDto["details"];
 export interface CreateItineraryItemInput {
   type: ItineraryItemType;
   title: string;
+  participantMemberIds: string[] | null;
   notes?: string | null;
   sourceUrl?: string | null;
   money?: MoneyDto | null;
@@ -342,6 +351,26 @@ function appointmentDetails(value: unknown): AppointmentDetails {
   };
 }
 
+function participantsValue(value: unknown): ItineraryParticipantDto[] | null {
+  if (value === null) return null;
+  if (!Array.isArray(value) || value.length === 0) return invalidResponse();
+  const memberIds = new Set<string>();
+  return value.map((participant) => {
+    if (!isRecord(participant) || typeof participant.removed !== "boolean") {
+      return invalidResponse();
+    }
+    const memberId = stringValue(participant.memberId);
+    if (memberIds.has(memberId)) return invalidResponse();
+    memberIds.add(memberId);
+    return {
+      memberId,
+      displayName: nullableString(participant.displayName),
+      email: stringValue(participant.email),
+      removed: participant.removed,
+    };
+  });
+}
+
 function itemValue(value: unknown): ItineraryItemDto {
   if (!isRecord(value) || !Array.isArray(value.endpoints) || !Array.isArray(value.constraints)) {
     return invalidResponse();
@@ -358,6 +387,7 @@ function itemValue(value: unknown): ItineraryItemDto {
     version: integerValue(value.version),
     endpoints: value.endpoints.map(endpointValue),
     constraints: value.constraints.map(constraintValue),
+    participants: participantsValue(value.participants),
   };
   if (!isRecord(value.details)) return invalidResponse();
   switch (value.type) {

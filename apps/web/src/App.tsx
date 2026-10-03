@@ -269,8 +269,8 @@ function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
           <h3 className="font-display text-2xl">Members</h3>
           <ul className="mt-3 grid gap-3">
             {trip.members.map((member) => (
-              <li key={member.userId} className="flex min-h-14 items-center justify-between gap-3 rounded-xl bg-surface-subtle px-4 py-3">
-                <span><strong className="block">{member.displayName ?? member.email}</strong><small className="text-muted-foreground">{member.role}{member.userId === currentUser.id ? " · you" : ""}</small></span>
+              <li key={member.id} className="flex min-h-14 items-center justify-between gap-3 rounded-xl bg-surface-subtle px-4 py-3">
+                <span className="min-w-0 [overflow-wrap:anywhere]"><strong className="block">{member.displayName ?? member.email}</strong><small className="text-muted-foreground">{member.role}{member.userId === currentUser.id ? " · you" : ""}</small></span>
                 {trip.role === "owner" && member.role === "editor" ? (
                   <button className="min-h-10 rounded-lg border border-accent-strong px-3 text-sm font-bold text-accent-strong" onClick={() => void removeMember(member.userId)}>
                     Remove

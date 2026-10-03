@@ -385,6 +385,55 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     });
   });
 
+  it("keeps membership identity stable through removal and rejoin without sharing it across trips", async () => {
+    const owner = await login("owner@example.test");
+    const first = (await createTrip(owner.cookie, "membership-first-trip")).trip;
+    const second = (await createTrip(owner.cookie, "membership-second-trip")).trip;
+    expect(first.members[0]!.id).not.toBe(first.members[0]!.userId);
+    expect(second.members[0]!.userId).toBe(first.members[0]!.userId);
+    expect(second.members[0]!.id).not.toBe(first.members[0]!.id);
+    expect((await createTrip(owner.cookie, "membership-first-trip")).trip.members)
+      .toEqual(first.members);
+
+    const invitation = await invite(
+      owner.cookie, first.id, "returning@example.test", "membership-invite",
+    );
+    const editor = await login("returning@example.test");
+    const acceptance = await accept(editor.cookie, invitation.token, "membership-accept");
+    expect(acceptance.status).toBe(200);
+    const joined = parseTripResponse(await acceptance.json()).trip.members
+      .find((member) => member.email === "returning@example.test")!;
+    expect(joined.id).not.toBe(joined.userId);
+
+    const removed = await app.request(`/api/trips/${first.id}/members/${joined.userId}`, {
+      method: "DELETE",
+      headers: {
+        cookie: owner.cookie,
+        "idempotency-key": "membership-remove",
+        origin: "https://app.example.test",
+      },
+    });
+    expect(removed.status).toBe(204);
+    const afterRemoval = await app.request(`/api/trips/${first.id}`, {
+      headers: { cookie: owner.cookie },
+    });
+    expect(parseTripResponse(await afterRemoval.json()).trip.members).toEqual(first.members);
+
+    const reinvitation = await invite(
+      owner.cookie, first.id, joined.email, "membership-reinvite",
+    );
+    const reaccepted = await accept(editor.cookie, reinvitation.token, "membership-reaccept");
+    expect(reaccepted.status).toBe(200);
+    expect(parseTripResponse(await reaccepted.json()).trip.members
+      .find((member) => member.userId === joined.userId)).toEqual(joined);
+    const reloaded = await app.request(`/api/trips/${first.id}`, {
+      headers: { cookie: editor.cookie },
+    });
+    expect(reloaded.status).toBe(200);
+    expect(parseTripResponse(await reloaded.json()).trip.members
+      .find((member) => member.userId === joined.userId)?.id).toBe(joined.id);
+  });
+
   it("creates generic trips transactionally and replays creation without duplicates", async () => {
     const unauthenticated = await app.request("/api/trips");
     expect(unauthenticated.status).toBe(401);

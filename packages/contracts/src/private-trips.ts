@@ -10,6 +10,7 @@ export interface UserDto {
 }
 
 export interface TripMemberDto {
+  id: string;
   userId: string;
   email: string;
   displayName: string | null;
@@ -147,6 +148,7 @@ function userValue(value: unknown): UserDto {
 function memberValue(value: unknown): TripMemberDto {
   if (!isRecord(value)) return invalidResponse();
   return {
+    id: stringValue(value.id),
     userId: stringValue(value.userId),
     email: stringValue(value.email),
     displayName: nullableString(value.displayName),
