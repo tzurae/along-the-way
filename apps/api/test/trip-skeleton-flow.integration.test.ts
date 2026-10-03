@@ -2249,6 +2249,15 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         throw new Error("The migration regression requires a database separate from TEST_DATABASE_URL");
       }
       migrationUrl.pathname = "/along_the_way_participants_migration";
+      // CI provisions only TEST_DATABASE_URL; create the sibling database on that same server.
+      const existing = await sql<{ present: boolean }>`
+        select exists (
+          select 1 from pg_database where datname = 'along_the_way_participants_migration'
+        ) as present
+      `.execute(mainDatabase);
+      if (!existing.rows[0]?.present) {
+        await sql`create database along_the_way_participants_migration`.execute(mainDatabase);
+      }
       migrationDatabase = createDatabase(migrationUrl.toString());
       database = migrationDatabase;
       migrator = new Migrator({

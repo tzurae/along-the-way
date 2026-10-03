@@ -96,9 +96,10 @@ removed-member history. Direct browser operation also saved and reloaded a party
 desktop and a 390px mobile case with a shorter participant email showed the full
 time range without horizontal overflow. This is not proof for longer labels.
 
-Integration tests require a disposable `TEST_DATABASE_URL` and the separate
-`along_the_way_participants_migration` database on that same isolated PostgreSQL
-instance. Never run their reset operations against retained or production data.
+Integration tests require a disposable `TEST_DATABASE_URL`. The migration
+regression creates and uses the sibling `along_the_way_participants_migration`
+database on that same isolated PostgreSQL server, so the test role needs
+`CREATEDB`. Never run their reset operations against retained or production data.
 Run browser verification against a freshly seeded, disposable app database:
 `owner@example.test` must exist and Mailpit must be reachable by the test process.
 Integration fixtures must not be left in the browser database; a prior earlier
