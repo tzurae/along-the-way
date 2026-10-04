@@ -1,8 +1,10 @@
+import type { MemberPlacePreferenceDto, PreferenceLevel } from "@along-the-way/contracts/trip-places";
 import { describe, expect, it } from "vitest";
 
 import type { DayHours } from "../src/planning/opening-hours";
 import {
   distributePlaces,
+  placePreferences,
   preferencePriority,
   type DistributionCandidate,
   type DistributionDay,
@@ -122,5 +124,34 @@ describe("distributing wishlist places over days", () => {
     expect(preferencePriority(["dislike"])).toBe(4);
     expect(preferencePriority(["dislike", "must"])).toBe(0);
     expect(preferencePriority(["optional", null, "want"])).toBe(1);
+  });
+
+  it("keeps every member's preference apart and flags a must next to a dislike", async () => {
+    const member = (id: string, level: PreferenceLevel | null, displayName: string | null = id): MemberPlacePreferenceDto => ({
+      memberUserId: id,
+      memberEmail: `${id}@example.test`,
+      memberDisplayName: displayName,
+      level,
+      version: level === null ? null : 1,
+      updatedAt: null,
+      isOwn: false,
+    });
+    // Roster order: dad, mum, kid, gran.
+    expect(placePreferences({
+      id: "kiyomizu",
+      preferences: [member("dad", "dislike"), member("mum", "must", null), member("kid", null), member("gran", "dislike")],
+    })).toEqual({
+      tripPlaceId: "kiyomizu",
+      members: [
+        // Without a display name the email stands in; two dislikes keep roster order.
+        { memberUserId: "mum", memberName: "mum@example.test", level: "must" },
+        { memberUserId: "dad", memberName: "dad", level: "dislike" },
+        { memberUserId: "gran", memberName: "gran", level: "dislike" },
+      ],
+      conflict: true,
+    });
+    expect(placePreferences({ id: "cafe", preferences: [member("dad", "dislike"), member("mum", "want")] }))
+      .toMatchObject({ conflict: false });
+    expect(placePreferences({ id: "cafe", preferences: [member("dad", null)] })).toBeNull();
   });
 });

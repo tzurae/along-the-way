@@ -18,7 +18,15 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useI18n } from "./i18n";
-import { clock, describeStartAndEnd, loadLabel, reasonLabel, span, TimetableRow } from "./TimetableView";
+import {
+  clock,
+  describeStartAndEnd,
+  loadLabel,
+  PreferenceSummary,
+  reasonLabel,
+  span,
+  TimetableRow,
+} from "./TimetableView";
 
 type JsonRequest = <T>(url: string, options?: RequestInit & { parse?: (value: unknown) => unknown }) => Promise<T>;
 
@@ -161,6 +169,7 @@ export function DayPlanDialog({
         row.kind !== "start" && row.travel?.attribution ? [row.travel.attribution] : []))]
     : [];
   const hoursChecked = timetable?.rows.some((row) => row.kind === "visit" && row.hours === "listed") ?? false;
+  const preferences = new Map(timetable?.preferences.map((entry) => [entry.tripPlaceId, entry]) ?? []);
 
   return (
     <Dialog open={day !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -203,7 +212,13 @@ export function DayPlanDialog({
             </p>
             {timetable.rows.length > 0 ? (
               <ol className="grid gap-2" aria-label={t.dayPlan.draftTimetable}>
-                {timetable.rows.map((row, index) => <TimetableRow key={`${row.kind}-${index}`} row={row} />)}
+                {timetable.rows.map((row, index) => (
+                  <TimetableRow
+                    key={`${row.kind}-${index}`}
+                    row={row}
+                    preferences={row.kind === "visit" ? preferences.get(row.tripPlaceId) : undefined}
+                  />
+                ))}
               </ol>
             ) : (
               <p className="empty-state">{t.dayPlan.nothingFits}</p>
@@ -215,6 +230,7 @@ export function DayPlanDialog({
                   {timetable.unscheduled.map((place) => (
                     <li key={place.tripPlaceId}>
                       <strong>{place.name}</strong>・{reasonLabel(place.reason, t.timetable)}
+                      <PreferenceSummary preferences={preferences.get(place.tripPlaceId)} />
                     </li>
                   ))}
                 </ul>

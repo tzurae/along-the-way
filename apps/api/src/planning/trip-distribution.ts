@@ -1,4 +1,5 @@
-import type { PreferenceLevel } from "@along-the-way/contracts/trip-places";
+import type { PlacePreferencesDto } from "@along-the-way/contracts/day-plans";
+import type { PreferenceLevel, TripPlaceDto } from "@along-the-way/contracts/trip-places";
 
 import { straightLineMeters, type GeoPoint } from "./day-route-order";
 import type { DayHours } from "./opening-hours";
@@ -20,6 +21,24 @@ const PREFERENCE_PRIORITY: Record<PreferenceLevel, number> = {
 export function preferencePriority(levels: Array<PreferenceLevel | null>) {
   const ranks = levels.flatMap((level) => (level === null ? [] : [PREFERENCE_PRIORITY[level]]));
   return ranks.length === 0 ? PREFERENCE_PRIORITY.neutral : Math.min(...ranks);
+}
+
+/**
+ * Each member's own preference, strongest first, with no merging: the plan ranks a place by
+ * its best preference, so this is where a member who dislikes it stays visible.
+ * Null when no member rated the place.
+ */
+export function placePreferences(place: Pick<TripPlaceDto, "id" | "preferences">): PlacePreferencesDto | null {
+  const members = place.preferences.flatMap((entry) => (entry.level === null ? [] : [{
+    memberUserId: entry.memberUserId,
+    memberName: entry.memberDisplayName || entry.memberEmail,
+    level: entry.level,
+  }]));
+  if (members.length === 0) return null;
+  // A stable sort keeps roster order within one level.
+  members.sort((left, right) => PREFERENCE_PRIORITY[left.level] - PREFERENCE_PRIORITY[right.level]);
+  const levels = new Set(members.map((member) => member.level));
+  return { tripPlaceId: place.id, members, conflict: levels.has("must") && levels.has("dislike") };
 }
 
 export interface StayPoint extends GeoPoint {
