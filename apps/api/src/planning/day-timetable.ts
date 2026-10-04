@@ -62,8 +62,28 @@ export interface TimetableResult {
   load: DayLoadDto;
 }
 
-/** Where the traveller is: nowhere yet, at a known point, or somewhere without a map location. */
-type Origin = { kind: "anywhere" } | { kind: "point"; id: string } | { kind: "unlocated" };
+/** Travel assumed to and from a fixed item whose place has no map location, labelled an estimate. */
+export const UNLOCATED_TRAVEL_MINUTES = 30;
+
+/**
+ * Where the traveller is: nowhere yet, at a known point, or at a fixed item whose place has no
+ * map location, named for the travel line.
+ */
+type Origin = { kind: "anywhere" } | { kind: "point"; id: string } | { kind: "unlocated"; name: string };
+
+function unlocatedLeg(fromName: string, toName: string): DayLegDto {
+  return {
+    fromName,
+    toName,
+    mode: null,
+    durationMinutes: UNLOCATED_TRAVEL_MINUTES,
+    walkingMinutes: null,
+    transitMinutes: null,
+    estimated: true,
+    attribution: null,
+    unavailableReason: "location_unknown",
+  };
+}
 
 interface Gap {
   /** Index of the block that ends this gap; equal to the block count for the last gap. */
@@ -142,7 +162,7 @@ export async function scheduleDay(input: TimetableInput): Promise<TimetableResul
     for (const block of blocks.slice(0, index)) {
       if (block.endMinute < latestEnd) continue;
       latestEnd = block.endMinute;
-      origin = block.endPointId ? { kind: "point", id: block.endPointId } : { kind: "unlocated" };
+      origin = block.endPointId ? { kind: "point", id: block.endPointId } : { kind: "unlocated", name: block.title };
     }
     const startMinute = Math.max(window.startMinute, latestEnd);
     const next = blocks[index];
@@ -152,7 +172,7 @@ export async function scheduleDay(input: TimetableInput): Promise<TimetableResul
           startMinute,
           origin,
           deadline: Math.min(window.endMinute, next.startMinute - next.bufferMinutes),
-          target: next.startPointId ? { kind: "point", id: next.startPointId } : { kind: "unlocated" },
+          target: next.startPointId ? { kind: "point", id: next.startPointId } : { kind: "unlocated", name: next.title },
         }
       : { index, startMinute, origin, deadline: window.endMinute, target: lodgingOrigin };
   }
@@ -165,7 +185,7 @@ export async function scheduleDay(input: TimetableInput): Promise<TimetableResul
     if (openingStart(stop.hours, gap.startMinute, stay) === null) return { reason: "closes_too_early" };
 
     let inbound: DayLegDto | null = null;
-    if (gap.origin.kind === "unlocated") return { reason: "travel_unknown" };
+    if (gap.origin.kind === "unlocated") inbound = unlocatedLeg(gap.origin.name, stop.name);
     if (gap.origin.kind === "point") {
       inbound = await travel(gap.origin.id, stop.id);
       if (inbound.durationMinutes === null) return { reason: "travel_unknown" };
@@ -177,13 +197,13 @@ export async function scheduleDay(input: TimetableInput): Promise<TimetableResul
     if (endMinute > window.endMinute || endMinute > gap.deadline) return { reason: "not_enough_time" };
 
     let onward: DayLegDto | null = null;
-    if (gap.target.kind === "unlocated") return { reason: "travel_unknown" };
+    if (gap.target.kind === "unlocated") onward = unlocatedLeg(stop.name, gap.target.name);
     if (gap.target.kind === "point") {
       onward = await travel(stop.id, gap.target.id);
       if (onward.durationMinutes === null) return { reason: "travel_unknown" };
-      if (endMinute + onward.durationMinutes > gap.deadline) {
-        return { reason: final && lodging ? "cannot_return_to_lodging" : "not_enough_time" };
-      }
+    }
+    if (onward && endMinute + onward.durationMinutes! > gap.deadline) {
+      return { reason: final && lodging ? "cannot_return_to_lodging" : "not_enough_time" };
     }
     return { placed: { inbound, arriveMinute, startMinute, endMinute, stayMinutes: stay, onward } };
   }

@@ -8,7 +8,11 @@ import {
   parseTripPlaceResponse,
   type ProviderPlaceCandidateDto,
 } from "@along-the-way/contracts/trip-places";
-import { parseDayTimetableResponse, parseDayWindowResponse } from "@along-the-way/contracts/day-plans";
+import {
+  parseDayTimetableResponse,
+  parseDayWindowResponse,
+  parseTripPlanResponse,
+} from "@along-the-way/contracts/day-plans";
 import type {
   RouteMode,
   RouteObservation,
@@ -1343,6 +1347,210 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     const moved = (await list(owner.cookie, trip.id)).find((entry) => entry.id === tofukuji.id)!;
     expect((await assign("day-reassign", [{ ...moved, day: trip.days[2]!.id }])).status).toBe(200);
     expect((await positions()).get(tofukuji.id)).toBeNull();
+  });
+
+  it("adds unplanned wishlist places to nearby days around kept places and a friend's dinner", async () => {
+    const owner = await login("owner@example.test");
+    const trip = await createTrip(owner.cookie, "Trip plan trip");
+    const send = (method: string, path: string, key: string | null, payload?: unknown) =>
+      app.request(path, {
+        method,
+        headers: {
+          cookie: owner.cookie,
+          "content-type": "application/json",
+          origin: "https://app.example.test",
+          ...(key ? { "idempotency-key": key } : {}),
+        },
+        body: payload === undefined ? undefined : json(payload),
+      });
+    const skeleton = async () => {
+      const response = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+      return parseTripSkeletonResponse(await response.json()).skeleton;
+    };
+    const skeletonPlace = async (key: string, name: string, type: string, latitude: number | null, longitude: number | null) => {
+      const response = await send("POST", `/api/trips/${trip.id}/places`, key, {
+        name,
+        type,
+        address: null,
+        latitude,
+        longitude,
+        timeZone: "Asia/Tokyo",
+        sourceUrl: null,
+        notes: null,
+        expectedTripVersion: (await skeleton()).tripVersion,
+      });
+      expect(response.status).toBe(201);
+      return parsePlaceResponse(await response.json()).place;
+    };
+    const at = (placeId: string, role: "start" | "end", localDateTime: string) => ({
+      role,
+      countryStopId: trip.countryStops[0]!.id,
+      placeId,
+      localDateTime,
+      timeZone: "Asia/Tokyo",
+    });
+    const item = async (key: string, payload: Record<string, unknown>) => {
+      const response = await send("POST", `/api/trips/${trip.id}/items`, key, {
+        expectedTripVersion: (await skeleton()).tripVersion,
+        participantMemberIds: null,
+        notes: null,
+        sourceUrl: null,
+        money: null,
+        constraints: [],
+        ...payload,
+      });
+      expect(response.status).toBe(201);
+      return parseItineraryItemResponse(await response.json()).item;
+    };
+    // The hotel covers the nights of the 21st and 22nd; on the 22nd a friend picks a restaurant
+    // that has no map location yet.
+    const hotel = await skeletonPlace("plan-hotel", "Kyoto Station Hotel", "lodging", 34.9858, 135.7588);
+    const friendsPick = await skeletonPlace("plan-friend", "Friend's pick", "restaurant", null, null);
+    await item("plan-stay", {
+      type: "lodging",
+      title: "Kyoto stay",
+      endpoints: [at(hotel.id, "start", "2026-10-21T15:00"), at(hotel.id, "end", "2026-10-23T10:00")],
+      details: { bookedBy: null, confirmationCode: null },
+    });
+    const dinner = await item("plan-dinner", {
+      type: "meal",
+      title: "Dinner with Ken",
+      endpoints: [at(friendsPick.id, "start", "2026-10-22T18:00")],
+      details: { durationMinutes: 120, bookedBy: null, confirmationStatus: null },
+    });
+
+    const manual = async (key: string, name: string, latitude: number | null, longitude: number | null) => {
+      const response = await send("POST", `/api/trips/${trip.id}/trip-places`, key, {
+        method: "manual",
+        name,
+        type: "activity",
+        address: null,
+        latitude,
+        longitude,
+        timeZone: latitude === null ? null : "Asia/Tokyo",
+        sourceUrl: null,
+        originalNote: null,
+      });
+      expect(response.status).toBe(201);
+      return parseTripPlaceResponse(await response.json()).tripPlace;
+    };
+    const tofukuji = await manual("plan-tofukuji", "Tofuku-ji", 34.976, 135.7738);
+    const kiyomizuResponse = await send("POST", `/api/trips/${trip.id}/trip-places`, "plan-kiyomizu", {
+      method: "search",
+      providerPlaceId: provider.kyoto.providerPlaceId,
+      sourceUrl: provider.kyoto.sourceUrl,
+      originalNote: null,
+    });
+    expect(kiyomizuResponse.status).toBe(201);
+    const kiyomizu = parseTripPlaceResponse(await kiyomizuResponse.json()).tripPlace;
+    const komyoin = await manual("plan-komyoin", "Komyo-in", 34.9746, 135.7727);
+    const ine = await manual("plan-ine", "Ine Funaya", 35.6757, 135.2875);
+    const hidden = await manual("plan-hidden", "Hidden cafe", null, null);
+    // Tofuku-ji was put on the 23rd by hand and must stay there, first.
+    const dayOf = (date: string) => trip.days.find((day) => day.date === date)!.id;
+    expect((await send("PUT", `/api/trips/${trip.id}/trip-place-day-assignments`, "plan-assign", {
+      assignments: [{ tripPlaceId: tofukuji.id, tripDayId: dayOf("2026-10-23"), expectedVersion: tofukuji.version }],
+    })).status).toBe(200);
+    // Kiyomizu-dera is closed on Wednesdays (the 21st) and Fridays (the 23rd).
+    hours.hours.set(provider.kyoto.providerPlaceId, {
+      businessStatus: "operational",
+      regular: [0, 1, 2, 4, 6].map((day) => ({
+        open: { day, hour: 9, minute: 0, date: null },
+        close: { day, hour: 17, minute: 0, date: null },
+      })),
+      current: null,
+    });
+
+    const draft = async () => {
+      const response = await send("POST", `/api/trips/${trip.id}/trip-plan`, null);
+      expect(response.status).toBe(200);
+      return parseTripPlanResponse(await response.json()).plan;
+    };
+    const before = await skeleton();
+    const plan = await draft();
+    const byDate = new Map(plan.days.map((day) => [day.timetable.date, day]));
+
+    expect([...byDate.keys()]).toEqual(["2026-10-22", "2026-10-23", "2026-10-24"]);
+    // Kiyomizu goes to the nearest open day; the dinner keeps its time, reached in an estimated 30 minutes.
+    expect(byDate.get("2026-10-22")).toMatchObject({
+      addedTripPlaceIds: [kiyomizu.id],
+      orderedTripPlaceIds: [kiyomizu.id],
+    });
+    expect(byDate.get("2026-10-22")!.timetable.rows).toEqual([
+      { kind: "start", name: "Kyoto Station Hotel", departMinute: 540 },
+      expect.objectContaining({ kind: "visit", tripPlaceId: kiyomizu.id, startMinute: 550, endMinute: 640 }),
+      expect.objectContaining({
+        kind: "fixed",
+        itemId: dinner.id,
+        startMinute: 18 * 60,
+        endMinute: 20 * 60,
+        travel: expect.objectContaining({ fromName: "Kiyomizu-dera", durationMinutes: 30, estimated: true, mode: null }),
+      }),
+    ]);
+    // Komyo-in joins Tofuku-ji, which stays first; Ine, 90 km away, gets the first day without places it fits.
+    expect(byDate.get("2026-10-23")).toMatchObject({
+      addedTripPlaceIds: [komyoin.id],
+      orderedTripPlaceIds: [tofukuji.id, komyoin.id],
+    });
+    expect(byDate.get("2026-10-24")).toMatchObject({ addedTripPlaceIds: [ine.id] });
+    expect(plan.unplaced).toEqual([{ tripPlaceId: hidden.id, name: "Hidden cafe", reason: "no_location", date: null }]);
+    expect(await draft()).toEqual(plan);
+    expect(await skeleton()).toMatchObject({ tripVersion: before.tripVersion, items: before.items });
+
+    const apply = (key: string, chosen: typeof plan) => send("POST", `/api/trips/${trip.id}/trip-plan/apply`, key, {
+      basis: chosen.basis,
+      days: chosen.days.map((day) => ({ tripDayId: day.timetable.dayId, orderedTripPlaceIds: day.orderedTripPlaceIds })),
+    });
+    const placement = async () => new Map((await list(owner.cookie, trip.id))
+      .map((entry) => [entry.id, [entry.assignedDayId, entry.dayPosition]]));
+
+    // A change after the draft makes the plan stale; nothing is written.
+    const beforeChange = await placement();
+    const edited = await send("PATCH", `/api/trips/${trip.id}/trip-places/${ine.id}/planning`, "plan-ine-stay", {
+      expectedVersion: ine.version,
+      durationMinutes: 120,
+      budgetAmountMinor: null,
+      budgetCurrency: null,
+      notes: null,
+    });
+    expect(edited.status).toBe(200);
+    expect((await apply("plan-stale", plan)).status).toBe(409);
+    expect(await placement()).toEqual(beforeChange);
+
+    // Moving the dinner changes a day the plan checked, without touching the trip version.
+    const beforeMove = await draft();
+    const moved = await send("PATCH", `/api/trips/${trip.id}/items/${dinner.id}`, "plan-move-dinner", {
+      type: "meal",
+      title: "Dinner with Ken",
+      participantMemberIds: null,
+      notes: null,
+      sourceUrl: null,
+      money: null,
+      endpoints: [at(friendsPick.id, "start", "2026-10-22T10:00")],
+      details: { durationMinutes: 120, bookedBy: null, confirmationStatus: null },
+      expectedVersion: dinner.version,
+    });
+    expect(moved.status).toBe(200);
+    expect((await skeleton()).tripVersion).toBe(before.tripVersion);
+    expect((await apply("plan-stale-dinner", beforeMove)).status).toBe(409);
+    expect(await placement()).toEqual(beforeChange);
+
+    const fresh = await draft();
+    expect(fresh.basis).not.toBe(beforeMove.basis);
+    const used = await apply("plan-use", fresh);
+    expect(used.status).toBe(200);
+    const afterUse = await placement();
+    expect(afterUse.get(tofukuji.id)).toEqual([dayOf("2026-10-23"), 0]);
+    expect(afterUse.get(komyoin.id)).toEqual([dayOf("2026-10-23"), 1]);
+    expect(afterUse.get(kiyomizu.id)).toEqual([dayOf("2026-10-22"), 0]);
+    expect(afterUse.get(ine.id)).toEqual([dayOf("2026-10-24"), 0]);
+    expect(afterUse.get(hidden.id)).toEqual([null, null]);
+    expect((await skeleton()).tripVersion).toBe(before.tripVersion);
+    // A retry with the same key answers again without writing twice.
+    expect((await apply("plan-use", fresh)).status).toBe(200);
+    expect(await placement()).toEqual(afterUse);
+    // Nothing is left to add except the place without a location.
+    expect(await draft()).toMatchObject({ days: [], unplaced: [{ tripPlaceId: hidden.id, reason: "no_location" }] });
   });
 
   it("rejects merging an unscheduled day assignment into a scheduled place", async () => {

@@ -1,3 +1,4 @@
+import type { ApplyTripPlanInput } from "@along-the-way/contracts/day-plans";
 import type {
   CreateTripPlaceInput,
   MergeTripPlacesInput,
@@ -45,6 +46,13 @@ export interface TripPlaceModule {
     tripId: string,
     idempotencyKey: string,
     input: UpdateTripPlaceDayAssignmentsInput,
+  ): Promise<TripPlaceDto[]>;
+  /** Uses a trip plan: adds its new places to their days and keeps each day's order. */
+  addPlacesToDays(
+    userId: string,
+    tripId: string,
+    idempotencyKey: string,
+    input: ApplyTripPlanInput,
   ): Promise<TripPlaceDto[]>;
   setOwnPreference(
     userId: string,

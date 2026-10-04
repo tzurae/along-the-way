@@ -34,6 +34,7 @@ import {
 import { DayPlanDialog, type PlannedDay } from "./DayPlanDialog";
 import { ItineraryItemDialog } from "./ItineraryItemDialog";
 import { PlaceDialog } from "./PlaceDialog";
+import { TripPlanDialog } from "./TripPlanDialog";
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -263,6 +264,7 @@ export function TripSkeletonWorkspace({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [unlockingItem, setUnlockingItem] = useState<ItineraryItemDto | null>(null);
   const [planningDay, setPlanningDay] = useState<PlannedDay | null>(null);
+  const [planningTrip, setPlanningTrip] = useState(false);
   const placeCreateKey = useRef<string | null>(null);
   const itemCreateKey = useRef<string | null>(null);
   const actionKeys = useRef(new Map<string, string>());
@@ -295,8 +297,13 @@ export function TripSkeletonWorkspace({
     }
   }, [request, trip.id]);
 
+  // Only another trip blanks the itinerary. A place change reloads behind the current view:
+  // blanking it would shorten the page and drop the reader's scroll position.
   useEffect(() => {
     setSkeleton(null);
+  }, [trip.id]);
+
+  useEffect(() => {
     void load();
   }, [load, placesRevision]);
 
@@ -664,7 +671,19 @@ export function TripSkeletonWorkspace({
       </section>
 
       <section className="mt-10" aria-labelledby="timeline-heading">
-        <h3 id="timeline-heading" className="section-heading"><CalendarDays /> Daily timeline</h3>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h3 id="timeline-heading" className="section-heading"><CalendarDays /> Daily timeline</h3>
+          {tripPlaces.some((place) =>
+            !place.scheduled && place.assignedDayId === null && place.latitude !== null && place.longitude !== null) ? (
+            <button
+              className="min-h-10 rounded-lg border border-accent px-3 font-bold"
+              disabled={busyId !== null}
+              onClick={() => setPlanningTrip(true)}
+            >
+              Plan the whole trip
+            </button>
+          ) : null}
+        </div>
         <div className="timeline-grid">
           {skeleton.days.map((day, index) => {
             const assignedPlaces = tripPlaces.filter((place) =>
@@ -861,6 +880,18 @@ export function TripSkeletonWorkspace({
         request={request}
         onClose={() => setPlanningDay(null)}
         onOrderSaved={load}
+      />
+
+      <TripPlanDialog
+        tripId={trip.id}
+        open={planningTrip}
+        dayLabels={new Map(skeleton.days.map((day, index) => [day.id, `Day ${index + 1}`]))}
+        request={request}
+        onClose={() => setPlanningTrip(false)}
+        onApplied={() => {
+          setPlanningTrip(false);
+          onPlacesChanged();
+        }}
       />
     </section>
   );
