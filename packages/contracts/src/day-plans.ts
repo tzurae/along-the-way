@@ -1,3 +1,4 @@
+import type { PreferenceLevel } from "./trip-places";
 import type { ItineraryItemType } from "./trip-skeleton";
 import { isRecord } from "./type-guards";
 
@@ -109,6 +110,23 @@ export interface DayLoadDto {
   level: DayLoadLevel;
 }
 
+/** One member's preference for a place; members who gave none are left out. */
+export interface MemberPreferenceDto {
+  memberUserId: string;
+  /** Display name, else email. */
+  memberName: string;
+  level: PreferenceLevel;
+}
+
+/** Every member's preference for one place, kept apart rather than merged into one score. */
+export interface PlacePreferencesDto {
+  tripPlaceId: string;
+  /** Strongest first (must … dislike); members keep their roster order within a level. */
+  members: MemberPreferenceDto[];
+  /** At least one member must go and at least one dislikes it. */
+  conflict: boolean;
+}
+
 /** A draft computed on request; it is never stored and never changes the itinerary. */
 export interface DayTimetableDto {
   dayId: string;
@@ -124,6 +142,8 @@ export interface DayTimetableDto {
   rows: DayTimetableRowDto[];
   unscheduled: UnscheduledPlaceDto[];
   load: DayLoadDto;
+  /** Places in `rows` or `unscheduled` that at least one member rated. */
+  preferences: PlacePreferencesDto[];
 }
 
 export interface DayTimetableResponse {
@@ -160,6 +180,8 @@ export interface TripPlanDto {
   /** Days that receive at least one place. */
   days: TripPlanDayDto[];
   unplaced: TripPlanUnplacedDto[];
+  /** Places in `unplaced` that at least one member rated; each day's timetable covers its own. */
+  preferences: PlacePreferencesDto[];
 }
 
 export interface TripPlanResponse {
@@ -218,6 +240,23 @@ const REASONS = [
   "no_location",
   "cannot_return_to_lodging",
 ] as const;
+const PREFERENCE_LEVELS = ["must", "want", "optional", "neutral", "dislike"] as const;
+
+function placePreferences(value: unknown): PlacePreferencesDto {
+  const entry = record(value);
+  return {
+    tripPlaceId: text(entry.tripPlaceId),
+    members: list(entry.members, (member) => {
+      const row = record(member);
+      return {
+        memberUserId: text(row.memberUserId),
+        memberName: text(row.memberName),
+        level: oneOf(row.level, PREFERENCE_LEVELS),
+      };
+    }),
+    conflict: bool(entry.conflict),
+  };
+}
 
 function leg(value: unknown): DayLegDto {
   const row = record(value);
@@ -329,6 +368,7 @@ function timetable(value: unknown): DayTimetableDto {
       windowMinutes: integer(load.windowMinutes),
       level: oneOf(load.level, ["relaxed", "balanced", "packed"] as const),
     },
+    preferences: list(row.preferences, placePreferences),
   };
 }
 
@@ -358,6 +398,7 @@ export function parseTripPlanResponse(value: unknown): TripPlanResponse {
           date: nullableText(place.date),
         };
       }),
+      preferences: list(row.preferences, placePreferences),
     },
   };
 }

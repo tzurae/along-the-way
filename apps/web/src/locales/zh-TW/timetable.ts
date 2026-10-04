@@ -41,4 +41,7 @@ export const timetable = {
   startsAtWithoutLodging: (name: string) => `從「${name}」出發；當晚沒有住宿。`,
   startsAtArrivalAndEndsAt: (name: string) => `從抵達處或第一個地點開始，最後到「${name}」。`,
   noLodging: "沒有住宿資料，從第一個地點開始。",
+  preferences: (list: string) => `偏好：${list}`,
+  memberPreference: (name: string, level: string) => `${name} ${level}`,
+  preferenceConflict: "意見衝突：有人必去，有人不想去",
 };

@@ -38,7 +38,7 @@ import {
   type TimetableStop,
 } from "./day-timetable";
 import { hoursOn, type PlaceHoursLookup, type PlaceOpeningHours } from "./opening-hours";
-import { distributePlaces, preferencePriority } from "./trip-distribution";
+import { distributePlaces, placePreferences, preferencePriority } from "./trip-distribution";
 import { tripPlanBasis } from "./trip-plan-basis";
 
 /** Walking is suggested when it takes at most this long. */
@@ -123,6 +123,15 @@ function isMove(block: TimetableBlock) {
 
 function located(value: { latitude: number | null; longitude: number | null }) {
   return value.latitude !== null && value.longitude !== null;
+}
+
+/** The member preferences of the listed places, in list order; unrated places are left out. */
+function preferencesOf(tripPlaceIds: string[], placesById: Map<string, TripPlaceDto>) {
+  return tripPlaceIds.flatMap((id) => {
+    const place = placesById.get(id);
+    const preferences = place ? placePreferences(place) : null;
+    return preferences ? [preferences] : [];
+  });
 }
 
 /**
@@ -247,7 +256,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
     const ordered = orderedIds.map((id) => stopsById.get(id)!);
     const hours = await this.hoursFor(ordered.map((stop) => stop.place));
     const result = await this.draftDay(context, ordered, hours);
-    return this.timetableDto(context, orderedIds, result, planned, order);
+    return this.timetableDto(context, orderedIds, result, planned, order, new Map(places.map((place) => [place.id, place])));
   }
 
   async tripPlan(userId: string, tripId: string): Promise<TripPlanDto> {
@@ -262,6 +271,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
       throw new AppError("conflict", "The trip changed while planning; plan again", 409);
     }
 
+    const placesById = new Map(places.map((place) => [place.id, place]));
     const unplanned = places.filter((place) => !place.scheduled && place.assignedDayId === null);
     const unplaced: TripPlanUnplacedDto[] = unplanned.filter((place) => !located(place)).map((place) => ({
       tripPlaceId: place.id,
@@ -270,7 +280,9 @@ export class PostgresDayPlanModule implements DayPlanModule {
       date: null,
     }));
     const candidates = unplanned.filter(located).map(plannedStop);
-    if (candidates.length === 0) return { basis, days: [], unplaced };
+    if (candidates.length === 0) {
+      return { basis, days: [], unplaced, preferences: preferencesOf(unplaced.map((place) => place.tripPlaceId), placesById) };
+    }
 
     // A day without lodging, places or timed items takes the zone of the trip's places.
     const fallbackZone = places.find((place) => place.timeZone)?.timeZone ?? null;
@@ -337,12 +349,14 @@ export class PostgresDayPlanModule implements DayPlanModule {
       // A skipped place leaves the rest of the day exactly as if it had never been tried.
       const keptResult = { ...result, unscheduled: result.unscheduled.filter((place) => !addedIds.includes(place.tripPlaceId)) };
       days.push({
-        timetable: this.timetableDto(context, [...keptStops.map((stop) => stop.id), ...placedIds], keptResult, keptPlaces, "current"),
+        timetable: this.timetableDto(
+          context, [...keptStops.map((stop) => stop.id), ...placedIds], keptResult, keptPlaces, "current", placesById,
+        ),
         addedTripPlaceIds: placedIds,
         orderedTripPlaceIds: [...keptPlaces.map((place) => place.id), ...placedIds],
       });
     }
-    return { basis, days, unplaced };
+    return { basis, days, unplaced, preferences: preferencesOf(unplaced.map((place) => place.tripPlaceId), placesById) };
   }
 
   /** Places planned for a day, in its order: applied positions first, then list (creation) order. */
@@ -483,7 +497,20 @@ export class PostgresDayPlanModule implements DayPlanModule {
     result: TimetableResult,
     planned: TripPlaceDto[],
     order: DayTimetableDto["order"],
+    placesById: Map<string, TripPlaceDto>,
   ): DayTimetableDto {
+    const unscheduled = [
+      ...result.unscheduled,
+      ...planned.filter((place) => !located(place)).map((place) => ({
+        tripPlaceId: place.id,
+        name: place.name,
+        reason: "no_location" as const,
+      })),
+    ];
+    const listedIds = [
+      ...result.rows.flatMap((row) => (row.kind === "visit" ? [row.tripPlaceId] : [])),
+      ...unscheduled.map((place) => place.tripPlaceId),
+    ];
     return {
       dayId: context.day.id,
       date: context.day.date,
@@ -493,15 +520,9 @@ export class PostgresDayPlanModule implements DayPlanModule {
       startsAt: context.start ? { placeId: context.start.id, name: context.start.name } : null,
       endsAt: context.night ? { placeId: context.night.id, name: context.night.name } : null,
       rows: result.rows,
-      unscheduled: [
-        ...result.unscheduled,
-        ...planned.filter((place) => !located(place)).map((place) => ({
-          tripPlaceId: place.id,
-          name: place.name,
-          reason: "no_location" as const,
-        })),
-      ],
+      unscheduled,
       load: result.load,
+      preferences: preferencesOf(listedIds, placesById),
     };
   }
 

@@ -1470,6 +1470,21 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       expect(response.status).toBe(200);
       return parseTripPlanResponse(await response.json()).plan;
     };
+    // Two members disagree: Kiyomizu-dera is one's must and the other's dislike; Hidden cafe is a
+    // want against a dislike. The plan ranks places as before but keeps each member's view.
+    const second = await login("second@example.test");
+    await addMember(trip.id, second.user.id);
+    for (const [cookie, place, level, key] of [
+      [owner.cookie, kiyomizu, "must", "plan-owner-kiyomizu"],
+      [second.cookie, kiyomizu, "dislike", "plan-second-kiyomizu"],
+      [second.cookie, hidden, "dislike", "plan-second-hidden"],
+      [owner.cookie, hidden, "want", "plan-owner-hidden"],
+    ] as const) {
+      expect((await setPreference(cookie, trip.id, place.id, level, null, key)).status).toBe(200);
+    }
+    // The owner has no display name, so the email stands in.
+    const owners = (level: string) => ({ memberUserId: owner.user.id, memberName: "owner@example.test", level });
+    const seconds = (level: string) => ({ memberUserId: second.user.id, memberName: "second", level });
     const before = await skeleton();
     const plan = await draft();
     const byDate = new Map(plan.days.map((day) => [day.timetable.date, day]));
@@ -1498,6 +1513,14 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     });
     expect(byDate.get("2026-10-24")).toMatchObject({ addedTripPlaceIds: [ine.id] });
     expect(plan.unplaced).toEqual([{ tripPlaceId: hidden.id, name: "Hidden cafe", reason: "no_location", date: null }]);
+    expect(byDate.get("2026-10-22")!.timetable.preferences).toEqual([
+      { tripPlaceId: kiyomizu.id, members: [owners("must"), seconds("dislike")], conflict: true },
+    ]);
+    // Unrated places are left out rather than listed as neutral.
+    expect(byDate.get("2026-10-23")!.timetable.preferences).toEqual([]);
+    expect(plan.preferences).toEqual([
+      { tripPlaceId: hidden.id, members: [owners("want"), seconds("dislike")], conflict: false },
+    ]);
     expect(await draft()).toEqual(plan);
     expect(await skeleton()).toMatchObject({ tripVersion: before.tripVersion, items: before.items });
 
@@ -1553,6 +1576,13 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     // A retry with the same key answers again without writing twice.
     expect((await apply("plan-use", fresh)).status).toBe(200);
     expect(await placement()).toEqual(afterUse);
+    // The day plan shows the same disagreement once the place is on its day.
+    const dayDraft = await send("POST", `/api/trips/${trip.id}/days/${dayOf("2026-10-22")}/timetable`, null, {
+      order: "current",
+    });
+    expect(parseDayTimetableResponse(await dayDraft.json()).timetable.preferences).toEqual([
+      { tripPlaceId: kiyomizu.id, members: [owners("must"), seconds("dislike")], conflict: true },
+    ]);
     // Nothing is left to add except the place without a location.
     expect(await draft()).toMatchObject({ days: [], unplaced: [{ tripPlaceId: hidden.id, reason: "no_location" }] });
   });
