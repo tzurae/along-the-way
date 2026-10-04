@@ -1,6 +1,54 @@
 import type { ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
 import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 
+import type {
+  BusinessStatus,
+  OpeningPeriod,
+  OpeningPoint,
+  PlaceHoursLookup,
+  PlaceOpeningHours,
+} from "../planning/opening-hours";
+
+// Opening hours move a Place Details request to the Enterprise SKU (about US$0.02 each).
+const HOURS_FIELD_MASK = "regularOpeningHours,currentOpeningHours,businessStatus";
+
+const BUSINESS_STATUS: Record<string, BusinessStatus> = {
+  OPERATIONAL: "operational",
+  CLOSED_TEMPORARILY: "closed_temporarily",
+  CLOSED_PERMANENTLY: "closed_permanently",
+  FUTURE_OPENING: "future_opening",
+};
+
+function openingPoint(value: unknown): OpeningPoint | null {
+  if (typeof value !== "object" || value === null) return null;
+  const point = value as Record<string, unknown>;
+  const integer = (field: unknown, maximum: number) =>
+    typeof field === "number" && Number.isInteger(field) && field >= 0 && field <= maximum ? field : null;
+  const day = integer(point.day, 6);
+  const hour = integer(point.hour, 24);
+  const minute = integer(point.minute, 59);
+  if (day === null || hour === null || minute === null) return null;
+  const date = typeof point.date === "object" && point.date !== null ? point.date as Record<string, unknown> : null;
+  const isoDate = date && [date.year, date.month, date.day].every((part) => typeof part === "number")
+    ? `${String(date.year).padStart(4, "0")}-${String(date.month).padStart(2, "0")}-${String(date.day).padStart(2, "0")}`
+    : null;
+  return { day, hour, minute, date: isoDate };
+}
+
+/** Periods as reported; null when the provider reported no hours at all. */
+function openingPeriods(value: unknown): OpeningPeriod[] | null {
+  if (typeof value !== "object" || value === null) return null;
+  const periods = (value as Record<string, unknown>).periods;
+  if (!Array.isArray(periods)) return null;
+  return periods.flatMap((raw): OpeningPeriod[] => {
+    if (typeof raw !== "object" || raw === null) return [];
+    const period = raw as Record<string, unknown>;
+    const open = openingPoint(period.open);
+    if (!open) return [];
+    return [{ open, close: period.close === undefined ? null : openingPoint(period.close) }];
+  });
+}
+
 export class ProviderUnavailableError extends Error {
   constructor(
     message = "Google Places is temporarily unavailable; use manual entry instead",
@@ -109,7 +157,7 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup {
+export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, PlaceHoursLookup {
   readonly attribution = "Google Maps";
   readonly available: boolean;
   private readonly apiKey: string | undefined;
@@ -183,6 +231,23 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup {
         websiteUri: typeof item?.websiteUri === "string" ? item.websiteUri : null,
       };
     });
+  }
+
+  /** The place's opening hours for evaluating a visit; returned to the caller, never stored. */
+  async openingHours(rawProviderPlaceId: string): Promise<PlaceOpeningHours> {
+    const providerPlaceId = rawProviderPlaceId.trim();
+    if (!/^[A-Za-z0-9_-]{8,300}$/.test(providerPlaceId)) {
+      throw new TypeError("Invalid Google place ID");
+    }
+    const value = record(await this.request(
+      `https://places.googleapis.com/v1/places/${encodeURIComponent(providerPlaceId)}`,
+      { headers: { "X-Goog-FieldMask": HOURS_FIELD_MASK } },
+    ));
+    return {
+      businessStatus: typeof value?.businessStatus === "string" ? BUSINESS_STATUS[value.businessStatus] ?? null : null,
+      regular: openingPeriods(value?.regularOpeningHours),
+      current: openingPeriods(value?.currentOpeningHours),
+    };
   }
 
   async getPlace(rawProviderPlaceId: string) {

@@ -4,7 +4,7 @@ import { OpenAiResponsesDiscoveryModel } from "./discovery/openai-responses-disc
 import { PostgresDiscoveryModule } from "./discovery/postgres-discovery-module";
 import { GoogleRoutesProvider } from "./planning/google-routes-provider";
 import { NavitimeRoutesProvider } from "./planning/navitime-routes-provider";
-import { PostgresDayRouteModule } from "./planning/postgres-day-route-module";
+import { PostgresDayPlanModule } from "./planning/postgres-day-plan-module";
 import { PostgresIdentityAccessModule } from "./private-trips/postgres-identity-access-module";
 import { PostgresRateLimiter } from "./private-trips/postgres-rate-limiter";
 import { PostgresReadinessProbe } from "./private-trips/postgres-readiness-probe";
@@ -45,7 +45,7 @@ const discovery = new PostgresDiscoveryModule({
   placeLookup: placeProvider,
   tripPlaces,
 });
-const dayRoutes = new PostgresDayRouteModule({
+const dayPlans = new PostgresDayPlanModule({
   database,
   tripSkeleton,
   tripPlaces,
@@ -54,11 +54,12 @@ const dayRoutes = new PostgresDayRouteModule({
     new NavitimeRoutesProvider({ apiKey: process.env.RAPIDAPI_KEY }),
     new GoogleRoutesProvider({ apiKey: process.env.GOOGLE_MAPS_API_KEY }),
   ],
+  placeHours: placeProvider,
 });
 const rateLimiter = new PostgresRateLimiter(database, tokenSecret);
 const readiness = new PostgresReadinessProbe(database);
 const app = createApp({
-  dayRoutes,
+  dayPlans,
   discovery,
   identityAccess,
   rateLimiter,

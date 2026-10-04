@@ -80,10 +80,19 @@ describe("Google Routes observation adapter", () => {
     expect(observations.map((entry) => entry.durationMinutes)).toEqual([null, null]);
   });
 
+  it("reads an omitted distance as zero, as protobuf JSON omits zero values", async () => {
+    // Google's answer for two points it places at the same spot, e.g. a hotel beside a station.
+    const observations = await providerWithResponse({ routes: [{
+      duration: "0s",
+      legs: [{ steps: [{ travelMode: "WALK", staticDuration: "0s" }] }],
+    }] }).observe(query);
+    expect(observations.map((entry) => [entry.status, entry.durationMinutes, entry.distanceMeters]))
+      .toEqual([["available", 0, 0], ["available", 0, 0]]);
+  });
+
   it.each([
     { duration: "oops", distanceMeters: 10 },
     { duration: "-1s", distanceMeters: 10 },
-    { duration: "10s" },
     { distanceMeters: 10 },
     { duration: "10s", distanceMeters: -1 },
     { duration: "10s", distanceMeters: 1.5 },

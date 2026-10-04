@@ -29,7 +29,7 @@ import { TokenIssuer } from "../src/private-trips/token-issuer";
 import { PostgresTripSkeletonModule } from "../src/trip-skeleton/postgres-trip-skeleton-module";
 import { GooglePlacesProvider } from "../src/trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
-import { unrelatedDayRouteModule } from "./day-route-test-support";
+import { unrelatedDayPlanModule } from "./day-plan-test-support";
 import { unrelatedDiscoveryModule } from "./discovery-test-support";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -123,7 +123,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       now,
     });
     app = createApp({
-      dayRoutes: unrelatedDayRouteModule,
+      dayPlans: unrelatedDayPlanModule,
       discovery: unrelatedDiscoveryModule,
       identityAccess,
       rateLimiter: new PostgresRateLimiter(database, "trip-skeleton-rate-secret-at-least-32-bytes", now),
@@ -2373,6 +2373,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         { migrationName: "008_activity_participants", direction: "Up", status: "Error" },
         { migrationName: "009_day_place_order", direction: "Up", status: "NotExecuted" },
         { migrationName: "010_grounded_recommendations", direction: "Up", status: "NotExecuted" },
+        { migrationName: "011_day_plan_window", direction: "Up", status: "NotExecuted" },
       ]);
       await database.deleteFrom("mutation_requests")
         .where("actor_id", "=", owner.userId).where("operation", "=", "create_trip")
