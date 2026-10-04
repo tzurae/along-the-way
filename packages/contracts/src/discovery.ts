@@ -4,6 +4,14 @@ import type { PlaceType } from "./trip-skeleton";
 export type DiscoveryConfidence = "high" | "medium" | "low";
 export type DiscoveryProposalStatus = "pending" | "accepting" | "accepted" | "rejected";
 export type DiscoveryFeedbackStatus = "pending" | "confirmed" | "rejected";
+/** Independent kinds of source that can vouch for a recommendation. */
+export type DiscoveryEndorsement = "google_reviews" | "wikivoyage" | "official_tourism";
+export type DiscoveryShortfallCode =
+  | "not_researched"
+  | "not_found"
+  | "name_mismatch"
+  | "single_source"
+  | "category_short";
 
 export interface StructuredDiscoveryBriefDto {
   interests: string[];
@@ -22,11 +30,30 @@ export interface DiscoveryBriefDto {
 }
 
 export interface DiscoverySearchPlanDto {
+  /** Google lookups actually made, one short "area name" query per researched place. */
   queries: string[];
   areas: string[];
+  /** Kinds of place the traveler asked for, or the defaults when they asked for none. */
   categories: string[];
+  defaultCategories: boolean;
+  /** Places the traveler named; each is always researched. */
+  namedPlaces: string[];
+  /** Arrangements the traveler already made; never recommended. */
+  alreadyArranged: string[];
   exclusions: string[];
   dateRange: { start: string; end: string };
+}
+
+/** Why something the traveler would expect is missing from the shortlist. */
+export interface DiscoveryShortfallDto {
+  code: DiscoveryShortfallCode;
+  /** Place name, or the kind of place for category_short. */
+  subject: string;
+  named: boolean;
+  /** Sources that did vouch, for single_source. */
+  endorsements: DiscoveryEndorsement[];
+  /** Places shown for the kind, for category_short. */
+  count: number | null;
 }
 
 export interface DiscoveryEvidenceDto {
@@ -59,6 +86,10 @@ export interface CandidateProposalDto {
   evidence: DiscoveryEvidenceDto[];
   acceptedTripPlaceId: string | null;
   version: number;
+  /** Kind of place it answers; null for proposals from before kinds were recorded. */
+  category: string | null;
+  /** Independent sources that vouched for it; empty for older proposals. */
+  endorsements: DiscoveryEndorsement[];
 }
 
 export interface DiscoveryRunDto {
@@ -70,6 +101,7 @@ export interface DiscoveryRunDto {
   searchPlan: DiscoverySearchPlanDto;
   generatedAt: string;
   errorCode: string | null;
+  shortfalls: DiscoveryShortfallDto[];
 }
 
 export interface DiscoveryFeedbackDto {
@@ -155,6 +187,28 @@ function strings(value: unknown) {
   return Array.isArray(value) ? value.map(text) : invalid();
 }
 
+function endorsements(value: unknown): DiscoveryEndorsement[] {
+  return strings(value).map((entry) =>
+    entry === "google_reviews" || entry === "wikivoyage" || entry === "official_tourism" ? entry : invalid()
+  );
+}
+
+const SHORTFALL_CODES: readonly DiscoveryShortfallCode[] = [
+  "not_researched", "not_found", "name_mismatch", "single_source", "category_short",
+];
+
+function shortfall(value: unknown): DiscoveryShortfallDto {
+  const item = record(value);
+  const code = SHORTFALL_CODES.find((entry) => entry === item.code) ?? invalid();
+  return {
+    code,
+    subject: text(item.subject),
+    named: typeof item.named === "boolean" ? item.named : invalid(),
+    endorsements: endorsements(item.endorsements),
+    count: item.count === null ? null : integer(item.count),
+  };
+}
+
 function placeType(value: unknown): PlaceType {
   if (["airport", "station", "lodging", "restaurant", "activity", "other"].includes(String(value))) {
     return value as PlaceType;
@@ -180,6 +234,9 @@ function searchPlan(value: unknown): DiscoverySearchPlanDto {
     queries: strings(item.queries),
     areas: strings(item.areas),
     categories: strings(item.categories),
+    defaultCategories: typeof item.defaultCategories === "boolean" ? item.defaultCategories : invalid(),
+    namedPlaces: strings(item.namedPlaces),
+    alreadyArranged: strings(item.alreadyArranged),
     exclusions: strings(item.exclusions),
     dateRange: { start: text(dateRange.start), end: text(dateRange.end) },
   };
@@ -223,6 +280,8 @@ function proposal(value: unknown): CandidateProposalDto {
     evidence: Array.isArray(item.evidence) ? item.evidence.map(evidence) : invalid(),
     acceptedTripPlaceId: nullableText(item.acceptedTripPlaceId),
     version: integer(item.version),
+    category: nullableText(item.category),
+    endorsements: endorsements(item.endorsements),
   };
 }
 
@@ -275,6 +334,7 @@ export function parseDiscoveryWorkspaceResponse(value: unknown): DiscoveryWorksp
       searchPlan: searchPlan(item.searchPlan),
       generatedAt: text(item.generatedAt),
       errorCode: nullableText(item.errorCode),
+      shortfalls: Array.isArray(item.shortfalls) ? item.shortfalls.map(shortfall) : invalid(),
     };
   }
   return {

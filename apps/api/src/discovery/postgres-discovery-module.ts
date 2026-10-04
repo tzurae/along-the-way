@@ -3,7 +3,9 @@ import type {
   CreateDiscoveryFeedbackInput,
   DecideCandidateProposalInput,
   DecideDiscoveryFeedbackInput,
+  DiscoveryEndorsement,
   DiscoveryFeedbackDto,
+  DiscoveryShortfallDto,
   DiscoveryWorkspaceDto,
   GenerateDiscoveryInput,
   SaveDiscoveryBriefInput,
@@ -25,6 +27,11 @@ import {
   type DatabaseExecutor,
 } from "../private-trips/postgres-private-trip-store";
 import {
+  defaultRecommendationSourceChecks,
+  verifyResearchedCandidates,
+  type RecommendationSourceChecks,
+} from "./candidate-verification";
+import {
   DiscoveryModelResponseError,
   DiscoveryModelUnavailableError,
   type DiscoveryModel,
@@ -36,24 +43,34 @@ import {
 import type { DiscoveryModule } from "./discovery-module";
 import {
   ProviderUnavailableError,
-  type PlaceProvider,
+  type RatedPlaceLookup,
 } from "../trip-places/google-places-provider";
 import type { TripPlaceModule } from "../trip-places/trip-place-module";
 
 interface PostgresDiscoveryModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
   model: DiscoveryModel;
-  placeProvider: PlaceProvider;
+  /** Google lookups with rating and review count, used to place and screen researched candidates. */
+  placeLookup: RatedPlaceLookup;
   tripPlaces: TripPlaceModule;
+  sourceChecks?: RecommendationSourceChecks;
   now?: () => Date;
   policyVersion?: string;
 }
+
+const ENDORSEMENTS: readonly DiscoveryEndorsement[] = ["google_reviews", "wikivoyage", "official_tourism"];
+const SHORTFALL_CODES: readonly DiscoveryShortfallDto["code"][] = [
+  "not_researched", "not_found", "name_mismatch", "single_source", "category_short",
+];
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EMPTY_PLAN: DiscoverySearchPlan = {
   queries: [],
   areas: [],
   categories: [],
+  defaultCategories: false,
+  namedPlaces: [],
+  alreadyArranged: [],
   exclusions: [],
   dateRange: { start: "", end: "" },
 };
@@ -89,8 +106,28 @@ function jsonStrings(value: unknown) {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
+/**
+ * Workspace snapshots stored for idempotent replay before quality checks existed lack their
+ * fields; a retried request replays them as "none recorded" instead of failing to parse.
+ */
+function upgradeStoredWorkspace(value: unknown) {
+  const workspace = jsonObject(value);
+  const run = workspace.latestRun === null ? null : jsonObject(workspace.latestRun);
+  return {
+    ...workspace,
+    latestRun: run && {
+      ...run,
+      shortfalls: Array.isArray(run.shortfalls) ? run.shortfalls : [],
+      searchPlan: { defaultCategories: false, namedPlaces: [], alreadyArranged: [], ...jsonObject(run.searchPlan) },
+    },
+    proposals: Array.isArray(workspace.proposals)
+      ? workspace.proposals.map((proposal) => ({ category: null, endorsements: [], ...jsonObject(proposal) }))
+      : workspace.proposals,
+  };
+}
+
 function replayedWorkspace(value: unknown) {
-  return parseDiscoveryWorkspaceResponse({ discovery: value }).discovery;
+  return parseDiscoveryWorkspaceResponse({ discovery: upgradeStoredWorkspace(value) }).discovery;
 }
 
 const AI_REQUEST_STATE = "discovery-ai-request-state";
@@ -120,18 +157,21 @@ function isAiRequestClaim(value: unknown) {
 export class PostgresDiscoveryModule implements DiscoveryModule {
   private readonly database: Kysely<AlongTheWayDatabase>;
   private readonly model: DiscoveryModel;
-  private readonly placeProvider: PlaceProvider;
+  private readonly placeLookup: RatedPlaceLookup;
   private readonly tripPlaces: TripPlaceModule;
+  private readonly sourceChecks: RecommendationSourceChecks;
   private readonly now: () => Date;
   private readonly policyVersion: string;
 
   constructor(options: PostgresDiscoveryModuleOptions) {
     this.database = options.database;
     this.model = options.model;
-    this.placeProvider = options.placeProvider;
+    this.placeLookup = options.placeLookup;
     this.tripPlaces = options.tripPlaces;
+    this.sourceChecks = options.sourceChecks ?? defaultRecommendationSourceChecks;
     this.now = options.now ?? (() => new Date());
-    this.policyVersion = options.policyVersion ?? "discovery-v1";
+    // v2: research first, Google only places candidates, two independent sources required.
+    this.policyVersion = options.policyVersion ?? "discovery-v2";
   }
 
   async getWorkspace(userId: string, tripId: string) {
@@ -222,8 +262,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     }
     const trip = await this.tripFacts(userId, tripId);
     const feedback = await this.confirmedFeedback(tripId);
-    const rejectedProviderPlaceIds = await this.database.selectFrom("candidate_proposals")
-      .select("provider_place_id")
+    const rejected = await this.database.selectFrom("candidate_proposals")
+      .select(["provider_place_id", "name"])
       .where("trip_id", "=", tripId)
       .where("status", "=", "rejected")
       .execute();
@@ -244,36 +284,41 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         trip,
         confirmedFeedback: feedback,
       });
-      plan.searchPlan.dateRange = { start: trip.startDate, end: trip.endDate };
-      const byProviderId = new Map<string, ProviderPlaceCandidateDto>();
-      let providerSucceeded = false;
-      for (const query of plan.searchPlan.queries.slice(0, 6)) {
-        try {
-          const returned = await this.placeProvider.search(query, { languageCode: plan.outputLanguage });
-          providerSucceeded = true;
-          for (const candidate of returned) {
-            if (!byProviderId.has(candidate.providerPlaceId) && byProviderId.size < 24) {
-              byProviderId.set(candidate.providerPlaceId, candidate);
-            }
-          }
-        } catch (error) {
-          if (!(error instanceof ProviderUnavailableError)) throw error;
-        }
-      }
-      if (!providerSucceeded && byProviderId.size === 0) {
+      if (this.placeLookup.available === false) {
         throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
       }
-      const candidates = [...byProviderId.values()];
-      const synthesis = await this.model.synthesize({
+      const research = await this.model.research({
         brief: plan.structuredBrief,
-        searchPlan: plan.searchPlan,
+        request: plan.request,
         trip,
-        candidates,
         confirmedFeedback: feedback,
-        rejectedProviderPlaceIds: rejectedProviderPlaceIds.map((item) => item.provider_place_id),
+        rejectedPlaces: [...new Set(rejected.map((row) => row.name))],
         outputLanguage: plan.outputLanguage,
       });
-      const candidateById = new Map(candidates.map((candidate) => [candidate.providerPlaceId, candidate]));
+      const verification = await verifyResearchedCandidates({
+        candidates: research.candidates,
+        request: plan.request,
+        outputLanguage: plan.outputLanguage,
+        placeLookup: this.placeLookup,
+        sourceChecks: this.sourceChecks,
+        rejectedProviderPlaceIds: new Set(rejected.map((row) => row.provider_place_id)),
+      }).catch((error: unknown) => {
+        if (error instanceof ProviderUnavailableError) {
+          throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
+        }
+        throw error;
+      });
+      const searchPlan: DiscoverySearchPlan = {
+        queries: verification.queries,
+        areas: plan.request.areas,
+        categories: plan.request.categories,
+        defaultCategories: plan.request.defaultCategories,
+        namedPlaces: plan.request.namedPlaces.map((place) => place.name),
+        alreadyArranged: plan.request.alreadyArranged,
+        exclusions: plan.request.exclusions,
+        dateRange: { start: trip.startDate, end: trip.endDate },
+      };
+      const sourceTitles = new Map(research.sources.map((source) => [source.url, source.title]));
       return await this.database.transaction().execute(async (transaction) => {
         await this.requireMember(transaction, userId, tripId);
         await lockMutation(transaction, userId, operation, key);
@@ -296,74 +341,101 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           trip_id: tripId,
           brief_version: version,
           policy_version: this.policyVersion,
-          model_id: synthesis.modelId || plan.modelId,
+          model_id: research.modelId || plan.modelId,
           status: "completed",
-          search_plan: plan.searchPlan,
+          search_plan: searchPlan,
           error_code: null,
           created_by: userId,
           completed_at: this.now(),
+          shortfalls: JSON.stringify(verification.gate.shortfalls),
         }).returning("id").executeTakeFirstOrThrow();
-        const sourceEvidence = new Map<string, string>();
-        const usedSourceUrls = new Set(synthesis.candidates.flatMap((candidate) => candidate.sourceUrls));
-        for (const source of synthesis.sources) {
-          if (!usedSourceUrls.has(source.url)) continue;
+        // One web-source row per page per run, shared by every place it vouches for.
+        const webEvidence = new Map<string, string>();
+        const webSource = async (url: string, title: string, attribution: string) => {
+          const existing = webEvidence.get(url);
+          if (existing) return existing;
           const row = await transaction.insertInto("discovery_evidence").values({
             trip_id: tripId,
             run_id: run.id,
             evidence_kind: "web-source",
             provider_place_id: null,
-            source_url: source.url,
-            title: source.title,
-            attribution: "OpenAI web search source",
+            source_url: url,
+            title,
+            attribution,
             observed_at: this.now(),
             expires_at: null,
             facts: { sourceOnly: true },
           }).returning("id").executeTakeFirstOrThrow();
-          sourceEvidence.set(source.url, row.id);
-        }
-        for (const candidateSynthesis of synthesis.candidates) {
-          if (rejectedProviderPlaceIds.some((entry) => entry.provider_place_id === candidateSynthesis.providerPlaceId)) continue;
-          const candidate = candidateById.get(candidateSynthesis.providerPlaceId);
-          if (!candidate) continue;
-          const googleUrl = candidate.sourceUrl ?? `https://www.google.com/maps/search/?api=1&query_place_id=${encodeURIComponent(candidate.providerPlaceId)}`;
+          webEvidence.set(url, row.id);
+          return row.id;
+        };
+        for (const { index, members, endorsements } of verification.gate.shown) {
+          const { researched, place } = verification.candidates[index]!;
+          // Entries merged into this place may have found the pages that vouch for it.
+          const merged = members.map((member) => verification.candidates[member]!);
+          if (!place) continue;
+          const googleUrl = place.sourceUrl ?? `https://www.google.com/maps/search/?api=1&query_place_id=${encodeURIComponent(place.providerPlaceId)}`;
+          // Only the place identity is kept; Google's rating and review count never are.
           const googleEvidence = await transaction.insertInto("discovery_evidence").values({
             trip_id: tripId,
             run_id: run.id,
             evidence_kind: "google-place",
-            provider_place_id: candidate.providerPlaceId,
+            provider_place_id: place.providerPlaceId,
             source_url: googleUrl,
-            title: candidate.name,
-            attribution: candidate.attribution,
-            observed_at: candidate.observedAt,
-            expires_at: candidate.expiresAt,
-            facts: candidate,
+            title: place.name,
+            attribution: place.attribution,
+            observed_at: place.observedAt,
+            expires_at: place.expiresAt,
+            facts: place,
           }).returning("id").executeTakeFirstOrThrow();
           const proposal = await transaction.insertInto("candidate_proposals").values({
             trip_id: tripId,
             run_id: run.id,
-            provider_place_id: candidate.providerPlaceId,
-            name: candidate.name,
-            place_type: candidate.type,
-            address: candidate.address,
-            latitude: candidate.latitude,
-            longitude: candidate.longitude,
-            source_url: candidate.sourceUrl,
-            recommendation: candidateSynthesis.recommendation,
-            matched_needs: JSON.stringify(candidateSynthesis.matchedNeeds),
-            tradeoffs: JSON.stringify(candidateSynthesis.tradeoffs),
-            unknowns: JSON.stringify(candidateSynthesis.unknowns),
-            confidence: candidateSynthesis.confidence,
+            provider_place_id: place.providerPlaceId,
+            name: place.name,
+            place_type: place.type,
+            address: place.address,
+            latitude: place.latitude,
+            longitude: place.longitude,
+            source_url: place.sourceUrl,
+            recommendation: researched.recommendation,
+            matched_needs: JSON.stringify(researched.matchedNeeds),
+            tradeoffs: JSON.stringify(researched.tradeoffs),
+            unknowns: JSON.stringify(researched.unknowns),
+            confidence: researched.confidence,
             status: "pending",
             accepted_trip_place_id: null,
             decided_by: null,
             decided_at: null,
+            // A named place of no requested kind shows the kind a merged entry was found for.
+            category: researched.category ?? merged.find((entry) => entry.researched.category)?.researched.category ?? null,
+            endorsements: JSON.stringify(endorsements),
           }).returning("id").executeTakeFirstOrThrow();
-          const evidenceIds = [
-            googleEvidence.id,
-            ...candidateSynthesis.sourceUrls.map((url) => sourceEvidence.get(url)).filter((id): id is string => Boolean(id)),
-          ];
+          const evidenceIds = [googleEvidence.id];
+          const official = new Set<string>();
+          for (const entry of merged) {
+            if (entry.wikivoyagePage) {
+              evidenceIds.push(await webSource(entry.wikivoyagePage.url, `${entry.wikivoyagePage.title} (Wikivoyage)`, "Wikivoyage"));
+            }
+            if (entry.officialPage) {
+              official.add(entry.officialPage);
+              evidenceIds.push(await webSource(
+                entry.officialPage,
+                sourceTitles.get(entry.officialPage) ?? new URL(entry.officialPage).hostname,
+                "Official tourism site",
+              ));
+            }
+          }
+          for (const source of merged.flatMap((entry) => entry.researched.sources)) {
+            if (source.type !== "place_official" || official.has(source.url)) continue;
+            evidenceIds.push(await webSource(
+              source.url,
+              sourceTitles.get(source.url) ?? new URL(source.url).hostname,
+              "Place's own website",
+            ));
+          }
           await transaction.insertInto("candidate_proposal_evidence").values(
-            evidenceIds.map((evidenceId) => ({ proposal_id: proposal.id, evidence_id: evidenceId })),
+            [...new Set(evidenceIds)].map((evidenceId) => ({ proposal_id: proposal.id, evidence_id: evidenceId })),
           ).execute();
         }
         await recordEvent(transaction, {
@@ -372,7 +444,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           eventType: "discovery.generated",
           targetType: "discovery_run",
           targetId: run.id,
-          summary: `Generated ${synthesis.candidates.length} source-grounded place proposals`,
+          summary: `Generated ${verification.gate.shown.length} place proposals vouched for by two independent sources`,
         });
         const response = await this.readWorkspace(transaction, tripId);
         await transaction.updateTable("mutation_requests").set({ response })
@@ -390,7 +462,23 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           : error instanceof DiscoveryModelResponseError
             ? new AppError("model_unavailable", error.message, 503)
             : null;
-      if (!failure) throw error;
+      if (!failure) {
+        // An unexpected failure must still release the claim, or every retry of this key
+        // would be told the request is in progress forever.
+        await this.database.updateTable("mutation_requests").set({
+          response: {
+            type: AI_REQUEST_STATE,
+            state: "failed",
+            code: "model_unavailable",
+            message: "The discovery request failed; try again",
+          },
+        })
+          .where("actor_id", "=", userId)
+          .where("operation", "=", operation)
+          .where("idempotency_key", "=", key)
+          .execute();
+        throw error;
+      }
       const replayCode = failure.code === "provider_unavailable"
         ? "provider_unavailable"
         : failure.code === "conflict"
@@ -473,7 +561,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         longitude: proposal.longitude,
         timeZone: typeof facts.timeZone === "string" ? facts.timeZone : null,
         sourceUrl: proposal.source_url,
-        attribution: typeof facts.attribution === "string" ? facts.attribution : this.placeProvider.attribution,
+        attribution: typeof facts.attribution === "string" ? facts.attribution : this.placeLookup.attribution,
         observedAt: typeof facts.observedAt === "string" ? facts.observedAt : isoTimestamp(proposal.created_at),
         expiresAt: typeof facts.expiresAt === "string" ? facts.expiresAt : isoTimestamp(this.now()),
       };
@@ -829,6 +917,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         searchPlan: this.readSearchPlan(run.search_plan),
         generatedAt: isoTimestamp(run.completed_at),
         errorCode: run.error_code,
+        shortfalls: this.readShortfalls(run.shortfalls),
       } : null,
       proposals: proposalRows.map((proposal) => ({
         id: proposal.id,
@@ -849,6 +938,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         evidence: evidenceByProposal.get(proposal.id) ?? [],
         acceptedTripPlaceId: proposal.accepted_trip_place_id,
         version: proposal.version,
+        category: proposal.category,
+        endorsements: this.readEndorsements(proposal.endorsements),
       })),
       feedback: feedbackRows.map((feedback): DiscoveryFeedbackDto => {
         const interpretation = jsonObject(feedback.interpretation);
@@ -869,7 +960,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         };
       }),
       modelAvailable: this.model.available,
-      placeProviderAvailable: this.placeProvider.available !== false,
+      placeProviderAvailable: this.placeLookup.available !== false,
     };
   }
 
@@ -891,11 +982,35 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       queries: jsonStrings(item.queries),
       areas: jsonStrings(item.areas),
       categories: jsonStrings(item.categories),
+      defaultCategories: item.defaultCategories === true,
+      namedPlaces: jsonStrings(item.namedPlaces),
+      alreadyArranged: jsonStrings(item.alreadyArranged),
       exclusions: jsonStrings(item.exclusions),
       dateRange: {
         start: typeof dateRange.start === "string" ? dateRange.start : EMPTY_PLAN.dateRange.start,
         end: typeof dateRange.end === "string" ? dateRange.end : EMPTY_PLAN.dateRange.end,
       },
     };
+  }
+
+  private readEndorsements(value: unknown): DiscoveryEndorsement[] {
+    return jsonStrings(value).filter((entry): entry is DiscoveryEndorsement =>
+      ENDORSEMENTS.some((endorsement) => endorsement === entry));
+  }
+
+  private readShortfalls(value: unknown): DiscoveryShortfallDto[] {
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((raw): DiscoveryShortfallDto[] => {
+      const item = jsonObject(raw);
+      const code = SHORTFALL_CODES.find((entry) => entry === item.code);
+      if (!code || typeof item.subject !== "string") return [];
+      return [{
+        code,
+        subject: item.subject,
+        named: item.named === true,
+        endorsements: this.readEndorsements(item.endorsements),
+        count: typeof item.count === "number" && Number.isSafeInteger(item.count) ? item.count : null,
+      }];
+    });
   }
 }

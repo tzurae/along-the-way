@@ -2372,6 +2372,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       expect(refused.results).toEqual([
         { migrationName: "008_activity_participants", direction: "Up", status: "Error" },
         { migrationName: "009_day_place_order", direction: "Up", status: "NotExecuted" },
+        { migrationName: "010_grounded_recommendations", direction: "Up", status: "NotExecuted" },
       ]);
       await database.deleteFrom("mutation_requests")
         .where("actor_id", "=", owner.userId).where("operation", "=", "create_trip")

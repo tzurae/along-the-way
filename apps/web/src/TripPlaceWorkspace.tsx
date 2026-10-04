@@ -4,6 +4,7 @@ import {
   CircleAlert,
   CircleCheck,
   CloudOff,
+  Images,
   MapPinOff,
 } from "lucide-react";
 
@@ -17,6 +18,8 @@ import {
   type TripPlaceDto,
 } from "@along-the-way/contracts/trip-places";
 import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
+
+import { googleMapsPlaceUrl } from "./google-maps";
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -538,6 +541,7 @@ export function TripPlaceWorkspace({
                 <span className="flex items-center gap-2 rounded-full border border-ink/15 bg-surface px-3 py-1 text-sm font-bold"><StatusIcon status={place.status} />{statusLabels[place.status]}</span>
               </div>
               {place.providerObservedAt ? <p className="text-sm text-muted-foreground">Provider facts observed {new Date(place.providerObservedAt).toLocaleString()}{place.providerFactsExpired ? " · expired; not presented as current" : ""}</p> : null}
+              {place.provider === "google" && place.providerPlaceId ? <a className="inline-flex min-h-10 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />View photos on Google Maps</a> : null}
               {place.preferenceConflict ? <p className="rounded-xl border border-accent-strong bg-surface p-3 font-bold text-accent-strong" role="status">Preference conflict: at least one member marked Must go and another marked Prefer not to go. Both opinions are preserved.</p> : null}
 
               {place.assignedDayId ? (

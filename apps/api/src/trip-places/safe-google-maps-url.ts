@@ -186,7 +186,8 @@ function privateIpv6(address: string) {
   );
 }
 
-function isPublicAddress(address: string) {
+/** True only for a literal IP outside private, loopback, link-local, multicast and reserved ranges. */
+export function isPublicAddress(address: string) {
   const family = isIP(address);
   if (family === 4) return !privateIpv4(address);
   if (family === 6) return !privateIpv6(address);

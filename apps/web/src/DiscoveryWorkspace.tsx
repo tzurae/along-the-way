@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Bot, Check, ExternalLink, RefreshCw, Search, X } from "lucide-react";
+import { Bot, Check, ExternalLink, Images, RefreshCw, Search, X } from "lucide-react";
 
 import {
   parseDiscoveryWorkspaceResponse,
   type CandidateProposalDto,
+  type DiscoveryEndorsement,
+  type DiscoveryShortfallDto,
   type DiscoveryWorkspaceDto,
 } from "@along-the-way/contracts/discovery";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
+
+import { googleMapsPlaceUrl } from "./google-maps";
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
 
@@ -48,6 +52,32 @@ function missingServices(workspace: DiscoveryWorkspaceDto, needsPlaces: boolean)
     ...(workspace.modelAvailable ? [] : ["OpenAI API key and model"]),
     ...(needsPlaces && !workspace.placeProviderAvailable ? ["Google Maps API key"] : []),
   ];
+}
+
+const endorsementLabels: Record<DiscoveryEndorsement, string> = {
+  google_reviews: "Many good Google reviews",
+  wikivoyage: "Listed in Wikivoyage",
+  official_tourism: "Official tourism site",
+};
+
+function shortfallText(shortfall: DiscoveryShortfallDto) {
+  switch (shortfall.code) {
+    case "not_researched":
+      return "AI found no sources about this place.";
+    case "not_found":
+      return "Not found on Google Maps, so it could not be checked.";
+    case "name_mismatch":
+      return "Google Maps returned a different place, so it was left out.";
+    case "single_source": {
+      // Fewer than two by definition: none, or exactly one.
+      const vouched = shortfall.endorsements.map((endorsement) => endorsementLabels[endorsement]).join(", ");
+      return vouched
+        ? `Only one independent source recommends it (${vouched}); two are required.`
+        : "No independent source recommends it; two are required.";
+    }
+    case "category_short":
+      return shortfall.count ? "Only one place passed the quality checks." : "No place passed the quality checks.";
+  }
 }
 
 const statusLabels: Record<CandidateProposalDto["status"], string> = {
@@ -189,7 +219,7 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
         <div>
           <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.14em] text-accent-strong"><Bot aria-hidden="true" className="size-4" />AI trip research</p>
           <h2 id="ai-discovery-heading" className="font-display text-3xl text-ink-strong sm:text-4xl">Let AI find and explain the options</h2>
-          <p className="mt-2 max-w-3xl text-muted-foreground">Describe the trip once. AI builds a bounded search plan, checks Google Places and current web sources, then gives you a shortlist to accept or reject.</p>
+          <p className="mt-2 max-w-3xl text-muted-foreground">Describe the trip once. AI researches trusted sources, confirms each place on Google Maps, and shows only places that at least two independent sources recommend.</p>
         </div>
         {workspace?.latestRun ? <button className="flex min-h-11 items-center gap-2 rounded-xl border px-4 font-bold" disabled={pending !== null} onClick={() => void research("again")}><RefreshCw aria-hidden="true" className="size-4" />{researchLabel("Research again")}</button> : null}
       </div>
@@ -233,8 +263,13 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
 
           {workspace?.latestRun ? (
             <section className="rounded-panel border border-ink/10 p-4" aria-label="AI search plan">
-              <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-display text-2xl">Search plan</h3><span className="text-sm text-muted-foreground">{workspace.latestRun.modelId} · {new Date(workspace.latestRun.generatedAt).toLocaleString()}</span></div>
-              <ul className="mt-3 grid gap-2 sm:grid-cols-2">{workspace.latestRun.searchPlan.queries.map((query) => <li key={query} className="rounded-lg bg-surface-subtle p-3">{query}</li>)}</ul>
+              <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-display text-2xl">What AI looked for</h3><span className="text-sm text-muted-foreground">{workspace.latestRun.modelId} · {new Date(workspace.latestRun.generatedAt).toLocaleString()}</span></div>
+              <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+                {workspace.latestRun.searchPlan.categories.length ? <div><dt className="font-bold">Recommending</dt><dd>{workspace.latestRun.searchPlan.categories.join(", ")}{workspace.latestRun.searchPlan.defaultCategories ? <span className="block text-sm text-muted-foreground">You did not ask for anything specific, so AI used these defaults for your destination and dates.</span> : null}</dd></div> : null}
+                {workspace.latestRun.searchPlan.namedPlaces.length ? <div><dt className="font-bold">Places you named</dt><dd>{workspace.latestRun.searchPlan.namedPlaces.join(", ")}</dd></div> : null}
+                {workspace.latestRun.searchPlan.alreadyArranged.length ? <div><dt className="font-bold">Already arranged, not recommended</dt><dd>{workspace.latestRun.searchPlan.alreadyArranged.join(", ")}</dd></div> : null}
+              </dl>
+              {workspace.latestRun.searchPlan.queries.length ? <details className="mt-3"><summary className="cursor-pointer font-bold">Places checked on Google Maps ({workspace.latestRun.searchPlan.queries.length})</summary><ul className="mt-2 grid gap-2 sm:grid-cols-2">{workspace.latestRun.searchPlan.queries.map((query, index) => <li key={`${index}:${query}`} className="rounded-lg bg-surface-subtle p-3">{query}</li>)}</ul></details> : null}
             </section>
           ) : null}
 
@@ -244,8 +279,10 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
               <div className="mt-4 grid gap-4 xl:grid-cols-2">
                 {workspace.proposals.map((proposal) => (
                   <article key={proposal.id} className="grid content-start gap-4 rounded-panel border border-ink/10 bg-surface-subtle p-4" aria-label={`AI proposal ${proposal.name}`}>
-                    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{proposal.type} · {proposal.confidence} confidence</p><h4 className="font-display text-2xl">{proposal.name}</h4><p className="text-sm text-muted-foreground">{proposal.address ?? "Address unknown"}</p></div><span className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{statusLabels[proposal.status]}</span></div>
+                    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{proposal.category ?? proposal.type} · {proposal.confidence} confidence</p><h4 className="font-display text-2xl">{proposal.name}</h4><p className="text-sm text-muted-foreground">{proposal.address ?? "Address unknown"}</p></div><span className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{statusLabels[proposal.status]}</span></div>
+                    {proposal.endorsements.length ? <div aria-label={`Recommended by for ${proposal.name}`}><strong>Recommended by</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabels[endorsement]}</li>)}</ul></div> : null}
                     <p>{proposal.recommendation}</p>
+                    <a className="inline-flex min-h-10 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(proposal.name, proposal.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />View photos on Google Maps</a>
                     <div className="grid gap-3 sm:grid-cols-3"><div><strong>Matches</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.matchedNeeds.map((item) => <li key={item}>{item}</li>)}</ul></div><div><strong>Tradeoffs</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul></div><div><strong>Unknowns</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.unknowns.map((item) => <li key={item}>{item}</li>)}</ul></div></div>
                     <div><strong>Evidence</strong><ul className="mt-1 grid gap-1">{proposal.evidence.map((item) => <li key={item.id}><a className="inline-flex items-center gap-1 break-all font-bold text-accent-strong underline" href={item.sourceUrl} target="_blank" rel="noreferrer">{item.title}<ExternalLink aria-hidden="true" className="size-3" /></a><span className="ml-2 text-xs text-muted-foreground">{item.attribution} · observed {new Date(item.observedAt).toLocaleString()}</span></li>)}</ul></div>
                     {proposal.status === "pending" ? <div className="flex flex-wrap gap-2"><button className="flex min-h-10 items-center gap-2 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "accept")}><Check aria-hidden="true" className="size-4" />Accept into wishlist</button><button className="flex min-h-10 items-center gap-2 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "reject")}><X aria-hidden="true" className="size-4" />Not for this trip</button></div> : null}
@@ -253,7 +290,15 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
                 ))}
               </div>
             </section>
-          ) : workspace?.latestRun ? <p className="rounded-panel border border-dashed p-5 text-center text-muted-foreground">AI found no source-grounded candidates that passed the current filters.</p> : null}
+          ) : workspace?.latestRun ? <p className="rounded-panel border border-dashed p-5 text-center text-muted-foreground">No place passed the quality checks this time.</p> : null}
+
+          {workspace?.latestRun?.shortfalls.length ? (
+            <section className="rounded-panel border border-ink/10 p-4" aria-label="What's missing">
+              <h3 className="font-display text-2xl">What's missing</h3>
+              <p className="mt-1 text-sm text-muted-foreground">Places and kinds of place that did not make the shortlist, and why.</p>
+              <ul className="mt-3 grid gap-2">{workspace.latestRun.shortfalls.map((shortfall) => <li key={`${shortfall.code}:${shortfall.subject}`} className="rounded-lg bg-surface-subtle p-3"><strong>{shortfall.subject}</strong>{shortfall.named ? <span className="ml-2 text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">You asked for this</span> : null}<span className="block text-sm">{shortfallText(shortfall)}</span></li>)}</ul>
+            </section>
+          ) : null}
 
           <section className="rounded-panel bg-surface-subtle p-4" aria-label="Discovery feedback">
             <h3 className="font-display text-2xl">Refine it in your own words</h3>

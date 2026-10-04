@@ -96,4 +96,32 @@ describe("Google Places provider adapter", () => {
       ProviderUnavailableError,
     );
   });
+
+  it("looks places up with rating, review count and website, keeping only plausible values", async () => {
+    let fields = "";
+    let body: unknown;
+    const provider = new GooglePlacesProvider({
+      apiKey: "server-only-key",
+      fetch: async (_input, init) => {
+        fields = new Headers(init?.headers).get("X-Goog-FieldMask") ?? "";
+        body = JSON.parse(String(init?.body));
+        return Response.json({
+          places: [
+            { id: "ChIJ-tofukuji", displayName: { text: "東福寺" }, rating: 4.5, userRatingCount: 11_353, websiteUri: "https://tofukuji.jp/" },
+            { id: "ChIJ-broken", displayName: { text: "Broken" }, rating: 9, userRatingCount: -3 },
+          ],
+        });
+      },
+    });
+
+    const results = await provider.lookup("京都 東福寺", { languageCode: "zh-TW" });
+
+    expect(fields.split(",")).toEqual(expect.arrayContaining(["places.id", "places.rating", "places.userRatingCount", "places.websiteUri"]));
+    expect(fields).not.toMatch(/review(s|Summary)|photo/i);
+    expect(body).toEqual({ textQuery: "京都 東福寺", maxResultCount: 3, languageCode: "zh-TW" });
+    expect(results).toEqual([
+      { candidate: expect.objectContaining({ providerPlaceId: "ChIJ-tofukuji", name: "東福寺" }), rating: 4.5, userRatingCount: 11_353, websiteUri: "https://tofukuji.jp/" },
+      { candidate: expect.objectContaining({ providerPlaceId: "ChIJ-broken" }), rating: null, userRatingCount: null, websiteUri: null },
+    ]);
+  });
 });

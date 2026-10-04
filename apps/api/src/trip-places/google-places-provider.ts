@@ -21,6 +21,22 @@ export interface PlaceProvider {
   getPlace(providerPlaceId: string): Promise<ProviderPlaceCandidateDto>;
 }
 
+export interface RatedPlaceCandidate {
+  candidate: ProviderPlaceCandidateDto;
+  /** Google star rating and review count: used only to screen, never stored or shown (Google terms). */
+  rating: number | null;
+  userRatingCount: number | null;
+  /** The place's own website, which is not an independent recommendation. */
+  websiteUri: string | null;
+}
+
+export interface RatedPlaceLookup {
+  readonly attribution: string;
+  readonly available?: boolean;
+  /** Text Search Enterprise: a few best matches for a short "area name" query. */
+  lookup(query: string, options?: PlaceSearchOptions): Promise<RatedPlaceCandidate[]>;
+}
+
 interface GooglePlacesProviderOptions {
   apiKey?: string;
   fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -45,6 +61,14 @@ const SEARCH_FIELD_MASK = [
   "places.primaryType",
   "places.googleMapsUri",
 ].join(",");
+// rating, userRatingCount and websiteUri move the request to the Enterprise SKU.
+const LOOKUP_FIELD_MASK = [
+  SEARCH_FIELD_MASK,
+  "places.rating",
+  "places.userRatingCount",
+  "places.websiteUri",
+].join(",");
+const LOOKUP_RESULT_COUNT = 3;
 const DETAILS_FIELD_MASK = [
   "id",
   "displayName",
@@ -85,7 +109,7 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-export class GooglePlacesProvider implements PlaceProvider {
+export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup {
   readonly attribution = "Google Maps";
   readonly available: boolean;
   private readonly apiKey: string | undefined;
@@ -124,6 +148,41 @@ export class GooglePlacesProvider implements PlaceProvider {
     const places = record(value)?.places;
     if (!Array.isArray(places)) return [];
     return places.map((place) => this.candidate(place));
+  }
+
+  async lookup(rawQuery: string, options: PlaceSearchOptions = {}): Promise<RatedPlaceCandidate[]> {
+    const query = rawQuery.trim();
+    if (!query || query.length > 300) {
+      throw new TypeError("Search query must contain 1 to 300 characters");
+    }
+    const value = await this.request(
+      "https://places.googleapis.com/v1/places:searchText",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          textQuery: query,
+          maxResultCount: LOOKUP_RESULT_COUNT,
+          ...(options.languageCode ? { languageCode: options.languageCode } : {}),
+        }),
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-FieldMask": LOOKUP_FIELD_MASK,
+        },
+      },
+    );
+    const places = record(value)?.places;
+    if (!Array.isArray(places)) return [];
+    return places.map((place) => {
+      const item = record(place);
+      const rating = typeof item?.rating === "number" && item.rating >= 1 && item.rating <= 5 ? item.rating : null;
+      const count = item?.userRatingCount;
+      return {
+        candidate: this.candidate(place),
+        rating,
+        userRatingCount: typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : null,
+        websiteUri: typeof item?.websiteUri === "string" ? item.websiteUri : null,
+      };
+    });
   }
 
   async getPlace(rawProviderPlaceId: string) {
