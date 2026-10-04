@@ -30,10 +30,12 @@ export interface DistributionDay {
   id: string;
   date: string;
   windowMinutes: number;
-  /** Time of fixed itinerary items inside the day's hours. */
+  /** Time the day cannot use inside its hours: fixed items, and before an arrival or after a departure. */
   fixedMinutes: number;
-  /** That night's lodging; the estimate starts and ends there. */
-  lodging: GeoPoint | null;
+  /** Where the day's places start from: the morning's lodging, or the new lodging after moving. */
+  start: GeoPoint | null;
+  /** Where the day ends: that night's lodging, or the morning's on the last day for the luggage. */
+  end: GeoPoint | null;
   /** Places already planned for the day, in order. They never move. */
   kept: StayPoint[];
   /** Stays of places planned for the day without a map location: time, but no estimated travel. */
@@ -66,9 +68,9 @@ export function estimatedTravelMinutes(from: GeoPoint, to: GeoPoint) {
   return Math.ceil(km <= 1.2 ? km * 12.5 : 15 + 2 * km);
 }
 
-/** Fixed time, stays, and estimated travel from the lodging through the places and back. */
+/** Unusable time, stays, and estimated travel from the day's start through the places to its end. */
 export function estimatedLoadMinutes(day: DistributionDay, places: StayPoint[]) {
-  const path: GeoPoint[] = day.lodging ? [day.lodging, ...places, day.lodging] : places;
+  const path: GeoPoint[] = [...(day.start ? [day.start] : []), ...places, ...(day.end ? [day.end] : [])];
   let travel = 0;
   for (let index = 1; index < path.length; index += 1) {
     travel += estimatedTravelMinutes(path[index - 1]!, path[index]!);
@@ -104,7 +106,7 @@ export function distributePlaces(days: DistributionDay[], candidates: Distributi
     let chosen: DistributionDay | null = null;
     let chosenDistance = Number.POSITIVE_INFINITY;
     for (const day of roomy) {
-      const anchors = [...placed.get(day.id)!, ...day.fixedPoints, ...(day.lodging ? [day.lodging] : [])];
+      const anchors = [...placed.get(day.id)!, ...day.fixedPoints, ...(day.start ? [day.start] : []), ...(day.end ? [day.end] : [])];
       for (const anchor of anchors) {
         const distance = straightLineMeters(anchor, candidate);
         // Strictly nearer only, so an equally near later day never displaces an earlier one.

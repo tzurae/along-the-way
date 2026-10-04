@@ -54,8 +54,8 @@ async function signIn(page: Page, request: APIRequestContext, email: string) {
   await page.goto("/");
   const previousResponse = await request.get(`${MAILPIT_API_URL}/api/v1/messages`);
   const previousIds = new Set(messages(await previousResponse.json()).map((message) => message.id));
-  await page.getByLabel("Email").fill(email);
-  await page.getByRole("button", { name: "Email me a sign-in link" }).click();
+  await page.getByLabel("電子郵件").fill(email);
+  await page.getByRole("button", { name: "寄登入連結給我" }).click();
   let id = "";
   await expect.poll(async () => {
     const response = await request.get(`${MAILPIT_API_URL}/api/v1/messages`);
@@ -73,29 +73,29 @@ async function signIn(page: Page, request: APIRequestContext, email: string) {
   if (!link) throw new Error("Magic link missing");
   await page.goto("about:blank");
   await page.goto(link);
-  await expect(page.getByText(`Signed in as ${email}`)).toBeVisible();
+  await expect(page.getByText(`登入帳號：${email}`)).toBeVisible();
 }
 
 async function createTrip(page: Page, name: string) {
-  await page.getByRole("button", { name: "Create trip" }).click();
-  const dialog = page.getByRole("dialog", { name: "Create a trip" });
-  await dialog.getByLabel("Trip name").fill(name);
-  await dialog.getByRole("button", { name: "Choose a date range" }).click();
+  await page.getByRole("button", { name: "建立旅程" }).click();
+  const dialog = page.getByRole("dialog", { name: "建立旅程" });
+  await dialog.getByLabel("旅程名稱").fill(name);
+  await dialog.getByRole("button", { name: "選擇日期範圍" }).click();
   const year = 2026;
   const month = 11;
   const current = new Date();
   const offset = year * 12 + month - 1 - (current.getFullYear() * 12 + current.getMonth());
-  const direction = offset >= 0 ? "Next" : "Previous";
+  const direction = offset >= 0 ? ".rdp-button_next" : ".rdp-button_previous";
   for (let index = 0; index < Math.abs(offset); index += 1) {
-    await page.getByRole("button", { name: new RegExp(direction, "i") }).click();
+    await page.locator(direction).click();
   }
-  const label = (day: number) => new Date(year, month - 1, day).toLocaleDateString("en-US");
+  const label = (day: number) => new Date(year, month - 1, day).toLocaleDateString("zh-TW");
   await page.locator(`[data-day="${label(3)}"]`).click();
   await page.locator(`[data-day="${label(9)}"]`).click();
-  const country = dialog.getByLabel("Add a country");
+  const country = dialog.getByLabel("新增國家");
   await country.fill("Japan");
   await page.getByRole("option", { name: /\(JP\)/ }).dispatchEvent("click");
-  await dialog.getByRole("button", { name: "Create trip", exact: true }).click();
+  await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
   await expect(page.getByRole("heading", { name })).toBeVisible();
 }
 
@@ -103,14 +103,14 @@ async function addManualPlace(
   page: Page,
   input: { name: string; address?: string; note: string },
 ) {
-  await page.getByRole("button", { name: "Add wishlist place" }).click();
-  const dialog = page.getByRole("dialog", { name: "Add a place" });
-  await dialog.getByRole("tab", { name: "Manual" }).click();
-  await dialog.getByLabel("Place name").fill(input.name);
-  await dialog.getByLabel("Place type").selectOption("restaurant");
-  if (input.address) await dialog.getByLabel("Address, if known").fill(input.address);
-  await dialog.getByLabel("Your original note").fill(input.note);
-  await dialog.getByRole("button", { name: "Add manual place" }).click();
+  await page.getByRole("button", { name: "新增想去地點" }).click();
+  const dialog = page.getByRole("dialog", { name: "新增地點" });
+  await dialog.getByRole("tab", { name: "手動輸入" }).click();
+  await dialog.getByLabel("地點名稱").fill(input.name);
+  await dialog.getByLabel("地點類型").selectOption("restaurant");
+  if (input.address) await dialog.getByLabel("地址（若知道）").fill(input.address);
+  await dialog.getByLabel("你的原始備註").fill(input.note);
+  await dialog.getByRole("button", { name: "手動新增地點" }).click();
   await expect(dialog).toHaveCount(0);
 }
 
@@ -118,13 +118,13 @@ async function addSkeletonPlace(
   page: Page,
   input: { name: string; address: string; note: string },
 ) {
-  await page.getByRole("button", { name: "Add place", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Add a place" });
-  await dialog.getByLabel("Place name").fill(input.name);
-  await dialog.getByLabel("Place type").selectOption("restaurant");
-  await dialog.getByLabel("Address").fill(input.address);
-  await dialog.getByLabel("Notes").fill(input.note);
-  await dialog.getByRole("button", { name: "Save place" }).click();
+  await page.getByRole("button", { name: "新增地點", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "新增地點" });
+  await dialog.getByLabel("地點名稱").fill(input.name);
+  await dialog.getByLabel("地點類型").selectOption("restaurant");
+  await dialog.getByLabel("地址").fill(input.address);
+  await dialog.getByLabel("備註").fill(input.note);
+  await dialog.getByRole("button", { name: "儲存地點" }).click();
   await expect(dialog).toHaveCount(0);
 }
 
@@ -132,31 +132,31 @@ async function addTimedActivity(
   page: Page,
   input: { title: string; place: string; localDateTime: string },
 ) {
-  await page.getByRole("button", { name: "Add commitment" }).click();
-  const dialog = page.getByRole("dialog", { name: "Add a commitment" });
-  await dialog.getByLabel("Type").selectOption("activity");
-  await dialog.getByLabel("Title").fill(input.title);
-  const start = dialog.getByRole("group", { name: "Start in local time" });
-  await start.getByLabel("Country stop").selectOption({ label: "1. JP" });
-  await start.getByLabel("Place").selectOption({ label: input.place });
-  await start.getByLabel("Local date and time").fill(input.localDateTime);
-  const timeZone = start.getByLabel("IANA time zone");
+  await page.getByRole("button", { name: "新增固定行程" }).click();
+  const dialog = page.getByRole("dialog", { name: "新增固定行程" });
+  await dialog.getByLabel("類型").selectOption("activity");
+  await dialog.getByLabel("標題").fill(input.title);
+  const start = dialog.getByRole("group", { name: "開始（當地時間）" });
+  await start.getByLabel("停留國家").selectOption({ label: "1、JP" });
+  await start.getByLabel("地點").selectOption({ label: input.place });
+  await start.getByLabel("當地日期與時間").fill(input.localDateTime);
+  const timeZone = start.getByLabel("IANA 時區");
   if (await timeZone.inputValue() !== "Asia/Tokyo") {
     await timeZone.fill("Asia/Tokyo");
   }
-  await dialog.getByLabel("Duration (minutes)").fill("60");
-  await dialog.getByLabel("Booked by").fill("Wishlist owner");
-  await dialog.getByLabel("Confirmation status").fill("Confirmed");
-  await dialog.getByLabel("Constraint").selectOption("fixed_time");
-  await dialog.getByLabel("Knowledge status").selectOption("confirmed");
-  await dialog.getByRole("button", { name: "Save item" }).click();
+  await dialog.getByLabel("期間（分鐘）").fill("60");
+  await dialog.getByLabel("預訂者").fill("Wishlist owner");
+  await dialog.locator("#appointment-status").fill("Confirmed");
+  await dialog.getByLabel("限制").selectOption("fixed_time");
+  await dialog.locator("#constraint-status").selectOption("confirmed");
+  await dialog.getByRole("button", { name: "儲存固定行程" }).click();
   await expect(dialog).toHaveCount(0);
 }
 
 async function setPreference(page: Page, placeName: string, value: string) {
   const card = page.locator("article").filter({ has: page.getByRole("heading", { name: placeName }) });
-  await card.getByLabel("Your preference").selectOption(value);
-  await expect(card.getByLabel("Your preference")).toHaveValue(value);
+  await card.getByLabel("你的偏好").selectOption(value);
+  await expect(card.getByLabel("你的偏好")).toHaveValue(value);
 }
 
 async function cleanup() {
@@ -205,110 +205,110 @@ test("members keep independent wishlist contributions and preferences on desktop
     const page = await context.newPage();
     await signIn(page, request, memberEmails[index]!);
     await page.getByRole("button", { name: new RegExp(tripName) }).click();
-    await expect(page.getByRole("heading", { name: "Shared place wishlist" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "共享地點想去清單" })).toBeVisible();
     await setPreference(page, "Family Cafe", preference!);
     await context.close();
   }
 
   await ownerPage.reload();
   const card = ownerPage.locator("article").filter({ has: ownerPage.getByRole("heading", { name: "Family Cafe" }) });
-  await expect(card.getByText("Preference conflict:")).toBeVisible();
+  await expect(card.getByText("偏好衝突：")).toBeVisible();
   const preferenceList = card.getByRole("list").first();
-  await expect(preferenceList.getByText("Must go", { exact: true })).toBeVisible();
-  await expect(preferenceList.getByText("Prefer not to go", { exact: true })).toBeVisible();
-  await expect(preferenceList.getByText("Want to go", { exact: true })).toBeVisible();
-  await expect(preferenceList.getByText("Optional", { exact: true })).toBeVisible();
+  await expect(preferenceList.getByText("必去", { exact: true })).toBeVisible();
+  await expect(preferenceList.getByText("不想去", { exact: true })).toBeVisible();
+  await expect(preferenceList.getByText("想去", { exact: true })).toBeVisible();
+  await expect(preferenceList.getByText("可有可無", { exact: true })).toBeVisible();
   await expect(card.getByText("Owner wants breakfast")).toBeVisible();
 
   await addManualPlace(ownerPage, { name: "Family Cafe", address: "Kyoto south gate", note: "Different branch" });
-  const comparison = ownerPage.getByRole("region", { name: "Possible duplicate comparison" });
+  const comparison = ownerPage.getByRole("region", { name: "可能重複的地點比較" });
   await expect(comparison.getByText("Kyoto north gate")).toBeVisible();
   await expect(comparison.getByText("Kyoto south gate")).toBeVisible();
   await expect(comparison.getByText("Owner wants breakfast")).toBeVisible();
-  await comparison.getByRole("button", { name: "Keep separate options" }).click();
-  await expect(ownerPage.getByText("Possible duplicate", { exact: true })).toHaveCount(0);
+  await comparison.getByRole("button", { name: "保持分開" }).click();
+  await expect(ownerPage.getByText("可能重複", { exact: true })).toHaveCount(0);
 
   await addManualPlace(ownerPage, {
     name: "Cross-surface Cafe",
     address: "Cross-surface north",
     note: "Wishlist-side source",
   });
-  await expect(ownerPage.getByRole("button", { name: "Edit Cross-surface Cafe" })).toHaveCount(1);
+  await expect(ownerPage.getByRole("button", { name: "編輯「Cross-surface Cafe」" })).toHaveCount(1);
   await addSkeletonPlace(ownerPage, {
     name: "Cross-surface Cafe",
     address: "Cross-surface south",
     note: "Skeleton-side source",
   });
   await expect(ownerPage.getByRole("article", {
-    name: "Cross-surface Cafe at Cross-surface south",
+    name: "Cross-surface Cafe，地址：Cross-surface south",
   })).toBeVisible();
-  await expect(ownerPage.getByRole("button", { name: "Edit Cross-surface Cafe" })).toHaveCount(2);
+  await expect(ownerPage.getByRole("button", { name: "編輯「Cross-surface Cafe」" })).toHaveCount(2);
   const northPlanning = ownerPage.getByRole("article", {
-    name: "Cross-surface Cafe at Cross-surface north",
+    name: "Cross-surface Cafe，地址：Cross-surface north",
   });
-  await northPlanning.getByText("Duration, budget, and notes").click();
-  await northPlanning.getByLabel("Shared planning note").fill("North planning note");
-  await northPlanning.getByRole("button", { name: "Save planning facts" }).click();
-  await expect(northPlanning.getByText("Planning facts saved.")).toBeVisible();
+  await northPlanning.getByText("停留時間、預算和備註").click();
+  await northPlanning.getByLabel("共享規劃備註").fill("North planning note");
+  await northPlanning.getByRole("button", { name: "儲存規劃資訊" }).click();
+  await expect(northPlanning.getByText("規劃資訊已儲存。")).toBeVisible();
   const southPlanning = ownerPage.getByRole("article", {
-    name: "Cross-surface Cafe at Cross-surface south",
+    name: "Cross-surface Cafe，地址：Cross-surface south",
   });
-  await southPlanning.getByText("Duration, budget, and notes").click();
-  await southPlanning.getByLabel("Shared planning note").fill("South planning note");
-  await southPlanning.getByRole("button", { name: "Save planning facts" }).click();
-  await expect(southPlanning.getByText("Planning facts saved.")).toBeVisible();
+  await southPlanning.getByText("停留時間、預算和備註").click();
+  await southPlanning.getByLabel("共享規劃備註").fill("South planning note");
+  await southPlanning.getByRole("button", { name: "儲存規劃資訊" }).click();
+  await expect(southPlanning.getByText("規劃資訊已儲存。")).toBeVisible();
   const crossSurfaceComparison = ownerPage.getByRole("region", {
-    name: "Possible duplicate comparison",
+    name: "可能重複的地點比較",
   });
   await expect(crossSurfaceComparison.getByText("Cross-surface north")).toBeVisible();
   await expect(crossSurfaceComparison.getByText("Cross-surface south")).toBeVisible();
-  await crossSurfaceComparison.getByRole("button", { name: "Merge these options" }).click();
-  await expect(ownerPage.getByRole("button", { name: "Edit Cross-surface Cafe" })).toHaveCount(1);
+  await crossSurfaceComparison.getByRole("button", { name: "合併" }).click();
+  await expect(ownerPage.getByRole("button", { name: "編輯「Cross-surface Cafe」" })).toHaveCount(1);
   const mergedCard = ownerPage.locator("article").filter({
     has: ownerPage.getByRole("heading", { name: "Cross-surface Cafe" }),
   });
-  const mergedNotes = mergedCard.getByLabel("Shared planning note");
+  const mergedNotes = mergedCard.getByLabel("共享規劃備註");
   await expect(mergedNotes).toHaveValue(
     /(?=.*North planning note)(?=.*South planning note)/s,
   );
-  await mergedCard.getByLabel("Duration in minutes").fill("45");
-  await mergedCard.getByLabel("Budget in minor units").fill("1200");
-  await mergedCard.getByLabel("ISO currency").fill("JPY");
-  await mergedCard.getByRole("button", { name: "Save planning facts" }).click();
-  await expect(mergedCard.getByText("Planning facts saved.")).toBeVisible();
+  await mergedCard.getByLabel("停留時間（分鐘）").fill("45");
+  await mergedCard.getByLabel("預算（最小貨幣單位）").fill("1200");
+  await mergedCard.getByLabel("貨幣代碼").fill("JPY");
+  await mergedCard.getByRole("button", { name: "儲存規劃資訊" }).click();
+  await expect(mergedCard.getByText("規劃資訊已儲存。")).toBeVisible();
   await expect(mergedNotes).toHaveValue(
     /(?=.*North planning note)(?=.*South planning note)/s,
   );
-  await ownerPage.getByRole("button", { name: "Edit Cross-surface Cafe" }).click();
-  const editMergedDialog = ownerPage.getByRole("dialog", { name: "Edit place" });
-  await expect(editMergedDialog.getByLabel("Notes")).toHaveValue(
+  await ownerPage.getByRole("button", { name: "編輯「Cross-surface Cafe」" }).click();
+  const editMergedDialog = ownerPage.getByRole("dialog", { name: "編輯地點" });
+  await expect(editMergedDialog.getByLabel("備註")).toHaveValue(
     /(?=.*North planning note)(?=.*South planning note)/s,
   );
-  await editMergedDialog.getByLabel("Address").fill("Cross-surface merged updated");
-  await editMergedDialog.getByRole("button", { name: "Save place" }).click();
+  await editMergedDialog.getByLabel("地址").fill("Cross-surface merged updated");
+  await editMergedDialog.getByRole("button", { name: "儲存地點" }).click();
   await expect(editMergedDialog).toHaveCount(0);
   await expect(ownerPage.getByRole("article", {
-    name: "Cross-surface Cafe at Cross-surface merged updated",
+    name: "Cross-surface Cafe，地址：Cross-surface merged updated",
   })).toBeVisible();
+  await expect(ownerPage.locator('input[name="desiredDayIds"]')).toHaveCount(0);
+  await expect(ownerPage.locator('input[name="excludedDayIds"]')).toHaveCount(0);
 
-  await expect(ownerPage.getByText("Preferred days")).toHaveCount(0);
-  await expect(ownerPage.getByText("Excluded days")).toHaveCount(0);
   const firstDay = ownerPage.locator('[data-date="2026-11-03"]');
-  await firstDay.getByText("Add from shared wishlist").click();
+  await firstDay.getByText("從共用想去清單新增").click();
   await firstDay.getByRole("checkbox", { name: /Cross-surface Cafe/ }).check();
-  await firstDay.getByRole("button", { name: "Add selected (1)" }).click();
+  await firstDay.getByRole("button", { name: "新增所選地點（1）" }).click();
   await expect(firstDay.getByRole("article", {
-    name: "Planned wishlist place Cross-surface Cafe",
+    name: "已規劃的想去清單地點：Cross-surface Cafe",
   })).toBeVisible();
-  await expect(firstDay.getByText(/1 planned entries · ¥1,200/)).toBeVisible();
-  await expect(mergedCard.getByText("Planned for 2026-11-03")).toBeVisible();
+  await expect(firstDay.getByText(/1 個已規劃項目・¥1,200/)).toBeVisible();
+  await expect(mergedCard.getByText("已排在 2026-11-03")).toBeVisible();
 
   // A place planned for one day is not offered to another day until removed there.
   const secondDay = ownerPage.locator('[data-date="2026-11-04"]');
-  await secondDay.getByText("Add from shared wishlist").click();
+  await secondDay.getByText("從共用想去清單新增").click();
   await expect(secondDay.getByRole("checkbox", { name: /Cross-surface Cafe/ })).toHaveCount(0);
   const firstDayPlace = firstDay.getByRole("article", {
-    name: "Planned wishlist place Cross-surface Cafe",
+    name: "已規劃的想去清單地點：Cross-surface Cafe",
   });
   // Removing reloads the timeline in place. It must never leave the page: the page would get
   // shorter for a moment and throw the reader's scroll position far up.
@@ -323,7 +323,7 @@ test("members keep independent wishlist contributions and preferences on desktop
   const timelineReloaded = ownerPage.waitForResponse((response) =>
     response.request().method() === "GET" && new URL(response.url()).pathname.endsWith("/skeleton")
   );
-  await firstDayPlace.getByRole("button", { name: "Remove from this day" }).click();
+  await firstDayPlace.getByRole("button", { name: "從這天移除" }).click();
   await timelineReloaded;
   await expect(firstDayPlace).toHaveCount(0);
   expect(await ownerPage.evaluate(() => {
@@ -331,19 +331,19 @@ test("members keep independent wishlist contributions and preferences on desktop
     probe.timelineWatch?.disconnect();
     return probe.timelineLeft;
   })).toBe(false);
-  const secondPicker = secondDay.locator("details").filter({ hasText: "Add from shared wishlist" });
+  const secondPicker = secondDay.locator("details").filter({ hasText: "從共用想去清單新增" });
   const freedPlace = secondDay.getByRole("checkbox", { name: /Cross-surface Cafe/ });
   await expect(async () => {
     if (await secondPicker.getAttribute("open") === null) await secondPicker.locator("summary").click();
     await expect(freedPlace).toBeVisible({ timeout: 1_000 });
   }).toPass({ timeout: 15_000 });
   await freedPlace.check();
-  await secondDay.getByRole("button", { name: "Add selected (1)" }).click();
+  await secondDay.getByRole("button", { name: "新增所選地點（1）" }).click();
   const movedPlace = secondDay.getByRole("article", {
-    name: "Planned wishlist place Cross-surface Cafe",
+    name: "已規劃的想去清單地點：Cross-surface Cafe",
   });
   await expect(movedPlace).toBeVisible();
-  await movedPlace.getByRole("button", { name: "Remove from this day" }).click();
+  await movedPlace.getByRole("button", { name: "從這天移除" }).click();
   await expect(movedPlace).toHaveCount(0);
 
   await addTimedActivity(ownerPage, {
@@ -370,21 +370,21 @@ test("members keep independent wishlist contributions and preferences on desktop
   await expect(secondDay.getByRole("heading", { name: "Cross-surface timed visit" }))
     .toBeVisible();
   await expect(secondDay.getByRole("article", {
-    name: "Planned wishlist place Cross-surface Cafe",
+    name: "已規劃的想去清單地點：Cross-surface Cafe",
   })).toHaveCount(0);
-  await expect(secondDay.getByText(/1 planned entries · No known cost · 1 cost unknown/))
+  await expect(secondDay.getByText(/1 個已規劃項目・沒有已知費用・1 筆費用未知/))
     .toBeVisible();
 
-  await ownerPage.getByRole("button", { name: "Add wishlist place" }).click();
-  const searchDialog = ownerPage.getByRole("dialog", { name: "Add a place" });
-  await searchDialog.getByRole("tab", { name: "Search" }).click();
-  await searchDialog.getByLabel("Search Google Maps").fill("Kiyomizu-dera");
-  await searchDialog.getByLabel("Your original note").fill("Keep this text during provider failure");
-  await searchDialog.getByRole("button", { name: "Search places" }).click();
-  await expect(searchDialog.getByRole("alert")).toContainText("temporarily unavailable");
-  await expect(searchDialog.getByLabel("Search Google Maps")).toHaveValue("Kiyomizu-dera");
-  await expect(searchDialog.getByLabel("Your original note")).toHaveValue("Keep this text during provider failure");
-  await searchDialog.getByRole("button", { name: "Close" }).click();
+  await ownerPage.getByRole("button", { name: "新增想去地點" }).click();
+  const searchDialog = ownerPage.getByRole("dialog", { name: "新增地點" });
+  await searchDialog.getByRole("tab", { name: "搜尋" }).click();
+  await searchDialog.getByLabel("搜尋 Google Maps").fill("Kiyomizu-dera");
+  await searchDialog.getByLabel("你的原始備註").fill("Keep this text during provider failure");
+  await searchDialog.getByRole("button", { name: "搜尋地點" }).click();
+  await expect(searchDialog.getByRole("alert")).toContainText("服務供應商目前無法使用，請稍後再試。");
+  await expect(searchDialog.getByLabel("搜尋 Google Maps")).toHaveValue("Kiyomizu-dera");
+  await expect(searchDialog.getByLabel("你的原始備註")).toHaveValue("Keep this text during provider failure");
+  await searchDialog.getByRole("button", { name: "關閉" }).click();
 
   await ownerContext.close();
 });
@@ -419,23 +419,23 @@ test("manual wishlist intake remains usable on a mobile viewport", async ({ brow
     }
     await route.continue();
   });
-  await page.getByRole("button", { name: "Add wishlist place" }).click();
-  const retryDialog = page.getByRole("dialog", { name: "Add a place" });
-  await retryDialog.getByRole("tab", { name: "Manual" }).click();
-  await retryDialog.getByLabel("Place name").fill("Retry-safe place");
-  await retryDialog.getByLabel("Place type").selectOption("restaurant");
-  await retryDialog.getByLabel("Your original note").fill("Retry without duplicate contribution");
-  await retryDialog.getByRole("button", { name: "Add manual place" }).click();
+  await page.getByRole("button", { name: "新增想去地點" }).click();
+  const retryDialog = page.getByRole("dialog", { name: "新增地點" });
+  await retryDialog.getByRole("tab", { name: "手動輸入" }).click();
+  await retryDialog.getByLabel("地點名稱").fill("Retry-safe place");
+  await retryDialog.getByLabel("地點類型").selectOption("restaurant");
+  await retryDialog.getByLabel("你的原始備註").fill("Retry without duplicate contribution");
+  await retryDialog.getByRole("button", { name: "手動新增地點" }).click();
   await expect(retryDialog.getByRole("alert")).toBeVisible();
-  await expect(retryDialog.getByLabel("Place name")).toHaveValue("Retry-safe place");
-  await retryDialog.getByRole("button", { name: "Add manual place" }).click();
+  await expect(retryDialog.getByLabel("地點名稱")).toHaveValue("Retry-safe place");
+  await retryDialog.getByRole("button", { name: "手動新增地點" }).click();
   await expect(retryDialog).toHaveCount(0);
-  await expect(page.getByRole("article", { name: "Retry-safe place at unknown address" })).toHaveCount(1);
+  await expect(page.getByRole("article", { name: "Retry-safe place，地址：地址未知" })).toHaveCount(1);
   expect(retryKeys).toHaveLength(2);
   expect(retryKeys[1]).toBe(retryKeys[0]);
   await page.unroute(tripPlaceRoute);
 
-  const retryCard = page.getByRole("article", { name: "Retry-safe place at unknown address" });
+  const retryCard = page.getByRole("article", { name: "Retry-safe place，地址：地址未知" });
   const preferenceRoute = /\/api\/trips\/[^/]+\/trip-places\/[^/]+\/preference$/;
   const preferenceKeys: string[] = [];
   let preferenceInterrupted = false;
@@ -458,11 +458,11 @@ test("manual wishlist intake remains usable on a mobile viewport", async ({ brow
     }
     await route.continue();
   });
-  await retryCard.getByLabel("Your preference").selectOption("want");
-  await expect(page.getByRole("alert")).toContainText("Version conflict");
-  await expect(retryCard.getByLabel("Your preference")).toHaveValue("want");
-  await retryCard.getByRole("button", { name: "Retry preference" }).click();
-  await expect(retryCard.getByRole("button", { name: "Retry preference" })).toHaveCount(0);
+  await retryCard.getByLabel("你的偏好").selectOption("want");
+  await expect(page.getByRole("alert")).toContainText("資料已變更，無法完成操作。");
+  await expect(retryCard.getByLabel("你的偏好")).toHaveValue("want");
+  await retryCard.getByRole("button", { name: "重試偏好設定" }).click();
+  await expect(retryCard.getByRole("button", { name: "重試偏好設定" })).toHaveCount(0);
   expect(preferenceKeys).toHaveLength(2);
   expect(preferenceKeys[1]).toBe(preferenceKeys[0]);
   await page.unroute(preferenceRoute);
@@ -474,7 +474,7 @@ test("manual wishlist intake remains usable on a mobile viewport", async ({ brow
     await preferenceGate;
     await route.continue();
   });
-  const preferenceSelect = retryCard.getByLabel("Your preference");
+  const preferenceSelect = retryCard.getByLabel("你的偏好");
   await preferenceSelect.selectOption("optional");
   await expect(preferenceSelect).toBeDisabled();
   releasePreference();
@@ -483,7 +483,7 @@ test("manual wishlist intake remains usable on a mobile viewport", async ({ brow
   await page.unroute(preferenceRoute);
   await addManualPlace(page, { name: "Private meeting point", note: "Ask host for exact pin" });
   const card = page.locator("article").filter({ has: page.getByRole("heading", { name: "Private meeting point" }) });
-  await expect(card.getByText("Location needed", { exact: true })).toBeVisible();
+  await expect(card.getByText("需要地點資訊", { exact: true })).toBeVisible();
   await expect(card.getByText("Ask host for exact pin")).toBeVisible();
 
   // Enough wrapped two-line addresses to exceed the picker's capped height.
@@ -496,8 +496,8 @@ test("manual wishlist intake remains usable on a mobile viewport", async ({ brow
     await addManualPlace(page, { name: `Long address place ${index + 1}`, address, note: "Day picker layout" });
   }
   const firstDay = page.locator("[data-date]").first();
-  await firstDay.getByText("Add from shared wishlist").click();
-  const picker = firstDay.getByRole("group", { name: "Wishlist places to add" });
+  await firstDay.getByText("從共用想去清單新增").click();
+  const picker = firstDay.getByRole("group", { name: "要新增的想去清單地點" });
   const rows = await picker.evaluate((group) => [...group.querySelectorAll("label")].map((label) => {
     const contents = document.createRange();
     contents.selectNodeContents(label);

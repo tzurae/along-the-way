@@ -20,7 +20,8 @@ function day(id: string, date: string, overrides: Partial<DistributionDay> = {})
     date,
     windowMinutes: 600,
     fixedMinutes: 0,
-    lodging: null,
+    start: null,
+    end: null,
     kept: [],
     unmappedStays: [],
     fixedPoints: [],
@@ -92,7 +93,7 @@ describe("distributing wishlist places over days", () => {
   it("counts fixed time and the round trip from the lodging against the limit", async () => {
     const hotel = { id: "hotel", latitude: 34.9853, longitude: 135.7586 };
     // 600-minute window, 300 minutes of fixed items: 120 minutes left under the 70% limit.
-    const days = [day("d21", "2026-10-21", { fixedMinutes: 300, lodging: hotel })];
+    const days = [day("d21", "2026-10-21", { fixedMinutes: 300, start: hotel, end: hotel })];
     const near = candidate("station", 34.9858, 135.7588, { stayMinutes: 100 });
     const far = candidate("tofukuji", 34.976, 135.7738, { stayMinutes: 100 });
 

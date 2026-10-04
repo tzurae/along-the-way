@@ -17,6 +17,7 @@ import { CreateTripDialog } from "./CreateTripDialog";
 import { DiscoveryWorkspace } from "./DiscoveryWorkspace";
 import { TripSkeletonWorkspace } from "./TripSkeletonWorkspace";
 import { TripPlaceWorkspace } from "./TripPlaceWorkspace";
+import { useI18n, type Messages } from "./i18n";
 
 const countryNames = new Map(
   countryOptions("zh-Hant").map((country) => [
@@ -47,17 +48,37 @@ class ApiRequestError extends Error {
     readonly correlationId?: string,
     readonly currentVersion?: number,
   ) {
-    super(
-      [
-        message,
-        currentVersion === undefined ? "" : `Current version: ${currentVersion}.`,
-        correlationId ? `Reference: ${correlationId}` : "",
-      ].filter(Boolean).join(" "),
-    );
+    super(message);
   }
 }
 
-async function requestJson<T>(url: string, options: RequestOptions = {}) {
+function localizedErrorMessage(
+  messages: Messages["errors"],
+  code: string,
+  detail: string,
+  correlationId?: string,
+  currentVersion?: number,
+) {
+  const knownCode = code as keyof typeof messages.byCode;
+  const base = Object.prototype.hasOwnProperty.call(messages.byCode, knownCode)
+    ? messages.byCode[knownCode]
+    : messages.unknown;
+  const message =
+    code === "validation_error" || code === "conflict"
+      ? messages.withDetail(base, detail)
+      : base;
+  return [
+    message,
+    currentVersion === undefined ? "" : messages.currentVersion(currentVersion),
+    correlationId ? messages.reference(correlationId) : "",
+  ].filter(Boolean).join(" ");
+}
+
+async function requestJson<T>(
+  messages: Messages["errors"],
+  url: string,
+  options: RequestOptions = {},
+) {
   const response = await fetch(url, {
     ...options,
     headers: {
@@ -72,11 +93,17 @@ async function requestJson<T>(url: string, options: RequestOptions = {}) {
     try {
       parsed = parseApiError(value);
     } catch {
-      throw new Error("Unable to complete that request");
+      throw new Error(messages.unknown);
     }
     throw new ApiRequestError(
       parsed.error.code,
-      parsed.error.message,
+      localizedErrorMessage(
+        messages,
+        parsed.error.code,
+        parsed.error.message,
+        parsed.error.correlationId,
+        parsed.error.currentVersion,
+      ),
       parsed.error.correlationId,
       parsed.error.currentVersion,
     );
@@ -103,6 +130,7 @@ function LoginPanel({
   initialMessage: string;
   pendingInviteToken: string | null;
 }) {
+  const { t } = useI18n();
   const [email, setEmail] = useState("");
   const [message, setMessage] = useState(initialMessage);
   const [submitting, setSubmitting] = useState(false);
@@ -111,7 +139,8 @@ function LoginPanel({
     event.preventDefault();
     setSubmitting(true);
     try {
-      const response = await requestJson<{ message: string }>(
+      await requestJson<{ message: string }>(
+        t.errors,
         "/api/auth/magic-links",
         {
           method: "POST",
@@ -121,9 +150,9 @@ function LoginPanel({
           }),
         },
       );
-      setMessage(response.message);
+      setMessage(t.app.magicLinkSent);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Unable to request a link");
+      setMessage(error instanceof Error ? error.message : t.app.unableRequestLink);
     } finally {
       setSubmitting(false);
     }
@@ -136,15 +165,14 @@ function LoginPanel({
           ALONG THE WAY
         </p>
         <h1 className="font-display text-4xl leading-tight text-ink-strong">
-          Plan a private trip together
+          {t.app.planTogether}
         </h1>
         <p className="mt-4 text-muted-foreground">
-          Sign in with the email your family uses for this trip. No password or
-          public registration.
+          {t.app.signInDescription}
         </p>
         <form className="mt-8 grid gap-4" onSubmit={submit}>
           <label className="grid gap-2 font-semibold">
-            Email
+            {t.app.email}
             <input
               className="min-h-12 rounded-xl border border-ink/20 bg-white px-4 outline-none focus:border-focus focus:ring-2 focus:ring-focus/30"
               type="email"
@@ -158,7 +186,7 @@ function LoginPanel({
             className="min-h-12 rounded-xl bg-ink-strong px-5 font-bold text-on-dark outline-none hover:bg-ink focus:ring-4 focus:ring-focus/40 disabled:opacity-60"
             disabled={submitting}
           >
-            {submitting ? "Sending…" : "Email me a sign-in link"}
+            {submitting ? t.app.sending : t.app.emailSignInLink}
           </button>
         </form>
         {message ? (
@@ -179,6 +207,7 @@ interface TripWorkspaceProps {
 }
 
 function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
+  const { t } = useI18n();
   const [inviteEmail, setInviteEmail] = useState("");
   const [message, setMessage] = useState("");
   const inviteKey = useRef<string | null>(null);
@@ -197,6 +226,7 @@ function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
     inviteKey.current ??= crypto.randomUUID();
     try {
       const response = await requestJson<{ invite: { email: string } }>(
+        t.errors,
         `/api/trips/${trip.id}/invites`,
         {
           method: "POST",
@@ -207,16 +237,16 @@ function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
       );
       inviteKey.current = null;
       setInviteEmail("");
-      setMessage(`Invitation sent to ${response.invite.email}`);
+      setMessage(t.app.invitationSent(response.invite.email));
       await onChanged();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Unable to invite member");
+      setMessage(error instanceof Error ? error.message : t.app.unableInviteMember);
     }
   }
 
   async function removeMember(userId: string) {
     const identity = `remove-member:${userId}`;
-    await requestJson(`/api/trips/${trip.id}/members/${userId}`, {
+    await requestJson(t.errors, `/api/trips/${trip.id}/members/${userId}`, {
       method: "DELETE",
       headers: { "Idempotency-Key": actionKey(identity) },
     });
@@ -226,7 +256,7 @@ function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
 
   async function revokeInvite(inviteId: string) {
     const identity = `revoke-invite:${inviteId}`;
-    await requestJson(`/api/trips/${trip.id}/invites/${inviteId}`, {
+    await requestJson(t.errors, `/api/trips/${trip.id}/invites/${inviteId}`, {
       method: "DELETE",
       headers: { "Idempotency-Key": actionKey(identity) },
     });
@@ -237,43 +267,45 @@ function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
   return (
     <section className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8">
       <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">
-        {trip.role} · version {trip.version}
+        {t.app.tripVersion(t.app.role(trip.role), trip.version)}
       </p>
       <h2 className="mt-2 font-display text-3xl text-ink-strong sm:text-4xl">{trip.name}</h2>
       <p className="mt-2 text-muted-foreground">
         {trip.startDate} – {trip.endDate}
-        {trip.defaultCurrency ? ` · Default currency ${trip.defaultCurrency}` : " · No inferred default currency"}
+        {trip.defaultCurrency
+          ? t.app.defaultCurrency(trip.defaultCurrency)
+          : t.app.noDefaultCurrency}
       </p>
       <section className="mt-5" aria-labelledby="trip-country-route">
-        <h3 id="trip-country-route" className="font-semibold">Country route</h3>
+        <h3 id="trip-country-route" className="font-semibold">{t.app.countryRoute}</h3>
         {trip.countryStops.length > 0 ? (
           <ol className="mt-2 grid gap-2">
             {trip.countryStops.map((stop) => (
               <li key={stop.id} className="flex items-center justify-between gap-3 rounded-xl bg-surface-subtle px-4 py-3">
                 <span><strong className="mr-3">{stop.position + 1}.</strong>{countryStopLabel(stop.countryCode)}</span>
-                <small className="text-muted-foreground">{stop.timeZone ?? "Time zone not inferred"}</small>
+                <small className="text-muted-foreground">{stop.timeZone ?? t.app.timeZoneNotInferred}</small>
               </li>
             ))}
           </ol>
         ) : (
-          <p className="mt-2 rounded-xl bg-surface-subtle p-4 text-muted-foreground">Country route not set for this legacy trip.</p>
+          <p className="mt-2 rounded-xl bg-surface-subtle p-4 text-muted-foreground">{t.app.legacyTripNoCountryRoute}</p>
         )}
       </section>
       <div className="mt-5 grid grid-cols-2 gap-px overflow-hidden rounded-xl bg-ink/10 sm:max-w-sm">
-        <div className="bg-surface-subtle p-4"><strong className="block text-2xl">{trip.memberCount}</strong> members</div>
-        <div className="bg-surface-subtle p-4"><strong className="block text-2xl">{trip.dayCount}</strong> days</div>
+        <div className="bg-surface-subtle p-4"><strong className="block text-2xl">{trip.memberCount}</strong>{t.app.memberUnit}</div>
+        <div className="bg-surface-subtle p-4"><strong className="block text-2xl">{trip.dayCount}</strong>{t.app.dayUnit}</div>
       </div>
 
       <div className="mt-8 grid gap-6 lg:grid-cols-[1fr_0.9fr]">
         <div>
-          <h3 className="font-display text-2xl">Members</h3>
+          <h3 className="font-display text-2xl">{t.app.members}</h3>
           <ul className="mt-3 grid gap-3">
             {trip.members.map((member) => (
               <li key={member.id} className="flex min-h-14 items-center justify-between gap-3 rounded-xl bg-surface-subtle px-4 py-3">
-                <span className="min-w-0 [overflow-wrap:anywhere]"><strong className="block">{member.displayName ?? member.email}</strong><small className="text-muted-foreground">{member.role}{member.userId === currentUser.id ? " · you" : ""}</small></span>
+                <span className="min-w-0 [overflow-wrap:anywhere]"><strong className="block">{member.displayName ?? member.email}</strong><small className="text-muted-foreground">{t.app.role(member.role)}{member.userId === currentUser.id ? `・${t.app.you}` : ""}</small></span>
                 {trip.role === "owner" && member.role === "editor" ? (
                   <button className="min-h-10 rounded-lg border border-accent-strong px-3 text-sm font-bold text-accent-strong" onClick={() => void removeMember(member.userId)}>
-                    Remove
+                    {t.app.remove}
                   </button>
                 ) : null}
               </li>
@@ -282,25 +314,25 @@ function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
         </div>
 
         <div>
-          <h3 className="font-display text-2xl">Pending invitations</h3>
+          <h3 className="font-display text-2xl">{t.app.pendingInvitations}</h3>
           <ul className="mt-3 grid gap-3">
             {trip.invites.filter((invite) => invite.status === "pending").map((invite) => (
               <li key={invite.id} className="flex min-h-14 items-center justify-between gap-3 rounded-xl bg-surface-subtle px-4 py-3">
                 <span>{invite.email}</span>
                 {trip.role === "owner" ? (
-                  <button className="min-h-10 rounded-lg border px-3 text-sm font-bold" onClick={() => void revokeInvite(invite.id)}>Revoke</button>
+                  <button className="min-h-10 rounded-lg border px-3 text-sm font-bold" onClick={() => void revokeInvite(invite.id)}>{t.app.revoke}</button>
                 ) : null}
               </li>
             ))}
-            {trip.invites.every((invite) => invite.status !== "pending") ? <li className="text-muted-foreground">No pending invitations.</li> : null}
+            {trip.invites.every((invite) => invite.status !== "pending") ? <li className="text-muted-foreground">{t.app.noPendingInvitations}</li> : null}
           </ul>
           {trip.role === "owner" ? (
             <form className="mt-5 grid gap-3" onSubmit={inviteMember}>
               <label className="grid gap-1 font-semibold">
-                Invite editor by email
+                {t.app.inviteEditorByEmail}
                 <input className="min-h-11 rounded-lg border px-3" type="email" required value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} />
               </label>
-              <button className="min-h-11 rounded-xl bg-ink-strong px-4 font-bold text-white">Send invitation</button>
+              <button className="min-h-11 rounded-xl bg-ink-strong px-4 font-bold text-white">{t.app.sendInvitation}</button>
             </form>
           ) : null}
           {message ? <p className="mt-3" role="status">{message}</p> : null}
@@ -311,6 +343,12 @@ function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
 }
 
 export function App() {
+  const { t } = useI18n();
+  const request = useCallback(
+    <T,>(url: string, options: RequestOptions = {}) =>
+      requestJson<T>(t.errors, url, options),
+    [t.errors],
+  );
   const [user, setUser] = useState<UserDto | null | undefined>(undefined);
   const [trips, setTrips] = useState<TripSummaryDto[]>([]);
   const [selectedTrip, setSelectedTrip] = useState<TripDto | null>(null);
@@ -325,19 +363,19 @@ export function App() {
   }, []);
 
   const refreshTrips = useCallback(async () => {
-    const response = await requestJson<{ trips: TripSummaryDto[] }>("/api/trips", {
+    const response = await request<{ trips: TripSummaryDto[] }>("/api/trips", {
       parse: (value) => parseTripListResponse(value),
     });
     setTrips(response.trips);
     return response.trips;
-  }, []);
+  }, [request]);
 
   const loadTrip = useCallback(async (tripId: string) => {
-    const response = await requestJson<{ trip: TripDto }>(`/api/trips/${tripId}`, {
+    const response = await request<{ trip: TripDto }>(`/api/trips/${tripId}`, {
       parse: (value) => parseTripResponse(value),
     });
     setSelectedTrip(response.trip);
-  }, []);
+  }, [request]);
 
   useEffect(() => {
     let active = true;
@@ -345,14 +383,14 @@ export function App() {
       try {
         const magicToken = tokenParameter("magicToken");
         if (magicToken) {
-          await requestJson("/api/auth/magic-links/consume", {
+          await request("/api/auth/magic-links/consume", {
             method: "POST",
             body: JSON.stringify({ token: magicToken }),
             parse: (value) => parseSessionResponse(value),
           });
           removeTokenFragment("magicToken");
         }
-        const session = await requestJson<{ user: UserDto }>("/api/session", {
+        const session = await request<{ user: UserDto }>("/api/session", {
           parse: (value) => parseSessionResponse(value),
         });
         if (!active) return;
@@ -367,7 +405,7 @@ export function App() {
             RECOVERABLE_MAGIC_CODES[reason.code]
           ) {
             setSignInError(
-              `${reason.message} Enter your email below to request a new sign-in link.`,
+              `${reason.message} ${t.app.requestNewMagicLink}`,
             );
             removeTokenFragment("magicToken");
           }
@@ -377,7 +415,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [loadTrip, refreshTrips]);
+  }, [loadTrip, refreshTrips, request, t.app.requestNewMagicLink]);
 
   async function acceptInvitation() {
     const token = tokenParameter("inviteToken");
@@ -386,7 +424,7 @@ export function App() {
     setError("");
     inviteKey.current ??= crypto.randomUUID();
     try {
-      const response = await requestJson<{ trip: TripDto }>("/api/invites/accept", {
+      const response = await request<{ trip: TripDto }>("/api/invites/accept", {
         method: "POST",
         headers: { "Idempotency-Key": inviteKey.current },
         body: JSON.stringify({ token }),
@@ -397,7 +435,7 @@ export function App() {
       setSelectedTrip(response.trip);
       await refreshTrips();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to accept invitation");
+      setError(reason instanceof Error ? reason.message : t.app.unableAcceptInvitation);
     } finally {
       setAccepting(false);
     }
@@ -405,7 +443,7 @@ export function App() {
 
   async function createTrip(input: CreateTripInput) {
     createTripKey.current ??= crypto.randomUUID();
-    const response = await requestJson<{ trip: TripDto }>("/api/trips", {
+    const response = await request<{ trip: TripDto }>("/api/trips", {
       method: "POST",
       headers: { "Idempotency-Key": createTripKey.current },
       body: JSON.stringify(input),
@@ -417,14 +455,14 @@ export function App() {
   }
 
   async function logout() {
-    await requestJson("/api/logout", { method: "POST" });
+    await request("/api/logout", { method: "POST" });
     setUser(null);
     setTrips([]);
     setSelectedTrip(null);
   }
 
   if (user === undefined) {
-    return <main className="grid min-h-screen place-items-center" role="status">Opening your trips…</main>;
+    return <main className="grid min-h-screen place-items-center" role="status">{t.app.openingTrips}</main>;
   }
   if (user === null) {
     return (
@@ -440,14 +478,14 @@ export function App() {
   return (
     <main className="mx-auto min-h-screen w-[min(100%-1.25rem,96rem)] py-5 sm:py-8">
       <header className="flex flex-wrap items-center justify-between gap-4 rounded-panel bg-surface/90 px-5 py-4 shadow-feedback">
-        <div><p className="text-xs font-bold tracking-[0.14em] text-accent-strong">ALONG THE WAY</p><p className="text-sm text-muted-foreground">Signed in as {user.email}</p></div>
-        <button className="min-h-10 rounded-lg border px-4 font-bold" onClick={() => void logout()}>Sign out</button>
+        <div><p className="text-xs font-bold tracking-[0.14em] text-accent-strong">ALONG THE WAY</p><p className="text-sm text-muted-foreground">{t.app.signedInAs(user.email)}</p></div>
+        <button className="min-h-10 rounded-lg border px-4 font-bold" onClick={() => void logout()}>{t.app.signOut}</button>
       </header>
 
       {inviteToken ? (
         <section className="my-5 flex flex-wrap items-center justify-between gap-3 rounded-panel bg-ink-strong p-5 text-on-dark">
-          <div><strong className="block text-lg">You have a trip invitation</strong><span>Accept it with this signed-in email.</span></div>
-          <button className="min-h-11 rounded-xl bg-accent px-5 font-bold" disabled={accepting} onClick={() => void acceptInvitation()}>{accepting ? "Accepting…" : "Accept invitation"}</button>
+          <div><strong className="block text-lg">{t.app.tripInvitation}</strong><span>{t.app.acceptWithSignedInEmail}</span></div>
+          <button className="min-h-11 rounded-xl bg-accent px-5 font-bold" disabled={accepting} onClick={() => void acceptInvitation()}>{accepting ? t.app.accepting : t.app.acceptInvitation}</button>
         </section>
       ) : null}
       {error ? <p className="my-4 rounded-xl bg-surface p-4 text-accent-strong" role="alert">{error}</p> : null}
@@ -455,13 +493,13 @@ export function App() {
       <div className="my-6 grid gap-5 lg:grid-cols-[17rem_1fr]">
         <aside className="grid content-start gap-4">
           <CreateTripDialog createTrip={createTrip} />
-          <nav aria-label="Trips" className="grid gap-2">
+          <nav aria-label={t.app.trips} className="grid gap-2">
             {trips.map((trip) => (
               <button key={trip.id} className={`min-h-14 rounded-xl border px-4 py-3 text-left outline-none focus:ring-4 focus:ring-focus/30 ${selectedTrip?.id === trip.id ? "border-accent-strong bg-surface" : "border-ink/10 bg-surface/70"}`} onClick={() => void loadTrip(trip.id)}>
-                <strong className="block">{trip.name}</strong><small className="text-muted-foreground">{trip.memberCount} members · {trip.dayCount} days</small>
+                <strong className="block">{trip.name}</strong><small className="text-muted-foreground">{t.app.tripSummary(trip.memberCount, trip.dayCount)}</small>
               </button>
             ))}
-            {trips.length === 0 ? <p className="rounded-xl bg-surface/70 p-4 text-muted-foreground">Create your first private trip.</p> : null}
+            {trips.length === 0 ? <p className="rounded-xl bg-surface/70 p-4 text-muted-foreground">{t.app.createFirstTrip}</p> : null}
           </nav>
         </aside>
         {selectedTrip ? (
@@ -469,25 +507,25 @@ export function App() {
             <TripWorkspace trip={selectedTrip} currentUser={user} onChanged={() => loadTrip(selectedTrip.id)} />
             <DiscoveryWorkspace
               trip={selectedTrip}
-              request={requestJson}
+              request={request}
               onPlacesChanged={placesChanged}
             />
             <TripPlaceWorkspace
               trip={selectedTrip}
-              request={requestJson}
+              request={request}
               placesRevision={placesRevision}
               onPlacesChanged={placesChanged}
             />
             <TripSkeletonWorkspace
               trip={selectedTrip}
-              request={requestJson}
+              request={request}
               onTripChanged={() => loadTrip(selectedTrip.id)}
               placesRevision={placesRevision}
               onPlacesChanged={placesChanged}
             />
           </div>
         ) : (
-          <section className="grid min-h-72 place-items-center rounded-card border border-dashed border-ink/20 bg-surface/50 p-8 text-center text-muted-foreground">Choose or create a trip.</section>
+          <section className="grid min-h-72 place-items-center rounded-card border border-dashed border-ink/20 bg-surface/50 p-8 text-center text-muted-foreground">{t.app.chooseOrCreateTrip}</section>
         )}
       </div>
     </main>

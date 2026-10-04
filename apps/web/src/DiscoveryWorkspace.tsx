@@ -11,6 +11,7 @@ import {
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 
 import { googleMapsPlaceUrl } from "./google-maps";
+import { useI18n, type Messages } from "./i18n";
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
 
@@ -35,8 +36,8 @@ function clearRetryKey(store: RetryKeys, operation: string) {
   store.delete(operation);
 }
 
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : "Unable to complete AI discovery";
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
 }
 
 function shouldStartFreshRequest(error: unknown) {
@@ -47,47 +48,51 @@ function shouldStartFreshRequest(error: unknown) {
 // Where an outcome is reported: next to the control that caused it, or at the top.
 type NoticeArea = "general" | "find" | "again" | "feedback";
 
-function missingServices(workspace: DiscoveryWorkspaceDto, needsPlaces: boolean) {
+function missingServices(
+  workspace: DiscoveryWorkspaceDto,
+  needsPlaces: boolean,
+  t: Messages["discovery"],
+) {
   return [
-    ...(workspace.modelAvailable ? [] : ["OpenAI API key and model"]),
-    ...(needsPlaces && !workspace.placeProviderAvailable ? ["Google Maps API key"] : []),
+    ...(workspace.modelAvailable ? [] : [t.services.openAi]),
+    ...(needsPlaces && !workspace.placeProviderAvailable ? [t.services.googleMaps] : []),
   ];
 }
 
-const endorsementLabels: Record<DiscoveryEndorsement, string> = {
-  google_reviews: "Many good Google reviews",
-  wikivoyage: "Listed in Wikivoyage",
-  official_tourism: "Official tourism site",
-};
-
-function shortfallText(shortfall: DiscoveryShortfallDto) {
-  switch (shortfall.code) {
-    case "not_researched":
-      return "AI found no sources about this place.";
-    case "not_found":
-      return "Not found on Google Maps, so it could not be checked.";
-    case "name_mismatch":
-      return "Google Maps returned a different place, so it was left out.";
-    case "single_source": {
-      // Fewer than two by definition: none, or exactly one.
-      const vouched = shortfall.endorsements.map((endorsement) => endorsementLabels[endorsement]).join(", ");
-      return vouched
-        ? `Only one independent source recommends it (${vouched}); two are required.`
-        : "No independent source recommends it; two are required.";
-    }
-    case "category_short":
-      return shortfall.count ? "Only one place passed the quality checks." : "No place passed the quality checks.";
+function endorsementLabel(
+  endorsement: DiscoveryEndorsement,
+  t: Messages["discovery"],
+) {
+  switch (endorsement) {
+    case "google_reviews": return t.endorsement.googleReviews;
+    case "wikivoyage": return t.endorsement.wikivoyage;
+    case "official_tourism": return t.endorsement.officialTourism;
   }
 }
 
-const statusLabels: Record<CandidateProposalDto["status"], string> = {
-  pending: "Ready for review",
-  accepting: "Adding to wishlist…",
-  accepted: "Added to wishlist",
-  rejected: "Not for this trip",
-};
+function shortfallText(shortfall: DiscoveryShortfallDto, t: Messages["discovery"]) {
+  switch (shortfall.code) {
+    case "not_researched":
+      return t.shortfall.notResearched;
+    case "not_found":
+      return t.shortfall.notFound;
+    case "name_mismatch":
+      return t.shortfall.nameMismatch;
+    case "single_source": {
+      // Fewer than two by definition: none, or exactly one.
+      const vouched = shortfall.endorsements.map((endorsement) =>
+        endorsementLabel(endorsement, t)
+      ).join("、");
+      return vouched ? t.shortfall.oneSource(vouched) : t.shortfall.noSource;
+    }
+    case "category_short":
+      return shortfall.count ? t.shortfall.onePassed : t.shortfall.nonePassed;
+  }
+}
+
 
 export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: DiscoveryWorkspaceProps) {
+  const { locale, t: { discovery: t } } = useI18n();
   const [workspace, setWorkspace] = useState<DiscoveryWorkspaceDto | null>(null);
   const [briefDraft, setBriefDraft] = useState("");
   const [feedbackDraft, setFeedbackDraft] = useState("");
@@ -96,8 +101,7 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
   const [notice, setNotice] = useState<{ area: NoticeArea; text: string } | null>(null);
   const retryKeys = useRef<RetryKeys>(new Map());
   const researchLabel = (idle: string) =>
-    pending === "save-brief" ? "Saving…" : pending === "generate" ? "Researching…" : idle;
-
+    pending === "save-brief" ? t.progress.saving : pending === "generate" ? t.progress.researching : idle;
   const apply = useCallback((value: unknown) => {
     const next = parseDiscoveryWorkspaceResponse(value).discovery;
     setWorkspace(next);
@@ -111,11 +115,11 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
       apply(await request(`/api/trips/${trip.id}/discovery`));
       setNotice(null);
     } catch (error) {
-      setNotice({ area: "general", text: errorMessage(error) });
+      setNotice({ area: "general", text: errorMessage(error, t.errors.failed) });
     } finally {
       setLoading(false);
     }
-  }, [apply, request, trip.id]);
+  }, [apply, request, t.errors.failed, trip.id]);
 
   useEffect(() => {
     void load();
@@ -145,7 +149,7 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
       return next;
     } catch (error) {
       if (shouldStartFreshRequest(error)) clearRetryKey(retryKeys.current, operation);
-      setNotice({ area, text: errorMessage(error) });
+      setNotice({ area, text: errorMessage(error, t.errors.failed) });
     } finally {
       setPending(null);
     }
@@ -155,11 +159,11 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
   // otherwise store the current brief text when it changed, then research it.
   async function research(area: "find" | "again") {
     if (pending || !workspace) return;
-    const missing = missingServices(workspace, true);
+    const missing = missingServices(workspace, true, t);
     if (missing.length > 0) {
       setNotice({
         area,
-        text: `AI research can't run: this server has no ${missing.join(" and no ")} configured. Your trip description is kept.`,
+        text: t.errors.researchUnavailable(missing.join(t.services.separator)),
       });
       return;
     }
@@ -190,11 +194,11 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
   async function createFeedback() {
     const text = feedbackDraft.trim();
     if (!text || pending || !workspace) return;
-    const missing = missingServices(workspace, false);
+    const missing = missingServices(workspace, false, t);
     if (missing.length > 0) {
       setNotice({
         area: "feedback",
-        text: `Feedback can't be interpreted: this server has no ${missing.join(" and no ")} configured. Your feedback is kept.`,
+        text: t.errors.feedbackUnavailable(missing.join(t.services.separator)),
       });
       return;
     }
@@ -217,95 +221,95 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
     <section className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8" aria-labelledby="ai-discovery-heading">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.14em] text-accent-strong"><Bot aria-hidden="true" className="size-4" />AI trip research</p>
-          <h2 id="ai-discovery-heading" className="font-display text-3xl text-ink-strong sm:text-4xl">Let AI find and explain the options</h2>
-          <p className="mt-2 max-w-3xl text-muted-foreground">Describe the trip once. AI researches trusted sources, confirms each place on Google Maps, and shows only places that at least two independent sources recommend.</p>
+          <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.14em] text-accent-strong"><Bot aria-hidden="true" className="size-4" />{t.header.eyebrow}</p>
+          <h2 id="ai-discovery-heading" className="font-display text-3xl text-ink-strong sm:text-4xl">{t.header.title}</h2>
+          <p className="mt-2 max-w-3xl text-muted-foreground">{t.header.description}</p>
         </div>
-        {workspace?.latestRun ? <button className="flex min-h-11 items-center gap-2 rounded-xl border px-4 font-bold" disabled={pending !== null} onClick={() => void research("again")}><RefreshCw aria-hidden="true" className="size-4" />{researchLabel("Research again")}</button> : null}
+        {workspace?.latestRun ? <button className="flex min-h-11 items-center gap-2 rounded-xl border px-4 font-bold" disabled={pending !== null} onClick={() => void research("again")}><RefreshCw aria-hidden="true" className="size-4" />{researchLabel(t.header.researchAgain)}</button> : null}
       </div>
 
       {notice?.area === "again" ? <p className="mt-4 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
       {notice?.area === "general" ? <p className="mt-4 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
-      {loading ? <p className="mt-6" role="status">Loading AI discovery…</p> : null}
+      {loading ? <p className="mt-6" role="status">{t.header.loading}</p> : null}
 
       {!loading ? (
         <div className="mt-6 grid gap-5">
-          <section className="rounded-panel bg-surface-subtle p-4 sm:p-5" aria-label="Trip discovery brief">
-            <label className="grid gap-2 font-bold">What should AI plan around?
+          <section className="rounded-panel bg-surface-subtle p-4 sm:p-5" aria-label={t.brief.areaLabel}>
+            <label className="grid gap-2 font-bold">{t.brief.prompt}
               <textarea
                 className="min-h-32 rounded-xl border bg-surface p-3 font-normal"
                 value={briefDraft}
                 onChange={(event) => setBriefDraft(event.target.value)}
-                placeholder="Seven days in Osaka and Kyoto. We like gardens and local food, want an unhurried pace, and do not want long walking days."
+                placeholder={t.brief.placeholder}
               />
             </label>
             <div className="mt-3 flex flex-wrap gap-2">
-              <button className="flex min-h-11 items-center gap-2 rounded-xl bg-accent px-4 font-bold text-ink-strong" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research("find")}><Search aria-hidden="true" className="size-4" />{researchLabel("Find candidates")}</button>
+              <button className="flex min-h-11 items-center gap-2 rounded-xl bg-accent px-4 font-bold text-ink-strong" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research("find")}><Search aria-hidden="true" className="size-4" />{researchLabel(t.brief.findCandidates)}</button>
             </div>
             {notice?.area === "find" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
-            {!workspace?.modelAvailable ? <p className="mt-3 text-sm text-muted-foreground">AI discovery is unavailable until the server has an OpenAI API key and model. Existing trip data remains available.</p> : null}
-            {!workspace?.placeProviderAvailable ? <p className="mt-2 text-sm text-muted-foreground">Google Places is unavailable. Existing proposals remain readable, but a new grounded search cannot run.</p> : null}
+            {!workspace?.modelAvailable ? <p className="mt-3 text-sm text-muted-foreground">{t.brief.modelUnavailable}</p> : null}
+            {!workspace?.placeProviderAvailable ? <p className="mt-2 text-sm text-muted-foreground">{t.brief.placesUnavailable}</p> : null}
           </section>
 
           {workspace?.brief?.structured ? (
-            <section className="rounded-panel border border-ink/10 p-4" aria-label="AI interpretation of trip brief">
-              <h3 className="font-display text-2xl">What AI understood</h3>
+            <section className="rounded-panel border border-ink/10 p-4" aria-label={t.brief.interpretationLabel}>
+              <h3 className="font-display text-2xl">{t.brief.understood}</h3>
               <dl className="mt-3 grid gap-3 sm:grid-cols-2">
-                <div><dt className="font-bold">Interests</dt><dd>{workspace.brief.structured.interests.join(", ") || "Unknown"}</dd></div>
-                <div><dt className="font-bold">Areas</dt><dd>{workspace.brief.structured.areas.join(", ") || "Unknown"}</dd></div>
-                <div><dt className="font-bold">Pace</dt><dd>{workspace.brief.structured.pace ?? "Unknown"}</dd></div>
-                <div><dt className="font-bold">Budget</dt><dd>{workspace.brief.structured.budget ?? "Unknown"}</dd></div>
-                <div className="sm:col-span-2"><dt className="font-bold">Avoid</dt><dd>{workspace.brief.structured.exclusions.join(", ") || "Nothing confirmed"}</dd></div>
+                <div><dt className="font-bold">{t.brief.interests}</dt><dd>{workspace.brief.structured.interests.join("、") || t.brief.unknown}</dd></div>
+                <div><dt className="font-bold">{t.brief.areas}</dt><dd>{workspace.brief.structured.areas.join("、") || t.brief.unknown}</dd></div>
+                <div><dt className="font-bold">{t.brief.pace}</dt><dd>{workspace.brief.structured.pace ?? t.brief.unknown}</dd></div>
+                <div><dt className="font-bold">{t.brief.budget}</dt><dd>{workspace.brief.structured.budget ?? t.brief.unknown}</dd></div>
+                <div className="sm:col-span-2"><dt className="font-bold">{t.brief.avoid}</dt><dd>{workspace.brief.structured.exclusions.join("、") || t.brief.nothingConfirmed}</dd></div>
               </dl>
-              {workspace.brief.unresolvedQuestions.length ? <div className="mt-4"><strong>Questions that could change the shortlist</strong><ul className="mt-1 list-disc pl-5">{workspace.brief.unresolvedQuestions.map((question) => <li key={question}>{question}</li>)}</ul></div> : null}
+              {workspace.brief.unresolvedQuestions.length ? <div className="mt-4"><strong>{t.brief.questions}</strong><ul className="mt-1 list-disc pl-5">{workspace.brief.unresolvedQuestions.map((question) => <li key={question}>{question}</li>)}</ul></div> : null}
             </section>
           ) : null}
 
           {workspace?.latestRun ? (
-            <section className="rounded-panel border border-ink/10 p-4" aria-label="AI search plan">
-              <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-display text-2xl">What AI looked for</h3><span className="text-sm text-muted-foreground">{workspace.latestRun.modelId} · {new Date(workspace.latestRun.generatedAt).toLocaleString()}</span></div>
+            <section className="rounded-panel border border-ink/10 p-4" aria-label={t.searchPlan.areaLabel}>
+              <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-display text-2xl">{t.searchPlan.title}</h3><span className="text-sm text-muted-foreground">{workspace.latestRun.modelId}・{new Date(workspace.latestRun.generatedAt).toLocaleString(locale)}</span></div>
               <dl className="mt-3 grid gap-3 sm:grid-cols-2">
-                {workspace.latestRun.searchPlan.categories.length ? <div><dt className="font-bold">Recommending</dt><dd>{workspace.latestRun.searchPlan.categories.join(", ")}{workspace.latestRun.searchPlan.defaultCategories ? <span className="block text-sm text-muted-foreground">You did not ask for anything specific, so AI used these defaults for your destination and dates.</span> : null}</dd></div> : null}
-                {workspace.latestRun.searchPlan.namedPlaces.length ? <div><dt className="font-bold">Places you named</dt><dd>{workspace.latestRun.searchPlan.namedPlaces.join(", ")}</dd></div> : null}
-                {workspace.latestRun.searchPlan.alreadyArranged.length ? <div><dt className="font-bold">Already arranged, not recommended</dt><dd>{workspace.latestRun.searchPlan.alreadyArranged.join(", ")}</dd></div> : null}
+                {workspace.latestRun.searchPlan.categories.length ? <div><dt className="font-bold">{t.searchPlan.recommending}</dt><dd>{workspace.latestRun.searchPlan.categories.join("、")}{workspace.latestRun.searchPlan.defaultCategories ? <span className="block text-sm text-muted-foreground">{t.searchPlan.defaultExplanation}</span> : null}</dd></div> : null}
+                {workspace.latestRun.searchPlan.namedPlaces.length ? <div><dt className="font-bold">{t.searchPlan.namedPlaces}</dt><dd>{workspace.latestRun.searchPlan.namedPlaces.join("、")}</dd></div> : null}
+                {workspace.latestRun.searchPlan.alreadyArranged.length ? <div><dt className="font-bold">{t.searchPlan.alreadyArranged}</dt><dd>{workspace.latestRun.searchPlan.alreadyArranged.join("、")}</dd></div> : null}
               </dl>
-              {workspace.latestRun.searchPlan.queries.length ? <details className="mt-3"><summary className="cursor-pointer font-bold">Places checked on Google Maps ({workspace.latestRun.searchPlan.queries.length})</summary><ul className="mt-2 grid gap-2 sm:grid-cols-2">{workspace.latestRun.searchPlan.queries.map((query, index) => <li key={`${index}:${query}`} className="rounded-lg bg-surface-subtle p-3">{query}</li>)}</ul></details> : null}
+              {workspace.latestRun.searchPlan.queries.length ? <details className="mt-3"><summary className="cursor-pointer font-bold">{t.searchPlan.checkedOnGoogleMaps(workspace.latestRun.searchPlan.queries.length)}</summary><ul className="mt-2 grid gap-2 sm:grid-cols-2">{workspace.latestRun.searchPlan.queries.map((query, index) => <li key={`${index}:${query}`} className="rounded-lg bg-surface-subtle p-3">{query}</li>)}</ul></details> : null}
             </section>
           ) : null}
 
           {workspace?.proposals.length ? (
-            <section aria-label="AI place shortlist">
-              <h3 className="font-display text-3xl">AI shortlist</h3>
+            <section aria-label={t.proposal.shortlistLabel}>
+              <h3 className="font-display text-3xl">{t.proposal.shortlistTitle}</h3>
               <div className="mt-4 grid gap-4 xl:grid-cols-2">
                 {workspace.proposals.map((proposal) => (
-                  <article key={proposal.id} className="grid content-start gap-4 rounded-panel border border-ink/10 bg-surface-subtle p-4" aria-label={`AI proposal ${proposal.name}`}>
-                    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{proposal.category ?? proposal.type} · {proposal.confidence} confidence</p><h4 className="font-display text-2xl">{proposal.name}</h4><p className="text-sm text-muted-foreground">{proposal.address ?? "Address unknown"}</p></div><span className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{statusLabels[proposal.status]}</span></div>
-                    {proposal.endorsements.length ? <div aria-label={`Recommended by for ${proposal.name}`}><strong>Recommended by</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabels[endorsement]}</li>)}</ul></div> : null}
+                  <article key={proposal.id} className="grid content-start gap-4 rounded-panel border border-ink/10 bg-surface-subtle p-4" aria-label={t.proposal.ariaLabel(proposal.name)}>
+                    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{proposal.category ?? t.placeType[proposal.type]}・{t.proposal.confidence(t.confidence[proposal.confidence])}</p><h4 className="font-display text-2xl">{proposal.name}</h4><p className="text-sm text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</p></div><span className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{t.status[proposal.status]}</span></div>
+                    {proposal.endorsements.length ? <div aria-label={t.proposal.recommendedByFor(proposal.name)}><strong>{t.proposal.recommendedBy}</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabel(endorsement, t)}</li>)}</ul></div> : null}
                     <p>{proposal.recommendation}</p>
-                    <a className="inline-flex min-h-10 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(proposal.name, proposal.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />View photos on Google Maps</a>
-                    <div className="grid gap-3 sm:grid-cols-3"><div><strong>Matches</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.matchedNeeds.map((item) => <li key={item}>{item}</li>)}</ul></div><div><strong>Tradeoffs</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul></div><div><strong>Unknowns</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.unknowns.map((item) => <li key={item}>{item}</li>)}</ul></div></div>
-                    <div><strong>Evidence</strong><ul className="mt-1 grid gap-1">{proposal.evidence.map((item) => <li key={item.id}><a className="inline-flex items-center gap-1 break-all font-bold text-accent-strong underline" href={item.sourceUrl} target="_blank" rel="noreferrer">{item.title}<ExternalLink aria-hidden="true" className="size-3" /></a><span className="ml-2 text-xs text-muted-foreground">{item.attribution} · observed {new Date(item.observedAt).toLocaleString()}</span></li>)}</ul></div>
-                    {proposal.status === "pending" ? <div className="flex flex-wrap gap-2"><button className="flex min-h-10 items-center gap-2 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "accept")}><Check aria-hidden="true" className="size-4" />Accept into wishlist</button><button className="flex min-h-10 items-center gap-2 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "reject")}><X aria-hidden="true" className="size-4" />Not for this trip</button></div> : null}
+                    <a className="inline-flex min-h-10 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(proposal.name, proposal.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.proposal.viewPhotos}</a>
+                    <div className="grid gap-3 sm:grid-cols-3"><div><strong>{t.proposal.matches}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.matchedNeeds.map((item) => <li key={item}>{item}</li>)}</ul></div><div><strong>{t.proposal.tradeoffs}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul></div><div><strong>{t.proposal.unknowns}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.unknowns.map((item) => <li key={item}>{item}</li>)}</ul></div></div>
+                    <div><strong>{t.proposal.evidence}</strong><ul className="mt-1 grid gap-1">{proposal.evidence.map((item) => <li key={item.id}><a className="inline-flex items-center gap-1 break-all font-bold text-accent-strong underline" href={item.sourceUrl} target="_blank" rel="noreferrer">{item.title}<ExternalLink aria-hidden="true" className="size-3" /></a><span className="ml-2 text-xs text-muted-foreground">{item.attribution}・{t.proposal.observedAt(new Date(item.observedAt).toLocaleString(locale))}</span></li>)}</ul></div>
+                    {proposal.status === "pending" ? <div className="flex flex-wrap gap-2"><button className="flex min-h-10 items-center gap-2 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "accept")}><Check aria-hidden="true" className="size-4" />{t.proposal.accept}</button><button className="flex min-h-10 items-center gap-2 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "reject")}><X aria-hidden="true" className="size-4" />{t.proposal.decline}</button></div> : null}
                   </article>
                 ))}
               </div>
             </section>
-          ) : workspace?.latestRun ? <p className="rounded-panel border border-dashed p-5 text-center text-muted-foreground">No place passed the quality checks this time.</p> : null}
+          ) : workspace?.latestRun ? <p className="rounded-panel border border-dashed p-5 text-center text-muted-foreground">{t.proposal.nonePassed}</p> : null}
 
           {workspace?.latestRun?.shortfalls.length ? (
-            <section className="rounded-panel border border-ink/10 p-4" aria-label="What's missing">
-              <h3 className="font-display text-2xl">What's missing</h3>
-              <p className="mt-1 text-sm text-muted-foreground">Places and kinds of place that did not make the shortlist, and why.</p>
-              <ul className="mt-3 grid gap-2">{workspace.latestRun.shortfalls.map((shortfall) => <li key={`${shortfall.code}:${shortfall.subject}`} className="rounded-lg bg-surface-subtle p-3"><strong>{shortfall.subject}</strong>{shortfall.named ? <span className="ml-2 text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">You asked for this</span> : null}<span className="block text-sm">{shortfallText(shortfall)}</span></li>)}</ul>
+            <section className="rounded-panel border border-ink/10 p-4" aria-label={t.missing.areaLabel}>
+              <h3 className="font-display text-2xl">{t.missing.title}</h3>
+              <p className="mt-1 text-sm text-muted-foreground">{t.missing.description}</p>
+              <ul className="mt-3 grid gap-2">{workspace.latestRun.shortfalls.map((shortfall) => <li key={`${shortfall.code}:${shortfall.subject}`} className="rounded-lg bg-surface-subtle p-3"><strong>{shortfall.subject}</strong>{shortfall.named ? <span className="ml-2 text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{t.missing.requested}</span> : null}<span className="block text-sm">{shortfallText(shortfall, t)}</span></li>)}</ul>
             </section>
           ) : null}
 
-          <section className="rounded-panel bg-surface-subtle p-4" aria-label="Discovery feedback">
-            <h3 className="font-display text-2xl">Refine it in your own words</h3>
-            <label className="mt-3 grid gap-2 font-bold">Feedback<textarea className="min-h-24 rounded-xl border bg-surface p-3 font-normal" value={feedbackDraft} onChange={(event) => setFeedbackDraft(event.target.value)} placeholder="Too many temples. Keep one garden day and add more food markets." /></label>
-            <button className="mt-3 min-h-11 rounded-xl border px-4 font-bold" disabled={pending !== null || !feedbackDraft.trim()} onClick={() => void createFeedback()}>{pending === "feedback" ? "Interpreting…" : "Interpret feedback"}</button>
+          <section className="rounded-panel bg-surface-subtle p-4" aria-label={t.feedback.areaLabel}>
+            <h3 className="font-display text-2xl">{t.feedback.title}</h3>
+            <label className="mt-3 grid gap-2 font-bold">{t.feedback.label}<textarea className="min-h-24 rounded-xl border bg-surface p-3 font-normal" value={feedbackDraft} onChange={(event) => setFeedbackDraft(event.target.value)} placeholder={t.feedback.placeholder} /></label>
+            <button className="mt-3 min-h-11 rounded-xl border px-4 font-bold" disabled={pending !== null || !feedbackDraft.trim()} onClick={() => void createFeedback()}>{pending === "feedback" ? t.feedback.interpreting : t.feedback.interpret}</button>
             {notice?.area === "feedback" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
-            <div className="mt-4 grid gap-3">{workspace?.feedback.map((feedback) => <article key={feedback.id} className="rounded-xl bg-surface p-3"><p className="whitespace-pre-wrap">“{feedback.originalText}”</p><p className="mt-2"><strong>AI interpretation:</strong> {feedback.interpretation.summary}</p><p className="mt-1 text-sm text-muted-foreground">Interests: {feedback.interpretation.interests.join(", ") || "none"} · Avoid: {feedback.interpretation.exclusions.join(", ") || "none"} · Pace: {feedback.interpretation.pace ?? "unchanged"} · Budget: {feedback.interpretation.budget ?? "unchanged"}</p>{feedback.status === "pending" ? <div className="mt-3 flex gap-2"><button className="min-h-10 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null} onClick={() => void decideFeedback(feedback.id, feedback.version, "confirm")}>Confirm interpretation</button><button className="min-h-10 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideFeedback(feedback.id, feedback.version, "reject")}>Reject interpretation</button></div> : <span className="mt-2 inline-block text-sm font-bold">{feedback.status}</span>}</article>)}</div>
+            <div className="mt-4 grid gap-3">{workspace?.feedback.map((feedback) => <article key={feedback.id} className="rounded-xl bg-surface p-3"><p className="whitespace-pre-wrap">「{feedback.originalText}」</p><p className="mt-2"><strong>{t.feedback.interpretation}</strong> {feedback.interpretation.summary}</p><p className="mt-1 text-sm text-muted-foreground">{t.feedback.interests}：{feedback.interpretation.interests.join("、") || t.feedback.none}・{t.feedback.avoid}：{feedback.interpretation.exclusions.join("、") || t.feedback.none}・{t.feedback.pace}：{feedback.interpretation.pace ?? t.feedback.unchanged}・{t.feedback.budget}：{feedback.interpretation.budget ?? t.feedback.unchanged}</p>{feedback.status === "pending" ? <div className="mt-3 flex gap-2"><button className="min-h-10 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null} onClick={() => void decideFeedback(feedback.id, feedback.version, "confirm")}>{t.feedback.confirm}</button><button className="min-h-10 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideFeedback(feedback.id, feedback.version, "reject")}>{t.feedback.reject}</button></div> : <span className="mt-2 inline-block text-sm font-bold">{t.feedbackStatus[feedback.status]}</span>}</article>)}</div>
           </section>
         </div>
       ) : null}

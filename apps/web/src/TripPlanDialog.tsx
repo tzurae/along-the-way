@@ -15,7 +15,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { loadLabels, reasonLabels, span, TimetableRow } from "./TimetableView";
+import { useI18n } from "./i18n";
+import { loadLabel, reasonLabel, span, TimetableRow } from "./TimetableView";
 
 type JsonRequest = <T>(url: string, options?: RequestInit & { parse?: (value: unknown) => unknown }) => Promise<T>;
 
@@ -39,6 +40,7 @@ export function TripPlanDialog({
   onClose(): void;
   onApplied(): void;
 }) {
+  const { t } = useI18n();
   const [plan, setPlan] = useState<TripPlanDto | null>(null);
   const [busy, setBusy] = useState<"planning" | "saving" | null>(null);
   const [error, setError] = useState("");
@@ -58,11 +60,11 @@ export function TripPlanDialog({
       });
       if (ticket === latestRequest.current) setPlan(response.plan);
     } catch (reason) {
-      if (ticket === latestRequest.current) setError(reason instanceof Error ? reason.message : "Could not plan the trip");
+      if (ticket === latestRequest.current) setError(reason instanceof Error ? reason.message : t.tripPlan.couldNotPlan);
     } finally {
       if (ticket === latestRequest.current) setBusy(null);
     }
-  }, [request, tripId]);
+  }, [request, t.tripPlan, tripId]);
 
   useEffect(() => {
     latestRequest.current += 1;
@@ -94,7 +96,7 @@ export function TripPlanDialog({
       applyKey.current = null;
       onApplied();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not use this plan");
+      setError(reason instanceof Error ? reason.message : t.tripPlan.couldNotUsePlan);
     } finally {
       setBusy(null);
     }
@@ -107,46 +109,56 @@ export function TripPlanDialog({
     <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
       <DialogContent className="h-dvh w-screen max-w-none overflow-y-auto rounded-none content-start sm:h-auto sm:max-h-[90vh] sm:w-full sm:max-w-2xl sm:rounded-xl">
         <DialogHeader>
-          <DialogTitle>Plan the whole trip</DialogTitle>
-          <DialogDescription>
-            Adds wishlist places that are not on a day yet. Places already on a day stay where they are. Nothing is saved until you use this plan, and the itinerary never changes.
-          </DialogDescription>
+          <DialogTitle>{t.tripPlan.title}</DialogTitle>
+          <DialogDescription>{t.tripPlan.description}</DialogDescription>
         </DialogHeader>
 
         {error ? <p role="alert" className="text-sm font-semibold text-destructive">{error}</p> : null}
-        {busy === "planning" ? <p role="status" className="text-sm">Planning the trip…</p> : null}
+        {busy === "planning" ? <p role="status" className="text-sm">{t.tripPlan.planning}</p> : null}
 
         {plan ? (
           <div className="grid gap-5">
-            {plan.days.length === 0 ? <p className="empty-state">No day gets a new place.</p> : null}
+            {plan.days.length === 0 ? <p className="empty-state">{t.tripPlan.noDayGetsNewPlace}</p> : null}
             {plan.days.map((day) => (
-              <section key={day.timetable.dayId} className="grid gap-2" aria-label={`Plan for ${day.timetable.date}`}>
+              <section
+                key={day.timetable.dayId}
+                className="grid gap-2"
+                aria-label={t.tripPlan.planFor(day.timetable.date)}
+              >
                 <h3 className="font-display text-lg text-ink-strong">
-                  {dayLabels.get(day.timetable.dayId) ?? "Day"} · {day.timetable.date}
+                  {dayLabels.get(day.timetable.dayId) ?? t.tripPlan.dayFallback}・{day.timetable.date}
                 </h3>
                 <p className="text-sm">
-                  <strong>Adds:</strong> {day.addedTripPlaceIds.map((id) => names.get(id) ?? id).join(", ")}
-                  {" · "}
-                  {loadLabels[day.timetable.load.level]}, {span(day.timetable.load.busyMinutes)} busy of {span(day.timetable.load.windowMinutes)}
+                  <strong>{t.tripPlan.adds}</strong>{" "}
+                  {day.addedTripPlaceIds.map((id) => names.get(id) ?? id).join("、")}
+                  {"・"}
+                  {t.tripPlan.loadSummary(
+                    loadLabel(day.timetable.load.level, t.timetable),
+                    span(day.timetable.load.busyMinutes, t.timetable),
+                    span(day.timetable.load.windowMinutes, t.timetable),
+                  )}
                 </p>
-                <ol className="grid gap-2" aria-label={`Draft timetable for ${day.timetable.date}`}>
+                <ol className="grid gap-2" aria-label={t.tripPlan.draftTimetableFor(day.timetable.date)}>
                   {day.timetable.rows.map((row, index) => <TimetableRow key={`${row.kind}-${index}`} row={row} />)}
                 </ol>
                 {day.timetable.unscheduled.length > 0 ? (
                   <p className="text-sm text-muted-foreground">
-                    Already on this day but not fitting:{" "}
-                    {day.timetable.unscheduled.map((place) => `${place.name} (${reasonLabels[place.reason]})`).join(", ")}
+                    {t.tripPlan.alreadyOnDayButNotFitting}{" "}
+                    {day.timetable.unscheduled
+                      .map((place) => `${place.name}（${reasonLabel(place.reason, t.timetable)}）`)
+                      .join("、")}
                   </p>
                 ) : null}
               </section>
             ))}
             {plan.unplaced.length > 0 ? (
-              <section aria-label="Not added">
-                <p className="font-bold">Not added</p>
+              <section aria-label={t.tripPlan.notAdded}>
+                <p className="font-bold">{t.tripPlan.notAdded}</p>
                 <ul className="mt-1 grid gap-1 text-sm">
                   {plan.unplaced.map((place) => (
                     <li key={place.tripPlaceId}>
-                      <strong>{place.name}</strong> · {reasonLabels[place.reason]}{place.date ? ` on ${place.date}` : ""}
+                      <strong>{place.name}</strong>・{reasonLabel(place.reason, t.timetable)}
+                      {place.date ? t.tripPlan.onDate(place.date) : ""}
                     </li>
                   ))}
                 </ul>
@@ -157,10 +169,10 @@ export function TripPlanDialog({
 
         <DialogFooter>
           {error ? (
-            <Button variant="outline" size="lg" disabled={busy !== null} onClick={() => void draft()}>Plan again</Button>
+            <Button variant="outline" size="lg" disabled={busy !== null} onClick={() => void draft()}>{t.tripPlan.planAgain}</Button>
           ) : null}
           <Button size="lg" disabled={busy !== null || !plan || plan.days.length === 0} onClick={() => void applyPlan()}>
-            {busy === "saving" ? "Saving…" : "Use this plan"}
+            {busy === "saving" ? t.tripPlan.saving : t.tripPlan.useThisPlan}
           </Button>
         </DialogFooter>
       </DialogContent>

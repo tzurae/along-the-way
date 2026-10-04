@@ -106,21 +106,21 @@ async function openEmailLink(page: Page, link: string) {
 }
 
 async function signIn(page: Page, request: APIRequestContext, email: string) {
-  await page.getByLabel("Email").fill(email);
-  await page.getByRole("button", { name: "Email me a sign-in link" }).click();
+  await page.getByLabel("電子郵件").fill(email);
+  await page.getByRole("button", { name: "寄登入連結給我" }).click();
   await expect(page.getByRole("status")).toContainText(
-    "If that email can sign in",
+    "如果這個電子郵件可以登入",
   );
   await openEmailLink(
     page,
     await emailLink(request, email, "Sign in to Along the Way"),
   );
-  await expect(page.getByText(`Signed in as ${email}`)).toBeVisible();
+  await expect(page.getByText(`登入帳號：${email}`)).toBeVisible();
 }
 
 function localDateLabel(date: string) {
   const [year, month, day] = date.split("-").map(Number);
-  return new Date(year!, month! - 1, day!).toLocaleDateString("en-US");
+  return new Date(year!, month! - 1, day!).toLocaleDateString("zh-TW");
 }
 
 async function selectDateRange(
@@ -129,14 +129,14 @@ async function selectDateRange(
   startDate: string,
   endDate: string,
 ) {
-  await dialog.getByRole("button", { name: "Choose a date range" }).click();
+  await dialog.getByRole("button", { name: "選擇日期範圍" }).click();
   const [year, month] = startDate.split("-").map(Number);
   const current = new Date();
   const monthOffset = year! * 12 + month! - 1 -
     (current.getFullYear() * 12 + current.getMonth());
-  const direction = monthOffset >= 0 ? "Next" : "Previous";
+  const direction = monthOffset >= 0 ? ".rdp-button_next" : ".rdp-button_previous";
   for (let step = 0; step < Math.abs(monthOffset); step += 1) {
-    await page.getByRole("button", { name: new RegExp(direction, "i") }).click();
+    await page.locator(direction).click();
   }
   await page.locator(`[data-day="${localDateLabel(startDate)}"]`).click();
   await page.locator(`[data-day="${localDateLabel(endDate)}"]`).click();
@@ -147,12 +147,12 @@ async function createTrip(
   input: TripInput,
   beforeSubmit?: (dialog: ReturnType<Page["getByRole"]>) => Promise<void>,
 ) {
-  await page.getByRole("button", { name: "Create trip" }).click();
-  const dialog = page.getByRole("dialog", { name: "Create a trip" });
-  await dialog.getByLabel("Trip name").fill(input.name);
+  await page.getByRole("button", { name: "建立旅程" }).click();
+  const dialog = page.getByRole("dialog", { name: "建立旅程" });
+  await dialog.getByLabel("旅程名稱").fill(input.name);
   await selectDateRange(page, dialog, input.startDate, input.endDate);
   for (const [index, stop] of input.countryStops.entries()) {
-    const search = dialog.getByLabel("Add a country");
+    const search = dialog.getByLabel("新增國家");
     await search.fill(stop.query);
     const option = page.getByRole("option", { name: new RegExp(`\\(${stop.code}\\)`) });
     await expect(option).toBeVisible();
@@ -162,7 +162,7 @@ async function createTrip(
     ).toHaveCount(index + 1);
   }
   await beforeSubmit?.(dialog);
-  await dialog.getByRole("button", { name: "Create trip", exact: true }).click();
+  await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
   await expect(page.getByRole("heading", { name: input.name })).toBeVisible();
 }
 
@@ -171,8 +171,8 @@ async function inviteEditor(
   request: APIRequestContext,
   email: string,
 ) {
-  await page.getByLabel("Invite editor by email").fill(email);
-  await page.getByRole("button", { name: "Send invitation" }).click();
+  await page.getByLabel("透過電子郵件邀請編輯者").fill(email);
+  await page.getByRole("button", { name: "寄出邀請" }).click();
   await expect(page.getByRole("status")).toContainText(email);
   return emailLink(request, email, "Join 大阪京都家庭旅行");
 }
@@ -186,7 +186,7 @@ async function acceptEditor(
   const page = await context.newPage();
   await openEmailLink(page, inviteLink);
   await signIn(page, request, email);
-  await page.getByRole("button", { name: "Accept invitation" }).click();
+  await page.getByRole("button", { name: "接受邀請" }).click();
   await expect(
     page.getByRole("heading", { name: "大阪京都家庭旅行" }),
   ).toBeVisible();
@@ -248,11 +248,11 @@ test("private trips work across four identities, viewports, and rejection paths"
 
   await page.goto("/");
   await signIn(page, request, "owner@example.test");
-  const createTripTrigger = page.getByRole("button", { name: "Create trip" });
+  const createTripTrigger = page.getByRole("button", { name: "建立旅程" });
   await createTripTrigger.click();
-  await expect(page.getByRole("dialog", { name: "Create a trip" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "建立旅程" })).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("dialog", { name: "Create a trip" })).toHaveCount(0);
+  await expect(page.getByRole("dialog", { name: "建立旅程" })).toHaveCount(0);
   await expect(createTripTrigger).toBeFocused();
 
   await createTrip(page, {
@@ -269,23 +269,23 @@ test("private trips work across four identities, viewports, and rejection paths"
     const bounds = await dialog.boundingBox();
     expect(bounds?.width).toBeGreaterThan(272);
 
-    const moveTaiwanUp = dialog.getByRole("button", { name: "Move stop 4 up" });
+    const moveTaiwanUp = dialog.getByRole("button", { name: "將第 4 個停靠點往上移" });
     await moveTaiwanUp.focus();
     await moveTaiwanUp.press("Enter");
-    await expect(dialog.getByRole("button", { name: "Move stop 3 up" })).toBeFocused();
+    await expect(dialog.getByRole("button", { name: "將第 3 個停靠點往上移" })).toBeFocused();
     await expect(dialog.getByRole("listitem").nth(2)).toContainText("(TW)");
-    await dialog.getByRole("button", { name: "Remove stop 3" }).click();
+    await dialog.getByRole("button", { name: "移除第 3 個停靠點" }).click();
 
     const routeItems = dialog.locator('section[aria-labelledby="country-route-heading"] li');
     await expect(routeItems).toHaveCount(3);
 
     const routeBeforeInvalidRemoval = await routeItems.allTextContents();
-    await dialog.getByRole("button", { name: "Remove stop 2" }).click();
-    await expect(dialog.getByRole("alert")).toContainText("Removing that stop");
+    await dialog.getByRole("button", { name: "移除第 2 個停靠點" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("移除後會讓相同國家相鄰。");
     expect(await routeItems.allTextContents()).toEqual(routeBeforeInvalidRemoval);
     await expect(routeItems.nth(2)).toContainText("(JP)");
 
-    const search = dialog.getByLabel("Add a country");
+    const search = dialog.getByLabel("新增國家");
     await search.fill("Japan");
     await expect(page.getByRole("option", { name: /\(JP\)/ })).toBeDisabled();
     await search.press("Enter");
@@ -295,12 +295,12 @@ test("private trips work across four identities, viewports, and rejection paths"
     await expect(page.getByRole("option", { name: /\(JP\)/ })).toHaveCount(0);
 
     const routeBeforeInvalidMove = await dialog.getByRole("listitem").allTextContents();
-    await dialog.getByRole("button", { name: "Move stop 1 down" }).click();
-    await expect(dialog.getByRole("alert")).toContainText("identical countries");
+    await dialog.getByRole("button", { name: "將第 1 個停靠點往下移" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("移動後會讓相同國家相鄰。");
     expect(await dialog.getByRole("listitem").allTextContents()).toEqual(routeBeforeInvalidMove);
   });
-  await expect(page.getByText("7 days", { exact: true })).toBeVisible();
-  await expect(page.getByText("No inferred default currency")).toBeVisible();
+  await expect(page.getByText("7天", { exact: true })).toBeVisible();
+  await expect(page.getByText("無法推定預設幣別")).toBeVisible();
   const countryRoute = page.locator('section[aria-labelledby="trip-country-route"]');
   await expect(countryRoute.getByRole("listitem").nth(0)).toContainText("(JP)");
   await expect(countryRoute.getByRole("listitem").nth(1)).toContainText("(KR)");
@@ -330,13 +330,13 @@ test("private trips work across four identities, viewports, and rejection paths"
   await expect(page.getByText("wife@example.test")).toBeVisible();
   await expect(page.getByText("mother@example.test")).toBeVisible();
   await expect(page.getByText("friend@example.test")).toBeVisible();
-  await expect(page.getByText("4 members", { exact: true })).toBeVisible();
+  await expect(page.getByText("4位成員", { exact: true })).toBeVisible();
 
   const wifePage = editorPages[0]!;
   const motherPage = editorPages[1]!;
   await motherPage.reload();
   await expect(motherPage.getByText("friend@example.test")).toBeVisible();
-  await expect(motherPage.getByText("4 members", { exact: true })).toBeVisible();
+  await expect(motherPage.getByText("4位成員", { exact: true })).toBeVisible();
 
   await createTrip(wifePage, {
     name: "手機建立的台北旅程",
@@ -349,15 +349,15 @@ test("private trips work across four identities, viewports, and rejection paths"
     expect(bounds ? bounds.x + bounds.width : Number.POSITIVE_INFINITY)
       .toBeLessThanOrEqual(390);
   });
-  await expect(wifePage.getByText("Default currency TWD")).toBeVisible();
+  await expect(wifePage.getByText("預設幣別 TWD")).toBeVisible();
   await expect(wifePage.getByText("Asia/Taipei", { exact: true })).toBeVisible();
   await wifePage
     .getByRole("button", { name: /大阪京都家庭旅行/ })
     .click();
   await expect(wifePage.getByText("friend@example.test")).toBeVisible();
-  await expect(wifePage.getByText("4 members", { exact: true })).toBeVisible();
+  await expect(wifePage.getByText("4位成員", { exact: true })).toBeVisible();
 
-  await expect(wifePage.getByLabel("Invite editor by email")).toHaveCount(0);
+  await expect(wifePage.getByLabel("透過電子郵件邀請編輯者")).toHaveCount(0);
   const forbiddenStatus = await wifePage.evaluate(async (id) => {
     const response = await fetch(`/api/trips/${id}/invites`, {
       method: "POST",
@@ -372,8 +372,8 @@ test("private trips work across four identities, viewports, and rejection paths"
   expect(forbiddenStatus).toBe(403);
 
   await openEmailLink(wifePage, inviteLinks[0]!);
-  await wifePage.getByRole("button", { name: "Accept invitation" }).click();
-  await expect(wifePage.getByRole("alert")).toContainText("already used");
+  await wifePage.getByRole("button", { name: "接受邀請" }).click();
+  await expect(wifePage.getByRole("alert")).toContainText("這個邀請已使用。");
 
   const outsiderLink = await inviteEditor(
     page,
@@ -393,9 +393,9 @@ test("private trips work across four identities, viewports, and rejection paths"
     "intended@example.test",
   );
   await openEmailLink(outsiderPage, mismatchLink);
-  await outsiderPage.getByRole("button", { name: "Accept invitation" }).click();
+  await outsiderPage.getByRole("button", { name: "接受邀請" }).click();
   await expect(outsiderPage.getByRole("alert")).toContainText(
-    "email address that received",
+    "這個邀請不適用於目前登入的電子郵件。",
   );
 
   const revokedLink = await inviteEditor(
@@ -406,15 +406,15 @@ test("private trips work across four identities, viewports, and rejection paths"
   const revokedItem = page
     .getByRole("listitem")
     .filter({ hasText: "revoked@example.test" });
-  await revokedItem.getByRole("button", { name: "Revoke" }).click();
+  await revokedItem.getByRole("button", { name: "撤銷" }).click();
   await expect(revokedItem).toHaveCount(0);
   const revokedContext = await browser.newContext();
   const revokedPage = await revokedContext.newPage();
   await revokedPage.goto("/");
   await signIn(revokedPage, request, "revoked@example.test");
   await openEmailLink(revokedPage, revokedLink);
-  await revokedPage.getByRole("button", { name: "Accept invitation" }).click();
-  await expect(revokedPage.getByRole("alert")).toContainText("revoked");
+  await revokedPage.getByRole("button", { name: "接受邀請" }).click();
+  await expect(revokedPage.getByRole("alert")).toContainText("這個邀請已撤銷。");
 
   const expiredLink = await inviteEditor(
     page,
@@ -427,14 +427,14 @@ test("private trips work across four identities, viewports, and rejection paths"
   await signIn(expiredPage, request, "expired@example.test");
   await expireInvite(expiredLink);
   await openEmailLink(expiredPage, expiredLink);
-  await expiredPage.getByRole("button", { name: "Accept invitation" }).click();
-  await expect(expiredPage.getByRole("alert")).toContainText("expired");
+  await expiredPage.getByRole("button", { name: "接受邀請" }).click();
+  await expect(expiredPage.getByRole("alert")).toContainText("這個邀請已過期。");
 
   expect(await privateTripStatus(wifePage, osakaTripId)).toBe(200);
   const wifeItem = page
     .getByRole("listitem")
     .filter({ hasText: "wife@example.test" });
-  await wifeItem.getByRole("button", { name: "Remove" }).click();
+  await wifeItem.getByRole("button", { name: "移除" }).click();
   await expect(wifeItem).toHaveCount(0);
   expect(await privateTripStatus(wifePage, osakaTripId)).toBe(404);
 
@@ -444,13 +444,13 @@ test("private trips work across four identities, viewports, and rejection paths"
     endDate: "2027-03-07",
     countryStops: [{ code: "KR", query: "kr" }],
   });
-  await expect(page.getByText("3 days", { exact: true })).toBeVisible();
+  await expect(page.getByText("3天", { exact: true })).toBeVisible();
 
   const invalidContext = await browser.newContext();
   const invalidPage = await invalidContext.newPage();
   await invalidPage.goto("/#magicToken=not-a-real-token");
   await expect(invalidPage.getByRole("status")).toContainText(
-    "request a new sign-in link",
+    "請在下方輸入電子郵件，索取新的登入連結。",
   );
 
   await Promise.all([

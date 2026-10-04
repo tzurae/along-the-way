@@ -54,8 +54,8 @@ async function signIn(page: Page, request: APIRequestContext, email: string) {
   await page.goto("/");
   const previous = await request.get(`${MAILPIT_API_URL}/api/v1/messages`);
   const previousIds = new Set(messages(await previous.json()).map((message) => message.id));
-  await page.getByLabel("Email").fill(email);
-  await page.getByRole("button", { name: "Email me a sign-in link" }).click();
+  await page.getByLabel("電子郵件").fill(email);
+  await page.getByRole("button", { name: "寄登入連結給我" }).click();
   let id = "";
   await expect.poll(async () => {
     const response = await request.get(`${MAILPIT_API_URL}/api/v1/messages`);
@@ -73,28 +73,28 @@ async function signIn(page: Page, request: APIRequestContext, email: string) {
   if (!link) throw new Error("Magic link missing");
   await page.goto("about:blank");
   await page.goto(link);
-  await expect(page.getByText(`Signed in as ${email}`)).toBeVisible();
+  await expect(page.getByText(`登入帳號：${email}`)).toBeVisible();
 }
 
 async function createTrip(page: Page, name: string) {
-  await page.getByRole("button", { name: "Create trip" }).click();
-  const dialog = page.getByRole("dialog", { name: "Create a trip" });
-  await dialog.getByLabel("Trip name").fill(name);
-  await dialog.getByRole("button", { name: "Choose a date range" }).click();
+  await page.getByRole("button", { name: "建立旅程" }).click();
+  const dialog = page.getByRole("dialog", { name: "建立旅程" });
+  await dialog.getByLabel("旅程名稱").fill(name);
+  await dialog.getByRole("button", { name: "選擇日期範圍" }).click();
   const year = 2026;
   const month = 11;
   const current = new Date();
   const offset = year * 12 + month - 1 - (current.getFullYear() * 12 + current.getMonth());
-  const direction = offset >= 0 ? "Next" : "Previous";
+  const direction = offset >= 0 ? ".rdp-button_next" : ".rdp-button_previous";
   for (let index = 0; index < Math.abs(offset); index += 1) {
-    await page.getByRole("button", { name: new RegExp(direction, "i") }).click();
+    await page.locator(direction).click();
   }
-  const label = (day: number) => new Date(year, month - 1, day).toLocaleDateString("en-US");
+  const label = (day: number) => new Date(year, month - 1, day).toLocaleDateString("zh-TW");
   await page.locator(`[data-day="${label(3)}"]`).click();
   await page.locator(`[data-day="${label(9)}"]`).click();
-  await dialog.getByLabel("Add a country").fill("Japan");
+  await dialog.getByLabel("新增國家").fill("Japan");
   await page.getByRole("option", { name: /\(JP\)/ }).dispatchEvent("click");
-  await dialog.getByRole("button", { name: "Create trip", exact: true }).click();
+  await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
   await expect(page.getByRole("heading", { name })).toBeVisible();
 }
 
@@ -115,8 +115,8 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
 
   await signIn(page, request, email);
   await createTrip(page, tripName);
-  await expect(page.getByRole("heading", { name: "Let AI find and explain the options" })).toBeVisible();
-  await expect(page.getByText("AI discovery is unavailable until the server has an OpenAI API key and model.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "讓 AI 尋找選項並說明原因" })).toBeVisible();
+  await expect(page.getByText("伺服器設定 AI 服務金鑰與模型後，才能使用 AI 研究。現有旅程資料仍可使用。", { exact: false })).toBeVisible();
   const briefText = "Food markets and gardens at an unhurried pace; avoid long walking days.";
 
   const runId = "00000000-0000-4000-8000-000000003601";
@@ -155,20 +155,20 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   `);
 
   await page.reload();
-  const proposal = page.getByRole("article", { name: "AI proposal Nishiki Market" });
+  const proposal = page.getByRole("article", { name: "AI 推薦：Nishiki Market" });
   await expect(proposal).toBeVisible();
   await expect(proposal.getByText("A compact food-market stop matching the trip focus.")).toBeVisible();
   await expect(proposal.getByRole("link", { name: "Official Nishiki Market guide" })).toHaveAttribute("href", "https://kyoto.example.test/nishiki");
   // A run from before the quality checks still reads, and its card links to the place's own Google Maps page.
-  await expect(proposal.getByRole("link", { name: "View photos on Google Maps" }))
+  await expect(proposal.getByRole("link", { name: "在 Google Maps 看照片" }))
     .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
-  await proposal.getByRole("button", { name: "Accept into wishlist" }).click();
-  await expect(proposal.getByText("Added to wishlist")).toBeVisible();
+  await proposal.getByRole("button", { name: "加入想去清單" }).click();
+  await expect(proposal.getByText("已加入想去清單")).toBeVisible();
 
-  const wishlist = page.getByRole("region", { name: "Shared place wishlist" });
+  const wishlist = page.getByRole("region", { name: "共享地點想去清單" });
   await expect(wishlist.getByRole("heading", { name: "Nishiki Market" })).toBeVisible();
-  await expect(wishlist.getByText("AI proposal", { exact: false })).toBeVisible();
-  await expect(wishlist.getByRole("link", { name: "View photos on Google Maps" }))
+  await expect(wishlist.getByText("AI 推薦", { exact: false })).toBeVisible();
+  await expect(wishlist.getByRole("link", { name: "在 Google Maps 看照片" }))
     .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
 });
 
@@ -181,35 +181,35 @@ test("research and feedback explain missing AI configuration without sending any
   await executeDatabase(`insert into users (email, display_name, status) values ('${email}', 'Discovery owner', 'active') on conflict (email) do nothing;`);
   await signIn(page, request, email);
   await createTrip(page, tripName);
-  await expect(page.getByText("AI discovery is unavailable until the server has an OpenAI API key and model.", { exact: false })).toBeVisible();
+  await expect(page.getByText("伺服器設定 AI 服務金鑰與模型後，才能使用 AI 研究。現有旅程資料仍可使用。", { exact: false })).toBeVisible();
 
   const discoveryWrites: string[] = [];
   page.on("request", (sent) => {
     if (sent.url().includes("/discovery") && sent.method() !== "GET") discoveryWrites.push(`${sent.method()} ${sent.url()}`);
   });
 
-  const brief = page.getByRole("region", { name: "Trip discovery brief" });
+  const brief = page.getByRole("region", { name: "旅程研究需求" });
   const briefText = "Gardens and food markets, unhurried pace.";
-  await brief.getByLabel("What should AI plan around?").fill(briefText);
-  await expect(brief.getByRole("button", { name: "Save trip brief" })).toHaveCount(0);
-  await brief.getByRole("button", { name: "Find candidates" }).click();
+  await brief.getByLabel("AI 規劃時該考量什麼？").fill(briefText);
+  await expect(brief.getByRole("button")).toHaveCount(1);
+  await brief.getByRole("button", { name: "尋找候選地點" }).click();
   const researchAlert = brief.getByRole("alert");
-  await expect(researchAlert).toContainText("AI research can't run");
-  await expect(researchAlert).toContainText("OpenAI API key and model");
-  await expect(researchAlert).toContainText("Google Maps API key");
-  await expect(brief.getByLabel("What should AI plan around?")).toHaveValue(briefText);
+  await expect(researchAlert).toContainText("無法進行 AI 研究");
+  await expect(researchAlert).toContainText("AI 服務金鑰與模型");
+  await expect(researchAlert).toContainText("Google Maps 金鑰");
+  await expect(brief.getByLabel("AI 規劃時該考量什麼？")).toHaveValue(briefText);
 
-  const feedback = page.getByRole("region", { name: "Discovery feedback" });
-  await feedback.getByLabel("Feedback").fill("Fewer temples, more markets.");
-  await feedback.getByRole("button", { name: "Interpret feedback" }).click();
-  await expect(feedback.getByRole("alert")).toContainText("Feedback can't be interpreted");
-  await expect(feedback.getByRole("alert")).toContainText("OpenAI API key and model");
-  await expect(feedback.getByLabel("Feedback")).toHaveValue("Fewer temples, more markets.");
+  const feedback = page.getByRole("region", { name: "研究意見" });
+  await feedback.getByLabel("意見").fill("Fewer temples, more markets.");
+  await feedback.getByRole("button", { name: "解讀意見" }).click();
+  await expect(feedback.getByRole("alert")).toContainText("無法解讀意見");
+  await expect(feedback.getByRole("alert")).toContainText("AI 服務金鑰與模型");
+  await expect(feedback.getByLabel("意見")).toHaveValue("Fewer temples, more markets.");
 
   expect(discoveryWrites).toEqual([]);
   await page.reload();
   await page.getByRole("button", { name: new RegExp(tripName) }).click();
-  await expect(page.getByLabel("What should AI plan around?")).toHaveValue("");
+  await expect(page.getByLabel("AI 規劃時該考量什麼？")).toHaveValue("");
 });
 
 test("one Find candidates action saves changed text, researches the saved version, and reports failures beside its button", async ({ page, request }) => {
@@ -250,36 +250,36 @@ test("one Find candidates action saves changed text, researches the saved versio
   await page.reload();
   await page.getByRole("button", { name: new RegExp(tripName) }).click();
 
-  const brief = page.getByRole("region", { name: "Trip discovery brief" });
-  const text = brief.getByLabel("What should AI plan around?");
-  const find = brief.getByRole("button", { name: "Find candidates" });
+  const brief = page.getByRole("region", { name: "旅程研究需求" });
+  const text = brief.getByLabel("AI 規劃時該考量什麼？");
+  const find = brief.getByRole("button", { name: "尋找候選地點" });
   await text.fill("Food markets and gardens.");
 
   // A failed save stops before research and keeps the text.
   await find.click();
-  await expect(brief.getByRole("alert")).toContainText("Version conflict");
+  await expect(brief.getByRole("alert")).toContainText("資料已變更，無法完成操作。");
   await expect(text).toHaveValue("Food markets and gardens.");
   expect(writes).toEqual(["brief"]);
 
   // A successful save is followed by research of the saved version; its failure stays beside the button.
   await find.click();
-  await expect(brief.getByRole("alert")).toContainText("temporarily unavailable");
+  await expect(brief.getByRole("alert")).toContainText("AI 模型目前無法使用，請稍後再試。");
   await expect(text).toHaveValue("Food markets and gardens.");
   expect(writes).toEqual(["brief", "brief", "generate"]);
   expect(generateBodies).toEqual([{ expectedBriefVersion: 1 }]);
 
   // Unchanged saved text is researched without saving again.
   await find.click();
-  await expect(brief.getByRole("alert")).toContainText("temporarily unavailable");
+  await expect(brief.getByRole("alert")).toContainText("AI 模型目前無法使用，請稍後再試。");
   expect(writes).toEqual(["brief", "brief", "generate", "generate"]);
 
   // Only the missing service is named, and nothing is sent.
   available = { modelAvailable: true, placeProviderAvailable: false };
   await page.reload();
   await page.getByRole("button", { name: new RegExp(tripName) }).click();
-  await brief.getByRole("button", { name: "Find candidates" }).click();
-  await expect(brief.getByRole("alert")).toContainText("no Google Maps API key configured");
-  await expect(brief.getByRole("alert")).not.toContainText("OpenAI");
+  await brief.getByRole("button", { name: "尋找候選地點" }).click();
+  await expect(brief.getByRole("alert")).toContainText("Google Maps 金鑰");
+  await expect(brief.getByRole("alert")).not.toContainText("AI 服務金鑰與模型");
   expect(writes).toHaveLength(4);
 
   // Research again explains missing configuration beside itself without sending anything.
@@ -294,9 +294,9 @@ test("one Find candidates action saves changed text, researches the saved versio
   available = { modelAvailable: false, placeProviderAvailable: true };
   await page.reload();
   await page.getByRole("button", { name: new RegExp(tripName) }).click();
-  const research = page.getByRole("region", { name: "Let AI find and explain the options" });
-  await research.getByRole("button", { name: "Research again" }).click();
-  await expect(research.getByRole("alert").first()).toContainText("no OpenAI API key and model configured");
+  const research = page.getByRole("region", { name: "讓 AI 尋找選項並說明原因" });
+  await research.getByRole("button", { name: "重新研究" }).click();
+  await expect(research.getByRole("alert").first()).toContainText("AI 服務金鑰與模型");
   await expect(brief.getByRole("alert")).toHaveCount(0);
   expect(writes).toHaveLength(4);
 });

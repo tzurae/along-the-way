@@ -35,6 +35,7 @@ import { DayPlanDialog, type PlannedDay } from "./DayPlanDialog";
 import { ItineraryItemDialog } from "./ItineraryItemDialog";
 import { PlaceDialog } from "./PlaceDialog";
 import { TripPlanDialog } from "./TripPlanDialog";
+import { useI18n, type Messages } from "./i18n";
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -50,29 +51,14 @@ interface TripSkeletonWorkspaceProps {
   onPlacesChanged(): void;
 }
 
-const itemTypeLabels: Record<ItineraryItemDto["type"], string> = {
-  flight: "Flight",
-  lodging: "Lodging",
-  transport: "Transport",
-  reservation: "Reservation",
-  meal: "Meal",
-  activity: "Activity",
-  "free-time": "Free time",
-};
 
-const constraintLabels: Record<ConstraintDto["type"], string> = {
-  fixed_time: "Fixed time",
-  immovable: "Immovable",
-  minimum_buffer: "Minimum buffer",
-};
-
-function localEndpoint(endpoint: ZonedEndpointDto, places: Map<string, PlaceDto>) {
+function localEndpoint(endpoint: ZonedEndpointDto, places: Map<string, PlaceDto>, t: Messages["tripSkeleton"]) {
   const place = places.get(endpoint.placeId);
   const abbreviation = new Intl.DateTimeFormat("en-US", {
     timeZone: endpoint.timeZone,
     timeZoneName: "short",
   }).formatToParts(new Date(endpoint.instant)).find((part) => part.type === "timeZoneName")?.value;
-  return `${endpoint.localDateTime.replace("T", " ")} · ${endpoint.timeZone} (${abbreviation ?? endpoint.utcOffset}, ${endpoint.utcOffset}) · ${place?.name ?? "Unknown place"}`;
+  return `${endpoint.localDateTime.replace("T", " ")} · ${endpoint.timeZone} (${abbreviation ?? endpoint.utcOffset}, ${endpoint.utcOffset}) · ${place?.name ?? t.unknownPlace}`;
 }
 
 function itemEndpoint(item: ItineraryItemDto, role: ZonedEndpointDto["role"]) {
@@ -123,34 +109,42 @@ function byEndpointInstant(
   return left.endpoint.instant.localeCompare(right.endpoint.instant);
 }
 
-function itemDetails(item: ItineraryItemDto) {
+function itemDetails(item: ItineraryItemDto, t: Messages["tripSkeleton"]) {
   switch (item.type) {
     case "flight":
-      return [item.details.carrier, item.details.serviceNumber, item.details.confirmationNotes].filter(Boolean).join(" · ");
+      return [item.details.carrier, item.details.serviceNumber, item.details.confirmationNotes].filter(Boolean).join("・");
     case "lodging":
-      return [item.details.bookedBy ? `Booked by ${item.details.bookedBy}` : null, item.details.confirmationCode ? `Confirmation ${item.details.confirmationCode}` : null].filter(Boolean).join(" · ");
+      return [
+        item.details.bookedBy ? t.bookedBy(item.details.bookedBy) : null,
+        item.details.confirmationCode ? t.confirmation(item.details.confirmationCode) : null,
+      ].filter(Boolean).join("・");
     case "transport":
-      return [item.details.mode, item.details.ticketInfo].filter(Boolean).join(" · ");
+      return [item.details.mode, item.details.ticketInfo].filter(Boolean).join("・");
     case "reservation":
     case "meal":
     case "activity":
-      return [`${item.details.durationMinutes} min`, item.details.bookedBy ? `Booked by ${item.details.bookedBy}` : null, item.details.confirmationStatus].filter(Boolean).join(" · ");
+      return [
+        t.durationMinutes(item.details.durationMinutes),
+        item.details.bookedBy ? t.bookedBy(item.details.bookedBy) : null,
+        item.details.confirmationStatus,
+      ].filter(Boolean).join("・");
     case "free-time":
-      return `${item.details.durationMinutes} min`;
+      return t.durationMinutes(item.details.durationMinutes);
   }
 }
 function ParticipantSummary({ item }: { item: ItineraryItemDto }) {
+  const { t } = useI18n();
   return (
-    <div className="mt-3 text-sm" aria-label="Participants">
-      <strong>Participants:</strong>{" "}
+    <div className="mt-3 text-sm" aria-label={t.tripSkeleton.participants}>
+      <strong>{t.tripSkeleton.participantsLabel}</strong>{" "}
       {item.participants === null ? (
-        <span className="text-muted-foreground">Pending confirmation</span>
+        <span className="text-muted-foreground">{t.tripSkeleton.participantsPending}</span>
       ) : (
         <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
           {item.participants.map((participant) => (
             <li key={participant.memberId} className="min-w-0 [overflow-wrap:anywhere]">
               {participant.displayName ?? participant.email}
-              {participant.removed ? " · removed" : ""}
+              {participant.removed ? `・${t.tripSkeleton.participantRemoved}` : ""}
             </li>
           ))}
         </ul>
@@ -161,25 +155,35 @@ function ParticipantSummary({ item }: { item: ItineraryItemDto }) {
 
 
 function ConstraintBadge({ constraint }: { constraint: ConstraintDto }) {
+  const { t } = useI18n();
   return (
     <span
       className="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-bold"
       data-status={constraint.status}
     >
-      {constraintLabels[constraint.type]}
-      {constraint.type === "minimum_buffer" ? ` ${constraint.minimumBufferMinutes} min` : ""}
-      {` · ${constraint.status}`}
+      {t.tripSkeleton.constraintTypes[constraint.type]}
+      {constraint.type === "minimum_buffer" && constraint.minimumBufferMinutes !== null
+        ? ` ${t.tripSkeleton.minimumBufferMinutes(constraint.minimumBufferMinutes)}`
+        : ""}
+      {`・${t.tripSkeleton.constraintStatuses[constraint.status]}`}
     </span>
   );
 }
 
-function formatMinorAmount(amountMinor: number, currency: string) {
-  const formatter = new Intl.NumberFormat(undefined, {
+function formatMinorAmount(amountMinor: number, currency: string, locale: string) {
+  const formatter = new Intl.NumberFormat(locale, {
     style: "currency",
     currency,
   });
   const fractionDigits = formatter.resolvedOptions().maximumFractionDigits ?? 2;
   return formatter.format(amountMinor / (10 ** fractionDigits));
+}
+
+function formatDate(date: string, locale: string) {
+  return new Intl.DateTimeFormat(locale, {
+    dateStyle: "medium",
+    timeZone: "UTC",
+  }).format(new Date(`${date}T00:00:00Z`));
 }
 
 /** Applied route order first; places without one keep their list order at the end. */
@@ -199,6 +203,7 @@ function DayAssignmentPicker({
   busy: boolean;
   assign(places: TripPlaceDto[]): Promise<void>;
 }) {
+  const { t } = useI18n();
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   // A place planned for one day must be removed there before another day can take it.
   const selectable = places.filter((place) => !place.scheduled && place.assignedDayId === null);
@@ -213,13 +218,13 @@ function DayAssignmentPicker({
 
   return (
     <details className="rounded-xl border border-ink/10 bg-surface p-3">
-      <summary className="cursor-pointer font-bold">Add from shared wishlist</summary>
+      <summary className="cursor-pointer font-bold">{t.tripSkeleton.addFromWishlist}</summary>
       {selectable.length === 0 ? (
-        <p className="mt-3 text-sm text-muted-foreground">Every available wishlist place is already planned or scheduled.</p>
+        <p className="mt-3 text-sm text-muted-foreground">{t.tripSkeleton.noAvailableWishlistPlaces}</p>
       ) : (
         <form className="mt-3 grid gap-3" onSubmit={(event) => void submit(event)}>
           <fieldset className="grid max-h-64 auto-rows-min gap-2 overflow-y-auto">
-            <legend className="sr-only">Wishlist places to add</legend>
+            <legend className="sr-only">{t.tripSkeleton.wishlistPlacesToAdd}</legend>
             {selectable.map((place) => (
               <label key={place.id} className="flex min-h-11 items-start gap-3 rounded-lg border border-ink/10 p-3">
                 <input
@@ -234,7 +239,7 @@ function DayAssignmentPicker({
                 />
                 <span className="min-w-0 [overflow-wrap:anywhere]">
                   <strong className="block">{place.name}</strong>
-                  <small className="text-muted-foreground">{place.address ?? "Address unknown"}</small>
+                  <small className="text-muted-foreground">{place.address ?? t.tripSkeleton.addressUnknown}</small>
                 </span>
               </label>
             ))}
@@ -243,7 +248,7 @@ function DayAssignmentPicker({
             className="min-h-11 rounded-lg bg-accent px-4 font-bold text-ink-strong"
             disabled={busy || selectedIds.length === 0}
           >
-            {busy ? "Adding…" : `Add selected (${selectedIds.length})`}
+            {busy ? t.tripSkeleton.adding : t.tripSkeleton.addSelected(selectedIds.length)}
           </button>
         </form>
       )}
@@ -258,6 +263,7 @@ export function TripSkeletonWorkspace({
   placesRevision,
   onPlacesChanged,
 }: TripSkeletonWorkspaceProps) {
+  const { t, locale } = useI18n();
   const [skeleton, setSkeleton] = useState<TripSkeletonDto | null>(null);
   const [tripPlaces, setTripPlaces] = useState<TripPlaceDto[]>([]);
   const [error, setError] = useState("");
@@ -293,9 +299,9 @@ export function TripSkeletonWorkspace({
       setTripPlaces(tripPlaceResponse.tripPlaces);
       setError("");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not load itinerary");
+      setError(reason instanceof Error ? reason.message : t.tripSkeleton.loadError);
     }
-  }, [request, trip.id]);
+  }, [request, t, trip.id]);
 
   // Only another trip blanks the itinerary. A place change reloads behind the current view:
   // blanking it would shorten the page and drop the reader's scroll position.
@@ -325,7 +331,7 @@ export function TripSkeletonWorkspace({
   );
 
   async function savePlace(input: CreatePlaceInput | UpdatePlaceInput, place?: PlaceDto) {
-    if (!skeleton) throw new Error("Itinerary is still loading");
+    if (!skeleton) throw new Error(t.tripSkeleton.loadingError);
     const updateIdentity = place
       ? `update-place:${place.id}:${(input as UpdatePlaceInput).expectedVersion}`
       : null;
@@ -352,7 +358,7 @@ export function TripSkeletonWorkspace({
   }
 
   async function deletePlace(place: PlaceDto) {
-    if (!window.confirm(`Delete ${place.name}? Referenced places cannot be deleted.`)) return;
+    if (!window.confirm(t.tripSkeleton.deletePlaceConfirm(place.name))) return;
     const identity = `delete-place:${place.id}:${place.version}`;
     setBusyId(place.id);
     try {
@@ -365,14 +371,14 @@ export function TripSkeletonWorkspace({
       await load();
       onPlacesChanged();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not delete place");
+      setError(reason instanceof Error ? reason.message : t.tripSkeleton.deletePlaceError);
     } finally {
       setBusyId(null);
     }
   }
 
   async function saveItem(input: CreateItineraryItemInput | UpdateItineraryItemInput, item?: ItineraryItemDto) {
-    if (!skeleton) throw new Error("Itinerary is still loading");
+    if (!skeleton) throw new Error(t.tripSkeleton.loadingError);
     const updateIdentity = item
       ? `update-item:${item.id}:${(input as UpdateItineraryItemInput).expectedVersion}`
       : null;
@@ -422,7 +428,9 @@ export function TripSkeletonWorkspace({
       await load();
       if (action === "delete") onPlacesChanged();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : `Could not ${action} item`);
+      setError(reason instanceof Error
+        ? reason.message
+        : t.tripSkeleton.itemActionError(t.tripSkeleton.actionNames[action]));
     } finally {
       setBusyId(null);
     }
@@ -447,7 +455,7 @@ export function TripSkeletonWorkspace({
       actionKeys.current.delete(identity);
       await load();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not update constraint");
+      setError(reason instanceof Error ? reason.message : t.tripSkeleton.constraintUpdateError);
     } finally {
       setBusyId(null);
     }
@@ -485,7 +493,7 @@ export function TripSkeletonWorkspace({
       setTripPlaces(response.tripPlaces);
       onPlacesChanged();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not update planned day");
+      setError(reason instanceof Error ? reason.message : t.tripSkeleton.plannedDayUpdateError);
     } finally {
       setBusyId(null);
     }
@@ -499,26 +507,26 @@ export function TripSkeletonWorkspace({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">
-              {itemTypeLabels[item.type]}{continuation ? " · Continues" : ""}
+              {t.tripSkeleton.itemTypes[item.type]}{continuation ? `・${t.tripSkeleton.continues}` : ""}
             </p>
             <h4 className="mt-1 font-display text-xl text-ink-strong">{item.title}</h4>
           </div>
-          {item.lockedAt ? <span className="locked-badge"><Lock className="size-3.5" /> Locked</span> : null}
+          {item.lockedAt ? <span className="locked-badge"><Lock className="size-3.5" /> {t.tripSkeleton.locked}</span> : null}
         </div>
         <div className="mt-3 grid gap-1 text-sm text-muted-foreground">
-          {start ? <p><strong>Start:</strong> {localEndpoint(start, placesById)}</p> : null}
+          {start ? <p><strong>{t.tripSkeleton.start}</strong> {localEndpoint(start, placesById, t.tripSkeleton)}</p> : null}
           {end === "unrepresentable" ? (
-            <p><strong>End:</strong> Cannot be shown because the duration exceeds the supported date range. Edit the duration.</p>
+            <p><strong>{t.tripSkeleton.end}</strong> {t.tripSkeleton.unsupportedEndDate}</p>
           ) : end ? (
-            <p><strong>End:</strong> {localEndpoint(end, placesById)}</p>
+            <p><strong>{t.tripSkeleton.end}</strong> {localEndpoint(end, placesById, t.tripSkeleton)}</p>
           ) : null}
         </div>
         <ParticipantSummary item={item} />
         {!continuation ? (
           <>
-            <p className="mt-3 text-sm">{itemDetails(item)}</p>
+            <p className="mt-3 text-sm">{itemDetails(item, t.tripSkeleton)}</p>
             {item.money ? (
-              <p className="mt-2 text-sm font-semibold">{item.money.currency} {item.money.amountMinor} minor units</p>
+              <p className="mt-2 text-sm font-semibold">{formatMinorAmount(item.money.amountMinor, item.money.currency, locale)}</p>
             ) : null}
             {item.constraints.length > 0 ? (
               <div className="mt-3 flex flex-wrap gap-2">
@@ -526,23 +534,23 @@ export function TripSkeletonWorkspace({
               </div>
             ) : null}
             {item.notes ? <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{item.notes}</p> : null}
-            {item.sourceUrl ? <a className="mt-2 inline-block text-sm font-semibold text-accent-strong underline" href={item.sourceUrl} rel="noreferrer" target="_blank">Official source</a> : null}
+            {item.sourceUrl ? <a className="mt-2 inline-block text-sm font-semibold text-accent-strong underline" href={item.sourceUrl} rel="noreferrer" target="_blank">{t.tripSkeleton.officialSource}</a> : null}
             <div className="mt-4 flex flex-wrap gap-2">
               {item.lockedAt ? (
-                <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => setUnlockingItem(item)}><Unlock /> Unlock</Button>
+                <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => setUnlockingItem(item)}><Unlock /> {t.tripSkeleton.unlock}</Button>
               ) : (
                 <>
                   <ItineraryItemDialog countryStops={trip.countryStops} members={trip.members} places={skeleton?.places ?? []} item={item} save={(input) => saveItem(input, item)} />
-                  <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => void itemAction(item, "lock")}><Lock /> Lock</Button>
-                  <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => void itemAction(item, "delete")}><Trash2 /> Delete</Button>
+                  <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => void itemAction(item, "lock")}><Lock /> {t.tripSkeleton.lock}</Button>
+                  <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => void itemAction(item, "delete")}><Trash2 /> {t.tripSkeleton.delete}</Button>
                 </>
               )}
             </div>
             {item.constraints.map((constraint) => (
               <div key={`${constraint.id}-controls`} className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                <span>{constraintLabels[constraint.type]} status:</span>
+                <span>{t.tripSkeleton.constraintStatus(t.tripSkeleton.constraintTypes[constraint.type])}</span>
                 {(["confirmed", "unknown", "conflicted"] as const).map((status) => (
-                  <Button key={status} size="xs" variant={constraint.status === status ? "default" : "outline"} disabled={busyId === constraint.id || item.lockedAt !== null} onClick={() => void setConstraintStatus(item, constraint, status)}>{status}</Button>
+                  <Button key={status} size="xs" variant={constraint.status === status ? "default" : "outline"} disabled={busyId === constraint.id || item.lockedAt !== null} onClick={() => void setConstraintStatus(item, constraint, status)}>{t.tripSkeleton.constraintStatuses[status]}</Button>
                 ))}
               </div>
             ))}
@@ -553,7 +561,7 @@ export function TripSkeletonWorkspace({
   }
 
   if (!skeleton) {
-    return <section className="trip-skeleton-shell"><p role={error ? "alert" : "status"}>{error || "Loading itinerary…"}</p></section>;
+    return <section className="trip-skeleton-shell"><p role={error ? "alert" : "status"}>{error || t.tripSkeleton.loadingItinerary}</p></section>;
   }
 
   const tripInformationItems = skeleton.tripInformationItemIds
@@ -613,9 +621,9 @@ export function TripSkeletonWorkspace({
     <section className="trip-skeleton-shell" aria-labelledby="itinerary-heading">
       <div className="workspace-heading">
         <div>
-          <p className="eyebrow">TRIP SKELETON</p>
-          <h2 id="itinerary-heading" className="font-display text-3xl text-ink-strong">Commitments and daily timeline</h2>
-          <p className="mt-2 max-w-3xl text-muted-foreground">Start with real Places, then anchor flights, stays, transport, reservations, meals, activities, and open time to local clocks.</p>
+          <p className="eyebrow">{t.tripSkeleton.eyebrow}</p>
+          <h2 id="itinerary-heading" className="font-display text-3xl text-ink-strong">{t.tripSkeleton.heading}</h2>
+          <p className="mt-2 max-w-3xl text-muted-foreground">{t.tripSkeleton.introduction}</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <PlaceDialog save={(input) => savePlace(input)} />
@@ -626,24 +634,24 @@ export function TripSkeletonWorkspace({
       {error ? <p role="alert" className="mt-4 rounded-lg bg-destructive/10 px-3 py-2 text-destructive">{error}</p> : null}
 
       <section className="mt-8" aria-labelledby="places-heading">
-        <h3 id="places-heading" className="section-heading"><MapPin /> Places</h3>
+        <h3 id="places-heading" className="section-heading"><MapPin /> {t.tripSkeleton.places}</h3>
         {skeleton.places.length === 0 ? (
-          <p className="empty-state">No Places yet. Add the real airports, stations, stays, restaurants, and venues first.</p>
+          <p className="empty-state">{t.tripSkeleton.noPlaces}</p>
         ) : (
           <div className="place-grid">
             {skeleton.places.map((place) => (
               <article key={place.id} className="place-card">
                 <div>
-                  <p className="text-xs font-bold uppercase tracking-wider text-accent-strong">{place.type}</p>
+                  <p className="text-xs font-bold uppercase tracking-wider text-accent-strong">{t.tripSkeleton.placeTypes[place.type]}</p>
                   <h4 className="mt-1 font-display text-lg">{place.name}</h4>
-                  <p className="mt-2 text-sm text-muted-foreground">{place.address || "No address yet"}</p>
-                  <p className="mt-1 text-sm">{place.timeZone || "No time zone yet"}</p>
-                  {place.locationStatus !== "complete" ? <p className="mt-2 font-semibold text-accent-strong">位置待補充 · Location details incomplete</p> : null}
+                  <p className="mt-2 text-sm text-muted-foreground">{place.address || t.tripSkeleton.noAddress}</p>
+                  <p className="mt-1 text-sm">{place.timeZone || t.tripSkeleton.noTimeZone}</p>
+                  {place.locationStatus !== "complete" ? <p className="mt-2 font-semibold text-accent-strong">{t.tripSkeleton.locationIncomplete}</p> : null}
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">
                   {lockedPlaceIds.has(place.id) ? (
                     <p className="flex items-center gap-2 text-sm font-semibold text-muted-foreground">
-                      <Lock className="size-4" /> Unlock the referencing item before editing this Place.
+                      <Lock className="size-4" /> {t.tripSkeleton.lockedPlace}
                     </p>
                   ) : (
                     <PlaceDialog place={place} save={(input) => savePlace(input, place)} />
@@ -654,7 +662,7 @@ export function TripSkeletonWorkspace({
                     disabled={busyId === place.id || lockedPlaceIds.has(place.id)}
                     onClick={() => void deletePlace(place)}
                   >
-                    <Trash2 /> Delete
+                    <Trash2 /> {t.tripSkeleton.delete}
                   </Button>
                 </div>
               </article>
@@ -664,15 +672,15 @@ export function TripSkeletonWorkspace({
       </section>
 
       <section className="mt-10" aria-labelledby="trip-info-heading">
-        <h3 id="trip-info-heading" className="section-heading"><Plane /> Trip information</h3>
-        {tripInformationItems.length === 0 ? <p className="empty-state">Flights, lodging, and transport will also appear here for quick reference.</p> : (
+        <h3 id="trip-info-heading" className="section-heading"><Plane /> {t.tripSkeleton.tripInformation}</h3>
+        {tripInformationItems.length === 0 ? <p className="empty-state">{t.tripSkeleton.noTripInformation}</p> : (
           <div className="grid gap-3 lg:grid-cols-2">{tripInformationItems.map((item) => renderItem(item))}</div>
         )}
       </section>
 
       <section className="mt-10" aria-labelledby="timeline-heading">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <h3 id="timeline-heading" className="section-heading"><CalendarDays /> Daily timeline</h3>
+          <h3 id="timeline-heading" className="section-heading"><CalendarDays /> {t.tripSkeleton.dailyTimeline}</h3>
           {tripPlaces.some((place) =>
             !place.scheduled && place.assignedDayId === null && place.latitude !== null && place.longitude !== null) ? (
             <button
@@ -680,7 +688,7 @@ export function TripSkeletonWorkspace({
               disabled={busyId !== null}
               onClick={() => setPlanningTrip(true)}
             >
-              Plan the whole trip
+              {t.tripSkeleton.planWholeTrip}
             </button>
           ) : null}
         </div>
@@ -711,82 +719,82 @@ export function TripSkeletonWorkspace({
               assignedPlaces.filter((place) => place.budgetAmountMinor === null).length
               + fullItems.filter((item) => item.money === null).length;
             const costSummary = [...knownCosts.entries()]
-              .map(([currency, amount]) => formatMinorAmount(amount, currency))
-              .join(" + ");
+              .map(([currency, amount]) => formatMinorAmount(amount, currency, locale))
+              .join("＋");
             return (
             <section key={day.id} className="day-column" data-date={day.date}>
               <header className="day-heading">
-                <p className="text-xs font-bold uppercase tracking-wider text-accent-strong">Day {index + 1}</p>
-                <h4 className="font-display text-xl">{day.date}</h4>
+                <p className="text-xs font-bold uppercase tracking-wider text-accent-strong">{t.tripSkeleton.dayLabel(index + 1)}</p>
+                <h4 className="font-display text-xl">{formatDate(day.date, locale)}</h4>
                 <p className="mt-2 text-sm font-semibold">
-                  {assignedPlaces.length + day.entries.length} planned entries
-                  {" · "}
-                  {costSummary || "No known cost"}
-                  {unknownCostCount > 0 ? ` · ${unknownCostCount} cost unknown` : ""}
+                  {t.tripSkeleton.plannedEntries(assignedPlaces.length + day.entries.length)}
+                  {"・"}
+                  {costSummary || t.tripSkeleton.noKnownCost}
+                  {unknownCostCount > 0 ? `・${t.tripSkeleton.unknownCosts(unknownCostCount)}` : ""}
                 </p>
                 {index === 0 ? (
                   <aside className="day-context" data-testid="arrival-priorities">
-                    <p className="font-bold">Arrival priorities from saved commitments</p>
+                    <p className="font-bold">{t.tripSkeleton.arrivalPriorities}</p>
                     <ol className="mt-2 grid gap-2">
                       <li>
-                        <strong>1 · Arrival:</strong>{" "}
+                        <strong>{t.tripSkeleton.arrival}</strong>{" "}
                         {arrivalItems.length > 0
                           ? arrivalItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById)}</span>
+                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
                             ))
-                          : "No arrival endpoint anchored yet."}
+                          : t.tripSkeleton.noArrival}
                       </li>
                       <li>
-                        <strong>2 · Luggage and check-in:</strong>{" "}
+                        <strong>{t.tripSkeleton.luggageAndCheckIn}</strong>{" "}
                         {checkInItems.length > 0
                           ? checkInItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById)}</span>
+                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
                             ))
-                          : "No lodging check-in anchored yet."}
+                          : t.tripSkeleton.noCheckIn}
                       </li>
                       <li>
-                        <strong>3 · Remaining usable time:</strong>{" "}
+                        <strong>{t.tripSkeleton.remainingTime}</strong>{" "}
                         {usableTimeItems.length > 0
                           ? usableTimeItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById)}</span>
+                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
                             ))
-                          : "No free-time block anchored yet."}
+                          : t.tripSkeleton.noFreeTime}
                       </li>
                     </ol>
                   </aside>
                 ) : null}
                 {index === skeleton.days.length - 1 ? (
                   <aside className="day-context" data-testid="departure-priorities">
-                    <p className="font-bold">Departure priorities from saved commitments</p>
+                    <p className="font-bold">{t.tripSkeleton.departurePriorities}</p>
                     <ol className="mt-2 grid gap-2">
                       <li>
-                        <strong>1 · Checkout and luggage:</strong>{" "}
+                        <strong>{t.tripSkeleton.checkoutAndLuggage}</strong>{" "}
                         {checkOutItems.length > 0
                           ? checkOutItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById)}</span>
+                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
                             ))
-                          : "No lodging checkout anchored yet."}
+                          : t.tripSkeleton.noCheckout}
                       </li>
                       <li>
-                        <strong>2 · Transfer and departure:</strong>{" "}
+                        <strong>{t.tripSkeleton.transferAndDeparture}</strong>{" "}
                         {departureItems.length > 0
                           ? departureItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById)}</span>
+                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
                             ))
-                          : "No departure endpoint anchored yet."}
+                          : t.tripSkeleton.noDeparture}
                       </li>
                       <li>
-                        <strong>3 · Protected buffer:</strong>{" "}
+                        <strong>{t.tripSkeleton.protectedBuffer}</strong>{" "}
                         {confirmedDepartureBufferMinutes.length > 0
-                          ? `${Math.max(...confirmedDepartureBufferMinutes)} minutes minimum`
-                          : "No confirmed minimum departure buffer recorded."}
+                          ? t.tripSkeleton.minimumMinutes(Math.max(...confirmedDepartureBufferMinutes))
+                          : t.tripSkeleton.noConfirmedBuffer}
                       </li>
                       {unconfirmedDepartureBuffers.length > 0 ? (
                         <li>
-                          <strong>Unconfirmed buffers:</strong>{" "}
+                          <strong>{t.tripSkeleton.unconfirmedBuffers}</strong>{" "}
                           {unconfirmedDepartureBuffers.map((constraint) => (
                             <span key={constraint.id} className="block">
-                              {constraint.minimumBufferMinutes} minutes · {constraint.status}
+                              {t.tripSkeleton.minimumBufferMinutes(constraint.minimumBufferMinutes!)}・{t.tripSkeleton.constraintStatuses[constraint.status]}
                             </span>
                           ))}
                         </li>
@@ -797,35 +805,35 @@ export function TripSkeletonWorkspace({
               </header>
               <div className="grid gap-3">
                 {day.entries.length === 0 && assignedPlaces.length === 0 ? (
-                  <p className="empty-state">Open day. Add wishlist places, free time, or a commitment.</p>
+                  <p className="empty-state">{t.tripSkeleton.openDay}</p>
                 ) : null}
                 {assignedPlaces.length > 0 ? (
                   <button
                     className="min-h-10 rounded-lg border border-accent px-3 font-bold"
                     disabled={busyId !== null}
-                    onClick={() => setPlanningDay({ id: day.id, date: day.date, label: `Day ${index + 1}` })}
+                    onClick={() => setPlanningDay({ id: day.id, date: day.date, label: t.tripSkeleton.dayLabel(index + 1) })}
                   >
-                    Plan this day
+                    {t.tripSkeleton.planThisDay}
                   </button>
                 ) : null}
                 {assignedPlaces.map((place) => (
-                  <article key={place.id} className="itinerary-card" aria-label={`Planned wishlist place ${place.name}`}>
-                    <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">Wishlist place · time not set</p>
+                  <article key={place.id} className="itinerary-card" aria-label={t.tripSkeleton.plannedWishlistPlace(place.name)}>
+                    <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">{t.tripSkeleton.wishlistTimeUnset}</p>
                     <h5 className="mt-1 font-display text-xl text-ink-strong">{place.name}</h5>
-                    <p className="mt-2 text-sm text-muted-foreground">{place.address ?? "Address unknown"}</p>
+                    <p className="mt-2 text-sm text-muted-foreground">{place.address ?? t.tripSkeleton.addressUnknown}</p>
                     <p className="mt-2 text-sm">
-                      {place.durationMinutes ? `${place.durationMinutes} min planned` : "Duration unknown"}
-                      {" · "}
+                      {place.durationMinutes ? t.tripSkeleton.plannedDuration(place.durationMinutes) : t.tripSkeleton.durationUnknown}
+                      {"・"}
                       {place.budgetAmountMinor !== null && place.budgetCurrency
-                        ? formatMinorAmount(place.budgetAmountMinor, place.budgetCurrency)
-                        : "Cost unknown"}
+                        ? formatMinorAmount(place.budgetAmountMinor, place.budgetCurrency, locale)
+                        : t.tripSkeleton.costUnknown}
                     </p>
                     <button
                       className="mt-3 min-h-10 rounded-lg border px-3 font-bold"
                       disabled={busyId !== null}
                       onClick={() => void updateDayAssignments(null, [place])}
                     >
-                      Remove from this day
+                      {t.tripSkeleton.removeFromDay}
                     </button>
                   </article>
                 ))}
@@ -846,13 +854,13 @@ export function TripSkeletonWorkspace({
       </section>
 
       <section className="mt-10" aria-labelledby="activity-heading">
-        <h3 id="activity-heading" className="section-heading"><Clock3 /> Recent changes</h3>
-        {skeleton.events.length === 0 ? <p className="empty-state">No itinerary changes recorded yet.</p> : (
+        <h3 id="activity-heading" className="section-heading"><Clock3 /> {t.tripSkeleton.recentChanges}</h3>
+        {skeleton.events.length === 0 ? <p className="empty-state">{t.tripSkeleton.noRecentChanges}</p> : (
           <ol className="activity-list">
             {skeleton.events.map((event) => (
               <li key={event.id}>
-                <p className="font-semibold">{event.summary}</p>
-                <p className="text-xs text-muted-foreground">{new Date(event.createdAt).toLocaleString()} · {event.eventType}</p>
+                <p className="font-semibold">{t.tripSkeleton.events[event.eventType] ?? event.summary}</p>
+                <p className="text-xs text-muted-foreground">{new Date(event.createdAt).toLocaleString(locale)}</p>
               </li>
             ))}
           </ol>
@@ -862,14 +870,12 @@ export function TripSkeletonWorkspace({
       <Dialog open={unlockingItem !== null} onOpenChange={(open) => { if (!open) setUnlockingItem(null); }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Unlock {unlockingItem?.title}?</DialogTitle>
-            <DialogDescription>
-              Unlocking restores editing and deletion. After unlocking, this commitment may be adjusted by a person or a future scheduling flow. The unlock does not alter it and is recorded in Recent changes.
-            </DialogDescription>
+            <DialogTitle>{unlockingItem ? t.tripSkeleton.unlockTitle(unlockingItem.title) : ""}</DialogTitle>
+            <DialogDescription>{t.tripSkeleton.unlockDescription}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setUnlockingItem(null)}>Keep locked</Button>
-            <Button disabled={!unlockingItem || busyId === unlockingItem.id} onClick={() => unlockingItem && void itemAction(unlockingItem, "unlock")}><Unlock /> Unlock item</Button>
+            <Button variant="outline" onClick={() => setUnlockingItem(null)}>{t.tripSkeleton.keepLocked}</Button>
+            <Button disabled={!unlockingItem || busyId === unlockingItem.id} onClick={() => unlockingItem && void itemAction(unlockingItem, "unlock")}><Unlock /> {t.tripSkeleton.unlockItem}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -885,7 +891,7 @@ export function TripSkeletonWorkspace({
       <TripPlanDialog
         tripId={trip.id}
         open={planningTrip}
-        dayLabels={new Map(skeleton.days.map((day, index) => [day.id, `Day ${index + 1}`]))}
+        dayLabels={new Map(skeleton.days.map((day, index) => [day.id, t.tripSkeleton.dayLabel(index + 1)]))}
         request={request}
         onClose={() => setPlanningTrip(false)}
         onApplied={() => {
