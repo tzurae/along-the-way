@@ -321,7 +321,7 @@ export interface ItineraryEndpointTable {
   itinerary_item_id: string;
   trip_id: string;
   endpoint_role: "start" | "end";
-  country_stop_id: string;
+  country_stop_id: string | null;
   place_id: string;
   local_date_time: string;
   time_zone: string;

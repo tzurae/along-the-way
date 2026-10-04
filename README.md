@@ -75,6 +75,11 @@ the personal current/next and offline features of Issue #28.
   transition can move the local date backward. A stored
   duration beyond Temporal's representable range (written before this rule or by
   an older binary) shows an explicit per-card message instead of an End time.
+- An endpoint's `countryStopId` is `null` only for a flight or transport endpoint
+  outside the Trip's Country Stops, such as the home airport (migration
+  `012_endpoints_outside_route`). That endpoint uses its Place's time zone or the
+  one the member enters, never a Country Stop's. Every other item, lodging
+  included, still requires one of the Trip's Country Stops.
 
 Migration `008_activity_participants` assigns real IDs to existing memberships,
 adds trip-scoped participant associations, and upgrades existing cached mutation

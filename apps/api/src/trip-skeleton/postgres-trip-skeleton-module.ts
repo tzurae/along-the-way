@@ -1078,11 +1078,18 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     const participantMemberIds = await this.validateParticipants(
       executor, tripId, input.participantMemberIds, itemId,
     );
+    // A flight or transport may start or end outside the trip's countries, e.g. at the home
+    // airport; every other item happens at one of the trip's country stops.
+    const mayLeaveRoute = type === "flight" || type === "transport";
     const endpoints = input.endpoints.map((endpoint) => {
-      validateUuid(endpoint.countryStopId, "countryStopId");
+      if (endpoint.countryStopId !== null) validateUuid(endpoint.countryStopId, "countryStopId");
+      else if (!mayLeaveRoute) {
+        throw new AppError("validation_error", `${type} endpoints must use one of this trip's Country Stops`);
+      }
       validateUuid(endpoint.placeId, "placeId");
       return resolveEndpoint(endpoint);
     });
+    const stopIds = endpoints.flatMap((endpoint) => endpoint.countryStopId ?? []);
     const expectedRoles = type === "flight" || type === "lodging" || type === "transport"
       ? ["start", "end"]
       : ["start"];
@@ -1096,8 +1103,10 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         .where("id", "in", endpoints.map((endpoint) => endpoint.placeId))
         .forUpdate()
         .execute(),
-      executor.selectFrom("trip_country_stops").select(["id", "time_zone"]).where("trip_id", "=", tripId)
-        .where("id", "in", endpoints.map((endpoint) => endpoint.countryStopId)).execute(),
+      stopIds.length === 0
+        ? []
+        : executor.selectFrom("trip_country_stops").select(["id", "time_zone"]).where("trip_id", "=", tripId)
+          .where("id", "in", stopIds).execute(),
       executor.selectFrom("trip_places as tripPlace")
         .innerJoin(
           "trip_place_day_assignments as assignment",
@@ -1122,11 +1131,13 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     for (const endpoint of endpoints) {
       const place = places.get(endpoint.placeId);
       if (!place) throw new AppError("validation_error", "Endpoint place must belong to this trip");
-      const stop = stops.get(endpoint.countryStopId);
-      if (!stop) {
+      // Outside the trip's countries there is no stop time zone to fall back to, so the
+      // endpoint keeps the Place's time zone or the one the member entered.
+      const stop = endpoint.countryStopId === null ? null : stops.get(endpoint.countryStopId);
+      if (stop === undefined) {
         throw new AppError("validation_error", "Endpoint Country Stop must belong to this trip");
       }
-      const suppliedConfirmedTimeZone = place.time_zone ?? stop.time_zone;
+      const suppliedConfirmedTimeZone = place.time_zone ?? stop?.time_zone ?? null;
       const confirmedTimeZone = suppliedConfirmedTimeZone
         ? canonicalNamedTimeZone(suppliedConfirmedTimeZone)
         : null;

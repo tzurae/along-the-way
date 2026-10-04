@@ -38,12 +38,15 @@ interface ItineraryItemDialogProps {
 }
 
 interface EndpointDraft {
+  /** A stop id, "" while unchosen, or OUTSIDE_ROUTE for an endpoint with no stop. */
   countryStopId: string;
   placeId: string;
   localDateTime: string;
   timeZone: string;
   utcOffset: string;
 }
+
+const OUTSIDE_ROUTE = "outside-route";
 
 const itemTypes: ItineraryItemType[] = [
   "flight",
@@ -67,7 +70,7 @@ function draftEndpoint(item: ItineraryItemDto | undefined, role: EndpointRole): 
   const endpoint = item?.endpoints.find((candidate) => candidate.role === role);
   return endpoint
     ? {
-        countryStopId: endpoint.countryStopId,
+        countryStopId: endpoint.countryStopId ?? OUTSIDE_ROUTE,
         placeId: endpoint.placeId,
         localDateTime: endpoint.localDateTime,
         timeZone: endpoint.timeZone,
@@ -80,10 +83,15 @@ function hasEndEndpoint(type: ItineraryItemType) {
   return type === "flight" || type === "lodging" || type === "transport";
 }
 
+/** Only flights and transport may start or end outside the trip's countries. */
+function mayLeaveRoute(type: ItineraryItemType) {
+  return type === "flight" || type === "transport";
+}
+
 function endpointInput(role: EndpointRole, draft: EndpointDraft): ZonedEndpointInput {
   return {
     role,
-    countryStopId: draft.countryStopId,
+    countryStopId: draft.countryStopId === OUTSIDE_ROUTE ? null : draft.countryStopId,
     placeId: draft.placeId,
     localDateTime: draft.localDateTime,
     timeZone: draft.timeZone,
@@ -98,17 +106,20 @@ function EndpointEditor({
   places,
   onChange,
   locationLocked = false,
+  allowOutsideRoute = false,
 }: {
   role: EndpointRole;
   draft: EndpointDraft;
   countryStops: CountryStopDto[];
   places: PlaceDto[];
   locationLocked?: boolean;
+  allowOutsideRoute?: boolean;
   onChange(value: EndpointDraft): void;
 }) {
   const { t } = useI18n();
   const title = role === "start" ? t.itemDialog.start : t.itemDialog.end;
   const id = `${role}-endpoint`;
+  const outsideRoute = allowOutsideRoute && draft.countryStopId === OUTSIDE_ROUTE;
 
   return (
     <FieldSet className="rounded-xl border p-4">
@@ -121,7 +132,8 @@ function EndpointEditor({
             className="min-h-10 rounded-lg border border-input bg-transparent px-3"
             required
             disabled={locationLocked}
-            value={draft.countryStopId}
+            // A leftover "outside" choice from a flight reads as unchosen for other item types.
+            value={allowOutsideRoute || draft.countryStopId !== OUTSIDE_ROUTE ? draft.countryStopId : ""}
             onChange={(event) => {
               const stop = countryStops.find((candidate) => candidate.id === event.target.value);
               const place = places.find((candidate) => candidate.id === draft.placeId);
@@ -138,6 +150,7 @@ function EndpointEditor({
                 {stop.position + 1}、{stop.countryCode}
               </option>
             ))}
+            {allowOutsideRoute ? <option value={OUTSIDE_ROUTE}>{t.itemDialog.outsideRoute}</option> : null}
           </select>
         </Field>
         <Field>
@@ -185,7 +198,9 @@ function EndpointEditor({
             onChange={(event) => onChange({ ...draft, timeZone: event.target.value })}
           />
           {!locationLocked ? (
-            <FieldDescription>{t.itemDialog.timeZoneDescription}</FieldDescription>
+            <FieldDescription>
+              {outsideRoute ? t.itemDialog.outsideRouteTimeZoneDescription : t.itemDialog.timeZoneDescription}
+            </FieldDescription>
           ) : null}
         </Field>
       </div>
@@ -457,7 +472,14 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
           </FieldSet>
 
 
-          <EndpointEditor role="start" draft={start} countryStops={countryStops} places={places} onChange={setStart} />
+          <EndpointEditor
+            role="start"
+            draft={start}
+            countryStops={countryStops}
+            places={places}
+            allowOutsideRoute={mayLeaveRoute(type)}
+            onChange={setStart}
+          />
           {hasEndEndpoint(type) ? (
             <EndpointEditor
               role="end"
@@ -465,6 +487,7 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
               countryStops={countryStops}
               places={places}
               locationLocked={type === "lodging"}
+              allowOutsideRoute={mayLeaveRoute(type)}
               onChange={setEnd}
             />
           ) : null}
