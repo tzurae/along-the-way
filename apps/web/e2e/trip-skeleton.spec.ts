@@ -173,6 +173,7 @@ async function inviteEditor(
   tripName: string,
   email: string,
 ) {
+  await openTab(ownerPage, "總覽");
   await ownerPage.getByLabel("透過電子郵件邀請編輯者").fill(email);
   await ownerPage.getByRole("button", { name: "寄出邀請" }).click();
   await expect(ownerPage.getByRole("status")).toContainText(email);
@@ -231,12 +232,18 @@ async function createTrip(
   }
   await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
   await expect(page.getByRole("heading", { name: input.name })).toBeVisible();
+  await openTab(page, "行程");
+}
+
+async function openTab(page: Page, name: "總覽" | "行程" | "最近變更") {
+  await page.getByRole("tab", { name, exact: true }).click();
 }
 
 async function createPlace(
   page: Page,
   input: { name: string; type: string; address: string; latitude: string; longitude: string; timeZone: string },
 ) {
+  await openTab(page, "行程");
   await page.getByRole("button", { name: "新增地點" }).click();
   const dialog = page.getByRole("dialog", { name: "新增地點" });
   await dialog.getByLabel("地點名稱").fill(input.name);
@@ -286,6 +293,7 @@ async function addFlight(
     currency: string;
   },
 ) {
+  await openTab(page, "行程");
   await page.getByRole("button", { name: "新增固定行程" }).click();
   const dialog = page.getByRole("dialog", { name: "新增固定行程" });
   await dialog.getByLabel("類型").selectOption("flight");
@@ -309,6 +317,7 @@ async function addLodging(
   page: Page,
   input: { title: string; place: string; start: string; end: string; confirmation: string },
 ) {
+  await openTab(page, "行程");
   await page.getByRole("button", { name: "新增固定行程" }).click();
   const dialog = page.getByRole("dialog", { name: "新增固定行程" });
   await dialog.getByLabel("類型").selectOption("lodging");
@@ -338,6 +347,7 @@ async function addTransport(
     buffer?: { minutes: string; status: "confirmed" | "unknown" | "conflicted" };
   },
 ) {
+  await openTab(page, "行程");
   await page.getByRole("button", { name: "新增固定行程" }).click();
   const dialog = page.getByRole("dialog", { name: "新增固定行程" });
   await dialog.getByLabel("類型").selectOption("transport");
@@ -359,6 +369,7 @@ async function addReservation(
   page: Page,
   input: { title: string; endpoint: EndpointSpec },
 ) {
+  await openTab(page, "行程");
   await page.getByRole("button", { name: "新增固定行程" }).click();
   const dialog = page.getByRole("dialog", { name: "新增固定行程" });
   await dialog.getByLabel("類型").selectOption("reservation");
@@ -374,6 +385,7 @@ async function addReservation(
 }
 
 async function addMeal(page: Page, input: { title: string; endpoint: EndpointSpec }) {
+  await openTab(page, "行程");
   await page.getByRole("button", { name: "新增固定行程" }).click();
   const dialog = page.getByRole("dialog", { name: "新增固定行程" });
   await dialog.getByLabel("類型").selectOption("meal");
@@ -388,6 +400,7 @@ async function addMeal(page: Page, input: { title: string; endpoint: EndpointSpe
 }
 
 async function addFreeTime(page: Page, input: { title: string; endpoint: EndpointSpec }) {
+  await openTab(page, "行程");
   await page.getByRole("button", { name: "新增固定行程" }).click();
   const dialog = page.getByRole("dialog", { name: "新增固定行程" });
   await dialog.getByLabel("類型").selectOption("free-time");
@@ -401,6 +414,7 @@ async function addFreeTime(page: Page, input: { title: string; endpoint: Endpoin
 }
 
 async function addActivity(page: Page, input: { title: string; endpoint: EndpointSpec }) {
+  await openTab(page, "行程");
   await page.getByRole("button", { name: "新增固定行程" }).click();
   const dialog = page.getByRole("dialog", { name: "新增固定行程" });
   await dialog.getByLabel("類型").selectOption("activity");
@@ -435,6 +449,7 @@ async function addParticipantActivity(
     expectedRosterSize: number;
   },
 ) {
+  await openTab(page, "行程");
   await page.getByRole("button", { name: "新增固定行程" }).click();
   const dialog = page.getByRole("dialog", { name: "新增固定行程" });
   await dialog.getByLabel("類型").selectOption("activity");
@@ -487,6 +502,7 @@ async function readSkeleton(page: Page, id: string) {
 async function openTrip(page: Page, name: string) {
   await page.getByRole("button", { name: new RegExp(name) }).click();
   await expect(page.getByRole("heading", { name })).toBeVisible();
+  await openTab(page, "行程");
   await expect(page.getByRole("heading", { name: "固定行程與每日行程" })).toBeVisible();
 }
 
@@ -635,7 +651,7 @@ test("the seven-day Osaka Kyoto pilot works on desktop and mobile", async ({ bro
   await editDialog.getByLabel("標題").fill("Mobile museum ticket · confirmed");
   await editDialog.getByRole("button", { name: "儲存固定行程" }).click();
   await expect(editDialog).toHaveCount(0);
-  const shellBox = await mobilePage.locator(".trip-skeleton-shell").boundingBox();
+  const shellBox = await mobilePage.locator("#trip-panel-itinerary .trip-skeleton-shell").boundingBox();
   expect(shellBox?.x).toBeGreaterThanOrEqual(0);
   expect(shellBox ? shellBox.x + shellBox.width : Number.POSITIVE_INFINITY).toBeLessThanOrEqual(390);
 
@@ -777,6 +793,7 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   await openTrip(page, name);
   await expect(page.getByText("SFO to Haneda · family confirmed").first()).toBeVisible();
   await expect(page.getByText("SFO to Haneda · stale overwrite")).toHaveCount(0);
+  await openTab(page, "最近變更");
   await expect(page.getByText("修改了固定行程").first()).toBeVisible();
 
   const mobileContext = await browser.newContext({
@@ -790,7 +807,7 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   await expect(mobilePage.getByText("SFO to Haneda · family confirmed").first()).toBeVisible();
   await expect(mobilePage.getByText(/2027-11-01 11:00 · America\/Los_Angeles \(.+, -07:00\)/).first()).toBeVisible();
   await expect(mobilePage.getByText(/2027-11-02 14:00 · Asia\/Tokyo \(.+, \+09:00\)/).first()).toBeVisible();
-  const shellBox = await mobilePage.locator(".trip-skeleton-shell").boundingBox();
+  const shellBox = await mobilePage.locator("#trip-panel-itinerary .trip-skeleton-shell").boundingBox();
   expect(shellBox?.x).toBeGreaterThanOrEqual(0);
   expect(shellBox ? shellBox.x + shellBox.width : Number.POSITIVE_INFINITY).toBeLessThanOrEqual(390);
 
@@ -835,6 +852,7 @@ test("activity participants persist exact subsets, history, times, and concurren
 
   await page.reload();
   await openTrip(page, name);
+  await openTab(page, "總覽");
   await expect(page.getByText("4位成員", { exact: true })).toBeVisible();
   await createPlace(page, {
     name: "Participant activity venue",
@@ -1001,6 +1019,7 @@ test("activity participants persist exact subsets, history, times, and concurren
   await unlockDialog.getByRole("button", { name: "解鎖固定行程" }).click();
   await expect(betaCard.getByRole("button", { name: "編輯「乙」" })).toBeVisible();
 
+  await openTab(page, "總覽");
   const membersPanel = page.getByRole("heading", { name: "成員", exact: true }).locator("..");
   const memberARow = membersPanel.getByRole("listitem").filter({ hasText: participantA });
   await memberARow.getByRole("button", { name: "移除" }).click();

@@ -26,6 +26,9 @@ const countryNames = new Map(
   ]),
 );
 
+const tripTabIds = ["overview", "discovery", "wishlist", "itinerary", "recent"] as const;
+type TripTab = (typeof tripTabIds)[number];
+
 function countryStopLabel(countryCode: string) {
   return countryNames.get(countryCode) ?? countryCode;
 }
@@ -266,17 +269,7 @@ function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
 
   return (
     <section className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8">
-      <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">
-        {t.app.tripVersion(t.app.role(trip.role), trip.version)}
-      </p>
-      <h2 className="mt-2 font-display text-3xl text-ink-strong sm:text-4xl">{trip.name}</h2>
-      <p className="mt-2 text-muted-foreground">
-        {trip.startDate} – {trip.endDate}
-        {trip.defaultCurrency
-          ? t.app.defaultCurrency(trip.defaultCurrency)
-          : t.app.noDefaultCurrency}
-      </p>
-      <section className="mt-5" aria-labelledby="trip-country-route">
+      <section aria-labelledby="trip-country-route">
         <h3 id="trip-country-route" className="font-semibold">{t.app.countryRoute}</h3>
         {trip.countryStops.length > 0 ? (
           <ol className="mt-2 grid gap-2">
@@ -361,6 +354,13 @@ export function App() {
   const placesChanged = useCallback(() => {
     setPlacesRevision((revision) => revision + 1);
   }, []);
+  const [activeTripTab, setActiveTripTab] = useState<TripTab>("overview");
+  const [recentChangesContainer, setRecentChangesContainer] = useState<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setActiveTripTab("overview");
+  }, [selectedTrip?.id]);
+
 
   const refreshTrips = useCallback(async () => {
     const response = await request<{ trips: TripSummaryDto[] }>("/api/trips", {
@@ -474,6 +474,14 @@ export function App() {
   }
 
   const inviteToken = tokenParameter("inviteToken");
+  const tripTabs = [
+    { value: "overview", label: t.app.tabs.overview },
+    { value: "discovery", label: t.app.tabs.discovery },
+    { value: "wishlist", label: t.app.tabs.wishlist },
+    { value: "itinerary", label: t.app.tabs.itinerary },
+    { value: "recent", label: t.app.tabs.recent },
+  ] as const;
+
 
   return (
     <main className="mx-auto min-h-screen w-[min(100%-1.25rem,96rem)] py-5 sm:py-8">
@@ -504,24 +512,115 @@ export function App() {
         </aside>
         {selectedTrip ? (
           <div className="grid gap-5">
-            <TripWorkspace trip={selectedTrip} currentUser={user} onChanged={() => loadTrip(selectedTrip.id)} />
-            <DiscoveryWorkspace
-              trip={selectedTrip}
-              request={request}
-              onPlacesChanged={placesChanged}
-            />
-            <TripPlaceWorkspace
-              trip={selectedTrip}
-              request={request}
-              placesRevision={placesRevision}
-              onPlacesChanged={placesChanged}
-            />
-            <TripSkeletonWorkspace
-              trip={selectedTrip}
-              request={request}
-              onTripChanged={() => loadTrip(selectedTrip.id)}
-              placesRevision={placesRevision}
-              onPlacesChanged={placesChanged}
+            <section
+              className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8"
+              aria-labelledby="trip-title-heading"
+            >
+              <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">
+                {t.app.tripVersion(t.app.role(selectedTrip.role), selectedTrip.version)}
+              </p>
+              <h2 id="trip-title-heading" className="mt-2 font-display text-3xl text-ink-strong sm:text-4xl">
+                {selectedTrip.name}
+              </h2>
+              <p className="mt-2 text-muted-foreground">
+                {selectedTrip.startDate} – {selectedTrip.endDate}
+                {selectedTrip.defaultCurrency
+                  ? t.app.defaultCurrency(selectedTrip.defaultCurrency)
+                  : t.app.noDefaultCurrency}
+              </p>
+            </section>
+
+            <nav className="sticky top-0 z-40 overflow-x-auto bg-paper py-2" aria-label={t.app.tripSections}>
+              <div className="flex w-max min-w-full gap-2" role="tablist">
+                {tripTabs.map((tab) => (
+                  <button
+                    key={tab.value}
+                    id={`trip-tab-${tab.value}`}
+                    type="button"
+                    className={`min-h-11 shrink-0 whitespace-nowrap rounded-xl border px-4 font-bold outline-none focus:ring-4 focus:ring-focus/30 ${
+                      activeTripTab === tab.value
+                        ? "border-accent-strong bg-surface text-accent-strong"
+                        : "border-ink/15 bg-surface-subtle"
+                    }`}
+                    role="tab"
+                    aria-controls={`trip-panel-${tab.value}`}
+                    aria-selected={activeTripTab === tab.value}
+                    tabIndex={activeTripTab === tab.value ? 0 : -1}
+                    onClick={() => setActiveTripTab(tab.value)}
+                    onKeyDown={(event) => {
+                      const currentIndex = tripTabIds.indexOf(tab.value);
+                      let nextIndex: number | null = null;
+                      if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % tripTabIds.length;
+                      if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + tripTabIds.length) % tripTabIds.length;
+                      if (event.key === "Home") nextIndex = 0;
+                      if (event.key === "End") nextIndex = tripTabIds.length - 1;
+                      if (nextIndex === null) return;
+                      event.preventDefault();
+                      const nextTab = tripTabIds[nextIndex]!;
+                      setActiveTripTab(nextTab);
+                      document.getElementById(`trip-tab-${nextTab}`)?.focus();
+                    }}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </nav>
+
+            <div
+              id="trip-panel-overview"
+              role="tabpanel"
+              aria-labelledby="trip-tab-overview"
+              hidden={activeTripTab !== "overview"}
+            >
+              <TripWorkspace trip={selectedTrip} currentUser={user} onChanged={() => loadTrip(selectedTrip.id)} />
+            </div>
+            <div
+              id="trip-panel-discovery"
+              role="tabpanel"
+              aria-labelledby="trip-tab-discovery"
+              hidden={activeTripTab !== "discovery"}
+            >
+              <DiscoveryWorkspace
+                trip={selectedTrip}
+                request={request}
+                onPlacesChanged={placesChanged}
+              />
+            </div>
+            <div
+              id="trip-panel-wishlist"
+              role="tabpanel"
+              aria-labelledby="trip-tab-wishlist"
+              hidden={activeTripTab !== "wishlist"}
+            >
+              <TripPlaceWorkspace
+                trip={selectedTrip}
+                request={request}
+                placesRevision={placesRevision}
+                onPlacesChanged={placesChanged}
+              />
+            </div>
+            <div
+              id="trip-panel-itinerary"
+              role="tabpanel"
+              aria-labelledby="trip-tab-itinerary"
+              hidden={activeTripTab !== "itinerary"}
+            >
+              <TripSkeletonWorkspace
+                trip={selectedTrip}
+                request={request}
+                onTripChanged={() => loadTrip(selectedTrip.id)}
+                placesRevision={placesRevision}
+                onPlacesChanged={placesChanged}
+                recentChangesContainer={recentChangesContainer}
+              />
+            </div>
+            <div
+              ref={setRecentChangesContainer}
+              id="trip-panel-recent"
+              role="tabpanel"
+              aria-labelledby="trip-tab-recent"
+              hidden={activeTripTab !== "recent"}
             />
           </div>
         ) : (

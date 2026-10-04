@@ -142,6 +142,10 @@ async function selectDateRange(
   await page.locator(`[data-day="${localDateLabel(endDate)}"]`).click();
 }
 
+async function openTab(page: Page, name: "總覽") {
+  await page.getByRole("tab", { name, exact: true }).click();
+}
+
 async function createTrip(
   page: Page,
   input: TripInput,
@@ -164,6 +168,7 @@ async function createTrip(
   await beforeSubmit?.(dialog);
   await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
   await expect(page.getByRole("heading", { name: input.name })).toBeVisible();
+  await openTab(page, "總覽");
 }
 
 async function inviteEditor(
@@ -171,6 +176,7 @@ async function inviteEditor(
   request: APIRequestContext,
   email: string,
 ) {
+  await openTab(page, "總覽");
   await page.getByLabel("透過電子郵件邀請編輯者").fill(email);
   await page.getByRole("button", { name: "寄出邀請" }).click();
   await expect(page.getByRole("status")).toContainText(email);
@@ -187,6 +193,7 @@ async function acceptEditor(
   await openEmailLink(page, inviteLink);
   await signIn(page, request, email);
   await page.getByRole("button", { name: "接受邀請" }).click();
+  await openTab(page, "總覽");
   await expect(
     page.getByRole("heading", { name: "大阪京都家庭旅行" }),
   ).toBeVisible();
@@ -327,6 +334,7 @@ test("private trips work across four identities, viewports, and rejection paths"
   }
 
   await page.reload();
+  await openTab(page, "總覽");
   await expect(page.getByText("wife@example.test")).toBeVisible();
   await expect(page.getByText("mother@example.test")).toBeVisible();
   await expect(page.getByText("friend@example.test")).toBeVisible();
@@ -335,6 +343,7 @@ test("private trips work across four identities, viewports, and rejection paths"
   const wifePage = editorPages[0]!;
   const motherPage = editorPages[1]!;
   await motherPage.reload();
+  await openTab(motherPage, "總覽");
   await expect(motherPage.getByText("friend@example.test")).toBeVisible();
   await expect(motherPage.getByText("4位成員", { exact: true })).toBeVisible();
 
@@ -354,6 +363,7 @@ test("private trips work across four identities, viewports, and rejection paths"
   await wifePage
     .getByRole("button", { name: /大阪京都家庭旅行/ })
     .click();
+  await openTab(wifePage, "總覽");
   await expect(wifePage.getByText("friend@example.test")).toBeVisible();
   await expect(wifePage.getByText("4位成員", { exact: true })).toBeVisible();
 
