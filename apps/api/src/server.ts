@@ -42,7 +42,7 @@ const discovery = new PostgresDiscoveryModule({
     apiKey: process.env.OPENAI_API_KEY,
     model: process.env.OPENAI_MODEL,
   }),
-  placeProvider,
+  placeLookup: placeProvider,
   tripPlaces,
 });
 const dayRoutes = new PostgresDayRouteModule({

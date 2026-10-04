@@ -30,20 +30,35 @@ const facts = {
   countries: [{ code: "JP", position: 0 }],
 };
 
-const candidate = {
-  provider: "google" as const,
-  providerPlaceId: "place-1",
-  name: "Nishiki Market",
-  type: "activity" as const,
-  address: "Nakagyo Ward, Kyoto",
-  latitude: 35.005,
-  longitude: 135.765,
-  timeZone: "Asia/Tokyo",
-  sourceUrl: "https://maps.google.com/?cid=1",
-  attribution: "Google Maps",
-  observedAt: "2026-09-28T12:00:00.000Z",
-  expiresAt: "2026-10-28T12:00:00.000Z",
+const request = {
+  namedPlaces: [{ name: "Saihoji", area: "Kyoto" }],
+  categories: ["Temples", "Local food"],
+  defaultCategories: false,
+  alreadyArranged: ["Staying at an airport hotel"],
+  areas: ["Kyoto"],
+  exclusions: [],
+  localLanguage: "ja",
 };
+
+const brief = { interests: ["temples"], pace: null, budget: null, exclusions: [], areas: ["Kyoto"] };
+
+function researched(overrides: Record<string, unknown>) {
+  return {
+    name: "Tofuku-ji",
+    localName: "東福寺",
+    englishName: "Tofuku-ji",
+    area: "京都市",
+    category: "Temples",
+    namedPlace: null,
+    recommendation: "Autumn leaves from Tsutenkyo bridge.",
+    matchedNeeds: ["temples"],
+    tradeoffs: [],
+    unknowns: [],
+    confidence: "high",
+    sources: [],
+    ...overrides,
+  };
+}
 
 function model(fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
   return new OpenAiResponsesDiscoveryModel({
@@ -58,28 +73,22 @@ describe("OpenAI Responses discovery model", () => {
   it("requests strict structured planning without web search", async () => {
     const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => completed({
       structuredBrief: {
-        interests: ["food markets", "gardens"],
-        pace: "unhurried",
+        interests: ["temples", "local food"],
+        pace: null,
         budget: null,
-        exclusions: ["long walking days"],
+        exclusions: [],
         areas: ["Kyoto"],
       },
-      unresolvedQuestions: ["Which neighborhood is your base?"],
-      searchPlan: {
-        queries: ["Kyoto food markets"],
-        areas: ["Kyoto"],
-        categories: ["market"],
-        exclusions: ["long walks"],
-        dateRange,
-      },
+      unresolvedQuestions: [],
+      request: { ...request, namedPlaces: [...request.namedPlaces, { name: "Saihoji", area: "Kyoto" }], localLanguage: "JA" },
       outputLanguage: "zh-tw",
     }));
 
-    const result = await model(fetch).plan({ trip: facts, brief: "Food and gardens", confirmedFeedback: [] });
+    const result = await model(fetch).plan({ trip: facts, brief: "Temples and food; we stay at an airport hotel", confirmedFeedback: [] });
 
     expect(result.modelId).toBe("gpt-test-2026-01-01");
-    expect(result.searchPlan.queries).toEqual(["Kyoto food markets"]);
     expect(result.outputLanguage).toBe("zh-TW");
+    expect(result.request).toEqual({ ...request, localLanguage: "ja" });
     const [url, init] = fetch.mock.calls[0] ?? [];
     expect(url).toBe("https://openai.example.test/v1/responses");
     expect(init?.headers).toMatchObject({ Authorization: "Bearer test-key" });
@@ -89,11 +98,23 @@ describe("OpenAI Responses discovery model", () => {
     expect(body.tools).toBeUndefined();
   });
 
+  it("uses default kinds of place when the model returns none", async () => {
+    const result = await model(vi.fn(async () => completed({
+      structuredBrief: { interests: [], pace: null, budget: null, exclusions: [], areas: [] },
+      unresolvedQuestions: [],
+      request: { ...request, namedPlaces: [], categories: [], defaultCategories: false },
+      outputLanguage: "en",
+    }))).plan({ trip: facts, brief: "Just recommend", confirmedFeedback: [] });
+
+    expect(result.request.categories).toHaveLength(3);
+    expect(result.request.defaultCategories).toBe(true);
+  });
+
   it("rejects a plan whose output language is not a language tag", async () => {
     const plan = (outputLanguage: unknown) => model(vi.fn(async () => completed({
       structuredBrief: { interests: [], pace: null, budget: null, exclusions: [], areas: [] },
       unresolvedQuestions: [],
-      searchPlan: { queries: ["Kyoto temples"], areas: [], categories: [], exclusions: [], dateRange },
+      request,
       outputLanguage,
     }))).plan({ trip: facts, brief: "Temples", confirmedFeedback: [] });
 
@@ -104,69 +125,74 @@ describe("OpenAI Responses discovery model", () => {
     }
   });
 
-  it("accepts only candidates and citations returned by the grounded search", async () => {
-    const source = { url: "https://kyoto.example.test/nishiki", title: "Official Nishiki Market" };
+  it("researches with web search and keeps only pages web search returned", async () => {
+    const official = { url: "https://kyoto.travel/en/tofukuji.html", title: "Tofuku-ji | Kyoto City Official Travel Guide" };
     const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => completed({
-      candidates: [{
-        providerPlaceId: candidate.providerPlaceId,
-        recommendation: "A compact food-market stop that matches the requested focus.",
-        matchedNeeds: ["food markets"],
-        tradeoffs: ["crowded at midday"],
-        unknowns: ["holiday opening hours"],
-        confidence: "medium",
-        sourceUrls: [source.url],
-      }],
-    }, [{ type: "web_search_call", action: { sources: [source] } }]));
+      candidates: [researched({
+        sources: [
+          { url: official.url, type: "tourism_board" },
+          { url: "https://invented.example.test/tofukuji", type: "government" },
+          { url: official.url, type: "other" },
+        ],
+      })],
+    }, [{ type: "web_search_call", action: { sources: [official] } }]));
 
-    const result = await model(fetch).synthesize({
-      trip: facts,
-      brief: { interests: ["food"], pace: null, budget: null, exclusions: [], areas: ["Kyoto"] },
-      searchPlan: { queries: ["Kyoto food markets"], areas: ["Kyoto"], categories: ["market"], exclusions: [], dateRange },
-      candidates: [candidate],
-      rejectedProviderPlaceIds: [],
-      confirmedFeedback: [],
-      outputLanguage: "en",
+    const result = await model(fetch).research({
+      trip: facts, brief, request, confirmedFeedback: [], rejectedPlaces: [], outputLanguage: "en",
     });
 
-    expect(result.candidates[0]?.sourceUrls).toEqual([source.url]);
-    expect(result.sources).toEqual([source]);
+    expect(result.candidates).toEqual([expect.objectContaining({
+      name: "Tofuku-ji",
+      localName: "東福寺",
+      sources: [{ url: official.url, type: "tourism_board" }],
+    })]);
+    expect(result.sources).toEqual([official]);
     const body = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body));
     expect(body.tools).toEqual([{ type: "web_search", search_context_size: "low" }]);
     expect(body.include).toEqual(["web_search_call.action.sources"]);
+    const item = body.text.format.schema.properties.candidates.items.properties;
+    expect(item.category.anyOf[0].enum).toEqual(["Temples", "Local food"]);
+    expect(item.namedPlace.anyOf[0].enum).toEqual(["Saihoji"]);
   });
 
-  it("drops citations web search did not return but keeps the recommendation", async () => {
-    const source = { url: "https://eikando.or.jp/lp/2026/index.html", title: "Eikando autumn" };
-    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => completed({
-      candidates: [{
-        providerPlaceId: candidate.providerPlaceId,
-        recommendation: "Autumn temple visit",
-        matchedNeeds: [],
-        tradeoffs: [],
-        unknowns: [],
-        confidence: "high",
-        sourceUrls: [
-          "https://www.eikando.or.jp/lp/2026/index.html",
-          "https://invented.example.test/fact",
-          candidate.sourceUrl,
-          source.url,
-        ],
-      }],
-    }, [{ type: "web_search_call", action: { sources: [source] } }]));
+  it("drops repeated places and places filed under kinds or named places the request lacks", async () => {
+    const result = await model(vi.fn(async () => completed({
+      candidates: [
+        researched({ name: "Saiho-ji", namedPlace: "Saihoji" }),
+        researched({ name: "saiho ji" }),
+        researched({ name: "Kinkaku-ji", category: "Gardens" }),
+        researched({ name: "Ginkaku-ji", namedPlace: "Eikando" }),
+        researched({ name: "Nishiki Market", category: "Local food" }),
+      ],
+    }))).research({ trip: facts, brief, request, confirmedFeedback: [], rejectedPlaces: [], outputLanguage: "en" });
 
-    const result = await model(fetch).synthesize({
-      trip: facts,
-      brief: { interests: [], pace: null, budget: null, exclusions: [], areas: [] },
-      searchPlan: { queries: ["Kyoto temples"], areas: [], categories: [], exclusions: [], dateRange },
-      candidates: [candidate],
-      rejectedProviderPlaceIds: [],
-      confirmedFeedback: [],
-      outputLanguage: "zh-TW",
-    });
+    expect(result.candidates.map((entry) => [entry.name, entry.namedPlace])).toEqual([
+      ["Saiho-ji", "Saihoji"],
+      ["Nishiki Market", null],
+    ]);
+  });
 
-    expect(result.candidates).toHaveLength(1);
-    expect(result.candidates[0]?.recommendation).toBe("Autumn temple visit");
-    expect(result.candidates[0]?.sourceUrls).toEqual([source.url]);
+  it("keeps a named place of none of the requested kinds without a kind, and drops any other place without one", async () => {
+    const result = await model(vi.fn(async () => completed({
+      candidates: [
+        researched({ name: "Saiho-ji", namedPlace: "Saihoji", category: null }),
+        researched({ name: "Arashiyama", category: null }),
+      ],
+    }))).research({ trip: facts, brief, request, confirmedFeedback: [], rejectedPlaces: [], outputLanguage: "en" });
+
+    expect(result.candidates.map((entry) => [entry.name, entry.category])).toEqual([["Saiho-ji", null]]);
+  });
+
+  it("cuts kinds of place to the 80 characters a proposal can store", async () => {
+    const long = "Quiet traditional gardens and temples at their best for autumn leaves in late October";
+    const result = await model(vi.fn(async () => completed({
+      structuredBrief: { interests: [], pace: null, budget: null, exclusions: [], areas: [] },
+      unresolvedQuestions: [],
+      request: { ...request, categories: [long, "Local food"] },
+      outputLanguage: "en",
+    }))).plan({ trip: facts, brief: "Gardens", confirmedFeedback: [] });
+
+    expect(result.request.categories).toEqual([long.slice(0, 80).trim(), "Local food"]);
   });
 
   it("fails closed before making a request when no server credential is configured", async () => {

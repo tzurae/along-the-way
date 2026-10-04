@@ -10,10 +10,11 @@ import { createApp } from "../src/app";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
 import { runMigrations } from "../src/database/migrate";
 import { seedDatabase } from "../src/database/seed";
+import type { RecommendationSourceChecks } from "../src/discovery/candidate-verification";
 import type {
   DiscoveryModel,
   DiscoveryPlanResult,
-  DiscoverySynthesisResult,
+  DiscoveryResearchResult,
   InterpretedDiscoveryFeedback,
 } from "../src/discovery/discovery-model";
 import { PostgresDiscoveryModule } from "../src/discovery/postgres-discovery-module";
@@ -25,7 +26,11 @@ import { PostgresReadinessProbe } from "../src/private-trips/postgres-readiness-
 import { PostgresTripWorkspaceModule } from "../src/private-trips/postgres-trip-workspace-module";
 import { TokenIssuer } from "../src/private-trips/token-issuer";
 import { PostgresTripSkeletonModule } from "../src/trip-skeleton/postgres-trip-skeleton-module";
-import type { PlaceProvider } from "../src/trip-places/google-places-provider";
+import type {
+  PlaceProvider,
+  RatedPlaceCandidate,
+  RatedPlaceLookup,
+} from "../src/trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
 import { unrelatedDayRouteModule } from "./day-route-test-support";
 
@@ -55,16 +60,50 @@ const market: ProviderPlaceCandidateDto = {
   expiresAt: "2026-10-28T12:00:00.000Z",
 };
 
-class ControlledPlaceProvider implements PlaceProvider {
+function place(name: string, providerPlaceId: string): ProviderPlaceCandidateDto {
+  return { ...market, name, providerPlaceId, sourceUrl: null };
+}
+
+class ControlledPlaceProvider implements PlaceProvider, RatedPlaceLookup {
   readonly available = true;
   readonly attribution = "Google Maps";
-  searches = 0;
+  lookups: string[] = [];
   async search() {
-    this.searches += 1;
     return [market];
   }
   async getPlace() {
     return market;
+  }
+  async lookup(query: string): Promise<RatedPlaceCandidate[]> {
+    this.lookups.push(query);
+    if (query.includes("Nishiki")) {
+      return [{ candidate: market, rating: 4.4, userRatingCount: 12_000, websiteUri: "https://www.kyoto-nishiki.or.jp/" }];
+    }
+    if (query.includes("Tiny Cafe")) {
+      // A near-perfect rating from too few reviews to count.
+      return [{ candidate: place("Tiny Cafe", "ChIJ-Tiny-Cafe"), rating: 4.9, userRatingCount: 40, websiteUri: null }];
+    }
+    if (query.includes("Takao") || query.includes("高雄")) {
+      return [{ candidate: place("Takao Kanko Hotel", "ChIJ-Takao-Hotel"), rating: 4.3, userRatingCount: 900, websiteUri: null }];
+    }
+    return [];
+  }
+}
+
+class ControlledSourceChecks implements RecommendationSourceChecks {
+  pages: string[] = [];
+  wikivoyage() {
+    return {
+      verify: async (input: { names: readonly string[] }) => input.names.includes("Nishiki Market")
+        ? { url: "https://en.wikivoyage.org/wiki/Kyoto/Central", title: "Kyoto/Central" }
+        : null,
+    };
+  }
+  async pageText(url: string) {
+    this.pages.push(url);
+    if (url.endsWith("/nishiki")) return "Nishiki Market, Kyoto's kitchen, is a narrow covered street of food stalls.";
+    if (url.endsWith("/tiny-cafe")) return "Tiny Cafe serves hand-drip coffee near the market.";
+    return null;
   }
 }
 
@@ -72,7 +111,9 @@ class ControlledDiscoveryModel implements DiscoveryModel {
   readonly available = true;
   readonly modelId = "gpt-test";
   planCalls = 0;
-  synthesisCalls = 0;
+  researchCalls = 0;
+  /** An unexpected failure (not a model or provider error) to raise from research. */
+  researchFailure: Error | null = null;
   feedbackCalls = 0;
   private releaseFirstPlan: (() => void) | null = null;
   private firstPlanStarted: (() => void) | null = null;
@@ -115,31 +156,66 @@ class ControlledDiscoveryModel implements DiscoveryModel {
         areas: ["Kyoto"],
       },
       unresolvedQuestions: [],
-      searchPlan: {
-        queries: ["Kyoto food markets"],
+      request: {
+        namedPlaces: [{ name: "Nishiki Market", area: "Kyoto" }, { name: "Saihoji", area: "Kyoto" }],
+        categories: ["Food markets"],
+        defaultCategories: false,
+        alreadyArranged: ["Staying at an airport hotel"],
         areas: ["Kyoto"],
-        categories: ["market"],
-        exclusions: ["long walks"],
-        dateRange: { start: "2026-10-21", end: "2026-10-27" },
+        exclusions: ["long walking days"],
+        localLanguage: "ja",
       },
       outputLanguage: "en",
     };
   }
 
-  async synthesize(): Promise<DiscoverySynthesisResult> {
-    this.synthesisCalls += 1;
+  async research(): Promise<DiscoveryResearchResult> {
+    this.researchCalls += 1;
+    if (this.researchFailure) throw this.researchFailure;
+    const base = {
+      area: "Kyoto",
+      category: "Food markets",
+      matchedNeeds: ["food markets"],
+      tradeoffs: [],
+      unknowns: ["holiday opening hours"],
+      confidence: "medium" as const,
+    };
     return {
       modelId: this.modelId,
-      sources: [{ url: "https://kyoto.example.test/nishiki", title: "Official Nishiki Market guide" }],
-      candidates: [{
-        providerPlaceId: market.providerPlaceId,
-        recommendation: "A compact food-market stop matching the trip's main interest.",
-        matchedNeeds: ["food markets", "unhurried half-day"],
-        tradeoffs: ["busy around lunch"],
-        unknowns: ["holiday opening hours"],
-        confidence: "medium",
-        sourceUrls: ["https://kyoto.example.test/nishiki"],
-      }],
+      sources: [
+        { url: "https://kyoto.example.test/nishiki", title: "Official Nishiki Market guide" },
+        { url: "https://kyoto.example.test/tiny-cafe", title: "Tiny Cafe feature" },
+      ],
+      candidates: [
+        {
+          ...base,
+          name: "Nishiki Market",
+          localName: "錦市場",
+          englishName: "Nishiki Market",
+          namedPlace: "Nishiki Market",
+          recommendation: "A compact food-market stop matching the trip's main interest.",
+          tradeoffs: ["busy around lunch"],
+          sources: [{ url: "https://kyoto.example.test/nishiki", type: "tourism_board" }],
+        },
+        {
+          ...base,
+          name: "Tiny Cafe",
+          localName: null,
+          englishName: null,
+          namedPlace: null,
+          recommendation: "A quiet coffee stop.",
+          sources: [{ url: "https://kyoto.example.test/tiny-cafe", type: "tourism_board" }],
+        },
+        {
+          ...base,
+          name: "Takao",
+          localName: "高雄",
+          englishName: "Takao",
+          namedPlace: null,
+          recommendation: "Mountain temples with early autumn leaves.",
+          sources: [],
+        },
+      ],
     };
   }
 
@@ -177,6 +253,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
   let worker: PostgresEmailWorker;
   let model: ControlledDiscoveryModel;
   let provider: ControlledPlaceProvider;
+  let sourceChecks: ControlledSourceChecks;
   const now = () => new Date("2026-09-28T12:00:00.000Z");
 
   beforeAll(async () => {
@@ -225,6 +302,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     email = new CapturingEmailSender();
     model = new ControlledDiscoveryModel();
     provider = new ControlledPlaceProvider();
+    sourceChecks = new ControlledSourceChecks();
     const tokenIssuer = new TokenIssuer("discovery-integration-secret-at-least-32-bytes");
     const identityAccess = new PostgresIdentityAccessModule({
       database,
@@ -243,10 +321,11 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     const discovery = new PostgresDiscoveryModule({
       database,
       model,
-      placeProvider: provider,
+      placeLookup: provider,
       tripPlaces,
+      sourceChecks,
       now,
-      policyVersion: "discovery-test-v1",
+      policyVersion: "discovery-test-v2",
     });
     app = createApp({
       dayRoutes: unrelatedDayRouteModule,
@@ -346,11 +425,36 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(generatedResponse.status).toBe(200);
     const generated = parseDiscoveryWorkspaceResponse(await generatedResponse.json()).discovery;
     expect(model.planCalls).toBe(1);
-    expect(model.synthesisCalls).toBe(1);
-    expect(provider.searches).toBe(1);
+    expect(model.researchCalls).toBe(1);
     expect(generated.brief?.structured?.interests).toContain("food markets");
-    expect(generated.proposals).toHaveLength(1);
-    expect(generated.proposals[0]?.evidence.map((item) => item.kind)).toEqual(["google-place", "web-source"]);
+    // Only the place three independent sources vouch for is shown.
+    expect(generated.proposals.map((entry) => [entry.name, entry.category, entry.endorsements])).toEqual([
+      ["Nishiki Market", "Food markets", ["google_reviews", "wikivoyage", "official_tourism"]],
+    ]);
+    expect(generated.proposals[0]?.evidence.map((item) => `${item.kind}:${item.attribution}`).sort()).toEqual([
+      "google-place:Google Maps",
+      "web-source:Official tourism site",
+      "web-source:Wikivoyage",
+    ]);
+    expect(generated.latestRun?.searchPlan).toMatchObject({
+      categories: ["Food markets"],
+      defaultCategories: false,
+      namedPlaces: ["Nishiki Market", "Saihoji"],
+      alreadyArranged: ["Staying at an airport hotel"],
+    });
+    expect(generated.latestRun?.shortfalls).toEqual([
+      { code: "not_researched", subject: "Saihoji", named: true, endorsements: [], count: null },
+      { code: "single_source", subject: "Tiny Cafe", named: false, endorsements: ["official_tourism"], count: null },
+      { code: "name_mismatch", subject: "Takao", named: false, endorsements: [], count: null },
+      { code: "category_short", subject: "Food markets", named: false, endorsements: [], count: 1 },
+    ]);
+    // Google's rating and review count are used to screen but never stored.
+    const storedRatings = await sql<{ count: string }>`
+      select count(*)::text as count from discovery_evidence
+      where facts ? 'rating' or facts ? 'userRatingCount' or facts::text ilike '%12000%'
+    `.execute(database);
+    expect(storedRatings.rows[0]?.count).toBe("0");
+    const lookupsAfterGeneration = provider.lookups.length;
 
     const replay = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "generate-1", {
       expectedBriefVersion: 1,
@@ -359,6 +463,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(parseDiscoveryWorkspaceResponse(await replay.json()).discovery.latestRun?.id)
       .toBe(generated.latestRun?.id);
     expect(model.planCalls).toBe(1);
+    expect(provider.lookups).toHaveLength(lookupsAfterGeneration);
 
     const proposal = generated.proposals[0];
     if (!proposal) throw new Error("Expected proposal");
@@ -410,5 +515,114 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(confirmed.status).toBe(200);
     expect(parseDiscoveryWorkspaceResponse(await confirmed.json()).discovery.feedback[0]?.status)
       .toBe("confirmed");
+  });
+
+  it("keeps shortlists from before the quality checks readable", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    const owner = await database.selectFrom("users").select("id").where("email", "=", "owner@example.test")
+      .executeTakeFirstOrThrow();
+    const run = await database.insertInto("discovery_runs").values({
+      trip_id: trip.id,
+      brief_version: 1,
+      policy_version: "discovery-v1",
+      model_id: "gpt-old",
+      status: "completed",
+      search_plan: { queries: ["Kyoto food markets"], areas: ["Kyoto"], categories: ["market"], exclusions: [], dateRange: { start: "2026-10-21", end: "2026-10-27" } },
+      error_code: null,
+      created_by: owner.id,
+      completed_at: now(),
+    }).returning("id").executeTakeFirstOrThrow();
+    await database.insertInto("candidate_proposals").values({
+      trip_id: trip.id,
+      run_id: run.id,
+      provider_place_id: market.providerPlaceId,
+      name: market.name,
+      place_type: market.type,
+      address: market.address,
+      latitude: market.latitude,
+      longitude: market.longitude,
+      source_url: market.sourceUrl,
+      recommendation: "An older recommendation.",
+      matched_needs: JSON.stringify([]),
+      tradeoffs: JSON.stringify([]),
+      unknowns: JSON.stringify([]),
+      confidence: "medium",
+      status: "pending",
+      accepted_trip_place_id: null,
+      decided_by: null,
+      decided_at: null,
+    }).execute();
+
+    const response = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
+
+    expect(response.status).toBe(200);
+    const workspace = parseDiscoveryWorkspaceResponse(await response.json()).discovery;
+    expect(workspace.latestRun).toMatchObject({
+      shortfalls: [],
+      searchPlan: { queries: ["Kyoto food markets"], categories: ["market"], defaultCategories: false, namedPlaces: [], alreadyArranged: [] },
+    });
+    expect(workspace.proposals).toEqual([expect.objectContaining({ name: "Nishiki Market", category: null, endorsements: [] })]);
+  });
+
+  it("replays a response stored before the quality checks instead of failing", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    const owner = await database.selectFrom("users").select("id").where("email", "=", "owner@example.test")
+      .executeTakeFirstOrThrow();
+    // The shape the previous release stored: no shortfalls, kinds, endorsements or named places.
+    await database.insertInto("mutation_requests").values({
+      actor_id: owner.id,
+      operation: `discovery:generate:${trip.id}`,
+      idempotency_key: "generate-before-deploy",
+      response: {
+        brief: null,
+        latestRun: {
+          id: "00000000-0000-4000-8000-000000004401", status: "completed", modelId: "gpt-old", policyVersion: "discovery-v1",
+          briefVersion: 1, generatedAt: "2026-10-03T16:38:02.000Z", errorCode: null,
+          searchPlan: { queries: ["Kyoto food markets"], areas: ["Kyoto"], categories: ["market"], exclusions: [], dateRange: { start: "2026-10-21", end: "2026-10-27" } },
+        },
+        proposals: [{
+          id: "00000000-0000-4000-8000-000000004402", runId: "00000000-0000-4000-8000-000000004401",
+          providerPlaceId: market.providerPlaceId, name: market.name, type: market.type, address: market.address,
+          latitude: market.latitude, longitude: market.longitude, sourceUrl: market.sourceUrl,
+          recommendation: "An older recommendation.", matchedNeeds: [], tradeoffs: [], unknowns: [], confidence: "medium",
+          status: "pending", evidence: [], acceptedTripPlaceId: null, version: 1,
+        }],
+        feedback: [],
+        modelAvailable: true,
+        placeProviderAvailable: true,
+      },
+    }).execute();
+
+    const replay = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "generate-before-deploy", {
+      expectedBriefVersion: 1,
+    });
+
+    expect(replay.status).toBe(200);
+    const workspace = parseDiscoveryWorkspaceResponse(await replay.json()).discovery;
+    expect(workspace.latestRun).toMatchObject({ shortfalls: [], searchPlan: { namedPlaces: [], defaultCategories: false } });
+    expect(workspace.proposals[0]).toMatchObject({ category: null, endorsements: [] });
+    expect(model.planCalls).toBe(0);
+  });
+
+  it("releases the request after an unexpected failure so a retry is not stuck in progress", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "brief-failure", {
+      originalText: "Food markets.",
+      expectedVersion: null,
+    });
+    model.releasePlan();
+    model.researchFailure = new TypeError("unexpected");
+    const generate = () => discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "generate-failure", {
+      expectedBriefVersion: 1,
+    });
+
+    expect((await generate()).status).toBe(500);
+    const retry = await generate();
+
+    expect(retry.status).toBe(503);
+    expect(model.researchCalls).toBe(1);
   });
 });

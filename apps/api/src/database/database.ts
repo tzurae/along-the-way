@@ -218,6 +218,8 @@ export interface DiscoveryRunTable {
   created_by: string;
   created_at: Timestamp;
   completed_at: Timestamp;
+  /** DiscoveryShortfallDto[]; empty for runs from before shortfalls were recorded. */
+  shortfalls: Generated<unknown>;
 }
 
 export interface DiscoveryEvidenceTable {
@@ -257,6 +259,9 @@ export interface CandidateProposalTable {
   version: Generated<number>;
   created_at: Timestamp;
   updated_at: Timestamp;
+  category: string | null;
+  /** DiscoveryEndorsement[]; empty for proposals from before endorsements were recorded. */
+  endorsements: Generated<unknown>;
 }
 
 export interface CandidateProposalEvidenceTable {

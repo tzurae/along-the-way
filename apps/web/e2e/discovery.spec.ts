@@ -159,12 +159,17 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   await expect(proposal).toBeVisible();
   await expect(proposal.getByText("A compact food-market stop matching the trip focus.")).toBeVisible();
   await expect(proposal.getByRole("link", { name: "Official Nishiki Market guide" })).toHaveAttribute("href", "https://kyoto.example.test/nishiki");
+  // A run from before the quality checks still reads, and its card links to the place's own Google Maps page.
+  await expect(proposal.getByRole("link", { name: "View photos on Google Maps" }))
+    .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
   await proposal.getByRole("button", { name: "Accept into wishlist" }).click();
   await expect(proposal.getByText("Added to wishlist")).toBeVisible();
 
   const wishlist = page.getByRole("region", { name: "Shared place wishlist" });
   await expect(wishlist.getByRole("heading", { name: "Nishiki Market" })).toBeVisible();
   await expect(wishlist.getByText("AI proposal", { exact: false })).toBeVisible();
+  await expect(wishlist.getByRole("link", { name: "View photos on Google Maps" }))
+    .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
 });
 
 test("research and feedback explain missing AI configuration without sending anything", async ({ page, request }) => {
