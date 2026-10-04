@@ -61,7 +61,8 @@ export type EndpointRole = "start" | "end";
 
 export interface ZonedEndpointDto {
   role: EndpointRole;
-  countryStopId: string;
+  /** Null only for a flight or transport endpoint outside the trip's country stops. */
+  countryStopId: string | null;
   placeId: string;
   localDateTime: string;
   timeZone: string;
@@ -71,7 +72,8 @@ export interface ZonedEndpointDto {
 
 export interface ZonedEndpointInput {
   role: EndpointRole;
-  countryStopId: string;
+  /** Null only for a flight or transport endpoint outside the trip's country stops. */
+  countryStopId: string | null;
   placeId: string;
   localDateTime: string;
   timeZone: string;
@@ -298,7 +300,7 @@ function endpointValue(value: unknown): ZonedEndpointDto {
   if (!isRecord(value)) return invalidResponse();
   return {
     role: endpointRoleValue(value.role),
-    countryStopId: stringValue(value.countryStopId),
+    countryStopId: nullableString(value.countryStopId),
     placeId: stringValue(value.placeId),
     localDateTime: stringValue(value.localDateTime),
     timeZone: stringValue(value.timeZone),

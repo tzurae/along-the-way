@@ -76,6 +76,13 @@ function optionalStringField(body: Record<string, unknown>, name: string) {
   return value;
 }
 
+/** Requires the field to be present; null is an explicit value, not a missing one. */
+function nullableStringField(body: Record<string, unknown>, name: string) {
+  const value = body[name];
+  if (value === null || typeof value === "string") return value;
+  throw new AppError("validation_error", `${name} must be a string or null`);
+}
+
 function numberField(body: Record<string, unknown>, name: string) {
   const value = body[name];
   if (typeof value !== "number") {
@@ -118,7 +125,7 @@ function endpointInput(value: unknown): ZonedEndpointInput {
   const endpoint = objectBody(value);
   return {
     role: stringField(endpoint, "role") as ZonedEndpointInput["role"],
-    countryStopId: stringField(endpoint, "countryStopId"),
+    countryStopId: nullableStringField(endpoint, "countryStopId"),
     placeId: stringField(endpoint, "placeId"),
     localDateTime: stringField(endpoint, "localDateTime"),
     timeZone: stringField(endpoint, "timeZone"),

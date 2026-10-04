@@ -1626,6 +1626,88 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     });
   });
 
+  it("lets flights and transport leave from outside the trip's countries on their own time zone", async () => {
+    const cookie = await login();
+    const japanTrip = await createTrip(cookie);
+    const japanStopId = japanTrip.countryStops[0]!.id;
+    const placeWithoutZone = (name: string) => ({
+      name, type: "airport", address: null, latitude: null, longitude: null,
+      timeZone: null, sourceUrl: null, notes: null,
+    });
+    const taoyuan = await createPlace(cookie, japanTrip.id, "outside-taoyuan", placeWithoutZone("Taoyuan Airport"));
+    const kansai = await createPlace(cookie, japanTrip.id, "outside-kansai", placeWithoutZone("Kansai Airport"));
+    const flight = (countryStopId: string | null) => ({
+      type: "flight",
+      title: "CI 152",
+      notes: null,
+      sourceUrl: null,
+      money: null,
+      participantMemberIds: null,
+      endpoints: [
+        { role: "start", countryStopId, placeId: taoyuan.id, localDateTime: "2026-10-21T09:00", timeZone: "Asia/Taipei" },
+        { role: "end", countryStopId: japanStopId, placeId: kansai.id, localDateTime: "2026-10-21T12:30", timeZone: "Asia/Tokyo" },
+      ],
+      details: { carrier: "China Airlines", serviceNumber: "CI 152", confirmationNotes: null },
+      constraints: [],
+    });
+
+    // Inside the Japan stop, a Place without a time zone still takes the stop's time zone.
+    const underJapan = await mutate(cookie, `/api/trips/${japanTrip.id}/items`, "outside-under-japan", {
+      ...flight(japanStopId), expectedTripVersion: await currentTripVersion(cookie, japanTrip.id),
+    });
+    expect(underJapan.status).toBe(400);
+
+    const created = await mutate(cookie, `/api/trips/${japanTrip.id}/items`, "outside-departure", {
+      ...flight(null), expectedTripVersion: await currentTripVersion(cookie, japanTrip.id),
+    });
+    expect(created.status).toBe(201);
+    const item = parseItineraryItemResponse(await created.json()).item;
+    const departure = {
+      role: "start", countryStopId: null, placeId: taoyuan.id,
+      localDateTime: "2026-10-21T09:00", timeZone: "Asia/Taipei", utcOffset: "+08:00",
+      instant: "2026-10-21T01:00:00.000Z",
+    };
+    expect(item.endpoints.find((endpoint) => endpoint.role === "start")).toMatchObject(departure);
+    const reloaded = (await readSkeleton(cookie, japanTrip.id)).items.find((candidate) => candidate.id === item.id);
+    expect(reloaded?.endpoints.find((endpoint) => endpoint.role === "start")).toMatchObject(departure);
+
+    const transport = await mutate(cookie, `/api/trips/${japanTrip.id}/items`, "outside-transport", {
+      ...flight(null),
+      type: "transport",
+      title: "Home to Taoyuan Airport",
+      endpoints: [
+        { role: "start", countryStopId: null, placeId: taoyuan.id, localDateTime: "2026-10-21T05:00", timeZone: "Asia/Taipei" },
+        { role: "end", countryStopId: null, placeId: taoyuan.id, localDateTime: "2026-10-21T06:00", timeZone: "Asia/Taipei" },
+      ],
+      details: { mode: "bus", ticketInfo: null },
+      expectedTripVersion: await currentTripVersion(cookie, japanTrip.id),
+    });
+    expect(transport.status).toBe(201);
+
+    // Single-place items still belong to one of the trip's country stops.
+    const looseActivity = await mutate(cookie, `/api/trips/${japanTrip.id}/items`, "outside-activity", {
+      ...flight(null),
+      type: "activity",
+      title: "Airport lounge",
+      endpoints: [{ role: "start", countryStopId: null, placeId: taoyuan.id, localDateTime: "2026-10-21T07:00", timeZone: "Asia/Taipei" }],
+      details: { durationMinutes: 60, bookedBy: null, confirmationStatus: "unknown" },
+      expectedTripVersion: await currentTripVersion(cookie, japanTrip.id),
+    });
+    expect(looseActivity.status).toBe(400);
+    const looseLodging = await mutate(cookie, `/api/trips/${japanTrip.id}/items`, "outside-lodging", {
+      ...flight(null),
+      type: "lodging",
+      title: "Airport hotel",
+      endpoints: [
+        { role: "start", countryStopId: null, placeId: taoyuan.id, localDateTime: "2026-10-21T15:00", timeZone: "Asia/Taipei" },
+        { role: "end", countryStopId: null, placeId: taoyuan.id, localDateTime: "2026-10-22T10:00", timeZone: "Asia/Taipei" },
+      ],
+      details: { bookedBy: null, confirmationCode: null },
+      expectedTripVersion: await currentTripVersion(cookie, japanTrip.id),
+    });
+    expect(looseLodging.status).toBe(400);
+  });
+
   it("persists every item type with only its relevant details", async () => {
     const cookie = await login();
     const trip = await createTrip(cookie);
@@ -2374,6 +2456,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         { migrationName: "009_day_place_order", direction: "Up", status: "NotExecuted" },
         { migrationName: "010_grounded_recommendations", direction: "Up", status: "NotExecuted" },
         { migrationName: "011_day_plan_window", direction: "Up", status: "NotExecuted" },
+        { migrationName: "012_endpoints_outside_route", direction: "Up", status: "NotExecuted" },
       ]);
       await database.deleteFrom("mutation_requests")
         .where("actor_id", "=", owner.userId).where("operation", "=", "create_trip")
