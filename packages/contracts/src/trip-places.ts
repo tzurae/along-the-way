@@ -82,6 +82,8 @@ export interface TripPlaceDto {
   scheduled: boolean;
   durationMinutes: number | null;
   assignedDayId: string | null;
+  /** Applied order within the assigned day; null until a route order is applied. */
+  dayPosition: number | null;
   budgetAmountMinor: number | null;
   budgetCurrency: string | null;
   notes: string | null;
@@ -308,6 +310,7 @@ function tripPlace(value: unknown): TripPlaceDto {
     scheduled: boolean(row.scheduled),
     durationMinutes: nullableInteger(row.durationMinutes),
     assignedDayId: nullableText(row.assignedDayId),
+    dayPosition: nullableInteger(row.dayPosition),
     budgetAmountMinor: nullableInteger(row.budgetAmountMinor),
     budgetCurrency: nullableText(row.budgetCurrency),
     notes: nullableText(row.notes),

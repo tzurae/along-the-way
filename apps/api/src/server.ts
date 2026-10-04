@@ -2,6 +2,9 @@ import { createApp } from "./app";
 import { createDatabase, requireDatabaseUrl } from "./database/database";
 import { OpenAiResponsesDiscoveryModel } from "./discovery/openai-responses-discovery-model";
 import { PostgresDiscoveryModule } from "./discovery/postgres-discovery-module";
+import { GoogleRoutesProvider } from "./planning/google-routes-provider";
+import { NavitimeRoutesProvider } from "./planning/navitime-routes-provider";
+import { PostgresDayRouteModule } from "./planning/postgres-day-route-module";
 import { PostgresIdentityAccessModule } from "./private-trips/postgres-identity-access-module";
 import { PostgresRateLimiter } from "./private-trips/postgres-rate-limiter";
 import { PostgresReadinessProbe } from "./private-trips/postgres-readiness-probe";
@@ -42,9 +45,20 @@ const discovery = new PostgresDiscoveryModule({
   placeProvider,
   tripPlaces,
 });
+const dayRoutes = new PostgresDayRouteModule({
+  database,
+  tripSkeleton,
+  tripPlaces,
+  // NAVITIME first: Google Routes has no transit in Japan.
+  routeProviders: [
+    new NavitimeRoutesProvider({ apiKey: process.env.RAPIDAPI_KEY }),
+    new GoogleRoutesProvider({ apiKey: process.env.GOOGLE_MAPS_API_KEY }),
+  ],
+});
 const rateLimiter = new PostgresRateLimiter(database, tokenSecret);
 const readiness = new PostgresReadinessProbe(database);
 const app = createApp({
+  dayRoutes,
   discovery,
   identityAccess,
   rateLimiter,
