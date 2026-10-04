@@ -74,6 +74,9 @@ export interface TripDayTable {
   trip_id: string;
   date: DateOnly;
   title: string | null;
+  /** Planned day window in minutes from local midnight; defaults to 09:00–19:00. */
+  day_start_minute: Generated<number>;
+  day_end_minute: Generated<number>;
 }
 
 export interface PlaceTable {

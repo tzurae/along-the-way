@@ -21,8 +21,9 @@ import type {
   UpdateTripPlaceDayAssignmentsInput,
   UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
+import type { CreateDayTimetableInput } from "@along-the-way/contracts/day-plans";
 import type { DiscoveryModule } from "./discovery/discovery-module";
-import type { DayRouteModule } from "./planning/postgres-day-route-module";
+import type { DayPlanModule } from "./planning/postgres-day-plan-module";
 
 import {
   AppError,
@@ -40,7 +41,7 @@ const SESSION_COOKIE = "along_the_way_session";
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
 interface AppDependencies {
-  dayRoutes: DayRouteModule;
+  dayPlans: DayPlanModule;
   discovery: DiscoveryModule;
   identityAccess: IdentityAccessModule;
   rateLimiter: RateLimiter;
@@ -288,7 +289,7 @@ async function jsonBody(context: Context) {
 }
 
 export function createApp({
-  dayRoutes,
+  dayPlans,
   discovery,
   identityAccess,
   rateLimiter,
@@ -637,16 +638,35 @@ export function createApp({
   );
 
   app.post(
-    "/api/trips/:tripId/days/:dayId/route-plan",
+    "/api/trips/:tripId/days/:dayId/timetable",
     async (context) => {
       const { user } = await authenticated(context);
       await rateLimiter.consume("trip_content", clientIp(context), user.id);
-      const plan = await dayRoutes.plan(
+      const body = await jsonBody(context);
+      const timetable = await dayPlans.timetable(
         user.id,
         uuidParam(context, "tripId"),
         uuidParam(context, "dayId"),
+        { order: stringField(body, "order") as CreateDayTimetableInput["order"] },
       );
-      return context.json({ plan });
+      return context.json({ timetable });
+    },
+  );
+
+  app.put(
+    "/api/trips/:tripId/days/:dayId/window",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const body = await jsonBody(context);
+      const window = await dayPlans.updateWindow(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "dayId"),
+        idempotencyKey(context),
+        { startMinute: numberField(body, "startMinute"), endMinute: numberField(body, "endMinute") },
+      );
+      return context.json({ window });
     },
   );
 
@@ -656,7 +676,7 @@ export function createApp({
       const { user } = await authenticated(context);
       await rateLimiter.consume("trip_content", clientIp(context), user.id);
       const body = await jsonBody(context);
-      const ordered = await dayRoutes.applyOrder(
+      const ordered = await dayPlans.applyOrder(
         user.id,
         uuidParam(context, "tripId"),
         uuidParam(context, "dayId"),

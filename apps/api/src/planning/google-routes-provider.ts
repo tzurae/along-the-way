@@ -180,7 +180,8 @@ export class GoogleRoutesProvider implements RouteObservationProvider {
       }
       const route = value.routes[0];
       const duration = durationNanoseconds(route.duration);
-      const distance = route.distanceMeters;
+      // Protobuf JSON also omits zero scalars: a route between two coincident points has no distance.
+      const distance = route.distanceMeters ?? 0;
       if (duration === null || !Number.isSafeInteger(distance) || (distance as number) < 0) {
         return unavailable("invalid_response");
       }

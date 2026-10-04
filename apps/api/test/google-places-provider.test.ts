@@ -124,4 +124,56 @@ describe("Google Places provider adapter", () => {
       { candidate: expect.objectContaining({ providerPlaceId: "ChIJ-broken" }), rating: null, userRatingCount: null, websiteUri: null },
     ]);
   });
+
+  it("asks Place Details for opening hours only and keeps dated periods and missing hours apart", async () => {
+    let url = "";
+    let fields = "";
+    const provider = new GooglePlacesProvider({
+      apiKey: "server-only-key",
+      fetch: async (input, init) => {
+        url = String(input);
+        fields = new Headers(init?.headers).get("X-Goog-FieldMask") ?? "";
+        return Response.json({
+          businessStatus: "OPERATIONAL",
+          regularOpeningHours: {
+            periods: [
+              { open: { day: 4, hour: 9, minute: 0 }, close: { day: 4, hour: 16, minute: 30 } },
+              { open: { day: 0, hour: 0, minute: 0 } },
+            ],
+          },
+          currentOpeningHours: {
+            periods: [{
+              open: { day: 4, hour: 9, minute: 0, date: { year: 2026, month: 10, day: 22 } },
+              close: { day: 4, hour: 16, minute: 30, date: { year: 2026, month: 10, day: 22 } },
+            }],
+          },
+        });
+      },
+    });
+
+    const hours = await provider.openingHours("ChIJ-tofukuji-1234");
+
+    expect(url).toBe("https://places.googleapis.com/v1/places/ChIJ-tofukuji-1234");
+    expect(fields.split(",").sort()).toEqual(["businessStatus", "currentOpeningHours", "regularOpeningHours"]);
+    expect(hours).toEqual({
+      businessStatus: "operational",
+      regular: [
+        { open: { day: 4, hour: 9, minute: 0, date: null }, close: { day: 4, hour: 16, minute: 30, date: null } },
+        { open: { day: 0, hour: 0, minute: 0, date: null }, close: null },
+      ],
+      current: [{
+        open: { day: 4, hour: 9, minute: 0, date: "2026-10-22" },
+        close: { day: 4, hour: 16, minute: 30, date: "2026-10-22" },
+      }],
+    });
+  });
+
+  it("reports no hours when Place Details has none", async () => {
+    const provider = new GooglePlacesProvider({
+      apiKey: "server-only-key",
+      fetch: async () => Response.json({}),
+    });
+
+    expect(await provider.openingHours("ChIJ-no-hours-1234")).toEqual({ businessStatus: null, regular: null, current: null });
+  });
 });
