@@ -52,24 +52,13 @@ interface TripSkeletonWorkspaceProps {
 }
 
 
-function localEndpoint(
-  endpoint: ZonedEndpointDto,
-  places: Map<string, PlaceDto>,
-  locale: string,
-  t: Messages["tripSkeleton"],
-) {
+function localEndpoint(endpoint: ZonedEndpointDto, places: Map<string, PlaceDto>, t: Messages["tripSkeleton"]) {
   const place = places.get(endpoint.placeId);
-  const formatter = new Intl.DateTimeFormat(locale, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
+  const abbreviation = new Intl.DateTimeFormat("en-US", {
     timeZone: endpoint.timeZone,
     timeZoneName: "short",
-  });
-  return `${formatter.format(new Date(endpoint.instant))}・${endpoint.timeZone}（${endpoint.utcOffset}）・${place?.name ?? t.unknownPlace}`;
+  }).formatToParts(new Date(endpoint.instant)).find((part) => part.type === "timeZoneName")?.value;
+  return `${endpoint.localDateTime.replace("T", " ")} · ${endpoint.timeZone} (${abbreviation ?? endpoint.utcOffset}, ${endpoint.utcOffset}) · ${place?.name ?? t.unknownPlace}`;
 }
 
 function itemEndpoint(item: ItineraryItemDto, role: ZonedEndpointDto["role"]) {
@@ -525,11 +514,11 @@ export function TripSkeletonWorkspace({
           {item.lockedAt ? <span className="locked-badge"><Lock className="size-3.5" /> {t.tripSkeleton.locked}</span> : null}
         </div>
         <div className="mt-3 grid gap-1 text-sm text-muted-foreground">
-          {start ? <p><strong>{t.tripSkeleton.start}</strong> {localEndpoint(start, placesById, locale, t.tripSkeleton)}</p> : null}
+          {start ? <p><strong>{t.tripSkeleton.start}</strong> {localEndpoint(start, placesById, t.tripSkeleton)}</p> : null}
           {end === "unrepresentable" ? (
             <p><strong>{t.tripSkeleton.end}</strong> {t.tripSkeleton.unsupportedEndDate}</p>
           ) : end ? (
-            <p><strong>{t.tripSkeleton.end}</strong> {localEndpoint(end, placesById, locale, t.tripSkeleton)}</p>
+            <p><strong>{t.tripSkeleton.end}</strong> {localEndpoint(end, placesById, t.tripSkeleton)}</p>
           ) : null}
         </div>
         <ParticipantSummary item={item} />
@@ -751,7 +740,7 @@ export function TripSkeletonWorkspace({
                         <strong>{t.tripSkeleton.arrival}</strong>{" "}
                         {arrivalItems.length > 0
                           ? arrivalItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title}・{localEndpoint(endpoint, placesById, locale, t.tripSkeleton)}</span>
+                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
                             ))
                           : t.tripSkeleton.noArrival}
                       </li>
@@ -759,7 +748,7 @@ export function TripSkeletonWorkspace({
                         <strong>{t.tripSkeleton.luggageAndCheckIn}</strong>{" "}
                         {checkInItems.length > 0
                           ? checkInItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title}・{localEndpoint(endpoint, placesById, locale, t.tripSkeleton)}</span>
+                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
                             ))
                           : t.tripSkeleton.noCheckIn}
                       </li>
@@ -767,7 +756,7 @@ export function TripSkeletonWorkspace({
                         <strong>{t.tripSkeleton.remainingTime}</strong>{" "}
                         {usableTimeItems.length > 0
                           ? usableTimeItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title}・{localEndpoint(endpoint, placesById, locale, t.tripSkeleton)}</span>
+                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
                             ))
                           : t.tripSkeleton.noFreeTime}
                       </li>
@@ -782,7 +771,7 @@ export function TripSkeletonWorkspace({
                         <strong>{t.tripSkeleton.checkoutAndLuggage}</strong>{" "}
                         {checkOutItems.length > 0
                           ? checkOutItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title}・{localEndpoint(endpoint, placesById, locale, t.tripSkeleton)}</span>
+                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
                             ))
                           : t.tripSkeleton.noCheckout}
                       </li>
@@ -790,7 +779,7 @@ export function TripSkeletonWorkspace({
                         <strong>{t.tripSkeleton.transferAndDeparture}</strong>{" "}
                         {departureItems.length > 0
                           ? departureItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title}・{localEndpoint(endpoint, placesById, locale, t.tripSkeleton)}</span>
+                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
                             ))
                           : t.tripSkeleton.noDeparture}
                       </li>
