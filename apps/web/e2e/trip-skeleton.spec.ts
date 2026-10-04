@@ -248,7 +248,7 @@ async function createPlace(
   await dialog.getByRole("button", { name: "儲存地點" }).click();
   await expect(dialog).toHaveCount(0);
   await expect(
-    page.getByRole("region", { name: "地點" }).getByRole("heading", { name: input.name }),
+    page.getByRole("region", { name: "地點", exact: true }).getByRole("heading", { name: input.name }),
   ).toBeVisible();
 }
 
@@ -1001,7 +1001,7 @@ test("activity participants persist exact subsets, history, times, and concurren
   await unlockDialog.getByRole("button", { name: "解鎖固定行程" }).click();
   await expect(betaCard.getByRole("button", { name: "編輯「乙」" })).toBeVisible();
 
-  const membersPanel = page.getByRole("heading", { name: "成員" }).locator("..");
+  const membersPanel = page.getByRole("heading", { name: "成員", exact: true }).locator("..");
   const memberARow = membersPanel.getByRole("listitem").filter({ hasText: participantA });
   await memberARow.getByRole("button", { name: "移除" }).click();
   await expect(memberARow).toHaveCount(0);
