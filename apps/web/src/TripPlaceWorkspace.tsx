@@ -518,7 +518,8 @@ export function TripPlaceWorkspace({
       </div>
 
       {message ? <p className="mt-4 rounded-xl bg-surface-subtle p-4" role="alert">{message}</p> : null}
-      {loading ? <p className="mt-6" role="status">Loading shared wishlist…</p> : null}
+      {/* A reload keeps the list in place; an extra line above it would push the page down. */}
+      {loading && places.length === 0 ? <p className="mt-6" role="status">Loading shared wishlist…</p> : null}
       {!loading && places.length === 0 ? <p className="mt-6 rounded-xl border border-dashed border-ink/20 p-6 text-center text-muted-foreground">No wishlist places yet. Add a Google Maps link, search, or manual place.</p> : null}
 
       <div className="mt-6 grid gap-5 xl:grid-cols-2">

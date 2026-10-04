@@ -2,13 +2,10 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from "react"
 import {
   parseDayTimetableResponse,
   parseDayWindowResponse,
-  type DayLegDto,
   type DayTimetableDto,
   type DayTimetableOrder,
   type DayTimetableResponse,
-  type DayTimetableRowDto,
   type DayWindowResponse,
-  type UnscheduledReason,
 } from "@along-the-way/contracts/day-plans";
 
 import { Button } from "@/components/ui/button";
@@ -20,6 +17,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { clock, loadLabels, reasonLabels, span, TimetableRow } from "./TimetableView";
 
 type JsonRequest = <T>(url: string, options?: RequestInit & { parse?: (value: unknown) => unknown }) => Promise<T>;
 
@@ -29,107 +27,9 @@ export interface PlannedDay {
   label: string;
 }
 
-const reasonLabels: Record<UnscheduledReason, string> = {
-  closed_that_day: "Closed that day",
-  temporarily_closed: "Temporarily closed",
-  permanently_closed: "Permanently closed",
-  closes_too_early: "Closes before the visit can end",
-  not_enough_time: "Not enough time",
-  travel_unknown: "Travel time unknown",
-  no_location: "No map location",
-  cannot_return_to_lodging: "Can't get back to the lodging in time",
-};
-
-const loadLabels: Record<DayTimetableDto["load"]["level"], string> = {
-  relaxed: "Relaxed",
-  balanced: "Balanced",
-  packed: "Packed",
-};
-
-function clock(minute: number) {
-  return `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
-}
-
 function minuteOf(value: string) {
   const match = /^(\d{2}):(\d{2})$/.exec(value);
   return match ? Number(match[1]) * 60 + Number(match[2]) : null;
-}
-
-function span(minutes: number) {
-  const hours = Math.floor(minutes / 60);
-  const rest = minutes % 60;
-  return hours === 0 ? `${rest} min` : rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
-}
-
-function legSummary(leg: DayLegDto) {
-  if (leg.mode === null || leg.durationMinutes === null) return "Travel time unavailable";
-  if (leg.mode === "walking") {
-    // Walking is only chosen past 15 minutes when no train time is known.
-    return `Walk ${leg.durationMinutes} min${leg.transitMinutes === null && leg.durationMinutes > 15 ? " · train time unavailable" : ""}`;
-  }
-  const walk = leg.walkingMinutes === null ? "" : ` · walking ${leg.walkingMinutes} min`;
-  return `Train ${leg.durationMinutes} min${leg.estimated ? " (average)" : ""}${walk}`;
-}
-
-function TimetableRow({ row }: { row: DayTimetableRowDto }) {
-  const travel = row.kind !== "start" && row.travel
-    ? <p className="text-sm text-muted-foreground">↓ {legSummary(row.travel)}</p>
-    : null;
-  switch (row.kind) {
-    case "start":
-      return (
-        <li className="grid grid-cols-[6.5rem_1fr] gap-x-3">
-          <span className="font-mono font-bold">{clock(row.departMinute)}</span>
-          <span className="font-semibold">Leave {row.name}</span>
-        </li>
-      );
-    case "visit":
-      return (
-        <li className="grid grid-cols-[6.5rem_1fr] gap-x-3" data-trip-place-id={row.tripPlaceId}>
-          <span />
-          <div>
-            {travel}
-            {row.waitMinutes > 0 ? (
-              <p className="text-sm text-muted-foreground">Arrive {clock(row.arriveMinute)} · wait {row.waitMinutes} min for opening</p>
-            ) : null}
-          </div>
-          <span className="font-mono font-bold">{clock(row.startMinute)}–{clock(row.endMinute)}</span>
-          <div>
-            <p className="font-semibold">{row.name}</p>
-            <p className="text-sm text-muted-foreground">
-              Stay {row.stayMinutes} min{row.stayEstimated ? " (estimate)" : ""}
-              {" · "}
-              {row.hours === "listed" ? "Open then per Google · check last entry yourself" : "Opening hours unknown"}
-            </p>
-          </div>
-        </li>
-      );
-    case "fixed":
-      return (
-        <li className="grid grid-cols-[6.5rem_1fr] gap-x-3" data-item-id={row.itemId}>
-          <span />
-          <div>{travel}</div>
-          <span className="font-mono font-bold">
-            {row.startsBeforeDay ? "…" : clock(row.startMinute)}–{row.endsAfterDay ? "…" : clock(row.endMinute)}
-          </span>
-          <div className="rounded-lg border border-accent/40 px-2 py-1">
-            <p className="font-semibold">{row.title}</p>
-            <p className="text-sm text-muted-foreground">
-              Fixed time, not moved{row.bufferMinutes > 0 ? ` · arrive ${row.bufferMinutes} min early` : ""}
-            </p>
-          </div>
-        </li>
-      );
-    case "return":
-      return (
-        <li className="grid grid-cols-[6.5rem_1fr] gap-x-3">
-          <span />
-          <div>{travel}</div>
-          <span className="font-mono font-bold">{clock(row.arriveMinute)}</span>
-          <span className="font-semibold">Back at {row.name}</span>
-        </li>
-      );
-  }
 }
 
 /** A draft timetable for one day. Only the day's hours and an explicitly used order are saved. */

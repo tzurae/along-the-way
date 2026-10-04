@@ -157,6 +157,39 @@ describe("single-day timetable", () => {
     expect(result.load.busyMinutes).toBe(8 * 60 + 5 + 60);
   });
 
+  it("allows an estimated 30 minutes each way around a fixed item without a map location", async () => {
+    const dinner: TimetableBlock = {
+      itemId: "dinner",
+      title: "Dinner with Ken",
+      itemType: "meal",
+      startMinute: 18 * 60,
+      endMinute: 19 * 60 + 30,
+      startsBeforeDay: false,
+      endsAfterDay: false,
+      startPointId: null,
+      endPointId: null,
+      bufferMinutes: 0,
+    };
+    const result = await scheduleDay(input({
+      window: { startMinute: 15 * 60, endMinute: 22 * 60 },
+      stops: [stop("a"), stop("b"), stop("c")],
+      blocks: [dinner],
+    }));
+
+    // b ends 17:10 and needs 30 minutes to dinner; c would end 18:20, so it goes after dinner.
+    expect(result.rows.map((row) => row.kind === "fixed" ? row.itemId : row.kind === "visit" ? row.tripPlaceId : row.kind))
+      .toEqual(["a", "b", "dinner", "c"]);
+    expect(result.rows[2]).toMatchObject({
+      startMinute: 18 * 60,
+      travel: { fromName: "b", toName: "Dinner with Ken", durationMinutes: 30, estimated: true, mode: null },
+    });
+    expect(result.rows[3]).toMatchObject({
+      arriveMinute: 20 * 60,
+      travel: { fromName: "Dinner with Ken", toName: "c", durationMinutes: 30, estimated: true },
+    });
+    expect(result.unscheduled).toEqual([]);
+  });
+
   it("rates the day by the share of the window spent staying and travelling", async () => {
     const level = async (stay: number) => (await scheduleDay(input({
       window: { startMinute: 600, endMinute: 700 },

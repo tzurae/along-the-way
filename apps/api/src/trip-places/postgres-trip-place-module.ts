@@ -13,8 +13,10 @@ import {
 } from "@along-the-way/contracts/trip-places";
 import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 import { sql, type Kysely, type Transaction } from "kysely";
+import type { ApplyTripPlanInput } from "@along-the-way/contracts/day-plans";
 
 import type { AlongTheWayDatabase } from "../database/database";
+import { tripPlanBasis } from "../planning/trip-plan-basis";
 import { AppError } from "../private-trips/private-trip-module";
 import {
   isoTimestamp,
@@ -708,40 +710,147 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       }
       const updatedAt = this.now();
       for (const assignment of assignments) {
-        await transaction.deleteFrom("trip_place_desired_days")
-          .where("trip_place_id", "=", assignment.tripPlaceId)
-          .execute();
-        if (assignment.tripDayId !== null) {
-          await transaction.insertInto("trip_place_desired_days").values({
-            trip_id: tripId,
-            trip_place_id: assignment.tripPlaceId,
-            trip_day_id: assignment.tripDayId,
-          }).execute();
-          await transaction.updateTable("trip_place_day_assignments").set({
-            assigned_by: userId,
-            assigned_at: updatedAt,
-          }).where("trip_place_id", "=", assignment.tripPlaceId).execute();
-        }
-        await transaction.updateTable("trip_places").set({
-          version: sql`version + 1`,
-          updated_at: updatedAt,
-        }).where("id", "=", assignment.tripPlaceId).execute();
-        await recordEvent(transaction, {
-          tripId,
-          actorId: userId,
-          eventType: assignment.tripDayId === null
-            ? "trip_place.day_unassigned"
-            : "trip_place.day_assigned",
-          targetType: "trip_place",
-          targetId: assignment.tripPlaceId,
-          summary: assignment.tripDayId === null
-            ? "Removed a place from its planned day"
-            : "Assigned a place to a planned day",
-        });
+        await this.writeDayAssignment(transaction, userId, tripId, assignment.tripPlaceId, assignment.tripDayId, updatedAt);
       }
       const response = await this.readList(transaction, userId, tripId);
       await remember(transaction, userId, operation, key, { tripPlaces: response });
       return response;
+    });
+  }
+
+  async addPlacesToDays(
+    userId: string,
+    tripId: string,
+    rawKey: string,
+    input: ApplyTripPlanInput,
+  ) {
+    if (typeof input.basis !== "string" || !/^[0-9a-f]{64}$/.test(input.basis)) {
+      throw new AppError("validation_error", "basis is invalid");
+    }
+    if (!Array.isArray(input.days) || input.days.length === 0 || input.days.length > 366) {
+      throw new AppError("validation_error", "days must contain between 1 and 366 days");
+    }
+    const days = input.days.map((day) => {
+      const ids = Array.isArray(day?.orderedTripPlaceIds) ? day.orderedTripPlaceIds : null;
+      if (!ids || ids.length === 0 || ids.length > 100) {
+        throw new AppError("validation_error", "orderedTripPlaceIds must contain 1 to 100 places");
+      }
+      return {
+        tripDayId: uuid(day.tripDayId, "tripDayId").toLowerCase(),
+        orderedTripPlaceIds: ids.map((id) => uuid(id, "orderedTripPlaceIds").toLowerCase()),
+      };
+    });
+    const dayIds = days.map((day) => day.tripDayId);
+    const placeIds = days.flatMap((day) => day.orderedTripPlaceIds);
+    if (new Set(dayIds).size !== dayIds.length || new Set(placeIds).size !== placeIds.length) {
+      throw new AppError("validation_error", "A day or place can appear only once");
+    }
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `tp:trip-plan:${tripId}`;
+    return this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return replayedTripPlaces(replay);
+      await this.lockTripContent(transaction, tripId);
+      await this.reconcileLegacyPlaces(transaction, tripId);
+      // Lock the days' hours and places too: their writers (#43 order, #46 hours) do not lock the trip.
+      const validDays = await transaction.selectFrom("trip_days").select("id")
+        .where("trip_id", "=", tripId).where("id", "in", dayIds).orderBy("id").forUpdate().execute();
+      if (validDays.length !== dayIds.length) {
+        throw new AppError("validation_error", "The plan must use days from this trip");
+      }
+      const current = await transaction.selectFrom("trip_place_day_assignments")
+        .select(["trip_place_id", "trip_day_id"])
+        .where("trip_id", "=", tripId)
+        .where((where) => where.or([where("trip_day_id", "in", dayIds), where("trip_place_id", "in", placeIds)]))
+        .orderBy("trip_place_id").forUpdate().execute();
+      if (await tripPlanBasis(transaction, tripId) !== input.basis) {
+        throw new AppError("conflict", "The trip changed since this plan was made; plan again", 409);
+      }
+      const places = await transaction.selectFrom("trip_places").select(["id", "legacy_place_id"])
+        .where("trip_id", "=", tripId).where("id", "in", placeIds).where("archived_at", "is", null)
+        .orderBy("id").forUpdate().execute();
+      if (places.length !== placeIds.length) {
+        throw new AppError("trip_place_not_found", "Trip place not found", 404);
+      }
+      const assignedDay = new Map(current.map((row) => [row.trip_place_id, row.trip_day_id]));
+      const added: Array<{ tripPlaceId: string; tripDayId: string }> = [];
+      for (const day of days) {
+        const listed = new Set(day.orderedTripPlaceIds);
+        const conflicting = current.some((row) => row.trip_day_id === day.tripDayId && !listed.has(row.trip_place_id))
+          || day.orderedTripPlaceIds.some((id) => assignedDay.has(id) && assignedDay.get(id) !== day.tripDayId);
+        if (conflicting) {
+          throw new AppError("conflict", "The plan's days no longer match; plan again", 409);
+        }
+        for (const id of day.orderedTripPlaceIds) {
+          if (!assignedDay.has(id)) added.push({ tripPlaceId: id, tripDayId: day.tripDayId });
+        }
+      }
+      const legacyById = new Map(places.map((place) => [place.id, place.legacy_place_id]));
+      if (added.length > 0) {
+        const scheduled = await transaction.selectFrom("itinerary_endpoints").select("place_id")
+          .where("trip_id", "=", tripId)
+          .where("place_id", "in", added.map((entry) => legacyById.get(entry.tripPlaceId)!))
+          .executeTakeFirst();
+        if (scheduled) {
+          throw new AppError("conflict", "A place in the plan is already on the timed itinerary", 409);
+        }
+      }
+      const updatedAt = this.now();
+      for (const entry of added) {
+        await this.writeDayAssignment(transaction, userId, tripId, entry.tripPlaceId, entry.tripDayId, updatedAt);
+      }
+      // Write every position so existing places keep their order ahead of the new ones.
+      for (const day of days) {
+        await transaction.updateTable("trip_place_day_assignments").set({ day_position: null })
+          .where("trip_id", "=", tripId).where("trip_day_id", "=", day.tripDayId).execute();
+        for (const [position, id] of day.orderedTripPlaceIds.entries()) {
+          await transaction.updateTable("trip_place_day_assignments").set({ day_position: position })
+            .where("trip_place_id", "=", id).execute();
+        }
+      }
+      const response = await this.readList(transaction, userId, tripId);
+      await remember(transaction, userId, operation, key, { tripPlaces: response });
+      return response;
+    });
+  }
+
+  /** Puts one place on a day, or takes it off its day when `tripDayId` is null. */
+  private async writeDayAssignment(
+    transaction: Transaction<AlongTheWayDatabase>,
+    userId: string,
+    tripId: string,
+    tripPlaceId: string,
+    tripDayId: string | null,
+    updatedAt: Date,
+  ) {
+    // The 007 synchronization trigger turns the desired-day row into the day assignment.
+    await transaction.deleteFrom("trip_place_desired_days")
+      .where("trip_place_id", "=", tripPlaceId)
+      .execute();
+    if (tripDayId !== null) {
+      await transaction.insertInto("trip_place_desired_days").values({
+        trip_id: tripId,
+        trip_place_id: tripPlaceId,
+        trip_day_id: tripDayId,
+      }).execute();
+      await transaction.updateTable("trip_place_day_assignments").set({
+        assigned_by: userId,
+        assigned_at: updatedAt,
+      }).where("trip_place_id", "=", tripPlaceId).execute();
+    }
+    await transaction.updateTable("trip_places").set({
+      version: sql`version + 1`,
+      updated_at: updatedAt,
+    }).where("id", "=", tripPlaceId).execute();
+    await recordEvent(transaction, {
+      tripId,
+      actorId: userId,
+      eventType: tripDayId === null ? "trip_place.day_unassigned" : "trip_place.day_assigned",
+      targetType: "trip_place",
+      targetId: tripPlaceId,
+      summary: tripDayId === null ? "Removed a place from its planned day" : "Assigned a place to a planned day",
     });
   }
 

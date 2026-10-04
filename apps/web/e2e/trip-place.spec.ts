@@ -310,13 +310,27 @@ test("members keep independent wishlist contributions and preferences on desktop
   const firstDayPlace = firstDay.getByRole("article", {
     name: "Planned wishlist place Cross-surface Cafe",
   });
-  // Removing reloads the timeline, which recreates (and collapses) every day picker.
+  // Removing reloads the timeline in place. It must never leave the page: the page would get
+  // shorter for a moment and throw the reader's scroll position far up.
+  await ownerPage.evaluate(() => {
+    const probe = window as unknown as { timelineLeft?: boolean; timelineWatch?: MutationObserver };
+    probe.timelineLeft = false;
+    probe.timelineWatch = new MutationObserver(() => {
+      if (!document.querySelector(".timeline-grid")) probe.timelineLeft = true;
+    });
+    probe.timelineWatch.observe(document.body, { childList: true, subtree: true });
+  });
   const timelineReloaded = ownerPage.waitForResponse((response) =>
     response.request().method() === "GET" && new URL(response.url()).pathname.endsWith("/skeleton")
   );
   await firstDayPlace.getByRole("button", { name: "Remove from this day" }).click();
   await timelineReloaded;
   await expect(firstDayPlace).toHaveCount(0);
+  expect(await ownerPage.evaluate(() => {
+    const probe = window as unknown as { timelineLeft?: boolean; timelineWatch?: MutationObserver };
+    probe.timelineWatch?.disconnect();
+    return probe.timelineLeft;
+  })).toBe(false);
   const secondPicker = secondDay.locator("details").filter({ hasText: "Add from shared wishlist" });
   const freedPlace = secondDay.getByRole("checkbox", { name: /Cross-surface Cafe/ });
   await expect(async () => {

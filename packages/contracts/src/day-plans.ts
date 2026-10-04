@@ -117,6 +117,43 @@ export interface DayWindowResponse {
   window: DayWindowDto;
 }
 
+/** Why a wishlist place is not in a trip plan. */
+export type TripPlanReason = UnscheduledReason | "closed_all_trip_days" | "no_day_fits";
+
+export interface TripPlanUnplacedDto {
+  tripPlaceId: string;
+  name: string;
+  reason: TripPlanReason;
+  /** The day whose timetable could not fit the place; null when no day was chosen. */
+  date: string | null;
+}
+
+export interface TripPlanDayDto {
+  /** The day with its new places after the existing ones; `unscheduled` lists existing places only. */
+  timetable: DayTimetableDto;
+  addedTripPlaceIds: string[];
+  /** Every place on the day once the plan is used, in order: existing ones, then new ones. */
+  orderedTripPlaceIds: string[];
+}
+
+/** A draft that adds unplanned wishlist places to days; never stored. */
+export interface TripPlanDto {
+  /** Fingerprint of the data the plan used; using the plan fails once that data changes. */
+  basis: string;
+  /** Days that receive at least one place. */
+  days: TripPlanDayDto[];
+  unplaced: TripPlanUnplacedDto[];
+}
+
+export interface TripPlanResponse {
+  plan: TripPlanDto;
+}
+
+export interface ApplyTripPlanInput {
+  basis: string;
+  days: Array<{ tripDayId: string; orderedTripPlaceIds: string[] }>;
+}
+
 function invalid(): never {
   throw new Error("Invalid day plan response");
 }
@@ -233,8 +270,8 @@ function timetableRow(value: unknown): DayTimetableRowDto {
   }
 }
 
-export function parseDayTimetableResponse(value: unknown): DayTimetableResponse {
-  const row = record(record(value).timetable);
+function timetable(value: unknown): DayTimetableDto {
+  const row = record(value);
   const lodging = row.lodging === null
     ? null
     : (() => {
@@ -243,27 +280,55 @@ export function parseDayTimetableResponse(value: unknown): DayTimetableResponse 
       })();
   const load = record(row.load);
   return {
-    timetable: {
-      dayId: text(row.dayId),
-      date: text(row.date),
-      window: window(row.window),
-      order: oneOf(row.order, ["current", "suggested"] as const),
-      orderedTripPlaceIds: list(row.orderedTripPlaceIds, text),
-      lodging,
-      rows: list(row.rows, timetableRow),
-      unscheduled: list(row.unscheduled, (entry) => {
+    dayId: text(row.dayId),
+    date: text(row.date),
+    window: window(row.window),
+    order: oneOf(row.order, ["current", "suggested"] as const),
+    orderedTripPlaceIds: list(row.orderedTripPlaceIds, text),
+    lodging,
+    rows: list(row.rows, timetableRow),
+    unscheduled: list(row.unscheduled, (entry) => {
+      const place = record(entry);
+      return {
+        tripPlaceId: text(place.tripPlaceId),
+        name: text(place.name),
+        reason: oneOf(place.reason, REASONS),
+      };
+    }),
+    load: {
+      busyMinutes: integer(load.busyMinutes),
+      windowMinutes: integer(load.windowMinutes),
+      level: oneOf(load.level, ["relaxed", "balanced", "packed"] as const),
+    },
+  };
+}
+
+export function parseDayTimetableResponse(value: unknown): DayTimetableResponse {
+  return { timetable: timetable(record(value).timetable) };
+}
+
+export function parseTripPlanResponse(value: unknown): TripPlanResponse {
+  const row = record(record(value).plan);
+  return {
+    plan: {
+      basis: text(row.basis),
+      days: list(row.days, (entry) => {
+        const day = record(entry);
+        return {
+          timetable: timetable(day.timetable),
+          addedTripPlaceIds: list(day.addedTripPlaceIds, text),
+          orderedTripPlaceIds: list(day.orderedTripPlaceIds, text),
+        };
+      }),
+      unplaced: list(row.unplaced, (entry) => {
         const place = record(entry);
         return {
           tripPlaceId: text(place.tripPlaceId),
           name: text(place.name),
-          reason: oneOf(place.reason, REASONS),
+          reason: oneOf(place.reason, [...REASONS, "closed_all_trip_days", "no_day_fits"] as const),
+          date: nullableText(place.date),
         };
       }),
-      load: {
-        busyMinutes: integer(load.busyMinutes),
-        windowMinutes: integer(load.windowMinutes),
-        level: oneOf(load.level, ["relaxed", "balanced", "packed"] as const),
-      },
     },
   };
 }

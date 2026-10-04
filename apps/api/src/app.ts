@@ -638,6 +638,41 @@ export function createApp({
   );
 
   app.post(
+    "/api/trips/:tripId/trip-plan",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const plan = await dayPlans.tripPlan(user.id, uuidParam(context, "tripId"));
+      return context.json({ plan });
+    },
+  );
+
+  app.post(
+    "/api/trips/:tripId/trip-plan/apply",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const body = await jsonBody(context);
+      const assigned = await tripPlaces.addPlacesToDays(
+        user.id,
+        uuidParam(context, "tripId"),
+        idempotencyKey(context),
+        {
+          basis: stringField(body, "basis"),
+          days: arrayField(body, "days").map((value) => {
+            const day = objectBody(value);
+            return {
+              tripDayId: stringField(day, "tripDayId"),
+              orderedTripPlaceIds: stringArrayField(day, "orderedTripPlaceIds"),
+            };
+          }),
+        },
+      );
+      return context.json({ tripPlaces: assigned });
+    },
+  );
+
+  app.post(
     "/api/trips/:tripId/days/:dayId/timetable",
     async (context) => {
       const { user } = await authenticated(context);
