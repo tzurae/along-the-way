@@ -1,4 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Temporal } from "@js-temporal/polyfill";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import {
@@ -49,6 +50,7 @@ interface TripSkeletonWorkspaceProps {
   onTripChanged(): Promise<void>;
   placesRevision: number;
   onPlacesChanged(): void;
+  recentChangesContainer: HTMLElement | null;
 }
 
 
@@ -262,6 +264,7 @@ export function TripSkeletonWorkspace({
   onTripChanged,
   placesRevision,
   onPlacesChanged,
+  recentChangesContainer,
 }: TripSkeletonWorkspaceProps) {
   const { t, locale } = useI18n();
   const [skeleton, setSkeleton] = useState<TripSkeletonDto | null>(null);
@@ -561,7 +564,13 @@ export function TripSkeletonWorkspace({
   }
 
   if (!skeleton) {
-    return <section className="trip-skeleton-shell"><p role={error ? "alert" : "status"}>{error || t.tripSkeleton.loadingItinerary}</p></section>;
+    const status = <section className="trip-skeleton-shell"><p role={error ? "alert" : "status"}>{error || t.tripSkeleton.loadingItinerary}</p></section>;
+    return (
+      <>
+        {status}
+        {recentChangesContainer ? createPortal(status, recentChangesContainer) : null}
+      </>
+    );
   }
 
   const tripInformationItems = skeleton.tripInformationItemIds
@@ -617,8 +626,26 @@ export function TripSkeletonWorkspace({
     (constraint) => constraint.status !== "confirmed",
   );
 
+  // Keep one skeleton request/state owner while placing its live event list in the sibling tab panel.
+  const recentChanges = (
+    <section className="trip-skeleton-shell" aria-labelledby="activity-heading">
+      <h3 id="activity-heading" className="section-heading"><Clock3 /> {t.tripSkeleton.recentChanges}</h3>
+      {skeleton.events.length === 0 ? <p className="empty-state">{t.tripSkeleton.noRecentChanges}</p> : (
+        <ol className="activity-list">
+          {skeleton.events.map((event) => (
+            <li key={event.id}>
+              <p className="font-semibold">{t.tripSkeleton.events[event.eventType] ?? event.summary}</p>
+              <p className="text-xs text-muted-foreground">{new Date(event.createdAt).toLocaleString(locale)}</p>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+
   return (
-    <section className="trip-skeleton-shell" aria-labelledby="itinerary-heading">
+    <>
+      <section className="trip-skeleton-shell" aria-labelledby="itinerary-heading">
       <div className="workspace-heading">
         <div>
           <p className="eyebrow">{t.tripSkeleton.eyebrow}</p>
@@ -853,19 +880,6 @@ export function TripSkeletonWorkspace({
         </div>
       </section>
 
-      <section className="mt-10" aria-labelledby="activity-heading">
-        <h3 id="activity-heading" className="section-heading"><Clock3 /> {t.tripSkeleton.recentChanges}</h3>
-        {skeleton.events.length === 0 ? <p className="empty-state">{t.tripSkeleton.noRecentChanges}</p> : (
-          <ol className="activity-list">
-            {skeleton.events.map((event) => (
-              <li key={event.id}>
-                <p className="font-semibold">{t.tripSkeleton.events[event.eventType] ?? event.summary}</p>
-                <p className="text-xs text-muted-foreground">{new Date(event.createdAt).toLocaleString(locale)}</p>
-              </li>
-            ))}
-          </ol>
-        )}
-      </section>
 
       <Dialog open={unlockingItem !== null} onOpenChange={(open) => { if (!open) setUnlockingItem(null); }}>
         <DialogContent>
@@ -899,6 +913,8 @@ export function TripSkeletonWorkspace({
           onPlacesChanged();
         }}
       />
-    </section>
+      </section>
+      {recentChangesContainer ? createPortal(recentChanges, recentChangesContainer) : null}
+    </>
   );
 }

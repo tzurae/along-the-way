@@ -98,6 +98,10 @@ async function createTrip(page: Page, name: string) {
   await expect(page.getByRole("heading", { name })).toBeVisible();
 }
 
+async function openTab(page: Page, name: "AI 找地點" | "想去清單") {
+  await page.getByRole("tab", { name, exact: true }).click();
+}
+
 async function cleanup() {
   await executeDatabase("delete from trips where name like 'Discovery browser %'; delete from users where email like 'discovery-%@example.test';");
 }
@@ -115,6 +119,7 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
 
   await signIn(page, request, email);
   await createTrip(page, tripName);
+  await openTab(page, "AI 找地點");
   await expect(page.getByRole("heading", { name: "讓 AI 尋找選項並說明原因" })).toBeVisible();
   await expect(page.getByText("伺服器設定 AI 服務金鑰與模型後，才能使用 AI 研究。現有旅程資料仍可使用。", { exact: false })).toBeVisible();
   const briefText = "Food markets and gardens at an unhurried pace; avoid long walking days.";
@@ -155,6 +160,7 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   `);
 
   await page.reload();
+  await openTab(page, "AI 找地點");
   const proposal = page.getByRole("article", { name: "AI 推薦：Nishiki Market" });
   await expect(proposal).toBeVisible();
   await expect(proposal.getByText("A compact food-market stop matching the trip focus.")).toBeVisible();
@@ -164,6 +170,7 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
     .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
   await proposal.getByRole("button", { name: "加入想去清單" }).click();
   await expect(proposal.getByText("已加入想去清單")).toBeVisible();
+  await openTab(page, "想去清單");
 
   const wishlist = page.getByRole("region", { name: "共享地點想去清單" });
   await expect(wishlist.getByRole("heading", { name: "Nishiki Market" })).toBeVisible();
@@ -181,6 +188,7 @@ test("research and feedback explain missing AI configuration without sending any
   await executeDatabase(`insert into users (email, display_name, status) values ('${email}', 'Discovery owner', 'active') on conflict (email) do nothing;`);
   await signIn(page, request, email);
   await createTrip(page, tripName);
+  await openTab(page, "AI 找地點");
   await expect(page.getByText("伺服器設定 AI 服務金鑰與模型後，才能使用 AI 研究。現有旅程資料仍可使用。", { exact: false })).toBeVisible();
 
   const discoveryWrites: string[] = [];
@@ -209,6 +217,7 @@ test("research and feedback explain missing AI configuration without sending any
   expect(discoveryWrites).toEqual([]);
   await page.reload();
   await page.getByRole("button", { name: new RegExp(tripName) }).click();
+  await openTab(page, "AI 找地點");
   await expect(page.getByLabel("AI 規劃時該考量什麼？")).toHaveValue("");
 });
 
@@ -249,6 +258,7 @@ test("one Find candidates action saves changed text, researches the saved versio
   });
   await page.reload();
   await page.getByRole("button", { name: new RegExp(tripName) }).click();
+  await openTab(page, "AI 找地點");
 
   const brief = page.getByRole("region", { name: "旅程研究需求" });
   const text = brief.getByLabel("AI 規劃時該考量什麼？");
@@ -277,6 +287,7 @@ test("one Find candidates action saves changed text, researches the saved versio
   available = { modelAvailable: true, placeProviderAvailable: false };
   await page.reload();
   await page.getByRole("button", { name: new RegExp(tripName) }).click();
+  await openTab(page, "AI 找地點");
   await brief.getByRole("button", { name: "尋找候選地點" }).click();
   await expect(brief.getByRole("alert")).toContainText("Google Maps 金鑰");
   await expect(brief.getByRole("alert")).not.toContainText("AI 服務金鑰與模型");
@@ -294,6 +305,7 @@ test("one Find candidates action saves changed text, researches the saved versio
   available = { modelAvailable: false, placeProviderAvailable: true };
   await page.reload();
   await page.getByRole("button", { name: new RegExp(tripName) }).click();
+  await openTab(page, "AI 找地點");
   const research = page.getByRole("region", { name: "讓 AI 尋找選項並說明原因" });
   await research.getByRole("button", { name: "重新研究" }).click();
   await expect(research.getByRole("alert").first()).toContainText("AI 服務金鑰與模型");

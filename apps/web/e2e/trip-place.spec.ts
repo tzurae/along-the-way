@@ -99,10 +99,15 @@ async function createTrip(page: Page, name: string) {
   await expect(page.getByRole("heading", { name })).toBeVisible();
 }
 
+async function openTab(page: Page, name: "想去清單" | "行程") {
+  await page.getByRole("tab", { name, exact: true }).click();
+}
+
 async function addManualPlace(
   page: Page,
   input: { name: string; address?: string; note: string },
 ) {
+  await openTab(page, "想去清單");
   await page.getByRole("button", { name: "新增想去地點" }).click();
   const dialog = page.getByRole("dialog", { name: "新增地點" });
   await dialog.getByRole("tab", { name: "手動輸入" }).click();
@@ -118,6 +123,7 @@ async function addSkeletonPlace(
   page: Page,
   input: { name: string; address: string; note: string },
 ) {
+  await openTab(page, "行程");
   await page.getByRole("button", { name: "新增地點", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "新增地點" });
   await dialog.getByLabel("地點名稱").fill(input.name);
@@ -132,6 +138,7 @@ async function addTimedActivity(
   page: Page,
   input: { title: string; place: string; localDateTime: string },
 ) {
+  await openTab(page, "行程");
   await page.getByRole("button", { name: "新增固定行程" }).click();
   const dialog = page.getByRole("dialog", { name: "新增固定行程" });
   await dialog.getByLabel("類型").selectOption("activity");
@@ -205,12 +212,14 @@ test("members keep independent wishlist contributions and preferences on desktop
     const page = await context.newPage();
     await signIn(page, request, memberEmails[index]!);
     await page.getByRole("button", { name: new RegExp(tripName) }).click();
+    await openTab(page, "想去清單");
     await expect(page.getByRole("heading", { name: "共享地點想去清單" })).toBeVisible();
     await setPreference(page, "Family Cafe", preference!);
     await context.close();
   }
 
   await ownerPage.reload();
+  await openTab(ownerPage, "想去清單");
   const card = ownerPage.locator("article").filter({ has: ownerPage.getByRole("heading", { name: "Family Cafe" }) });
   await expect(card.getByText("偏好衝突：")).toBeVisible();
   const preferenceList = card.getByRole("list").first();
@@ -233,16 +242,20 @@ test("members keep independent wishlist contributions and preferences on desktop
     address: "Cross-surface north",
     note: "Wishlist-side source",
   });
+  await openTab(ownerPage, "行程");
   await expect(ownerPage.getByRole("button", { name: "編輯「Cross-surface Cafe」" })).toHaveCount(1);
   await addSkeletonPlace(ownerPage, {
     name: "Cross-surface Cafe",
     address: "Cross-surface south",
     note: "Skeleton-side source",
   });
+  await openTab(ownerPage, "想去清單");
   await expect(ownerPage.getByRole("article", {
     name: "Cross-surface Cafe，地址：Cross-surface south",
   })).toBeVisible();
+  await openTab(ownerPage, "行程");
   await expect(ownerPage.getByRole("button", { name: "編輯「Cross-surface Cafe」" })).toHaveCount(2);
+  await openTab(ownerPage, "想去清單");
   const northPlanning = ownerPage.getByRole("article", {
     name: "Cross-surface Cafe，地址：Cross-surface north",
   });
@@ -263,7 +276,9 @@ test("members keep independent wishlist contributions and preferences on desktop
   await expect(crossSurfaceComparison.getByText("Cross-surface north")).toBeVisible();
   await expect(crossSurfaceComparison.getByText("Cross-surface south")).toBeVisible();
   await crossSurfaceComparison.getByRole("button", { name: "合併" }).click();
+  await openTab(ownerPage, "行程");
   await expect(ownerPage.getByRole("button", { name: "編輯「Cross-surface Cafe」" })).toHaveCount(1);
+  await openTab(ownerPage, "想去清單");
   const mergedCard = ownerPage.locator("article").filter({
     has: ownerPage.getByRole("heading", { name: "Cross-surface Cafe" }),
   });
@@ -279,6 +294,7 @@ test("members keep independent wishlist contributions and preferences on desktop
   await expect(mergedNotes).toHaveValue(
     /(?=.*North planning note)(?=.*South planning note)/s,
   );
+  await openTab(ownerPage, "行程");
   await ownerPage.getByRole("button", { name: "編輯「Cross-surface Cafe」" }).click();
   const editMergedDialog = ownerPage.getByRole("dialog", { name: "編輯地點" });
   await expect(editMergedDialog.getByLabel("備註")).toHaveValue(
@@ -287,12 +303,14 @@ test("members keep independent wishlist contributions and preferences on desktop
   await editMergedDialog.getByLabel("地址").fill("Cross-surface merged updated");
   await editMergedDialog.getByRole("button", { name: "儲存地點" }).click();
   await expect(editMergedDialog).toHaveCount(0);
+  await openTab(ownerPage, "想去清單");
   await expect(ownerPage.getByRole("article", {
     name: "Cross-surface Cafe，地址：Cross-surface merged updated",
   })).toBeVisible();
   await expect(ownerPage.locator('input[name="desiredDayIds"]')).toHaveCount(0);
   await expect(ownerPage.locator('input[name="excludedDayIds"]')).toHaveCount(0);
 
+  await openTab(ownerPage, "行程");
   const firstDay = ownerPage.locator('[data-date="2026-11-03"]');
   await firstDay.getByText("從共用想去清單新增").click();
   await firstDay.getByRole("checkbox", { name: /Cross-surface Cafe/ }).check();
@@ -301,7 +319,9 @@ test("members keep independent wishlist contributions and preferences on desktop
     name: "已規劃的想去清單地點：Cross-surface Cafe",
   })).toBeVisible();
   await expect(firstDay.getByText(/1 個已規劃項目・¥1,200/)).toBeVisible();
+  await openTab(ownerPage, "想去清單");
   await expect(mergedCard.getByText("已排在 2026-11-03")).toBeVisible();
+  await openTab(ownerPage, "行程");
 
   // A place planned for one day is not offered to another day until removed there.
   const secondDay = ownerPage.locator('[data-date="2026-11-04"]');
@@ -367,6 +387,7 @@ test("members keep independent wishlist contributions and preferences on desktop
     on conflict (trip_place_id, trip_day_id) do nothing;
   `);
   await ownerPage.reload();
+  await openTab(ownerPage, "行程");
   await expect(secondDay.getByRole("heading", { name: "Cross-surface timed visit" }))
     .toBeVisible();
   await expect(secondDay.getByRole("article", {
@@ -375,6 +396,7 @@ test("members keep independent wishlist contributions and preferences on desktop
   await expect(secondDay.getByText(/1 個已規劃項目・沒有已知費用・1 筆費用未知/))
     .toBeVisible();
 
+  await openTab(ownerPage, "想去清單");
   await ownerPage.getByRole("button", { name: "新增想去地點" }).click();
   const searchDialog = ownerPage.getByRole("dialog", { name: "新增地點" });
   await searchDialog.getByRole("tab", { name: "搜尋" }).click();
@@ -419,6 +441,7 @@ test("manual wishlist intake remains usable on a mobile viewport", async ({ brow
     }
     await route.continue();
   });
+  await openTab(page, "想去清單");
   await page.getByRole("button", { name: "新增想去地點" }).click();
   const retryDialog = page.getByRole("dialog", { name: "新增地點" });
   await retryDialog.getByRole("tab", { name: "手動輸入" }).click();
@@ -495,6 +518,7 @@ test("manual wishlist intake remains usable on a mobile viewport", async ({ brow
   ].entries()) {
     await addManualPlace(page, { name: `Long address place ${index + 1}`, address, note: "Day picker layout" });
   }
+  await openTab(page, "行程");
   const firstDay = page.locator("[data-date]").first();
   await firstDay.getByText("從共用想去清單新增").click();
   const picker = firstDay.getByRole("group", { name: "要新增的想去清單地點" });

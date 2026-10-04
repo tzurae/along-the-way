@@ -39,4 +39,12 @@ export const app = {
   tripSummary: (members: number, days: number) => `${members} 位成員・${days} 天`,
   createFirstTrip: "建立你的第一趟私人旅程。",
   chooseOrCreateTrip: "選擇或建立一趟旅程。",
+  tripSections: "旅程區段",
+  tabs: {
+    overview: "總覽",
+    discovery: "AI 找地點",
+    wishlist: "想去清單",
+    itinerary: "行程",
+    recent: "最近變更",
+  },
 };
