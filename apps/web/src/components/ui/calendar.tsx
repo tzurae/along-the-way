@@ -6,6 +6,8 @@ import {
   type DayButton,
   type Locale,
 } from "react-day-picker"
+// The picker's own locale also translates its button labels, e.g. 前往下個月.
+import { zhTW } from "react-day-picker/locale"
 
 import { Button, buttonVariants } from "@/components/ui/button"
 import { ChevronLeftIcon, ChevronRightIcon, ChevronDownIcon } from "lucide-react"
@@ -16,7 +18,7 @@ function Calendar({
   showOutsideDays = true,
   captionLayout = "label",
   buttonVariant = "ghost",
-  locale,
+  locale = zhTW,
   formatters,
   components,
   ...props

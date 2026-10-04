@@ -65,8 +65,22 @@ export type DayTimetableRowDto =
       endMinute: number;
       startsBeforeDay: boolean;
       endsAfterDay: boolean;
-      /** Confirmed minimum time to arrive before the item starts. */
+      /** Minutes to be there before the item starts. */
       bufferMinutes: number;
+      /** The buffer is a default (for flights), not one a member confirmed. */
+      bufferEstimated: boolean;
+      /** Default minutes after the item ends before anything else, such as entry and luggage after landing. */
+      afterBufferMinutes: number;
+    }
+  | {
+      kind: "luggage";
+      /** `drop` at the new lodging on a moving day; `collect` at the morning's lodging on the last day. */
+      action: "drop" | "collect";
+      name: string;
+      travel: DayLegDto | null;
+      /** Null when the travel there is unknown. */
+      arriveMinute: number | null;
+      leaveMinute: number | null;
     }
   | { kind: "return"; name: string; travel: DayLegDto; arriveMinute: number };
 
@@ -103,7 +117,10 @@ export interface DayTimetableDto {
   order: DayTimetableOrder;
   /** Located places in the order tried; saving the order stores exactly this. */
   orderedTripPlaceIds: string[];
-  lodging: { placeId: string; name: string } | null;
+  /** The morning's lodging, where the day starts; null starts at the first place or the arrival. */
+  startsAt: { placeId: string; name: string } | null;
+  /** That night's lodging, where the day ends; null when there is none. */
+  endsAt: { placeId: string; name: string } | null;
   rows: DayTimetableRowDto[];
   unscheduled: UnscheduledPlaceDto[];
   load: DayLoadDto;
@@ -257,6 +274,17 @@ function timetableRow(value: unknown): DayTimetableRowDto {
         startsBeforeDay: bool(row.startsBeforeDay),
         endsAfterDay: bool(row.endsAfterDay),
         bufferMinutes: integer(row.bufferMinutes),
+        bufferEstimated: bool(row.bufferEstimated),
+        afterBufferMinutes: integer(row.afterBufferMinutes),
+      };
+    case "luggage":
+      return {
+        kind: "luggage",
+        action: oneOf(row.action, ["drop", "collect"] as const),
+        name: text(row.name),
+        travel: nullableLeg(row.travel),
+        arriveMinute: nullableInteger(row.arriveMinute),
+        leaveMinute: nullableInteger(row.leaveMinute),
       };
     case "return":
       return {
@@ -270,14 +298,14 @@ function timetableRow(value: unknown): DayTimetableRowDto {
   }
 }
 
+function placeRef(value: unknown) {
+  if (value === null) return null;
+  const item = record(value);
+  return { placeId: text(item.placeId), name: text(item.name) };
+}
+
 function timetable(value: unknown): DayTimetableDto {
   const row = record(value);
-  const lodging = row.lodging === null
-    ? null
-    : (() => {
-        const item = record(row.lodging);
-        return { placeId: text(item.placeId), name: text(item.name) };
-      })();
   const load = record(row.load);
   return {
     dayId: text(row.dayId),
@@ -285,7 +313,8 @@ function timetable(value: unknown): DayTimetableDto {
     window: window(row.window),
     order: oneOf(row.order, ["current", "suggested"] as const),
     orderedTripPlaceIds: list(row.orderedTripPlaceIds, text),
-    lodging,
+    startsAt: placeRef(row.startsAt),
+    endsAt: placeRef(row.endsAt),
     rows: list(row.rows, timetableRow),
     unscheduled: list(row.unscheduled, (entry) => {
       const place = record(entry);

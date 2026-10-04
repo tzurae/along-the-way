@@ -20,6 +20,7 @@ import {
 import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 
 import { googleMapsPlaceUrl } from "./google-maps";
+import { useI18n, type Messages } from "./i18n";
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -32,33 +33,48 @@ interface TripPlaceWorkspaceProps {
   onPlacesChanged(): void;
 }
 
-const statusLabels: Record<TripPlaceDto["status"], string> = {
-  ready: "Ready for planning",
-  "needs-location": "Location needed",
-  "possible-duplicate": "Possible duplicate",
-  "provider-unavailable": "Provider unavailable",
-  scheduled: "Already scheduled",
-};
+function statusLabel(status: TripPlaceDto["status"], t: Messages["tripPlaces"]) {
+  switch (status) {
+    case "ready": return t.status.ready;
+    case "needs-location": return t.status.needsLocation;
+    case "possible-duplicate": return t.status.possibleDuplicate;
+    case "provider-unavailable": return t.status.providerUnavailable;
+    case "scheduled": return t.status.scheduled;
+  }
+}
 
-const preferenceLabels: Record<PreferenceLevel, string> = {
-  must: "Must go",
-  want: "Want to go",
-  optional: "Optional",
-  neutral: "Neutral",
-  dislike: "Prefer not to go",
-};
-
-const placeTypes: Array<{ value: PlaceType; label: string }> = [
-  { value: "activity", label: "Activity or sight" },
-  { value: "restaurant", label: "Restaurant or cafe" },
-  { value: "lodging", label: "Lodging" },
-  { value: "station", label: "Station" },
-  { value: "airport", label: "Airport" },
-  { value: "other", label: "Other" },
+const placeTypeValues: PlaceType[] = [
+  "activity",
+  "restaurant",
+  "lodging",
+  "station",
+  "airport",
+  "other",
 ];
 
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : "Unable to complete that request";
+
+function intakeMethodLabel(
+  method: TripPlaceDto["contributions"][number]["intakeMethod"],
+  t: Messages["tripPlaces"],
+) {
+  switch (method) {
+    case "google-maps-url": return t.intakeMethod.googleMapsUrl;
+    case "search": return t.intakeMethod.search;
+    case "manual": return t.intakeMethod.manual;
+  }
+}
+
+function duplicateReason(reason: string, t: Messages["tripPlaces"]) {
+  return reason.split(", ").map((part) => {
+    if (part === "same normalized name") return t.duplicates.sameName;
+    if (part === "same normalized address") return t.duplicates.sameAddress;
+    if (part === "within 100 metres") return t.duplicates.withinHundredMetres;
+    return part;
+  }).join("、");
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
 }
 
 type RetryKeys = Map<string, { fingerprint: string; key: string }>;
@@ -110,6 +126,7 @@ function AddPlacePanel({
   close(): void;
   changed(): Promise<void>;
 }) {
+  const { locale, t: { tripPlaces: t } } = useI18n();
   const [mode, setMode] = useState<"url" | "search" | "manual">("url");
   const [url, setUrl] = useState("");
   const [query, setQuery] = useState("");
@@ -140,10 +157,10 @@ function AddPlacePanel({
       setAttribution(parsed.attribution);
       setResolvedUrl(parsed.resolvedUrl ?? null);
       if (parsed.candidates.length === 0) {
-        setMessage("No unique place was confirmed. Try another search or add it manually.");
+        setMessage(t.errors.noUniquePlace);
       }
     } catch (error) {
-      setMessage(`${errorMessage(error)} Your URL, search, and note are still here.`);
+      setMessage(t.errors.discoveryPreserved(errorMessage(error, t.errors.requestFailed)));
     } finally {
       setBusy(false);
     }
@@ -170,7 +187,7 @@ function AddPlacePanel({
       await changed();
       close();
     } catch (error) {
-      setMessage(`${errorMessage(error)} Your selection and note are still here.`);
+      setMessage(t.errors.selectionPreserved(errorMessage(error, t.errors.requestFailed)));
     } finally {
       setBusy(false);
     }
@@ -204,7 +221,7 @@ function AddPlacePanel({
       await changed();
       close();
     } catch (error) {
-      setMessage(`${errorMessage(error)} Your manual place details are still here.`);
+      setMessage(t.errors.manualPreserved(errorMessage(error, t.errors.requestFailed)));
     } finally {
       setBusy(false);
     }
@@ -220,16 +237,16 @@ function AddPlacePanel({
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">Shared wishlist</p>
-            <h3 id="add-wishlist-place" className="font-display text-3xl text-ink-strong">Add a place</h3>
+            <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">{t.add.eyebrow}</p>
+            <h3 id="add-wishlist-place" className="font-display text-3xl text-ink-strong">{t.add.title}</h3>
           </div>
-          <button className="min-h-11 rounded-lg border px-4 font-bold" onClick={close}>Close</button>
+          <button className="min-h-11 rounded-lg border px-4 font-bold" onClick={close}>{t.add.close}</button>
         </div>
-        <div className="mt-5 grid grid-cols-3 gap-2" role="tablist" aria-label="Place intake method">
+        <div className="mt-5 grid grid-cols-3 gap-2" role="tablist" aria-label={t.add.methodLabel}>
           {([
-            ["url", "Google Maps link"],
-            ["search", "Search"],
-            ["manual", "Manual"],
+            ["url", t.add.googleMapsLink],
+            ["search", t.add.search],
+            ["manual", t.add.manual],
           ] as const).map(([value, label]) => (
             <button
               key={value}
@@ -249,38 +266,38 @@ function AddPlacePanel({
 
         {mode === "manual" ? (
           <form className="mt-6 grid gap-4 sm:grid-cols-2" onSubmit={addManual}>
-            <label className="grid gap-1 font-semibold sm:col-span-2">Place name<input className="min-h-11 rounded-lg border px-3" name="name" required maxLength={200} /></label>
-            <label className="grid gap-1 font-semibold">Place type<select className="min-h-11 rounded-lg border px-3" name="type">{placeTypes.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}</select></label>
-            <label className="grid gap-1 font-semibold">Address, if known<input className="min-h-11 rounded-lg border px-3" name="address" /></label>
-            <label className="grid gap-1 font-semibold">Latitude, if known<input className="min-h-11 rounded-lg border px-3" name="latitude" type="number" min="-90" max="90" step="any" /></label>
-            <label className="grid gap-1 font-semibold">Longitude, if known<input className="min-h-11 rounded-lg border px-3" name="longitude" type="number" min="-180" max="180" step="any" /></label>
-            <label className="grid gap-1 font-semibold">IANA time zone, if known<input className="min-h-11 rounded-lg border px-3" name="timeZone" placeholder="Asia/Tokyo" /></label>
-            <label className="grid gap-1 font-semibold">Source link, if any<input className="min-h-11 rounded-lg border px-3" name="sourceUrl" type="url" /></label>
-            <label className="grid gap-1 font-semibold sm:col-span-2">Your original note<textarea className="min-h-24 rounded-lg border p-3" name="originalNote" /></label>
-            <button className="min-h-12 rounded-xl bg-ink-strong px-5 font-bold text-on-dark sm:col-span-2" disabled={busy}>{busy ? "Adding…" : "Add manual place"}</button>
+            <label className="grid gap-1 font-semibold sm:col-span-2">{t.add.placeName}<input className="min-h-11 rounded-lg border px-3" name="name" required maxLength={200} /></label>
+            <label className="grid gap-1 font-semibold">{t.add.placeType}<select className="min-h-11 rounded-lg border px-3" name="type">{placeTypeValues.map((value) => <option key={value} value={value}>{t.placeType[value]}</option>)}</select></label>
+            <label className="grid gap-1 font-semibold">{t.add.addressIfKnown}<input className="min-h-11 rounded-lg border px-3" name="address" /></label>
+            <label className="grid gap-1 font-semibold">{t.add.latitudeIfKnown}<input className="min-h-11 rounded-lg border px-3" name="latitude" type="number" min="-90" max="90" step="any" /></label>
+            <label className="grid gap-1 font-semibold">{t.add.longitudeIfKnown}<input className="min-h-11 rounded-lg border px-3" name="longitude" type="number" min="-180" max="180" step="any" /></label>
+            <label className="grid gap-1 font-semibold">{t.add.timeZoneIfKnown}<input className="min-h-11 rounded-lg border px-3" name="timeZone" placeholder={t.add.timeZonePlaceholder} /></label>
+            <label className="grid gap-1 font-semibold">{t.add.sourceLinkIfAny}<input className="min-h-11 rounded-lg border px-3" name="sourceUrl" type="url" /></label>
+            <label className="grid gap-1 font-semibold sm:col-span-2">{t.add.originalNote}<textarea className="min-h-24 rounded-lg border p-3" name="originalNote" /></label>
+            <button className="min-h-12 rounded-xl bg-ink-strong px-5 font-bold text-on-dark sm:col-span-2" disabled={busy}>{busy ? t.add.adding : t.add.addManualPlace}</button>
           </form>
         ) : (
           <form className="mt-6 grid gap-4" onSubmit={discover}>
             {mode === "url" ? (
-              <label className="grid gap-1 font-semibold">Google Maps full or maps.app.goo.gl link<input className="min-h-12 rounded-lg border px-3" type="url" required value={url} onChange={(event) => setUrl(event.target.value)} /></label>
+              <label className="grid gap-1 font-semibold">{t.add.googleMapsUrl}<input className="min-h-12 rounded-lg border px-3" type="url" required value={url} onChange={(event) => setUrl(event.target.value)} /></label>
             ) : (
-              <label className="grid gap-1 font-semibold">Search Google Maps<input className="min-h-12 rounded-lg border px-3" required maxLength={300} value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+              <label className="grid gap-1 font-semibold">{t.add.searchGoogleMaps}<input className="min-h-12 rounded-lg border px-3" required maxLength={300} value={query} onChange={(event) => setQuery(event.target.value)} /></label>
             )}
-            <label className="grid gap-1 font-semibold">Your original note<textarea className="min-h-20 rounded-lg border p-3" value={note} onChange={(event) => setNote(event.target.value)} /></label>
-            <button className="min-h-12 rounded-xl bg-ink-strong px-5 font-bold text-on-dark" disabled={busy}>{busy ? "Checking…" : mode === "url" ? "Resolve link" : "Search places"}</button>
+            <label className="grid gap-1 font-semibold">{t.add.originalNote}<textarea className="min-h-20 rounded-lg border p-3" value={note} onChange={(event) => setNote(event.target.value)} /></label>
+            <button className="min-h-12 rounded-xl bg-ink-strong px-5 font-bold text-on-dark" disabled={busy}>{busy ? t.add.checking : mode === "url" ? t.add.resolveLink : t.add.searchPlaces}</button>
           </form>
         )}
 
         {candidates.length > 0 ? (
           <section className="mt-6" aria-labelledby="provider-candidates">
-            <h4 id="provider-candidates" className="font-display text-2xl">Confirm the place</h4>
-            {resolvedUrl ? <p className="mt-1 break-all text-sm text-muted-foreground">Resolved securely to {resolvedUrl}</p> : null}
-            <p className="mt-1 text-sm text-muted-foreground">Results provided by {attribution}. Select one; similar names are never guessed automatically.</p>
+            <h4 id="provider-candidates" className="font-display text-2xl">{t.add.confirmTitle}</h4>
+            {resolvedUrl ? <p className="mt-1 break-all text-sm text-muted-foreground">{t.add.resolvedTo(resolvedUrl)}</p> : null}
+            <p className="mt-1 text-sm text-muted-foreground">{t.add.resultsProvidedBy(attribution)}</p>
             <ul className="mt-3 grid gap-3">
               {candidates.map((candidate) => (
                 <li key={candidate.providerPlaceId} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-ink/10 p-4">
-                  <span><strong className="block">{candidate.name}</strong><small className="text-muted-foreground">{candidate.address ?? "Address unavailable"} · observed {new Date(candidate.observedAt).toLocaleString()}</small></span>
-                  <button className="min-h-11 rounded-lg bg-accent px-4 font-bold text-ink-strong" disabled={busy} onClick={() => void confirm(candidate)}>Add this place</button>
+                  <span><strong className="block">{candidate.name}</strong><small className="text-muted-foreground">{candidate.address ?? t.add.addressUnavailable}・{t.add.observedAt(new Date(candidate.observedAt).toLocaleString(locale))}</small></span>
+                  <button className="min-h-11 rounded-lg bg-accent px-4 font-bold text-ink-strong" disabled={busy} onClick={() => void confirm(candidate)}>{t.add.addThisPlace}</button>
                 </li>
               ))}
             </ul>
@@ -303,6 +320,7 @@ function PlanningEditor({
   request: TripPlaceWorkspaceProps["request"];
   changed(): Promise<void>;
 }) {
+  const { t: { tripPlaces: t } } = useI18n();
   const [message, setMessage] = useState("");
   const retryKeys = useRef<RetryKeys>(new Map());
   async function save(event: FormEvent<HTMLFormElement>) {
@@ -325,24 +343,24 @@ function PlanningEditor({
         parse: parseTripPlaceResponse,
       });
       clearRetryKey(retryKeys.current, operation);
-      setMessage("Planning facts saved.");
+      setMessage(t.planning.saved);
       await changed();
     } catch (error) {
-      setMessage(`${errorMessage(error)} Your edits remain in the form.`);
+      setMessage(t.errors.editsPreserved(errorMessage(error, t.errors.requestFailed)));
     }
   }
 
   return (
     <details className="rounded-xl border border-ink/10 p-3">
-      <summary className="cursor-pointer font-bold">Duration, budget, and notes</summary>
+      <summary className="cursor-pointer font-bold">{t.planning.summary}</summary>
       <form key={place.version} className="mt-4 grid gap-4" onSubmit={save}>
         <div className="grid gap-3 sm:grid-cols-2">
-          <label className="grid gap-1 font-semibold">Duration in minutes<input className="min-h-11 rounded-lg border px-3" name="durationMinutes" type="number" min="1" defaultValue={place.durationMinutes ?? ""} placeholder="Unknown" /></label>
-          <label className="grid gap-1 font-semibold">Budget in minor units<input className="min-h-11 rounded-lg border px-3" name="budgetAmountMinor" type="number" min="0" defaultValue={place.budgetAmountMinor ?? ""} placeholder="Unknown" /></label>
-          <label className="grid gap-1 font-semibold">ISO currency<input className="min-h-11 rounded-lg border px-3 uppercase" name="budgetCurrency" maxLength={3} defaultValue={place.budgetCurrency ?? ""} placeholder="Unknown" /></label>
-          <label className="grid gap-1 font-semibold sm:col-span-2">Shared planning note<textarea className="min-h-20 rounded-lg border p-3" name="notes" defaultValue={place.notes ?? ""} /></label>
+          <label className="grid gap-1 font-semibold">{t.planning.durationMinutes}<input className="min-h-11 rounded-lg border px-3" name="durationMinutes" type="number" min="1" defaultValue={place.durationMinutes ?? ""} placeholder={t.planning.unknown} /></label>
+          <label className="grid gap-1 font-semibold">{t.planning.budgetMinorUnits}<input className="min-h-11 rounded-lg border px-3" name="budgetAmountMinor" type="number" min="0" defaultValue={place.budgetAmountMinor ?? ""} placeholder={t.planning.unknown} /></label>
+          <label className="grid gap-1 font-semibold">{t.planning.isoCurrency}<input className="min-h-11 rounded-lg border px-3 uppercase" name="budgetCurrency" maxLength={3} defaultValue={place.budgetCurrency ?? ""} placeholder={t.planning.unknown} /></label>
+          <label className="grid gap-1 font-semibold sm:col-span-2">{t.planning.sharedNote}<textarea className="min-h-20 rounded-lg border p-3" name="notes" defaultValue={place.notes ?? ""} /></label>
         </div>
-        <button className="min-h-11 rounded-lg bg-ink-strong px-4 font-bold text-on-dark">Save planning facts</button>
+        <button className="min-h-11 rounded-lg bg-ink-strong px-4 font-bold text-on-dark">{t.planning.save}</button>
         {message ? <p role="status">{message}</p> : null}
       </form>
     </details>
@@ -355,6 +373,7 @@ export function TripPlaceWorkspace({
   placesRevision,
   onPlacesChanged,
 }: TripPlaceWorkspaceProps) {
+  const { locale, t: { tripPlaces: t } } = useI18n();
   const [places, setPlaces] = useState<TripPlaceDto[]>([]);
   const [adding, setAdding] = useState(false);
   const [message, setMessage] = useState("");
@@ -376,11 +395,11 @@ export function TripPlaceWorkspace({
       await refreshPlaces();
       setMessage("");
     } catch (error) {
-      setMessage(errorMessage(error));
+      setMessage(errorMessage(error, t.errors.requestFailed));
     } finally {
       setLoading(false);
     }
-  }, [refreshPlaces]);
+  }, [refreshPlaces, t.errors.requestFailed]);
 
   useEffect(() => {
     void load();
@@ -442,7 +461,7 @@ export function TripPlaceWorkspace({
           // The original conflict remains the actionable error.
         }
       }
-      setMessage(errorMessage(error));
+      setMessage(errorMessage(error, t.errors.requestFailed));
       setFailedPreferences((current) => ({ ...current, [place.id]: true }));
     } finally {
       pendingPreferenceIds.current.delete(place.id);
@@ -464,7 +483,7 @@ export function TripPlaceWorkspace({
       clearRetryKey(retryKeys.current, operation);
       await load();
     } catch (error) {
-      setMessage(errorMessage(error));
+      setMessage(errorMessage(error, t.errors.requestFailed));
     }
   }
 
@@ -488,7 +507,7 @@ export function TripPlaceWorkspace({
       await load();
       onPlacesChanged();
     } catch (error) {
-      setMessage(errorMessage(error));
+      setMessage(errorMessage(error, t.errors.requestFailed));
     }
   }
 
@@ -502,7 +521,7 @@ export function TripPlaceWorkspace({
       clearRetryKey(retryKeys.current, operation);
       await load();
     } catch (error) {
-      setMessage(errorMessage(error));
+      setMessage(errorMessage(error, t.errors.requestFailed));
     }
   }
 
@@ -510,68 +529,69 @@ export function TripPlaceWorkspace({
     <section className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8" aria-labelledby="shared-wishlist-heading">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">Plan together</p>
-          <h2 id="shared-wishlist-heading" className="font-display text-3xl text-ink-strong sm:text-4xl">Shared place wishlist</h2>
-          <p className="mt-2 max-w-3xl text-muted-foreground">Collect links, searches, and private places. Every member keeps an independent preference; conflicts stay visible.</p>
+          <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">{t.workspace.eyebrow}</p>
+          <h2 id="shared-wishlist-heading" className="font-display text-3xl text-ink-strong sm:text-4xl">{t.workspace.title}</h2>
+          <p className="mt-2 max-w-3xl text-muted-foreground">{t.workspace.description}</p>
         </div>
-        <button className="min-h-12 rounded-xl bg-accent px-5 font-bold text-ink-strong" onClick={() => setAdding(true)}>Add wishlist place</button>
+        <button className="min-h-12 rounded-xl bg-accent px-5 font-bold text-ink-strong" onClick={() => setAdding(true)}>{t.workspace.addPlace}</button>
       </div>
 
       {message ? <p className="mt-4 rounded-xl bg-surface-subtle p-4" role="alert">{message}</p> : null}
       {/* A reload keeps the list in place; an extra line above it would push the page down. */}
-      {loading && places.length === 0 ? <p className="mt-6" role="status">Loading shared wishlist…</p> : null}
-      {!loading && places.length === 0 ? <p className="mt-6 rounded-xl border border-dashed border-ink/20 p-6 text-center text-muted-foreground">No wishlist places yet. Add a Google Maps link, search, or manual place.</p> : null}
+      {loading && places.length === 0 ? <p className="mt-6" role="status">{t.workspace.loading}</p> : null}
+      {!loading && places.length === 0 ? <p className="mt-6 rounded-xl border border-dashed border-ink/20 p-6 text-center text-muted-foreground">{t.workspace.empty}</p> : null}
 
       <div className="mt-6 grid gap-5 xl:grid-cols-2">
         {places.map((place) => {
           const ownPreference = place.preferences.find((preference) => preference.isOwn);
           const preferenceDraft = preferenceDrafts[place.id];
+          const typeLabel = t.placeType[place.type];
           const factsLabel = place.factsSource === "provider"
-            ? `${place.type} · ${place.providerAttribution ?? "Provider facts"}`
+            ? `${typeLabel}・${place.providerAttribution ?? t.workspace.providerFacts}`
             : place.provider === "google"
-              ? `${place.type} · Member-provided facts · Google identity retained for matching`
-              : `${place.type} · Manual entry`;
+              ? `${typeLabel}・${t.workspace.memberFactsWithGoogle}`
+              : `${typeLabel}・${t.workspace.manualEntry}`;
           return (
-            <article aria-label={`${place.name} at ${place.address ?? "unknown address"}`} key={place.id} className="grid content-start gap-4 rounded-panel border border-ink/10 bg-surface-subtle p-4 sm:p-5">
+            <article aria-label={t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress)} key={place.id} className="grid content-start gap-4 rounded-panel border border-ink/10 bg-surface-subtle p-4 sm:p-5">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{factsLabel}{place.aiProposalId ? " · AI proposal" : ""}</p>
+                  <p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{factsLabel}{place.aiProposalId ? `・${t.workspace.aiProposal}` : ""}</p>
                   <h3 className="font-display text-2xl text-ink-strong">{place.name}</h3>
-                  <p className="mt-1 text-sm text-muted-foreground">{place.address ?? "Address unknown"}</p>
+                  <p className="mt-1 text-sm text-muted-foreground">{place.address ?? t.workspace.unknownAddress}</p>
                 </div>
-                <span className="flex items-center gap-2 rounded-full border border-ink/15 bg-surface px-3 py-1 text-sm font-bold"><StatusIcon status={place.status} />{statusLabels[place.status]}</span>
+                <span className="flex items-center gap-2 rounded-full border border-ink/15 bg-surface px-3 py-1 text-sm font-bold"><StatusIcon status={place.status} />{statusLabel(place.status, t)}</span>
               </div>
-              {place.providerObservedAt ? <p className="text-sm text-muted-foreground">Provider facts observed {new Date(place.providerObservedAt).toLocaleString()}{place.providerFactsExpired ? " · expired; not presented as current" : ""}</p> : null}
-              {place.provider === "google" && place.providerPlaceId ? <a className="inline-flex min-h-10 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />View photos on Google Maps</a> : null}
-              {place.preferenceConflict ? <p className="rounded-xl border border-accent-strong bg-surface p-3 font-bold text-accent-strong" role="status">Preference conflict: at least one member marked Must go and another marked Prefer not to go. Both opinions are preserved.</p> : null}
+              {place.providerObservedAt ? <p className="text-sm text-muted-foreground">{t.workspace.providerObserved(new Date(place.providerObservedAt).toLocaleString(locale))}{place.providerFactsExpired ? `・${t.workspace.expiredFacts}` : ""}</p> : null}
+              {place.provider === "google" && place.providerPlaceId ? <a className="inline-flex min-h-10 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
+              {place.preferenceConflict ? <p className="rounded-xl border border-accent-strong bg-surface p-3 font-bold text-accent-strong" role="status">{t.workspace.preferenceConflict}</p> : null}
 
               {place.assignedDayId ? (
                 <p className="rounded-xl bg-surface p-3 font-semibold">
-                  Planned for {trip.days.find((day) => day.id === place.assignedDayId)?.date ?? "an unavailable trip day"}
+                  {t.workspace.plannedFor(trip.days.find((day) => day.id === place.assignedDayId)?.date ?? t.workspace.unavailableTripDay)}
                 </p>
               ) : null}
-              <section aria-label={`Member preferences for ${place.name}`}>
-                <h4 className="font-bold">Member preferences</h4>
+              <section aria-label={t.workspace.memberPreferencesFor(place.name)}>
+                <h4 className="font-bold">{t.workspace.memberPreferences}</h4>
                 <ul className="mt-2 grid gap-2 sm:grid-cols-2">
                   {place.preferences.map((preference) => (
                     <li key={preference.memberUserId} className="rounded-lg bg-surface p-3">
-                      <strong className="block">{preference.memberDisplayName ?? preference.memberEmail}{preference.isOwn ? " · you" : ""}</strong>
-                      <span className="text-sm">{preference.level ? preferenceLabels[preference.level] : "No preference yet"}</span>
+                      <strong className="block">{preference.memberDisplayName ?? preference.memberEmail}{preference.isOwn ? `・${t.workspace.you}` : ""}</strong>
+                      <span className="text-sm">{preference.level ? t.preference[preference.level] : t.workspace.noPreference}</span>
                     </li>
                   ))}
                 </ul>
-                <label className="mt-3 grid gap-1 font-semibold">Your preference<select className="min-h-11 rounded-lg border bg-surface px-3" disabled={pendingPreferences[place.id]} value={preferenceDraft ?? ownPreference?.level ?? ""} onChange={(event) => { if (event.target.value) void setPreference(place, event.target.value as PreferenceLevel); }}><option value="">No preference yet</option>{Object.entries(preferenceLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-                {failedPreferences[place.id] && preferenceDraft ? <button className="mt-2 min-h-10 rounded-lg border px-3 font-bold" disabled={pendingPreferences[place.id]} onClick={() => void setPreference(place, preferenceDraft)}>Retry preference</button> : null}
+                <label className="mt-3 grid gap-1 font-semibold">{t.workspace.yourPreference}<select className="min-h-11 rounded-lg border bg-surface px-3" disabled={pendingPreferences[place.id]} value={preferenceDraft ?? ownPreference?.level ?? ""} onChange={(event) => { if (event.target.value) void setPreference(place, event.target.value as PreferenceLevel); }}><option value="">{t.workspace.noPreference}</option>{Object.entries(t.preference).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+                {failedPreferences[place.id] && preferenceDraft ? <button className="mt-2 min-h-10 rounded-lg border px-3 font-bold" disabled={pendingPreferences[place.id]} onClick={() => void setPreference(place, preferenceDraft)}>{t.workspace.retryPreference}</button> : null}
               </section>
 
-              <section aria-label={`Contributions for ${place.name}`}>
-                <h4 className="font-bold">Added by and original notes</h4>
+              <section aria-label={t.workspace.contributionsFor(place.name)}>
+                <h4 className="font-bold">{t.workspace.contributions}</h4>
                 <ul className="mt-2 grid gap-2">
                   {place.contributions.map((contribution) => (
                     <li key={contribution.id} className={`rounded-lg bg-surface p-3 ${contribution.withdrawnAt ? "opacity-60" : ""}`}>
-                      <div className="flex flex-wrap items-start justify-between gap-2"><span><strong>{contribution.memberDisplayName ?? contribution.memberEmail}</strong> · {contribution.intakeMethod}{contribution.withdrawnAt ? " · withdrawn" : ""}</span>{contribution.isOwn && !contribution.withdrawnAt ? <button className="min-h-9 rounded-lg border px-3 text-sm font-bold" onClick={() => void withdraw(place, contribution.id)}>Withdraw mine</button> : null}</div>
-                      <p className="mt-1 whitespace-pre-wrap text-sm">{contribution.originalNote ?? "No original note"}</p>
-                      {contribution.sourceUrl ? <a className="mt-1 block break-all text-sm font-bold text-accent-strong underline" href={contribution.sourceUrl} rel="noreferrer" target="_blank">Open original source</a> : null}
+                      <div className="flex flex-wrap items-start justify-between gap-2"><span><strong>{contribution.memberDisplayName ?? contribution.memberEmail}</strong>・{intakeMethodLabel(contribution.intakeMethod, t)}{contribution.withdrawnAt ? `・${t.workspace.withdrawn}` : ""}</span>{contribution.isOwn && !contribution.withdrawnAt ? <button className="min-h-9 rounded-lg border px-3 text-sm font-bold" onClick={() => void withdraw(place, contribution.id)}>{t.workspace.withdrawMine}</button> : null}</div>
+                      <p className="mt-1 whitespace-pre-wrap text-sm">{contribution.originalNote ?? t.workspace.noOriginalNote}</p>
+                      {contribution.sourceUrl ? <a className="mt-1 block break-all text-sm font-bold text-accent-strong underline" href={contribution.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
                     </li>
                   ))}
                 </ul>
@@ -581,38 +601,38 @@ export function TripPlaceWorkspace({
               ).map((suggestion) => {
                 const other = placesById.get(suggestion.otherTripPlaceId);
                 return (
-                  <section key={suggestion.id} className="rounded-xl border border-accent-strong bg-surface p-3" aria-label="Possible duplicate comparison">
-                    <strong className="block">Compare both options before deciding</strong>
-                    <p className="mt-1 text-sm">Suggested only because: {suggestion.reason}. It was not merged automatically.</p>
+                  <section key={suggestion.id} className="rounded-xl border border-accent-strong bg-surface p-3" aria-label={t.duplicates.comparisonLabel}>
+                    <strong className="block">{t.duplicates.compare}</strong>
+                    <p className="mt-1 text-sm">{t.duplicates.reason(duplicateReason(suggestion.reason, t))}</p>
                     <div className="mt-3 grid gap-3 sm:grid-cols-2">
                       {([
-                        ["This option", place],
-                        ["Other option", other],
+                        [t.duplicates.thisOption, place],
+                        [t.duplicates.otherOption, other],
                       ] as const).map(([label, candidate]) => (
                         <div key={label} className="rounded-lg border border-ink/10 p-3">
                           <span className="text-xs font-bold uppercase tracking-[0.12em] text-muted-foreground">{label}</span>
                           {candidate ? (
                             <>
                               <h5 className="font-display text-xl">{candidate.name}</h5>
-                              <p className="text-sm">{candidate.type} · {candidate.address ?? "Address unknown"}</p>
+                              <p className="text-sm">{t.placeType[candidate.type]}・{candidate.address ?? t.workspace.unknownAddress}</p>
                               <p className="mt-1 text-sm text-muted-foreground">
-                                {candidate.factsSource === "provider" ? "Provider facts" : "Member-provided facts"}
-                                {" · "}
+                                {candidate.factsSource === "provider" ? t.duplicates.providerFacts : t.duplicates.memberFacts}
+                                {"・"}
                                 {candidate.contributions.filter((entry) => !entry.withdrawnAt).map((entry) =>
                                   entry.memberDisplayName ?? entry.memberEmail
-                                ).join(", ") || "No active contributor"}
+                                ).join("、") || t.duplicates.noActiveContributor}
                               </p>
                               <p className="mt-1 text-sm">
                                 {candidate.contributions.filter((entry) => !entry.withdrawnAt).map((entry) =>
-                                  entry.originalNote ?? entry.sourceUrl ?? "No source note"
-                                ).join(" · ") || "No active source note"}
+                                  entry.originalNote ?? entry.sourceUrl ?? t.duplicates.noSourceNote
+                                ).join("・") || t.duplicates.noActiveSourceNote}
                               </p>
                             </>
-                          ) : <p className="mt-1 text-sm text-muted-foreground">This option is no longer available.</p>}
+                          ) : <p className="mt-1 text-sm text-muted-foreground">{t.duplicates.unavailable}</p>}
                         </div>
                       ))}
                     </div>
-                    <div className="mt-3 flex flex-wrap gap-2"><button className="min-h-10 rounded-lg bg-accent px-3 font-bold" disabled={!other} onClick={() => void merge(place, suggestion.otherTripPlaceId)}>Merge these options</button><button className="min-h-10 rounded-lg border px-3 font-bold" onClick={() => void keepSeparate(suggestion.id)}>Keep separate options</button></div>
+                    <div className="mt-3 flex flex-wrap gap-2"><button className="min-h-10 rounded-lg bg-accent px-3 font-bold" disabled={!other} onClick={() => void merge(place, suggestion.otherTripPlaceId)}>{t.duplicates.merge}</button><button className="min-h-10 rounded-lg border px-3 font-bold" onClick={() => void keepSeparate(suggestion.id)}>{t.duplicates.keepSeparate}</button></div>
                   </section>
                 );
               })}

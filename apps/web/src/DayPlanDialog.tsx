@@ -17,7 +17,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { clock, loadLabels, reasonLabels, span, TimetableRow } from "./TimetableView";
+import { useI18n } from "./i18n";
+import { clock, describeStartAndEnd, loadLabel, reasonLabel, span, TimetableRow } from "./TimetableView";
 
 type JsonRequest = <T>(url: string, options?: RequestInit & { parse?: (value: unknown) => unknown }) => Promise<T>;
 
@@ -46,6 +47,7 @@ export function DayPlanDialog({
   onClose(): void;
   onOrderSaved(): Promise<void>;
 }) {
+  const { t } = useI18n();
   const [timetable, setTimetable] = useState<DayTimetableDto | null>(null);
   const [order, setOrder] = useState<DayTimetableOrder>("current");
   const [start, setStart] = useState("09:00");
@@ -82,11 +84,11 @@ export function DayPlanDialog({
       setEnd(clock(response.timetable.window.endMinute));
     } catch (reason) {
       if (ticket !== latestRequest.current) return;
-      setError(reason instanceof Error ? reason.message : "Could not plan this day");
+      setError(reason instanceof Error ? reason.message : t.dayPlan.couldNotPlan);
     } finally {
       if (ticket === latestRequest.current) setBusy(null);
     }
-  }, [request, tripId]);
+  }, [request, t.dayPlan, tripId]);
 
   useEffect(() => {
     latestRequest.current += 1;
@@ -104,7 +106,7 @@ export function DayPlanDialog({
     const startMinute = minuteOf(start);
     const endMinute = minuteOf(end);
     if (startMinute === null || endMinute === null || startMinute >= endMinute) {
-      setError("The day must end after it starts.");
+      setError(t.dayPlan.endMustBeAfterStart);
       return;
     }
     setNotice("");
@@ -121,7 +123,7 @@ export function DayPlanDialog({
         });
         keys.current.delete(identity);
       } catch (reason) {
-        setError(reason instanceof Error ? reason.message : "Could not save this day's hours");
+        setError(reason instanceof Error ? reason.message : t.dayPlan.couldNotSaveHours);
         setBusy(null);
         return;
       }
@@ -145,10 +147,10 @@ export function DayPlanDialog({
       // The draft already uses this order, which is now the day's own.
       setOrder("current");
       setTimetable({ ...timetable, order: "current" });
-      setNotice("Order saved for this day.");
+      setNotice(t.dayPlan.orderSaved);
       await onOrderSaved();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not save this order");
+      setError(reason instanceof Error ? reason.message : t.dayPlan.couldNotSaveOrder);
     } finally {
       setBusy(null);
     }
@@ -164,54 +166,55 @@ export function DayPlanDialog({
     <Dialog open={day !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="h-dvh w-screen max-w-none overflow-y-auto rounded-none content-start sm:h-auto sm:max-h-[90vh] sm:w-full sm:max-w-2xl sm:rounded-xl">
         <DialogHeader>
-          <DialogTitle>Plan {day?.label} · {day?.date}</DialogTitle>
-          <DialogDescription>
-            This is a draft. It never changes the itinerary; only this day&apos;s hours, and an order you choose to use, are saved.
-          </DialogDescription>
+          <DialogTitle>{t.dayPlan.title(day?.label ?? "", day?.date ?? "")}</DialogTitle>
+          <DialogDescription>{t.dayPlan.draftNotice}</DialogDescription>
         </DialogHeader>
 
         <form className="flex flex-wrap items-end gap-3" onSubmit={(event) => void replan(event)}>
           <label className="grid gap-1 text-sm font-semibold">
-            Start
+            {t.dayPlan.start}
             <input className="min-h-10 rounded-lg border px-2" type="time" value={start} required onChange={(event) => setStart(event.target.value)} />
           </label>
           <label className="grid gap-1 text-sm font-semibold">
-            End
+            {t.dayPlan.end}
             <input className="min-h-10 rounded-lg border px-2" type="time" value={end} required onChange={(event) => setEnd(event.target.value)} />
           </label>
-          <Button type="submit" variant="outline" size="lg" disabled={busy !== null || !timetable}>Re-plan</Button>
+          <Button type="submit" variant="outline" size="lg" disabled={busy !== null || !timetable}>{t.dayPlan.rePlan}</Button>
         </form>
 
         {error ? <p role="alert" className="text-sm font-semibold text-destructive">{error}</p> : null}
-        {busy === "planning" ? <p role="status" className="text-sm">Planning this day…</p> : null}
+        {busy === "planning" ? <p role="status" className="text-sm">{t.dayPlan.planning}</p> : null}
         {notice ? <p role="status" className="text-sm font-semibold">{notice}</p> : null}
 
         {timetable ? (
           <div className="grid gap-4">
             <p className="font-bold" data-testid="day-load">
-              {loadLabels[timetable.load.level]} · {span(timetable.load.busyMinutes)} busy of {span(timetable.load.windowMinutes)}
+              {t.dayPlan.loadSummary(
+                loadLabel(timetable.load.level, t.timetable),
+                span(timetable.load.busyMinutes, t.timetable),
+                span(timetable.load.windowMinutes, t.timetable),
+              )}
             </p>
             <p className="text-sm text-muted-foreground">
-              {timetable.order === "suggested" ? "Suggested order: closest places first." : "This day's current order."}
-              {" "}
-              {timetable.lodging
-                ? `Starts and ends at ${timetable.lodging.name}.`
-                : "No lodging that night, so the day starts at the first place."}
+              {timetable.order === "suggested"
+                ? t.dayPlan.suggestedOrderDescription
+                : t.dayPlan.currentOrderDescription}
+              {describeStartAndEnd(timetable, t.timetable)}
             </p>
             {timetable.rows.length > 0 ? (
-              <ol className="grid gap-2" aria-label="Draft timetable">
+              <ol className="grid gap-2" aria-label={t.dayPlan.draftTimetable}>
                 {timetable.rows.map((row, index) => <TimetableRow key={`${row.kind}-${index}`} row={row} />)}
               </ol>
             ) : (
-              <p className="empty-state">Nothing fits in this day yet.</p>
+              <p className="empty-state">{t.dayPlan.nothingFits}</p>
             )}
             {timetable.unscheduled.length > 0 ? (
-              <section aria-label="Not in this draft">
-                <p className="font-bold">Not in this draft</p>
+              <section aria-label={t.dayPlan.notInDraft}>
+                <p className="font-bold">{t.dayPlan.notInDraft}</p>
                 <ul className="mt-1 grid gap-1 text-sm">
                   {timetable.unscheduled.map((place) => (
                     <li key={place.tripPlaceId}>
-                      <strong>{place.name}</strong> · {reasonLabels[place.reason]}
+                      <strong>{place.name}</strong>・{reasonLabel(place.reason, t.timetable)}
                     </li>
                   ))}
                 </ul>
@@ -219,8 +222,8 @@ export function DayPlanDialog({
             ) : null}
             {attributions.length > 0 || hoursChecked ? (
               <p className="text-xs text-muted-foreground">
-                {attributions.length > 0 ? `Route times: ${attributions.join(", ")}.` : ""}
-                {hoursChecked ? " Opening hours: Google Maps." : ""}
+                {attributions.length > 0 ? t.dayPlan.routeTimes(attributions.join("、")) : ""}
+                {hoursChecked ? ` ${t.dayPlan.openingHoursAttribution}` : ""}
               </p>
             ) : null}
           </div>
@@ -230,19 +233,19 @@ export function DayPlanDialog({
           {order === "suggested" ? (
             <>
               <Button variant="outline" size="lg" disabled={busy !== null || !day} onClick={() => day && void plan(day.id, "current")}>
-                Back to current order
+                {t.dayPlan.backToCurrentOrder}
               </Button>
               <Button
                 size="lg"
                 disabled={busy !== null || !timetable || timetable.orderedTripPlaceIds.length === 0}
                 onClick={() => void saveOrder()}
               >
-                {busy === "saving" ? "Saving…" : "Use this order"}
+                {busy === "saving" ? t.dayPlan.saving : t.dayPlan.useThisOrder}
               </Button>
             </>
           ) : (
             <Button variant="outline" size="lg" disabled={busy !== null || !day} onClick={() => day && void plan(day.id, "suggested")}>
-              Try suggested order
+              {t.dayPlan.trySuggestedOrder}
             </Button>
           )}
         </DialogFooter>

@@ -27,6 +27,7 @@ import {
 import { Field, FieldDescription, FieldLabel, FieldLegend, FieldSet } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { useI18n } from "./i18n";
 
 interface ItineraryItemDialogProps {
   countryStops: CountryStopDto[];
@@ -44,14 +45,14 @@ interface EndpointDraft {
   utcOffset: string;
 }
 
-const itemTypes: Array<{ value: ItineraryItemType; label: string }> = [
-  { value: "flight", label: "Flight" },
-  { value: "lodging", label: "Lodging" },
-  { value: "transport", label: "Transport" },
-  { value: "reservation", label: "Reservation" },
-  { value: "meal", label: "Meal" },
-  { value: "activity", label: "Activity" },
-  { value: "free-time", label: "Free time" },
+const itemTypes: ItineraryItemType[] = [
+  "flight",
+  "lodging",
+  "transport",
+  "reservation",
+  "meal",
+  "activity",
+  "free-time",
 ];
 
 const blankEndpoint: EndpointDraft = {
@@ -105,15 +106,16 @@ function EndpointEditor({
   locationLocked?: boolean;
   onChange(value: EndpointDraft): void;
 }) {
-  const title = role === "start" ? "Start" : "End";
+  const { t } = useI18n();
+  const title = role === "start" ? t.itemDialog.start : t.itemDialog.end;
   const id = `${role}-endpoint`;
 
   return (
     <FieldSet className="rounded-xl border p-4">
-      <FieldLegend>{title} in local time</FieldLegend>
+      <FieldLegend>{t.itemDialog.localTimeHeading(title)}</FieldLegend>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field>
-          <FieldLabel htmlFor={`${id}-country`}>Country stop</FieldLabel>
+          <FieldLabel htmlFor={`${id}-country`}>{t.itemDialog.countryStop}</FieldLabel>
           <select
             id={`${id}-country`}
             className="min-h-10 rounded-lg border border-input bg-transparent px-3"
@@ -130,16 +132,16 @@ function EndpointEditor({
               });
             }}
           >
-            <option value="">Choose a stop</option>
+            <option value="">{t.itemDialog.chooseStop}</option>
             {countryStops.map((stop) => (
               <option key={stop.id} value={stop.id}>
-                {stop.position + 1}. {stop.countryCode}
+                {stop.position + 1}、{stop.countryCode}
               </option>
             ))}
           </select>
         </Field>
         <Field>
-          <FieldLabel htmlFor={`${id}-place`}>Place</FieldLabel>
+          <FieldLabel htmlFor={`${id}-place`}>{t.itemDialog.place}</FieldLabel>
           <select
             id={`${id}-place`}
             className="min-h-10 rounded-lg border border-input bg-transparent px-3"
@@ -156,14 +158,14 @@ function EndpointEditor({
               });
             }}
           >
-            <option value="">Choose a place</option>
+            <option value="">{t.itemDialog.choosePlace}</option>
             {places.map((place) => (
               <option key={place.id} value={place.id}>{place.name}</option>
             ))}
           </select>
         </Field>
         <Field>
-          <FieldLabel htmlFor={`${id}-time`}>Local date and time</FieldLabel>
+          <FieldLabel htmlFor={`${id}-time`}>{t.itemDialog.localDateTime}</FieldLabel>
           <Input
             id={`${id}-time`}
             type="datetime-local"
@@ -173,39 +175,33 @@ function EndpointEditor({
           />
         </Field>
         <Field>
-          <FieldLabel htmlFor={`${id}-zone`}>IANA time zone</FieldLabel>
+          <FieldLabel htmlFor={`${id}-zone`}>{t.itemDialog.ianaTimeZone}</FieldLabel>
           <Input
             id={`${id}-zone`}
             required
             disabled={locationLocked}
-            placeholder="Asia/Tokyo"
+            placeholder={t.itemDialog.timeZonePlaceholder}
             value={draft.timeZone}
             onChange={(event) => onChange({ ...draft, timeZone: event.target.value })}
           />
           {!locationLocked ? (
-            <FieldDescription>
-              Uses the Place time zone first, then the Country Stop. If neither is known, confirm the IANA zone here.
-            </FieldDescription>
+            <FieldDescription>{t.itemDialog.timeZoneDescription}</FieldDescription>
           ) : null}
         </Field>
       </div>
       {locationLocked ? (
-        <FieldDescription>
-          Lodging checkout uses the same place and time zone as check-in.
-        </FieldDescription>
+        <FieldDescription>{t.itemDialog.lodgingEndDescription}</FieldDescription>
       ) : null}
       <Field>
-        <FieldLabel htmlFor={`${id}-offset`}>UTC offset when local time occurs twice</FieldLabel>
+        <FieldLabel htmlFor={`${id}-offset`}>{t.itemDialog.utcOffset}</FieldLabel>
         <Input
           id={`${id}-offset`}
-          placeholder="-08:00"
+          placeholder={t.itemDialog.utcOffsetPlaceholder}
           pattern="[+-][0-9]{2}:[0-9]{2}"
           value={draft.utcOffset}
           onChange={(event) => onChange({ ...draft, utcOffset: event.target.value })}
         />
-        <FieldDescription>
-          Leave blank normally. During a daylight-saving overlap, enter the offset for the intended occurrence.
-        </FieldDescription>
+        <FieldDescription>{t.itemDialog.utcOffsetDescription}</FieldDescription>
       </Field>
     </FieldSet>
   );
@@ -242,6 +238,7 @@ function itemDraft(item?: ItineraryItemDto) {
 }
 
 export function ItineraryItemDialog({ countryStops, members, places, item, save }: ItineraryItemDialogProps) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const initialDraft = itemDraft(item);
   const [type, setType] = useState<ItineraryItemType>(initialDraft.type);
@@ -373,7 +370,7 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
     try {
       if (item) {
         if (expectedVersion === null) {
-          throw new Error("The itinerary item version is unavailable");
+          throw new Error(t.itemDialog.unavailableVersion);
         }
         const { constraints: _constraints, ...updatable } = base;
         await save({ ...updatable, expectedVersion });
@@ -382,7 +379,7 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
       }
       setOpen(false);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not save the itinerary item");
+      setError(reason instanceof Error ? reason.message : t.itemDialog.saveError);
     } finally {
       setSubmitting(false);
     }
@@ -396,30 +393,28 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
         }
       >
         {item ? <Pencil /> : <Plus />}
-        {item ? `Edit ${item.title}` : "Add commitment"}
+        {item ? t.itemDialog.editTrigger(item.title) : t.itemDialog.addCommitment}
       </DialogTrigger>
       <DialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
-          <DialogTitle>{item ? "Edit itinerary item" : "Add a commitment"}</DialogTitle>
-          <DialogDescription>
-            Each endpoint keeps its local wall time, IANA time zone, offset, and UTC instant.
-          </DialogDescription>
+          <DialogTitle>{item ? t.itemDialog.editCommitment : t.itemDialog.addCommitment}</DialogTitle>
+          <DialogDescription>{t.itemDialog.endpointDescription}</DialogDescription>
         </DialogHeader>
         <form className="grid gap-5" onSubmit={(event) => event.preventDefault()}>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field>
-              <FieldLabel htmlFor={`item-type-${item?.id ?? "new"}`}>Type</FieldLabel>
+              <FieldLabel htmlFor={`item-type-${item?.id ?? "new"}`}>{t.itemDialog.type}</FieldLabel>
               <select
                 id={`item-type-${item?.id ?? "new"}`}
                 className="min-h-10 rounded-lg border border-input bg-transparent px-3"
                 value={type}
                 onChange={(event) => setType(event.target.value as ItineraryItemType)}
               >
-                {itemTypes.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                {itemTypes.map((itemType) => <option key={itemType} value={itemType}>{t.itemDialog.itemTypes[itemType]}</option>)}
               </select>
             </Field>
             <Field>
-              <FieldLabel htmlFor={`item-title-${item?.id ?? "new"}`}>Title</FieldLabel>
+              <FieldLabel htmlFor={`item-title-${item?.id ?? "new"}`}>{t.itemDialog.title}</FieldLabel>
               <Input
                 id={`item-title-${item?.id ?? "new"}`}
                 required
@@ -430,10 +425,8 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
             </Field>
           </div>
           <FieldSet className="grid max-h-64 auto-rows-min gap-2 overflow-y-auto rounded-xl border p-4">
-            <FieldLegend>Participants</FieldLegend>
-            <FieldDescription>
-              Select only confirmed participants. Leave everyone unchecked to keep participation pending.
-            </FieldDescription>
+            <FieldLegend>{t.itemDialog.participants}</FieldLegend>
+            <FieldDescription>{t.itemDialog.participantsDescription}</FieldDescription>
             {participantChoices.map((participant) => {
               const label = participant.displayName ?? participant.email;
               return (
@@ -454,8 +447,8 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
                   <span className="min-w-0 [overflow-wrap:anywhere]">
                     <strong className="block">{label}</strong>
                     <small className="text-muted-foreground">
-                      {participant.displayName ? `${participant.email} · ` : ""}
-                      {participant.removed ? "No longer a trip member" : "Trip member"}
+                      {participant.displayName ? `${participant.email}・` : ""}
+                      {participant.removed ? t.itemDialog.removedMember : t.itemDialog.tripMember}
                     </small>
                   </span>
                 </label>
@@ -478,81 +471,81 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
 
           {type === "flight" ? (
             <div className="grid gap-4 sm:grid-cols-3">
-              <Field><FieldLabel htmlFor="flight-carrier">Carrier</FieldLabel><Input id="flight-carrier" value={carrier} onChange={(event) => setCarrier(event.target.value)} /></Field>
-              <Field><FieldLabel htmlFor="flight-number">Flight number</FieldLabel><Input id="flight-number" required value={serviceNumber} onChange={(event) => setServiceNumber(event.target.value)} /></Field>
-              <Field><FieldLabel htmlFor="flight-confirmation">Confirmation notes</FieldLabel><Input id="flight-confirmation" value={confirmationNotes} onChange={(event) => setConfirmationNotes(event.target.value)} /></Field>
+              <Field><FieldLabel htmlFor="flight-carrier">{t.itemDialog.carrier}</FieldLabel><Input id="flight-carrier" value={carrier} onChange={(event) => setCarrier(event.target.value)} /></Field>
+              <Field><FieldLabel htmlFor="flight-number">{t.itemDialog.flightNumber}</FieldLabel><Input id="flight-number" required value={serviceNumber} onChange={(event) => setServiceNumber(event.target.value)} /></Field>
+              <Field><FieldLabel htmlFor="flight-confirmation">{t.itemDialog.confirmationNotes}</FieldLabel><Input id="flight-confirmation" value={confirmationNotes} onChange={(event) => setConfirmationNotes(event.target.value)} /></Field>
             </div>
           ) : null}
           {type === "lodging" ? (
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field><FieldLabel htmlFor="lodging-booked-by">Booked by</FieldLabel><Input id="lodging-booked-by" value={bookedBy} onChange={(event) => setBookedBy(event.target.value)} /></Field>
-              <Field><FieldLabel htmlFor="lodging-confirmation">Confirmation code</FieldLabel><Input id="lodging-confirmation" value={confirmationCode} onChange={(event) => setConfirmationCode(event.target.value)} /></Field>
+              <Field><FieldLabel htmlFor="lodging-booked-by">{t.itemDialog.bookedBy}</FieldLabel><Input id="lodging-booked-by" value={bookedBy} onChange={(event) => setBookedBy(event.target.value)} /></Field>
+              <Field><FieldLabel htmlFor="lodging-confirmation">{t.itemDialog.confirmationCode}</FieldLabel><Input id="lodging-confirmation" value={confirmationCode} onChange={(event) => setConfirmationCode(event.target.value)} /></Field>
             </div>
           ) : null}
           {type === "transport" ? (
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field><FieldLabel htmlFor="transport-mode">Mode</FieldLabel><Input id="transport-mode" required value={mode} onChange={(event) => setMode(event.target.value)} /></Field>
-              <Field><FieldLabel htmlFor="transport-ticket">Ticket details</FieldLabel><Input id="transport-ticket" value={ticketInfo} onChange={(event) => setTicketInfo(event.target.value)} /></Field>
+              <Field><FieldLabel htmlFor="transport-mode">{t.itemDialog.transportMode}</FieldLabel><Input id="transport-mode" required value={mode} onChange={(event) => setMode(event.target.value)} /></Field>
+              <Field><FieldLabel htmlFor="transport-ticket">{t.itemDialog.ticketDetails}</FieldLabel><Input id="transport-ticket" value={ticketInfo} onChange={(event) => setTicketInfo(event.target.value)} /></Field>
             </div>
           ) : null}
           {type === "reservation" || type === "meal" || type === "activity" ? (
             <div className="grid gap-4 sm:grid-cols-3">
-              <Field><FieldLabel htmlFor="appointment-duration">Duration (minutes)</FieldLabel><Input id="appointment-duration" type="number" min="1" required value={durationMinutes} onChange={(event) => setDurationMinutes(event.target.value)} /></Field>
-              <Field><FieldLabel htmlFor="appointment-booked-by">Booked by</FieldLabel><Input id="appointment-booked-by" value={bookedBy} onChange={(event) => setBookedBy(event.target.value)} /></Field>
-              <Field><FieldLabel htmlFor="appointment-status">Confirmation status</FieldLabel><Input id="appointment-status" value={confirmationStatus} onChange={(event) => setConfirmationStatus(event.target.value)} /></Field>
+              <Field><FieldLabel htmlFor="appointment-duration">{t.itemDialog.durationMinutes}</FieldLabel><Input id="appointment-duration" type="number" min="1" required value={durationMinutes} onChange={(event) => setDurationMinutes(event.target.value)} /></Field>
+              <Field><FieldLabel htmlFor="appointment-booked-by">{t.itemDialog.bookedBy}</FieldLabel><Input id="appointment-booked-by" value={bookedBy} onChange={(event) => setBookedBy(event.target.value)} /></Field>
+              <Field><FieldLabel htmlFor="appointment-status">{t.itemDialog.confirmationStatus}</FieldLabel><Input id="appointment-status" value={confirmationStatus} onChange={(event) => setConfirmationStatus(event.target.value)} /></Field>
             </div>
           ) : null}
           {type === "free-time" ? (
-            <Field><FieldLabel htmlFor="free-time-duration">Duration (minutes)</FieldLabel><Input id="free-time-duration" type="number" min="1" required value={durationMinutes} onChange={(event) => setDurationMinutes(event.target.value)} /></Field>
+            <Field><FieldLabel htmlFor="free-time-duration">{t.itemDialog.durationMinutes}</FieldLabel><Input id="free-time-duration" type="number" min="1" required value={durationMinutes} onChange={(event) => setDurationMinutes(event.target.value)} /></Field>
           ) : null}
 
           {type !== "free-time" ? (
             <FieldSet className="rounded-xl border p-4">
-              <FieldLegend>Money</FieldLegend>
+              <FieldLegend>{t.itemDialog.money}</FieldLegend>
               <div className="grid gap-4 sm:grid-cols-2">
                 <Field>
-                  <FieldLabel htmlFor="item-amount">Amount in minor units</FieldLabel>
-                  <Input id="item-amount" type="number" min="0" step="1" placeholder="12500" value={amountMinor} onChange={(event) => setAmountMinor(event.target.value)} />
-                  <FieldDescription>Store 12500 for JPY 12,500 or USD 125.00.</FieldDescription>
+                  <FieldLabel htmlFor="item-amount">{t.itemDialog.minorAmount}</FieldLabel>
+                  <Input id="item-amount" type="number" min="0" step="1" placeholder={t.itemDialog.minorAmountPlaceholder} value={amountMinor} onChange={(event) => setAmountMinor(event.target.value)} />
+                  <FieldDescription>{t.itemDialog.minorAmountDescription}</FieldDescription>
                 </Field>
-                <Field><FieldLabel htmlFor="item-currency">Currency</FieldLabel><Input id="item-currency" maxLength={3} placeholder="JPY" value={currency} onChange={(event) => setCurrency(event.target.value.toUpperCase())} /></Field>
+                <Field><FieldLabel htmlFor="item-currency">{t.itemDialog.currency}</FieldLabel><Input id="item-currency" maxLength={3} placeholder={t.itemDialog.currencyPlaceholder} value={currency} onChange={(event) => setCurrency(event.target.value.toUpperCase())} /></Field>
               </div>
             </FieldSet>
           ) : null}
 
           {!item ? (
             <FieldSet className="rounded-xl border p-4">
-              <FieldLegend>Initial constraint</FieldLegend>
+              <FieldLegend>{t.itemDialog.initialConstraint}</FieldLegend>
               <div className="grid gap-4 sm:grid-cols-3">
                 <Field>
-                  <FieldLabel htmlFor="constraint-type">Constraint</FieldLabel>
+                  <FieldLabel htmlFor="constraint-type">{t.itemDialog.constraint}</FieldLabel>
                   <select id="constraint-type" className="min-h-10 rounded-lg border border-input bg-transparent px-3" value={constraintType} onChange={(event) => setConstraintType(event.target.value as ConstraintType | "")}>
-                    <option value="">None</option>
-                    <option value="fixed_time">Fixed time</option>
-                    <option value="immovable">Immovable</option>
-                    <option value="minimum_buffer">Minimum buffer</option>
+                    <option value="">{t.itemDialog.none}</option>
+                    <option value="fixed_time">{t.itemDialog.constraintTypes.fixed_time}</option>
+                    <option value="immovable">{t.itemDialog.constraintTypes.immovable}</option>
+                    <option value="minimum_buffer">{t.itemDialog.constraintTypes.minimum_buffer}</option>
                   </select>
                 </Field>
                 <Field>
-                  <FieldLabel htmlFor="constraint-status">Knowledge status</FieldLabel>
+                  <FieldLabel htmlFor="constraint-status">{t.itemDialog.knowledgeStatus}</FieldLabel>
                   <select id="constraint-status" className="min-h-10 rounded-lg border border-input bg-transparent px-3" value={constraintStatus} onChange={(event) => setConstraintStatus(event.target.value as ConstraintStatus)}>
-                    <option value="confirmed">Confirmed</option>
-                    <option value="unknown">Unknown</option>
-                    <option value="conflicted">Conflicted</option>
+                    <option value="confirmed">{t.itemDialog.constraintStatuses.confirmed}</option>
+                    <option value="unknown">{t.itemDialog.constraintStatuses.unknown}</option>
+                    <option value="conflicted">{t.itemDialog.constraintStatuses.conflicted}</option>
                   </select>
                 </Field>
                 {constraintType === "minimum_buffer" ? (
-                  <Field><FieldLabel htmlFor="constraint-buffer">Buffer minutes</FieldLabel><Input id="constraint-buffer" type="number" min="0" required value={minimumBufferMinutes} onChange={(event) => setMinimumBufferMinutes(event.target.value)} /></Field>
+                  <Field><FieldLabel htmlFor="constraint-buffer">{t.itemDialog.bufferMinutes}</FieldLabel><Input id="constraint-buffer" type="number" min="0" required value={minimumBufferMinutes} onChange={(event) => setMinimumBufferMinutes(event.target.value)} /></Field>
                 ) : null}
               </div>
             </FieldSet>
           ) : null}
 
-          <Field><FieldLabel htmlFor="item-source">Official or source URL</FieldLabel><Input id="item-source" type="url" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} /></Field>
-          <Field><FieldLabel htmlFor="item-notes">Notes</FieldLabel><Textarea id="item-notes" value={notes} onChange={(event) => setNotes(event.target.value)} /></Field>
+          <Field><FieldLabel htmlFor="item-source">{t.itemDialog.sourceUrl}</FieldLabel><Input id="item-source" type="url" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} /></Field>
+          <Field><FieldLabel htmlFor="item-notes">{t.itemDialog.notes}</FieldLabel><Textarea id="item-notes" value={notes} onChange={(event) => setNotes(event.target.value)} /></Field>
           {error ? <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-destructive">{error}</p> : null}
           <DialogFooter>
-            <Button type="button" disabled={submitting} onClick={() => void submit()}>{submitting ? "Saving…" : "Save item"}</Button>
+            <Button type="button" disabled={submitting} onClick={() => void submit()}>{submitting ? t.itemDialog.saving : t.itemDialog.save}</Button>
           </DialogFooter>
         </form>
       </DialogContent>

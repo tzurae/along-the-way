@@ -1231,7 +1231,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
 
     const first = await draft("current");
     expect(first.window).toEqual({ startMinute: 9 * 60, endMinute: 19 * 60 });
-    expect(first.lodging).toEqual({ placeId: hotel.id, name: "Kyoto Station Hotel" });
+    expect(first.startsAt).toEqual({ placeId: hotel.id, name: "Kyoto Station Hotel" });
+    expect(first.endsAt).toEqual({ placeId: hotel.id, name: "Kyoto Station Hotel" });
     expect(first.orderedTripPlaceIds).toEqual(currentOrder);
     expect(first.rows).toEqual([
       { kind: "start", name: "Kyoto Station Hotel", departMinute: 540 },
@@ -1260,6 +1261,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         startsBeforeDay: false,
         endsAfterDay: false,
         bufferMinutes: 15,
+        bufferEstimated: false,
+        afterBufferMinutes: 0,
       },
       // Tofuku-ji would end at 11:55, past the 11:45 lunch buffer, so it moves after lunch.
       {
@@ -1288,7 +1291,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       { tripPlaceId: fushimi.id, name: "Fushimi Inari", reason: "travel_unknown" },
       { tripPlaceId: hidden.id, name: "Hidden cafe", reason: "no_location" },
     ]);
-    expect(first.load).toEqual({ busyMinutes: 90 + 18 + 60 + 10 + 45 + 10 + 10, windowMinutes: 600, level: "relaxed" });
+    // The 15 confirmed minutes before lunch are spent waiting there, so they count as busy.
+    expect(first.load).toEqual({ busyMinutes: 90 + 18 + 15 + 60 + 10 + 45 + 10 + 10, windowMinutes: 600, level: "relaxed" });
     // One opening-hours lookup per Google place; every route as if leaving at the day's start.
     expect([...hours.calls].sort()).toEqual([provider.branch.providerPlaceId, provider.kyoto.providerPlaceId].sort());
     expect(new Set(routes.queries.map((query) => query.departureTime))).toEqual(new Set(["2026-10-22T09:00:00+09:00"]));
@@ -1551,6 +1555,169 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect(await placement()).toEqual(afterUse);
     // Nothing is left to add except the place without a location.
     expect(await draft()).toMatchObject({ days: [], unplaced: [{ tripPlaceId: hidden.id, reason: "no_location" }] });
+  });
+
+  it("starts arrival, moving and departure days where the traveller really is", async () => {
+    const owner = await login("owner@example.test");
+    const trip = await createTrip(owner.cookie, "Travel days trip");
+    const send = (method: string, path: string, key: string | null, payload?: unknown) =>
+      app.request(path, {
+        method,
+        headers: {
+          cookie: owner.cookie,
+          "content-type": "application/json",
+          origin: "https://app.example.test",
+          ...(key ? { "idempotency-key": key } : {}),
+        },
+        body: payload === undefined ? undefined : json(payload),
+      });
+    const tripVersion = async () => {
+      const response = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+      return parseTripSkeletonResponse(await response.json()).skeleton.tripVersion;
+    };
+    const skeletonPlace = async (key: string, name: string, type: string, latitude: number, longitude: number, timeZone: string) => {
+      const response = await send("POST", `/api/trips/${trip.id}/places`, key, {
+        name, type, address: null, latitude, longitude, timeZone, sourceUrl: null, notes: null,
+        expectedTripVersion: await tripVersion(),
+      });
+      expect(response.status).toBe(201);
+      return parsePlaceResponse(await response.json()).place;
+    };
+    const at = (placeId: string, role: "start" | "end", localDateTime: string, timeZone = "Asia/Tokyo") => ({
+      role, countryStopId: trip.countryStops[0]!.id, placeId, localDateTime, timeZone,
+    });
+    const item = async (key: string, payload: Record<string, unknown>) => {
+      const response = await send("POST", `/api/trips/${trip.id}/items`, key, {
+        expectedTripVersion: await tripVersion(),
+        participantMemberIds: null, notes: null, sourceUrl: null, money: null, constraints: [],
+        ...payload,
+      });
+      expect(response.status).toBe(201);
+      return parseItineraryItemResponse(await response.json()).item;
+    };
+    const tpe = await skeletonPlace("days-tpe", "Taoyuan Airport", "airport", 25.0797, 121.2342, "Asia/Taipei");
+    const kix = await skeletonPlace("days-kix", "Kansai Airport", "airport", 34.4347, 135.244, "Asia/Tokyo");
+    const kyotoHotel = await skeletonPlace("days-kyoto", "Kyoto Station Hotel", "lodging", 34.9858, 135.7588, "Asia/Tokyo");
+    const osakaHotel = await skeletonPlace("days-osaka", "Namba Hotel", "lodging", 34.6665, 135.5013, "Asia/Tokyo");
+    const flight = (key: string, title: string, from: [string, string, string], to: [string, string, string]) => item(key, {
+      type: "flight",
+      title,
+      endpoints: [at(from[0], "start", from[1], from[2]), at(to[0], "end", to[1], to[2])],
+      details: { carrier: null, serviceNumber: title, confirmationNotes: null },
+    });
+    // In on the 21st (lands 12:30), Kyoto for two nights, Osaka for two, out on the 25th at 18:00.
+    const inbound = await flight("days-in", "CI 152", [tpe.id, "2026-10-21T09:00", "Asia/Taipei"], [kix.id, "2026-10-21T12:30", "Asia/Tokyo"]);
+    const outbound = await flight("days-out", "CI 153", [kix.id, "2026-10-25T18:00", "Asia/Tokyo"], [tpe.id, "2026-10-25T20:00", "Asia/Taipei"]);
+    for (const [key, hotel, from, to] of [
+      ["days-stay-kyoto", kyotoHotel, "2026-10-21T15:00", "2026-10-23T10:00"],
+      ["days-stay-osaka", osakaHotel, "2026-10-23T15:00", "2026-10-25T11:00"],
+    ] as const) {
+      await item(key, {
+        type: "lodging",
+        title: hotel.name,
+        endpoints: [at(hotel.id, "start", from), at(hotel.id, "end", to)],
+        details: { bookedBy: null, confirmationCode: null },
+      });
+    }
+    const manual = async (key: string, name: string, latitude: number, longitude: number) => {
+      const response = await send("POST", `/api/trips/${trip.id}/trip-places`, key, {
+        method: "manual", name, type: "activity", address: null, latitude, longitude,
+        timeZone: "Asia/Tokyo", sourceUrl: null, originalNote: null,
+      });
+      expect(response.status).toBe(201);
+      return parseTripPlaceResponse(await response.json()).tripPlace;
+    };
+    const dayOf = (date: string) => trip.days.find((day) => day.date === date)!.id;
+    const kiyomizu = await manual("days-kiyomizu", "Kiyomizu-dera", 34.9949, 135.785);
+    const castle = await manual("days-castle", "Osaka Castle", 34.6873, 135.5262);
+    const dotonbori = await manual("days-dotonbori", "Dotonbori", 34.6687, 135.5013);
+    expect((await send("PUT", `/api/trips/${trip.id}/trip-place-day-assignments`, "days-assign", {
+      assignments: [
+        { tripPlaceId: kiyomizu.id, tripDayId: dayOf("2026-10-21"), expectedVersion: kiyomizu.version },
+        { tripPlaceId: castle.id, tripDayId: dayOf("2026-10-23"), expectedVersion: castle.version },
+        { tripPlaceId: dotonbori.id, tripDayId: dayOf("2026-10-25"), expectedVersion: dotonbori.version },
+      ],
+    })).status).toBe(200);
+    // Airport and hotel transfers take the train; everything else is a 10-minute walk.
+    for (const [left, right, minutes] of [
+      [kix.id, kyotoHotel.id, 75],
+      [kyotoHotel.id, osakaHotel.id, 50],
+      [osakaHotel.id, kix.id, 60],
+    ] as const) {
+      routes.walking.set(ControlledRouteProvider.pair(left, right), null);
+      routes.transit.set(ControlledRouteProvider.pair(left, right), minutes);
+    }
+    const draft = async (date: string) => {
+      const response = await send("POST", `/api/trips/${trip.id}/days/${dayOf(date)}/timetable`, null, { order: "current" });
+      expect(response.status).toBe(200);
+      return parseDayTimetableResponse(await response.json()).timetable;
+    };
+    const kinds = (rows: Awaited<ReturnType<typeof draft>>["rows"]) => rows.map((row) =>
+      row.kind === "luggage" ? `${row.action}-luggage` : row.kind === "fixed" ? row.title : row.kind === "visit" ? row.name : row.kind);
+
+    // Arrival: lands 12:30, an estimated hour for entry and luggage, 75 minutes to the hotel.
+    const arrival = await draft("2026-10-21");
+    expect(arrival).toMatchObject({ startsAt: null, endsAt: { placeId: kyotoHotel.id } });
+    expect(kinds(arrival.rows)).toEqual(["CI 152", "drop-luggage", "Kiyomizu-dera", "return"]);
+    // Check-in for this flight happened in Taipei, so no airport buffer is shown for it here.
+    expect(arrival.rows[0]).toMatchObject({ itemId: inbound.id, endMinute: 750, afterBufferMinutes: 60, bufferMinutes: 0 });
+    expect(arrival.rows[1]).toMatchObject({ arriveMinute: 885, leaveMinute: 900, travel: { fromName: "Kansai Airport", durationMinutes: 75 } });
+    expect(arrival.rows[2]).toMatchObject({ startMinute: 910, endMinute: 1000 });
+
+    // Moving day: from Kyoto, luggage to Osaka first, back to Osaka at the end.
+    const moving = await draft("2026-10-23");
+    expect(moving).toMatchObject({ startsAt: { placeId: kyotoHotel.id }, endsAt: { placeId: osakaHotel.id } });
+    expect(kinds(moving.rows)).toEqual(["start", "drop-luggage", "Osaka Castle", "return"]);
+    expect(moving.rows[1]).toMatchObject({ name: "Namba Hotel", arriveMinute: 590, leaveMinute: 605 });
+    expect(moving.rows[3]).toMatchObject({ name: "Namba Hotel", arriveMinute: 715 });
+
+    // Departure: from Osaka, back for the luggage, at the airport two hours before 18:00.
+    const departure = await draft("2026-10-25");
+    expect(departure).toMatchObject({ startsAt: { placeId: osakaHotel.id }, endsAt: null });
+    expect(kinds(departure.rows)).toEqual(["start", "Dotonbori", "collect-luggage", "CI 153"]);
+    expect(departure.rows[2]).toMatchObject({ name: "Namba Hotel", arriveMinute: 650, leaveMinute: 665 });
+    expect(departure.rows[3]).toMatchObject({
+      itemId: outbound.id,
+      startMinute: 1080,
+      bufferMinutes: 120,
+      bufferEstimated: true,
+      afterBufferMinutes: 0,
+      travel: { fromName: "Namba Hotel", durationMinutes: 60 },
+    });
+
+    // A confirmed buffer replaces the default.
+    expect((await send("POST", `/api/trips/${trip.id}/items/${outbound.id}/constraints`, "days-buffer", {
+      type: "minimum_buffer", status: "confirmed", minimumBufferMinutes: 90, expectedItemVersion: outbound.version,
+    })).status).toBe(201);
+    expect((await draft("2026-10-25")).rows.at(-1)).toMatchObject({ bufferMinutes: 90, bufferEstimated: false });
+
+    // With a train to the airport, luggage is collected before the train, not before the flight.
+    const station = await skeletonPlace("days-namba-station", "Namba Station", "station", 34.6627, 135.5021, "Asia/Tokyo");
+    const rapit = await item("days-rapit", {
+      type: "transport",
+      title: "Rapi:t",
+      endpoints: [at(station.id, "start", "2026-10-25T15:00"), at(kix.id, "end", "2026-10-25T15:40")],
+      details: { mode: "train", ticketInfo: null },
+    });
+    const withTrain = await draft("2026-10-25");
+    expect(kinds(withTrain.rows)).toEqual(["start", "Dotonbori", "collect-luggage", "Rapi:t", "CI 153"]);
+    expect(withTrain.rows[2]).toMatchObject({ arriveMinute: 650, leaveMinute: 665 });
+    expect(withTrain.rows[3]).toMatchObject({ itemId: rapit.id, travel: { fromName: "Namba Hotel", toName: "Namba Station" } });
+
+    // A day without any lodging is not an arrival day: a midday train leaves the morning free.
+    const aquarium = await manual("days-aquarium", "Kaiyukan", 34.6545, 135.429);
+    expect((await send("PUT", `/api/trips/${trip.id}/trip-place-day-assignments`, "days-assign-aquarium", {
+      assignments: [{ tripPlaceId: aquarium.id, tripDayId: dayOf("2026-10-26"), expectedVersion: aquarium.version }],
+    })).status).toBe(200);
+    await item("days-jr", {
+      type: "transport",
+      title: "JR to Kyoto",
+      endpoints: [at(station.id, "start", "2026-10-26T13:00"), at(kyotoHotel.id, "end", "2026-10-26T13:30")],
+      details: { mode: "train", ticketInfo: null },
+    });
+    const afterTrip = await draft("2026-10-26");
+    expect(kinds(afterTrip.rows)).toEqual(["Kaiyukan", "JR to Kyoto"]);
+    expect(afterTrip.rows[0]).toMatchObject({ startMinute: 540 });
   });
 
   it("rejects merging an unscheduled day assignment into a scheduled place", async () => {

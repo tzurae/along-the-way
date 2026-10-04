@@ -29,7 +29,7 @@ import {
 } from "../private-trips/postgres-private-trip-store";
 import type { TripPlaceModule } from "../trip-places/trip-place-module";
 import type { TripSkeletonModule } from "../trip-skeleton/trip-skeleton-module";
-import { orderByStraightLine, type GeoPoint } from "./day-route-order";
+import { orderByStraightLine, straightLineMeters, type GeoPoint } from "./day-route-order";
 import {
   DEFAULT_STAY_MINUTES,
   scheduleDay,
@@ -90,13 +90,35 @@ interface PlannedStop extends RoutePoint {
 interface DayContext {
   day: TimelineDayDto;
   window: DayWindowDto;
-  lodging: RoutePoint | null;
+  /** The lodging slept in the night before; null on the first day or when none is known. */
+  morning: RoutePoint | null;
+  /** The lodging slept in that night. */
+  night: RoutePoint | null;
+  /** Where the day starts: the morning's lodging, or that night's when nobody is arriving. */
+  start: RoutePoint | null;
+  /** Without a morning lodging, the flight or transport that brings the traveller in. */
+  arrivalItemId: string | null;
+  /** Moving to a new lodging: luggage is left there after this flight or transport, or first thing. */
+  dropLuggage: { afterItemId: string | null } | null;
+  /** The last day: luggage is collected at the morning's lodging before this flight or transport. */
+  collectLuggageBeforeItemId: string | null;
   timeZone: string;
   /** The current date where the day is, for choosing dated opening hours. */
   today: string;
   blocks: TimetableBlock[];
   /** Map points of the fixed items, by place ID. */
   points: Map<string, RoutePoint>;
+}
+
+/** Default time at the airport before a flight unless a member confirmed a buffer. */
+const FLIGHT_CHECK_IN_MINUTES = 120;
+/** Default time after landing for entry and luggage. */
+const FLIGHT_ARRIVAL_MINUTES = 60;
+/** A move ending this close to where the next one starts takes the traveller to it. */
+const FEEDER_METERS = 2_000;
+
+function isMove(block: TimetableBlock) {
+  return block.itemType === "flight" || block.itemType === "transport";
 }
 
 function located(value: { latitude: number | null; longitude: number | null }) {
@@ -126,14 +148,24 @@ function stayMinutes(place: TripPlaceDto) {
   return place.durationMinutes ?? DEFAULT_STAY_MINUTES[place.type];
 }
 
-/** Fixed time inside the window, with overlapping items counted once. */
-function fixedMinutesInWindow(blocks: TimetableBlock[], window: DayWindowDto) {
+/**
+ * Minutes of the day's hours it cannot use for places, overlaps counted once: fixed items with
+ * their buffers, the time before an arrival, and the time after leaving for a departure.
+ */
+function unusableMinutes(context: DayContext) {
+  const { window, blocks } = context;
+  const intervals: Array<[number, number]> = blocks.map((block) =>
+    [block.startMinute - block.bufferMinutes, block.endMinute + block.afterBufferMinutes]);
+  const arrival = blocks.find((block) => block.itemId === context.arrivalItemId);
+  if (arrival) intervals.push([window.startMinute, arrival.endMinute + arrival.afterBufferMinutes]);
+  const departure = blocks.find((block) => block.itemId === context.collectLuggageBeforeItemId);
+  if (departure) intervals.push([departure.startMinute - departure.bufferMinutes, window.endMinute]);
   let total = 0;
   let countedUntil = window.startMinute;
-  for (const block of [...blocks].sort((left, right) => left.startMinute - right.startMinute)) {
-    const end = Math.min(block.endMinute, window.endMinute);
-    total += Math.max(0, end - Math.max(block.startMinute, countedUntil));
-    countedUntil = Math.max(countedUntil, end);
+  for (const [start, end] of intervals.sort((left, right) => left[0] - right[0])) {
+    const clippedEnd = Math.min(end, window.endMinute);
+    total += Math.max(0, clippedEnd - Math.max(start, countedUntil));
+    countedUntil = Math.max(countedUntil, clippedEnd);
   }
   return total;
 }
@@ -209,7 +241,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
     const stops = planned.filter(located).map(plannedStop);
     const context = this.dayContext(skeleton, day, windows.get(day.id)!, stops, null);
     const orderedIds = order === "suggested"
-      ? orderByStraightLine(stops, context.lodging)
+      ? orderByStraightLine(stops, context.night ?? context.start)
       : stops.map((stop) => stop.id);
     const stopsById = new Map(stops.map((stop) => [stop.id, stop]));
     const ordered = orderedIds.map((id) => stopsById.get(id)!);
@@ -252,8 +284,9 @@ export class PostgresDayPlanModule implements DayPlanModule {
         id: context.day.id,
         date: context.day.date,
         windowMinutes: context.window.endMinute - context.window.startMinute,
-        fixedMinutes: fixedMinutesInWindow(context.blocks, context.window),
-        lodging: context.lodging,
+        fixedMinutes: unusableMinutes(context),
+        start: (context.dropLuggage ? context.night : context.start) ?? null,
+        end: context.night ?? (context.collectLuggageBeforeItemId ? context.morning : null),
         kept: kept.get(context.day.id)!.filter(located).map((place) => ({
           ...plannedStop(place),
           stayMinutes: stayMinutes(place),
@@ -324,16 +357,62 @@ export class PostgresDayPlanModule implements DayPlanModule {
     stops: RoutePoint[],
     fallbackZone: string | null,
   ): DayContext {
-    const lodging = this.lodgingFor(skeleton, day.date);
-    const timeZone = lodging?.timeZone
+    const morning = this.lodgingFor(skeleton, Temporal.PlainDate.from(day.date).subtract({ days: 1 }).toString());
+    const night = this.lodgingFor(skeleton, day.date);
+    const timeZone = (night ?? morning)?.timeZone
       ?? stops.find((stop) => stop.timeZone)?.timeZone
       ?? day.entries.flatMap((entry) => skeleton.items.find((item) => item.id === entry.itemId)?.endpoints ?? [])[0]?.timeZone
       ?? fallbackZone
       ?? "UTC";
     const { blocks, points } = this.blocksFor(skeleton, day, timeZone);
+    const landings = blocks.filter((block) => isMove(block) && !block.endsAfterDay)
+      .sort((left, right) => left.endMinute - right.endMinute || left.itemId.localeCompare(right.itemId));
+    const departures = blocks.filter((block) => isMove(block) && !block.startsBeforeDay)
+      .sort((left, right) => left.startMinute - right.startMinute || left.itemId.localeCompare(right.itemId));
+    // The traveller arrives on the trip's first day, or on a day with a lodging but none the night
+    // before. On other days without a lodging a train is just a train.
+    const firstDay = skeleton.days[0]?.id === day.id;
+    const arrivalItemId = !morning && (night !== null || firstDay) ? landings[0]?.itemId ?? null : null;
+    // A new lodging takes the luggage after the last move of the day, or first thing.
+    const moving = night !== null && (morning ? morning.id !== night.id : arrivalItemId !== null);
+    const dropLuggage = moving ? { afterItemId: landings.at(-1)?.itemId ?? null } : null;
+    // The last day: luggage is collected before the move that leaves, which is the first flight
+    // out (or the last move without one), or an earlier move that takes the traveller to it.
+    const feeds = (move: TimetableBlock, into: TimetableBlock) => {
+      if (move.endMinute > into.startMinute || !move.endPointId || !into.startPointId) return false;
+      if (move.endPointId === into.startPointId) return true;
+      return straightLineMeters(points.get(move.endPointId)!, points.get(into.startPointId)!) <= FEEDER_METERS;
+    };
+    let leaving = departures.find((block) => block.itemType === "flight") ?? departures.at(-1) ?? null;
+    for (let feeder = leaving; feeder; ) {
+      leaving = feeder;
+      const into = feeder;
+      feeder = departures.filter((block) => block.startMinute < into.startMinute && feeds(block, into)).at(-1) ?? null;
+    }
+    const collectLuggageBeforeItemId = morning && !night ? leaving?.itemId ?? null : null;
     const today = Temporal.Instant.fromEpochMilliseconds(this.now().getTime())
       .toZonedDateTimeISO(timeZone).toPlainDate().toString();
-    return { day, window, lodging, timeZone, today, blocks, points };
+    return {
+      day,
+      window,
+      morning,
+      night,
+      start: morning ?? (arrivalItemId ? null : night),
+      arrivalItemId,
+      dropLuggage,
+      collectLuggageBeforeItemId,
+      timeZone,
+      today,
+      // The arrival is boarded elsewhere and the departure leaves: their check-in and entry time
+      // respectively do not happen here.
+      blocks: blocks.map((block) =>
+        block.itemId === arrivalItemId
+          ? { ...block, bufferMinutes: 0, bufferEstimated: false }
+          : block.itemId === collectLuggageBeforeItemId
+            ? { ...block, afterBufferMinutes: 0 }
+            : block),
+      points,
+    };
   }
 
   /** Opening hours per place ID, reusing `known` and looking each other place up once. */
@@ -351,9 +430,9 @@ export class PostgresDayPlanModule implements DayPlanModule {
     stops: PlannedStop[],
     hours: Map<string, PlaceOpeningHours | null>,
   ): Promise<TimetableResult> {
-    const { day, window, lodging, blocks } = context;
+    const { day, window, start, night, blocks } = context;
     const points = new Map(context.points);
-    for (const point of [...(lodging ? [lodging] : []), ...stops]) points.set(point.id, point);
+    for (const point of [...(start ? [start] : []), ...(night ? [night] : []), ...stops]) points.set(point.id, point);
     // Every leg is looked up as if leaving at the day's start, so one pair has one answer.
     const departureTime = Temporal.PlainDate.from(day.date)
       .toZonedDateTime({ timeZone: context.timeZone })
@@ -379,14 +458,19 @@ export class PostgresDayPlanModule implements DayPlanModule {
     // Start, at once, the legs a schedule uses when every open place fits; the scheduler then
     // mostly reads finished answers. Returns to the lodging are only certain without fixed items.
     const open = scheduleStops.filter((stop) => stop.hours.status !== "closed").map((stop) => stop.id);
-    const path = lodging ? [lodging.id, ...open] : open;
+    const firstOrigin = context.dropLuggage ? night : start;
+    const path = firstOrigin ? [firstOrigin.id, ...open] : open;
     for (const [index, id] of path.slice(1).entries()) void travel(path[index]!, id);
-    if (lodging) {
-      for (const id of blocks.length === 0 ? open : open.slice(-1)) void travel(id, lodging.id);
+    if (night) {
+      for (const id of blocks.length === 0 ? open : open.slice(-1)) void travel(id, night.id);
     }
     return scheduleDay({
       window,
-      lodging: lodging ? { id: lodging.id, name: lodging.name } : null,
+      start: start ? { id: start.id, name: start.name } : null,
+      end: night ? { id: night.id, name: night.name } : null,
+      arrivalItemId: context.arrivalItemId,
+      dropLuggage: context.dropLuggage,
+      collectLuggageBeforeItemId: context.collectLuggageBeforeItemId,
       stops: scheduleStops,
       blocks,
       travel,
@@ -406,7 +490,8 @@ export class PostgresDayPlanModule implements DayPlanModule {
       window: context.window,
       order,
       orderedTripPlaceIds,
-      lodging: context.lodging ? { placeId: context.lodging.id, name: context.lodging.name } : null,
+      startsAt: context.start ? { placeId: context.start.id, name: context.start.name } : null,
+      endsAt: context.night ? { placeId: context.night.id, name: context.night.name } : null,
       rows: result.rows,
       unscheduled: [
         ...result.unscheduled,
@@ -577,10 +662,11 @@ export class PostgresDayPlanModule implements DayPlanModule {
       const endInstant = end ? Temporal.Instant.from(end.instant) : startInstant.add({ minutes: plannedMinutes(item) });
       const startMinute = minuteOf(startInstant);
       const endMinute = minuteOf(endInstant);
-      const buffers = item.constraints.flatMap((constraint) =>
+      const confirmed = item.constraints.flatMap((constraint) =>
         constraint.type === "minimum_buffer" && constraint.status === "confirmed" && constraint.minimumBufferMinutes !== null
           ? [constraint.minimumBufferMinutes]
           : []);
+      const flight = item.type === "flight";
       const startPointId = pointFor(start.placeId);
       blocks.push({
         itemId: item.id,
@@ -592,7 +678,10 @@ export class PostgresDayPlanModule implements DayPlanModule {
         endsAfterDay: endMinute > DAY_MINUTES,
         startPointId,
         endPointId: end ? pointFor(end.placeId) : startPointId,
-        bufferMinutes: Math.max(0, ...buffers),
+        // A confirmed buffer wins; a flight otherwise gets the default check-in time.
+        bufferMinutes: confirmed.length > 0 ? Math.max(...confirmed) : flight ? FLIGHT_CHECK_IN_MINUTES : 0,
+        bufferEstimated: confirmed.length === 0 && flight,
+        afterBufferMinutes: flight ? FLIGHT_ARRIVAL_MINUTES : 0,
       });
     }
     return { blocks, points };

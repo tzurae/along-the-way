@@ -34,10 +34,32 @@ function stop(id: string, overrides: Partial<TimetableStop> = {}): TimetableStop
 function input(overrides: Partial<TimetableInput>): TimetableInput {
   return {
     window: { startMinute: 9 * 60, endMinute: 19 * 60 },
-    lodging: null,
+    start: null,
+    end: null,
+    arrivalItemId: null,
+    dropLuggage: null,
+    collectLuggageBeforeItemId: null,
     stops: [],
     blocks: [],
     travel: travelTable(),
+    ...overrides,
+  };
+}
+
+function fixed(itemId: string, overrides: Partial<TimetableBlock>): TimetableBlock {
+  return {
+    itemId,
+    title: itemId,
+    itemType: "activity",
+    startMinute: 0,
+    endMinute: 0,
+    startsBeforeDay: false,
+    endsAfterDay: false,
+    startPointId: null,
+    endPointId: null,
+    bufferMinutes: 0,
+    bufferEstimated: false,
+    afterBufferMinutes: 0,
     ...overrides,
   };
 }
@@ -67,7 +89,8 @@ describe("single-day timetable", () => {
   it("drops a place whose return to the lodging would end after the day, but not a closer one after it", async () => {
     const result = await scheduleDay(input({
       window: { startMinute: 9 * 60, endMinute: 12 * 60 },
-      lodging: { id: "hotel", name: "Hotel" },
+      start: { id: "hotel", name: "Hotel" },
+      end: { id: "hotel", name: "Hotel" },
       stops: [stop("near"), stop("far"), stop("close")],
       travel: travelTable({ "far|near": 20, "far|hotel": 60 }),
     }));
@@ -90,6 +113,8 @@ describe("single-day timetable", () => {
       startPointId: "airport",
       endPointId: null,
       bufferMinutes: 0,
+      bufferEstimated: false,
+      afterBufferMinutes: 0,
     };
     const train: TimetableBlock = {
       itemId: "train",
@@ -102,6 +127,8 @@ describe("single-day timetable", () => {
       startPointId: "origin",
       endPointId: "station",
       bufferMinutes: 0,
+      bufferEstimated: false,
+      afterBufferMinutes: 0,
     };
     const lunch: TimetableBlock = {
       itemId: "lunch",
@@ -114,6 +141,8 @@ describe("single-day timetable", () => {
       startPointId: "restaurant",
       endPointId: "restaurant",
       bufferMinutes: 30,
+      bufferEstimated: false,
+      afterBufferMinutes: 0,
     };
     const result = await scheduleDay(input({
       stops: [stop("castle"), stop("garden")],
@@ -145,6 +174,8 @@ describe("single-day timetable", () => {
       startPointId: point,
       endPointId: point,
       bufferMinutes: 0,
+      bufferEstimated: false,
+      afterBufferMinutes: 0,
     });
     const result = await scheduleDay(input({
       // An all-day tour ending at the station includes a lunch at a restaurant.
@@ -169,6 +200,8 @@ describe("single-day timetable", () => {
       startPointId: null,
       endPointId: null,
       bufferMinutes: 0,
+      bufferEstimated: false,
+      afterBufferMinutes: 0,
     };
     const result = await scheduleDay(input({
       window: { startMinute: 15 * 60, endMinute: 22 * 60 },
@@ -198,5 +231,148 @@ describe("single-day timetable", () => {
 
     expect([await level(69), await level(70), await level(90), await level(91)])
       .toEqual(["relaxed", "balanced", "balanced", "packed"]);
+  });
+
+  describe("travel days", () => {
+    const hotel = { id: "hotel", name: "Hotel" };
+    const kinds = (rows: Awaited<ReturnType<typeof scheduleDay>>["rows"]) => rows.map((row) =>
+      row.kind === "fixed" ? row.itemId : row.kind === "visit" ? row.tripPlaceId : row.kind === "luggage" ? `${row.action}-luggage` : row.kind);
+
+    it("starts after landing and entry, leaves luggage at the night's lodging, then plans", async () => {
+      const landing = fixed("landing", {
+        itemType: "flight",
+        startMinute: 8 * 60,
+        endMinute: 11 * 60 + 30,
+        startPointId: "tpe",
+        endPointId: "kix",
+        bufferMinutes: 120,
+        bufferEstimated: true,
+        afterBufferMinutes: 60,
+      });
+      const result = await scheduleDay(input({
+        end: hotel,
+        arrivalItemId: "landing",
+        dropLuggage: { afterItemId: "landing" },
+        stops: [stop("a"), stop("b")],
+        blocks: [landing],
+        travel: travelTable({ "hotel|kix": 70 }),
+      }));
+
+      // Nothing at 09:00 although the morning is free: the traveller is still in the air.
+      expect(kinds(result.rows)).toEqual(["landing", "drop-luggage", "a", "b", "return"]);
+      // Landing 11:30 + 60 minutes of entry + 70 minutes to the hotel, 15 minutes there.
+      expect(result.rows[1]).toMatchObject({ name: "Hotel", arriveMinute: 820, leaveMinute: 835, travel: { fromName: "kix" } });
+      expect(visits(result.rows)).toEqual([["a", 845, 905], ["b", 915, 975]]);
+    });
+
+    it("on a moving day starts at the old lodging and leaves luggage at the new one first", async () => {
+      const result = await scheduleDay(input({
+        start: { id: "old", name: "Old hotel" },
+        end: { id: "new", name: "New hotel" },
+        dropLuggage: { afterItemId: null },
+        stops: [stop("a")],
+        travel: travelTable({ "new|old": 40 }),
+      }));
+
+      expect(kinds(result.rows)).toEqual(["start", "drop-luggage", "a", "return"]);
+      expect(result.rows[0]).toMatchObject({ name: "Old hotel", departMinute: 540 });
+      expect(result.rows[1]).toMatchObject({ name: "New hotel", arriveMinute: 580, leaveMinute: 595 });
+      expect(result.rows[2]).toMatchObject({ travel: { fromName: "new" }, startMinute: 605 });
+      expect(result.rows[3]).toMatchObject({ name: "New hotel" });
+    });
+
+    it("on the last day collects luggage and reaches the airport by check-in, dropping what cannot fit", async () => {
+      const departure = fixed("departure", {
+        itemType: "flight",
+        startMinute: 18 * 60,
+        endMinute: 21 * 60,
+        startPointId: "kix",
+        endPointId: "tpe",
+        bufferMinutes: 120,
+        bufferEstimated: true,
+        afterBufferMinutes: 60,
+      });
+      const result = await scheduleDay(input({
+        start: hotel,
+        collectLuggageBeforeItemId: "departure",
+        stops: [stop("a"), stop("b"), stop("long", { durationMinutes: 240 })],
+        blocks: [departure],
+        travel: travelTable({ "hotel|kix": 75 }),
+      }));
+
+      // Leave the hotel by 14:30: 15 minutes for luggage and 75 to the airport, there 2 hours early.
+      expect(kinds(result.rows)).toEqual(["start", "a", "b", "collect-luggage", "departure"]);
+      expect(result.rows[3]).toMatchObject({ name: "Hotel", arriveMinute: 690, leaveMinute: 705, travel: { fromName: "b" } });
+      expect(result.rows[4]).toMatchObject({ travel: { fromName: "hotel", durationMinutes: 75 }, bufferMinutes: 120, bufferEstimated: true });
+      expect(result.unscheduled).toEqual([{ tripPlaceId: "long", name: "long", reason: "not_enough_time" }]);
+      // From 16:00 the traveller is at the airport: that time is busy, not free.
+      expect(result.load.busyMinutes).toBe(70 + 70 + 25 + 180 + 75);
+    });
+
+    it("never plans a place after the last day's departure", async () => {
+      const morningFlight = fixed("departure", {
+        itemType: "flight",
+        startMinute: 11 * 60,
+        endMinute: 13 * 60 + 30,
+        startPointId: "kix",
+        endPointId: null,
+        bufferMinutes: 120,
+        bufferEstimated: true,
+      });
+      const result = await scheduleDay(input({
+        start: hotel,
+        collectLuggageBeforeItemId: "departure",
+        stops: [stop("museum", { durationMinutes: 120 })],
+        blocks: [morningFlight],
+        travel: travelTable({ "hotel|kix": 50 }),
+      }));
+
+      // Leaving the hotel by 07:55 leaves no time; after the flight the traveller is gone.
+      expect(result.rows.some((row) => row.kind === "visit")).toBe(false);
+      expect(result.unscheduled).toEqual([{ tripPlaceId: "museum", name: "museum", reason: "not_enough_time" }]);
+    });
+
+    it("leaves luggage at the new lodging only when the next fixed item can still be reached", async () => {
+      const tea = fixed("tea", { startMinute: 10 * 60, endMinute: 11 * 60 + 30, startPointId: "kyoto-tea", endPointId: "kyoto-tea" });
+      const result = await scheduleDay(input({
+        start: { id: "old", name: "Old hotel" },
+        end: { id: "new", name: "New hotel" },
+        dropLuggage: { afterItemId: null },
+        blocks: [tea],
+        travel: travelTable({ "new|old": 50, "kyoto-tea|new": 50 }),
+      }));
+
+      // Old to new and back to the tea ceremony would end 10:55, after 10:00: drop it afterwards.
+      expect(kinds(result.rows)).toEqual(["tea", "drop-luggage"]);
+      expect(result.rows[1]).toMatchObject({ arriveMinute: 740, leaveMinute: 755, travel: { fromName: "kyoto-tea" } });
+    });
+
+    it("needs no travel when the last day's transfer leaves from the lodging itself", async () => {
+      const limousine = fixed("limousine", { itemType: "transport", startMinute: 13 * 60, endMinute: 14 * 60, startPointId: "hotel", endPointId: "kix" });
+      const result = await scheduleDay(input({
+        start: hotel,
+        collectLuggageBeforeItemId: "limousine",
+        stops: [stop("a")],
+        blocks: [limousine],
+        travel: travelTable({ "hotel|hotel": null }),
+      }));
+
+      expect(kinds(result.rows)).toEqual(["start", "a", "collect-luggage", "limousine"]);
+      expect(result.rows[3]).toMatchObject({ travel: { durationMinutes: 0 } });
+      expect(result.unscheduled).toEqual([]);
+    });
+
+    it("keeps places out when the way to the new lodging is unknown instead of guessing", async () => {
+      const result = await scheduleDay(input({
+        start: { id: "old", name: "Old hotel" },
+        end: { id: "new", name: "New hotel" },
+        dropLuggage: { afterItemId: null },
+        stops: [stop("a")],
+        travel: travelTable({ "new|old": null }),
+      }));
+
+      expect(result.rows[1]).toMatchObject({ kind: "luggage", arriveMinute: null, leaveMinute: null });
+      expect(result.unscheduled).toEqual([{ tripPlaceId: "a", name: "a", reason: "travel_unknown" }]);
+    });
   });
 });

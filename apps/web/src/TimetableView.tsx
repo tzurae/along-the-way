@@ -5,57 +5,81 @@ import type {
   TripPlanReason,
 } from "@along-the-way/contracts/day-plans";
 
-export const reasonLabels: Record<TripPlanReason, string> = {
-  closed_that_day: "Closed that day",
-  temporarily_closed: "Temporarily closed",
-  permanently_closed: "Permanently closed",
-  closes_too_early: "Closes before the visit can end",
-  not_enough_time: "Not enough time",
-  travel_unknown: "Travel time unknown",
-  no_location: "No map location",
-  cannot_return_to_lodging: "Can't get back to the lodging in time",
-  closed_all_trip_days: "Closed on every trip day",
-  no_day_fits: "No day has room for it",
-};
+import { useI18n, type Messages } from "./i18n";
 
-export const loadLabels: Record<DayTimetableDto["load"]["level"], string> = {
-  relaxed: "Relaxed",
-  balanced: "Balanced",
-  packed: "Packed",
-};
+export function reasonLabel(reason: TripPlanReason, t: Messages["timetable"]) {
+  switch (reason) {
+    case "closed_that_day":
+      return t.closedThatDay;
+    case "temporarily_closed":
+      return t.temporarilyClosed;
+    case "permanently_closed":
+      return t.permanentlyClosed;
+    case "closes_too_early":
+      return t.closesTooEarly;
+    case "not_enough_time":
+      return t.notEnoughTime;
+    case "travel_unknown":
+      return t.travelUnknown;
+    case "no_location":
+      return t.noLocation;
+    case "cannot_return_to_lodging":
+      return t.cannotReturnToLodging;
+    case "closed_all_trip_days":
+      return t.closedAllTripDays;
+    case "no_day_fits":
+      return t.noDayFits;
+  }
+}
+
+export function loadLabel(level: DayTimetableDto["load"]["level"], t: Messages["timetable"]) {
+  switch (level) {
+    case "relaxed":
+      return t.relaxed;
+    case "balanced":
+      return t.balanced;
+    case "packed":
+      return t.packed;
+  }
+}
 
 export function clock(minute: number) {
   return `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
 }
 
-export function span(minutes: number) {
+export function span(minutes: number, t: Messages["timetable"]) {
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
-  return hours === 0 ? `${rest} min` : rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
+  return hours === 0 ? t.minutes(rest) : rest === 0 ? t.hours(hours) : t.hoursAndMinutes(hours, rest);
 }
 
-function legSummary(leg: DayLegDto) {
-  if (leg.durationMinutes === null) return "Travel time unavailable";
+function legSummary(leg: DayLegDto, t: Messages["timetable"]) {
+  if (leg.durationMinutes === null) return t.travelTimeUnavailable;
   // A fixed item without a map location gets an assumed allowance instead of a route.
-  if (leg.mode === null) return `About ${leg.durationMinutes} min (estimate; no map location)`;
+  if (leg.mode === null) return t.estimatedTravelWithoutLocation(leg.durationMinutes);
   if (leg.mode === "walking") {
     // Walking is only chosen past 15 minutes when no train time is known.
-    return `Walk ${leg.durationMinutes} min${leg.transitMinutes === null && leg.durationMinutes > 15 ? " · train time unavailable" : ""}`;
+    const unavailable = leg.transitMinutes === null && leg.durationMinutes > 15
+      ? `・${t.trainTimeUnavailable}`
+      : "";
+    return `${t.walk(leg.durationMinutes)}${unavailable}`;
   }
-  const walk = leg.walkingMinutes === null ? "" : ` · walking ${leg.walkingMinutes} min`;
-  return `Train ${leg.durationMinutes} min${leg.estimated ? " (average)" : ""}${walk}`;
+  const walk = leg.walkingMinutes === null ? "" : `・${t.walkingTime(leg.walkingMinutes)}`;
+  const average = leg.estimated ? `（${t.average}）` : "";
+  return `${t.train(leg.durationMinutes)}${average}${walk}`;
 }
 
 export function TimetableRow({ row }: { row: DayTimetableRowDto }) {
+  const { t } = useI18n();
   const travel = row.kind !== "start" && row.travel
-    ? <p className="text-sm text-muted-foreground">↓ {legSummary(row.travel)}</p>
+    ? <p className="text-sm text-muted-foreground">↓ {legSummary(row.travel, t.timetable)}</p>
     : null;
   switch (row.kind) {
     case "start":
       return (
         <li className="grid grid-cols-[6.5rem_1fr] gap-x-3">
           <span className="font-mono font-bold">{clock(row.departMinute)}</span>
-          <span className="font-semibold">Leave {row.name}</span>
+          <span className="font-semibold">{t.timetable.leave(row.name)}</span>
         </li>
       );
     case "visit":
@@ -65,16 +89,19 @@ export function TimetableRow({ row }: { row: DayTimetableRowDto }) {
           <div>
             {travel}
             {row.waitMinutes > 0 ? (
-              <p className="text-sm text-muted-foreground">Arrive {clock(row.arriveMinute)} · wait {row.waitMinutes} min for opening</p>
+              <p className="text-sm text-muted-foreground">
+                {t.timetable.arriveAndWaitForOpening(clock(row.arriveMinute), row.waitMinutes)}
+              </p>
             ) : null}
           </div>
           <span className="font-mono font-bold">{clock(row.startMinute)}–{clock(row.endMinute)}</span>
           <div>
             <p className="font-semibold">{row.name}</p>
             <p className="text-sm text-muted-foreground">
-              Stay {row.stayMinutes} min{row.stayEstimated ? " (estimate)" : ""}
-              {" · "}
-              {row.hours === "listed" ? "Open then per Google · check last entry yourself" : "Opening hours unknown"}
+              {t.timetable.stay(row.stayMinutes)}
+              {row.stayEstimated ? `（${t.timetable.estimate}）` : ""}
+              {"・"}
+              {row.hours === "listed" ? t.timetable.openAccordingToGoogle : t.timetable.openingHoursUnknown}
             </p>
           </div>
         </li>
@@ -90,9 +117,33 @@ export function TimetableRow({ row }: { row: DayTimetableRowDto }) {
           <div className="rounded-lg border border-accent/40 px-2 py-1">
             <p className="font-semibold">{row.title}</p>
             <p className="text-sm text-muted-foreground">
-              Fixed time, not moved{row.bufferMinutes > 0 ? ` · arrive ${row.bufferMinutes} min early` : ""}
+              {t.timetable.fixedTimeNotMoved}
+              {row.bufferMinutes > 0
+                ? `・${t.timetable.arriveEarly(
+                    row.bufferMinutes,
+                    row.bufferEstimated ? t.timetable.estimate : t.timetable.confirmed,
+                  )}`
+                : ""}
+              {row.afterBufferMinutes > 0 ? `・${t.timetable.entryAndLuggageAfter(row.afterBufferMinutes)}` : ""}
             </p>
           </div>
+        </li>
+      );
+    case "luggage":
+      return (
+        <li className="grid grid-cols-[6.5rem_1fr] gap-x-3">
+          <span />
+          <div>{travel}</div>
+          <span className="font-mono font-bold">
+            {row.arriveMinute === null || row.leaveMinute === null
+              ? t.timetable.timeUnknown
+              : `${clock(row.arriveMinute)}–${clock(row.leaveMinute)}`}
+          </span>
+          <span className="font-semibold">
+            {row.action === "drop"
+              ? t.timetable.leaveLuggageAt(row.name)
+              : t.timetable.collectLuggageAt(row.name)}
+          </span>
         </li>
       );
     case "return":
@@ -101,8 +152,21 @@ export function TimetableRow({ row }: { row: DayTimetableRowDto }) {
           <span />
           <div>{travel}</div>
           <span className="font-mono font-bold">{clock(row.arriveMinute)}</span>
-          <span className="font-semibold">Back at {row.name}</span>
+          <span className="font-semibold">{t.timetable.backAt(row.name)}</span>
         </li>
       );
   }
+}
+
+/** Where the day starts and ends, in one sentence. */
+export function describeStartAndEnd(timetable: DayTimetableDto, t: Messages["timetable"]) {
+  const { startsAt, endsAt } = timetable;
+  if (startsAt && endsAt) {
+    return startsAt.placeId === endsAt.placeId
+      ? t.startsAndEndsAt(startsAt.name)
+      : t.startsAtAndEndsAt(startsAt.name, endsAt.name);
+  }
+  if (startsAt) return t.startsAtWithoutLodging(startsAt.name);
+  if (endsAt) return t.startsAtArrivalAndEndsAt(endsAt.name);
+  return t.noLodging;
 }

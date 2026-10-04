@@ -32,6 +32,7 @@ import {
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { useI18n } from "./i18n";
 
 interface CreateTripDialogProps {
   createTrip(input: CreateTripInput): Promise<void>;
@@ -58,6 +59,7 @@ function hasAdjacentDuplicate(countryCodes: readonly string[]) {
 }
 
 export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [dateRange, setDateRange] = useState<DateRange>();
@@ -77,12 +79,12 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
     setSelectedCountry(null);
     setCountryQuery("");
     if (countryStops.length >= MAX_TRIP_COUNTRY_STOPS) {
-      setError(`A trip can have at most ${MAX_TRIP_COUNTRY_STOPS} country stops.`);
+      setError(t.createTrip.maximumCountryStops(MAX_TRIP_COUNTRY_STOPS));
       return;
     }
 
     if (countryStops.at(-1)?.countryCode === country.code) {
-      setError("The same country cannot appear in consecutive stops.");
+      setError(t.createTrip.consecutiveCountry);
       return;
     }
 
@@ -104,7 +106,7 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
     candidate[index] = destinationCountry;
     candidate[destination] = currentCountry;
     if (hasAdjacentDuplicate(candidate.map((stop) => stop.countryCode))) {
-      setError("That move would place identical countries next to each other.");
+      setError(t.createTrip.moveCreatesConsecutiveCountry);
       return;
     }
 
@@ -115,7 +117,7 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
   function removeCountry(index: number) {
     const candidate = countryStops.filter((_, itemIndex) => itemIndex !== index);
     if (hasAdjacentDuplicate(candidate.map((stop) => stop.countryCode))) {
-      setError("Removing that stop would place identical countries next to each other.");
+      setError(t.createTrip.removalCreatesConsecutiveCountry);
       return;
     }
     setCountryStops(candidate);
@@ -133,11 +135,11 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
 
   async function submit() {
     if (!dateRange?.from || !dateRange.to) {
-      setError("Choose both the start and end dates.");
+      setError(t.createTrip.chooseStartAndEndDates);
       return;
     }
     if (countryStops.length === 0) {
-      setError("Add at least one country stop.");
+      setError(t.createTrip.addAtLeastOneCountry);
       return;
     }
 
@@ -153,7 +155,7 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
       reset();
       setOpen(false);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not create the trip.");
+      setError(caught instanceof Error ? caught.message : t.createTrip.couldNotCreate);
     } finally {
       setSubmitting(false);
     }
@@ -161,18 +163,18 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={<Button className="min-h-10" />}>Create trip</DialogTrigger>
+      <DialogTrigger render={<Button className="min-h-10" />}>{t.createTrip.createTrip}</DialogTrigger>
       <DialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
-          <DialogTitle>Create a trip</DialogTitle>
+          <DialogTitle>{t.createTrip.title}</DialogTitle>
           <DialogDescription>
-            Set the overall dates and an ordered country route. Time zones and a default currency are inferred only when the route is unambiguous.
+            {t.createTrip.description}
           </DialogDescription>
         </DialogHeader>
 
         <form className="grid gap-5" onSubmit={(event) => event.preventDefault()}>
           <Field>
-            <FieldLabel htmlFor="trip-name">Trip name</FieldLabel>
+            <FieldLabel htmlFor="trip-name">{t.createTrip.tripName}</FieldLabel>
             <Input
               id="trip-name"
               autoComplete="off"
@@ -184,7 +186,7 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
           </Field>
 
           <Field>
-            <FieldLabel>Trip dates</FieldLabel>
+            <FieldLabel>{t.createTrip.tripDates}</FieldLabel>
             <Popover>
               <PopoverTrigger
                 render={
@@ -199,8 +201,8 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
                 {dateRange?.from
                   ? dateRange.to
                     ? `${format(dateRange.from, "yyyy/MM/dd")} – ${format(dateRange.to, "yyyy/MM/dd")}`
-                    : `${format(dateRange.from, "yyyy/MM/dd")} – choose end date`
-                  : "Choose a date range"}
+                    : `${format(dateRange.from, "yyyy/MM/dd")} – ${t.createTrip.chooseEndDate}`
+                  : t.createTrip.chooseDateRange}
               </PopoverTrigger>
               <PopoverContent className="w-auto max-w-[calc(100vw-2rem)] p-0" align="start">
                 <Calendar
@@ -212,11 +214,11 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
                 />
               </PopoverContent>
             </Popover>
-            <FieldDescription>Dates are stored as calendar dates, without a time zone conversion.</FieldDescription>
+            <FieldDescription>{t.createTrip.dateDescription}</FieldDescription>
           </Field>
 
           <Field>
-            <FieldLabel htmlFor="country-route-search">Add a country</FieldLabel>
+            <FieldLabel htmlFor="country-route-search">{t.createTrip.addCountry}</FieldLabel>
             <Combobox
               items={filteredCountries}
               value={selectedCountry}
@@ -230,12 +232,12 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
             >
               <ComboboxInput
                 id="country-route-search"
-                placeholder="Search 中文, English, or ISO code"
+                placeholder={t.createTrip.searchCountryPlaceholder}
                 autoComplete="off"
                 className="w-full"
               />
               <ComboboxContent>
-                <ComboboxEmpty>No countries found.</ComboboxEmpty>
+                <ComboboxEmpty>{t.createTrip.noCountriesFound}</ComboboxEmpty>
                 <ComboboxList>
                   {(country: CountryOption) => (
                     <ComboboxItem
@@ -245,7 +247,7 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
                     >
                       <span className="truncate">{countryLabel(country)}</span>
                       {countryStops.at(-1)?.countryCode === country.code ? (
-                        <span className="ml-auto text-xs text-muted-foreground">Already last</span>
+                        <span className="ml-auto text-xs text-muted-foreground">{t.createTrip.alreadyLast}</span>
                       ) : null}
                     </ComboboxItem>
                   )}
@@ -253,18 +255,18 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
               </ComboboxContent>
             </Combobox>
             <FieldDescription>
-              Up to {MAX_TRIP_COUNTRY_STOPS} stops. Repeated countries are allowed when another stop appears between them.
+              {t.createTrip.countryStopLimit(MAX_TRIP_COUNTRY_STOPS)}
             </FieldDescription>
           </Field>
 
           <section aria-labelledby="country-route-heading" className="grid gap-3">
             <div className="flex items-center justify-between gap-3">
-              <h3 id="country-route-heading" className="font-semibold">Country route</h3>
-              <span className="text-sm text-muted-foreground">{countryStops.length} stops</span>
+              <h3 id="country-route-heading" className="font-semibold">{t.createTrip.countryRoute}</h3>
+              <span className="text-sm text-muted-foreground">{t.createTrip.stopCount(countryStops.length)}</span>
             </div>
             {countryStops.length === 0 ? (
               <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-                Add the first country to start the route.
+                {t.createTrip.emptyCountryRoute}
               </p>
             ) : (
               <ol className="grid gap-2">
@@ -286,7 +288,7 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
                           type="button"
                           variant="ghost"
                           size="icon-sm"
-                          aria-label={`Move stop ${index + 1} up`}
+                          aria-label={t.createTrip.moveStopUp(index + 1)}
                           disabled={index === 0}
                           onClick={() => moveCountry(index, -1)}
                         >
@@ -296,7 +298,7 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
                           type="button"
                           variant="ghost"
                           size="icon-sm"
-                          aria-label={`Move stop ${index + 1} down`}
+                          aria-label={t.createTrip.moveStopDown(index + 1)}
                           disabled={index === countryStops.length - 1}
                           onClick={() => moveCountry(index, 1)}
                         >
@@ -306,7 +308,7 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
                           type="button"
                           variant="ghost"
                           size="icon-sm"
-                          aria-label={`Remove stop ${index + 1}`}
+                          aria-label={t.createTrip.removeStop(index + 1)}
                           onClick={() => removeCountry(index)}
                         >
                           <Trash2 />
@@ -328,7 +330,7 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
           <DialogFooter>
             <Button type="button" disabled={submitting} onClick={() => void submit()}>
               <Plus />
-              {submitting ? "Creating…" : "Create trip"}
+              {submitting ? t.createTrip.creating : t.createTrip.createTrip}
             </Button>
           </DialogFooter>
         </form>
