@@ -83,6 +83,7 @@ export class AppError extends Error {
       | "forbidden"
       | "trip_not_found"
       | "trip_place_not_found"
+      | "trip_day_not_found"
       | "contribution_not_found"
       | "duplicate_suggestion_not_found"
       | "discovery_proposal_not_found"

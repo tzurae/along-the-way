@@ -26,6 +26,7 @@ function response(assignedDayId: string | null) {
       scheduled: false,
       durationMinutes: 60,
       assignedDayId,
+      dayPosition: assignedDayId === null ? null : 0,
       budgetAmountMinor: 1200,
       budgetCurrency: "JPY",
       notes: null,

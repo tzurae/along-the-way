@@ -1408,7 +1408,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       row,
     ]));
     const assignmentByPlaceId = new Map(
-      assignmentRows.map((assignment) => [assignment.trip_place_id, assignment.trip_day_id]),
+      assignmentRows.map((assignment) => [assignment.trip_place_id, assignment]),
     );
     return placeRows.map((row): TripPlaceDto => {
       const placeContributions = contributions.filter((entry) => entry.trip_place_id === row.id).map((entry) => ({
@@ -1491,7 +1491,8 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         status,
         scheduled: isScheduled,
         durationMinutes: row.duration_minutes,
-        assignedDayId: assignmentByPlaceId.get(row.id) ?? null,
+        assignedDayId: assignmentByPlaceId.get(row.id)?.trip_day_id ?? null,
+        dayPosition: assignmentByPlaceId.get(row.id)?.day_position ?? null,
         budgetAmountMinor: row.budget_amount_minor === null ? null : Number(row.budget_amount_minor),
         budgetCurrency: row.budget_currency,
         notes: row.notes,

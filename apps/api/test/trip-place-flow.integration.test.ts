@@ -8,6 +8,13 @@ import {
   parseTripPlaceResponse,
   type ProviderPlaceCandidateDto,
 } from "@along-the-way/contracts/trip-places";
+import { parseDayRoutePlanResponse } from "@along-the-way/contracts/day-routes";
+import type {
+  RouteMode,
+  RouteObservation,
+  RouteObservationProvider,
+  RouteObservationQuery,
+} from "@along-the-way/contracts/planning-observations";
 import { parseTripResponse } from "@along-the-way/contracts/private-trips";
 import {
   parsePlaceResponse,
@@ -21,7 +28,12 @@ import {
   down as removeDayAssignmentMigration,
   up as applyDayAssignmentMigration,
 } from "../src/database/migrations/007_trip_place_day_assignments";
+import {
+  down as removeDayOrderMigration,
+  up as applyDayOrderMigration,
+} from "../src/database/migrations/009_day_place_order";
 import { seedDatabase } from "../src/database/seed";
+import { PostgresDayRouteModule } from "../src/planning/postgres-day-route-module";
 import type { EmailSender } from "../src/private-trips/email-sender";
 import { PostgresEmailWorker } from "../src/private-trips/postgres-email-worker";
 import { PostgresIdentityAccessModule } from "../src/private-trips/postgres-identity-access-module";
@@ -91,6 +103,51 @@ class ControlledProvider implements PlaceProvider {
   }
 }
 
+/** Answers by unordered place pair; unlisted pairs walk 10 minutes and have no transit. */
+class ControlledRouteProvider implements RouteObservationProvider {
+  readonly queries: RouteObservationQuery[] = [];
+  readonly walking = new Map<string, number | null>();
+  readonly transit = new Map<string, number>();
+
+  static pair(left: string, right: string) {
+    return [left, right].sort().join("|");
+  }
+
+  async observe(query: RouteObservationQuery): Promise<RouteObservation[]> {
+    this.queries.push(query);
+    const pair = ControlledRouteProvider.pair(query.origin.placeId, query.destination.placeId);
+    const walking = this.walking.has(pair) ? this.walking.get(pair)! : 10;
+    return [
+      this.observation(query, "walking", walking),
+      this.observation(query, "transit", this.transit.get(pair) ?? null),
+    ];
+  }
+
+  private observation(query: RouteObservationQuery, mode: RouteMode, minutes: number | null): RouteObservation {
+    const source = {
+      originPlaceId: query.origin.placeId,
+      destinationPlaceId: query.destination.placeId,
+      requestedDepartureTime: query.departureTime,
+      mode,
+      provider: "controlled",
+      attribution: "Controlled routes",
+      observedAt: "2026-09-28T12:00:00.000Z",
+      expiresAt: "2026-09-28T12:05:00.000Z",
+    };
+    return minutes === null
+      ? { ...source, status: "unavailable", reason: "no_route", durationMinutes: null, distanceMeters: null, walkingLegMinutes: null }
+      : {
+          ...source,
+          status: "available",
+          durationMinutes: minutes,
+          distanceMeters: minutes * 80,
+          walkingLegMinutes: null,
+          manualChecks: mode === "transit" ? ["transit_duration_estimated"] : [],
+          warnings: [],
+        };
+  }
+}
+
 function json(value: unknown) {
   return JSON.stringify(value);
 }
@@ -131,6 +188,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
   let email: CapturingEmailSender;
   let worker: PostgresEmailWorker;
   let provider: ControlledProvider;
+  let routes: ControlledRouteProvider;
   const now = () => new Date("2026-09-28T12:00:00.000Z");
 
   beforeAll(async () => {
@@ -173,6 +231,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     await seedDatabase(database, "owner@example.test");
     email = new CapturingEmailSender();
     provider = new ControlledProvider();
+    routes = new ControlledRouteProvider();
     let sessionNumber = 0;
     const tokenIssuer = new TokenIssuer("trip-place-integration-secret-at-least-32-bytes");
     const identityAccess = new PostgresIdentityAccessModule({
@@ -188,7 +247,24 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       tokenIssuer,
       now,
     });
+    const tripPlaces = new PostgresTripPlaceModule({
+      database,
+      provider,
+      now,
+      urlResolver: {
+        fetch: async () => new Response(null, {
+          status: 302,
+          headers: {
+            location:
+              "https://www.google.com/maps/place/Kiyomizu-dera/?query_place_id=ChIJ-Kyoto-Temple-1234",
+          },
+        }),
+        resolveHost: async () => ["142.250.72.238"],
+      },
+    });
+    const tripSkeleton = new PostgresTripSkeletonModule({ database, now });
     app = createApp({
+      dayRoutes: new PostgresDayRouteModule({ database, tripSkeleton, tripPlaces, routeProviders: [routes] }),
       discovery: unrelatedDiscoveryModule,
       identityAccess,
       rateLimiter: new PostgresRateLimiter(
@@ -198,22 +274,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       ),
       readiness: new PostgresReadinessProbe(database, now),
       siteAddress: "https://app.example.test",
-      tripPlaces: new PostgresTripPlaceModule({
-        database,
-        provider,
-        now,
-        urlResolver: {
-          fetch: async () => new Response(null, {
-            status: 302,
-            headers: {
-              location:
-                "https://www.google.com/maps/place/Kiyomizu-dera/?query_place_id=ChIJ-Kyoto-Temple-1234",
-            },
-          }),
-          resolveHost: async () => ["142.250.72.238"],
-        },
-      }),
-      tripSkeleton: new PostgresTripSkeletonModule({ database, now }),
+      tripPlaces,
+      tripSkeleton,
       tripWorkspace: new PostgresTripWorkspaceModule({ database, now }),
     });
   });
@@ -571,6 +633,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       )).json(),
     ).tripPlace;
 
+    await removeDayOrderMigration(database as Kysely<unknown>);
     await removeDayAssignmentMigration(database as Kysely<unknown>);
     await database.insertInto("trip_place_desired_days").values([
       {
@@ -596,6 +659,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     }).execute();
 
     await applyDayAssignmentMigration(database as Kysely<unknown>);
+    await applyDayOrderMigration(database as Kysely<unknown>);
 
     expect(await database.selectFrom("trip_place_desired_days").selectAll()
       .where("trip_id", "=", trip.id).execute()).toHaveLength(3);
@@ -974,6 +1038,168 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       .toBe("Target planning note\n\nSource planning note");
     expect((await list(owner.cookie, trip.id))[0]?.notes)
       .toBe("Target planning note\n\nSource planning note");
+  });
+
+  it("plans a day from the night's lodging, queries only the chosen legs, and keeps an applied order", async () => {
+    const owner = await login("owner@example.test");
+    const trip = await createTrip(owner.cookie, "Day route trip");
+    const otherTrip = await createTrip(owner.cookie, "Other route trip");
+    const send = (method: string, path: string, key: string | null, payload?: unknown) =>
+      app.request(path, {
+        method,
+        headers: {
+          cookie: owner.cookie,
+          "content-type": "application/json",
+          origin: "https://app.example.test",
+          ...(key ? { "idempotency-key": key } : {}),
+        },
+        body: payload === undefined ? undefined : json(payload),
+      });
+    const tripVersion = async () => {
+      const response = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+      return parseTripSkeletonResponse(await response.json()).skeleton.tripVersion;
+    };
+
+    // Lodging from the evening of day 1 to the morning of day 3 covers the night of day 2.
+    const hotelResponse = await send("POST", `/api/trips/${trip.id}/places`, "route-hotel", {
+      name: "Kyoto Station Hotel",
+      type: "lodging",
+      address: "Kyoto Station",
+      latitude: 34.9858,
+      longitude: 135.7588,
+      timeZone: "Asia/Tokyo",
+      sourceUrl: null,
+      notes: null,
+      expectedTripVersion: await tripVersion(),
+    });
+    expect(hotelResponse.status).toBe(201);
+    const hotel = parsePlaceResponse(await hotelResponse.json()).place;
+    const endpoint = (role: "start" | "end", localDateTime: string) => ({
+      role,
+      countryStopId: trip.countryStops[0]!.id,
+      placeId: hotel.id,
+      localDateTime,
+      timeZone: "Asia/Tokyo",
+    });
+    const stay = await send("POST", `/api/trips/${trip.id}/items`, "route-stay", {
+      expectedTripVersion: await tripVersion(),
+      type: "lodging",
+      title: "Kyoto stay",
+      participantMemberIds: null,
+      notes: null,
+      sourceUrl: null,
+      money: null,
+      endpoints: [endpoint("start", "2026-10-21T15:00"), endpoint("end", "2026-10-23T10:00")],
+      details: { bookedBy: null, confirmationCode: null },
+      constraints: [],
+    });
+    expect(stay.status).toBe(201);
+
+    const place = async (key: string, name: string, latitude: number | null, longitude: number | null) => {
+      const response = await send("POST", `/api/trips/${trip.id}/trip-places`, key, {
+        method: "manual",
+        name,
+        type: "activity",
+        address: null,
+        latitude,
+        longitude,
+        timeZone: latitude === null ? null : "Asia/Tokyo",
+        sourceUrl: null,
+        originalNote: null,
+      });
+      expect(response.status).toBe(201);
+      return parseTripPlaceResponse(await response.json()).tripPlace;
+    };
+    const kiyomizu = await place("route-kiyomizu", "Kiyomizu-dera", 34.9949, 135.785);
+    const tofukuji = await place("route-tofukuji", "Tofuku-ji", 34.9767, 135.7738);
+    const fushimi = await place("route-fushimi", "Fushimi Inari", 34.9671, 135.7727);
+    const unlocated = await place("route-cafe", "Hidden cafe", null, null);
+    const arashiyama = await place("route-arashiyama", "Arashiyama", 35.0094, 135.6668);
+    const dayTwo = trip.days[1]!.id;
+    const assign = (key: string, entries: Array<{ id: string; version: number; day: string | null }>) =>
+      send("PUT", `/api/trips/${trip.id}/trip-place-day-assignments`, key, {
+        assignments: entries.map((entry) => ({
+          tripPlaceId: entry.id,
+          tripDayId: entry.day,
+          expectedVersion: entry.version,
+        })),
+      });
+    const assigned = await assign("route-assign", [
+      ...[kiyomizu, tofukuji, fushimi, unlocated].map((entry) => ({ ...entry, day: dayTwo })),
+      { ...arashiyama, day: trip.days[2]!.id },
+    ]);
+    expect(assigned.status).toBe(200);
+
+    // Hotel ↔ Kiyomizu is a long walk with a train; Fushimi ↔ Hotel has no known route.
+    routes.walking.set(ControlledRouteProvider.pair(hotel.id, kiyomizu.id), 40);
+    routes.transit.set(ControlledRouteProvider.pair(hotel.id, kiyomizu.id), 18);
+    routes.walking.set(ControlledRouteProvider.pair(hotel.id, fushimi.id), null);
+
+    expect((await send("POST", `/api/trips/${trip.id}/days/${otherTrip.days[1]!.id}/route-plan`, null)).status)
+      .toBe(404);
+    const planned = await send("POST", `/api/trips/${trip.id}/days/${dayTwo}/route-plan`, null);
+    expect(planned.status).toBe(200);
+    const { plan } = parseDayRoutePlanResponse(await planned.json());
+    expect(plan.lodging).toEqual({ placeId: hotel.id, name: "Kyoto Station Hotel" });
+    const names = plan.stops.map((stop) => stop.name);
+    expect([
+      ["Kiyomizu-dera", "Tofuku-ji", "Fushimi Inari"],
+      ["Fushimi Inari", "Tofuku-ji", "Kiyomizu-dera"],
+    ]).toContainEqual(names);
+    const legFor = (left: string, right: string) => plan.legs.find((leg) =>
+      [leg.fromName, leg.toName].sort().join("|") === [left, right].sort().join("|"));
+    expect(plan.legs).toHaveLength(4);
+    expect(legFor("Kyoto Station Hotel", "Kiyomizu-dera")).toMatchObject({
+      mode: "transit", durationMinutes: 18, walkingMinutes: 40, estimated: true,
+    });
+    expect(legFor("Kiyomizu-dera", "Tofuku-ji")).toMatchObject({ mode: "walking", durationMinutes: 10 });
+    expect(legFor("Fushimi Inari", "Kyoto Station Hotel")).toMatchObject({
+      mode: null, durationMinutes: null, unavailableReason: "no_route",
+    });
+    expect(plan.totalMinutes).toBe(18 + 10 + 10);
+    expect(plan.unknownLegs).toBe(1);
+    expect(plan.unplaceable).toEqual([{ tripPlaceId: unlocated.id, name: "Hidden cafe" }]);
+    // One query per leg of the chosen route, each at 10:00 Kyoto time.
+    expect(routes.queries).toHaveLength(4);
+    expect(new Set(routes.queries.map((query) => query.departureTime))).toEqual(
+      new Set(["2026-10-22T10:00:00+09:00"]),
+    );
+
+    const orderedTripPlaceIds = plan.stops.map((stop) => stop.tripPlaceId);
+    const applied = await send("PUT", `/api/trips/${trip.id}/days/${dayTwo}/place-order`, "route-apply", {
+      orderedTripPlaceIds,
+    });
+    expect(applied.status).toBe(200);
+    expect(await applied.json()).toEqual({ orderedTripPlaceIds });
+    const positions = async () => new Map(
+      (await list(owner.cookie, trip.id)).map((entry) => [entry.id, entry.dayPosition]),
+    );
+    const afterApply = await positions();
+    orderedTripPlaceIds.forEach((id, index) => expect(afterApply.get(id)).toBe(index));
+    expect(afterApply.get(unlocated.id)).toBeNull();
+    expect(afterApply.get(arashiyama.id)).toBeNull();
+
+    // A retried request returns the first answer and does not apply a second order.
+    const replay = await send("PUT", `/api/trips/${trip.id}/days/${dayTwo}/place-order`, "route-apply", {
+      orderedTripPlaceIds: [...orderedTripPlaceIds].reverse(),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ orderedTripPlaceIds });
+    expect(await positions()).toEqual(afterApply);
+
+    // An order naming a place planned for another day is stale and changes nothing.
+    const stale = await send("PUT", `/api/trips/${trip.id}/days/${dayTwo}/place-order`, "route-stale", {
+      orderedTripPlaceIds: [arashiyama.id, ...orderedTripPlaceIds],
+    });
+    expect(stale.status).toBe(409);
+    expect(await positions()).toEqual(afterApply);
+
+    // Moving a place off the day drops its position, so it never sorts ahead on its next day.
+    const current = (await list(owner.cookie, trip.id)).find((entry) => entry.id === tofukuji.id)!;
+    expect((await assign("route-unassign", [{ ...current, day: null }])).status).toBe(200);
+    const moved = (await list(owner.cookie, trip.id)).find((entry) => entry.id === tofukuji.id)!;
+    expect((await assign("route-reassign", [{ ...moved, day: trip.days[2]!.id }])).status).toBe(200);
+    expect((await positions()).get(tofukuji.id)).toBeNull();
   });
 
   it("rejects merging an unscheduled day assignment into a scheduled place", async () => {

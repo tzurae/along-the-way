@@ -27,6 +27,7 @@ import { TokenIssuer } from "../src/private-trips/token-issuer";
 import { PostgresTripSkeletonModule } from "../src/trip-skeleton/postgres-trip-skeleton-module";
 import type { PlaceProvider } from "../src/trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
+import { unrelatedDayRouteModule } from "./day-route-test-support";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required");
@@ -248,6 +249,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       policyVersion: "discovery-test-v1",
     });
     app = createApp({
+      dayRoutes: unrelatedDayRouteModule,
       discovery,
       identityAccess,
       rateLimiter: new PostgresRateLimiter(database, "discovery-rate-secret-at-least-32-bytes", now),
