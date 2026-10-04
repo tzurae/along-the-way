@@ -179,6 +179,8 @@ export interface TripPlaceDayAssignmentTable {
   trip_day_id: string;
   assigned_by: string;
   assigned_at: Timestamp;
+  /** Applied order within the day; null until a route order is applied. */
+  day_position: number | null;
 }
 
 export interface TripPlaceDuplicateSuggestionTable {

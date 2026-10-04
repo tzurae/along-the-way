@@ -1,5 +1,11 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Temporal } from "@js-temporal/polyfill";
+import {
+  parseDayRoutePlanResponse,
+  type DayRouteLegDto,
+  type DayRoutePlanDto,
+  type DayRoutePlanResponse,
+} from "@along-the-way/contracts/day-routes";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import {
   parseTripPlaceListResponse,
@@ -180,6 +186,88 @@ function formatMinorAmount(amountMinor: number, currency: string) {
   return formatter.format(amountMinor / (10 ** fractionDigits));
 }
 
+/** Applied route order first; places without one keep their list order at the end. */
+function byDayPosition(left: TripPlaceDto, right: TripPlaceDto) {
+  if (left.dayPosition === right.dayPosition) return 0;
+  if (left.dayPosition === null) return 1;
+  if (right.dayPosition === null) return -1;
+  return left.dayPosition - right.dayPosition;
+}
+
+function legSummary(leg: DayRouteLegDto) {
+  if (leg.mode === null || leg.durationMinutes === null) return "Travel time unavailable";
+  if (leg.mode === "walking") {
+    // Walking is only chosen past 15 minutes when no train time is known.
+    return `Walk ${leg.durationMinutes} min${leg.transitMinutes === null && leg.durationMinutes > 15 ? " · train time unavailable" : ""}`;
+  }
+  const walk = leg.walkingMinutes === null ? "" : ` · walking ${leg.walkingMinutes} min`;
+  return `Train ${leg.durationMinutes} min${leg.estimated ? " (average)" : ""}${walk}`;
+}
+
+function DayRoutePreview({
+  plan,
+  busy,
+  apply,
+  cancel,
+}: {
+  plan: DayRoutePlanDto;
+  busy: boolean;
+  apply(): void;
+  cancel(): void;
+}) {
+  const lodging = plan.lodging;
+  const path = lodging
+    ? [lodging.name, ...plan.stops.map((stop) => stop.name), lodging.name]
+    : plan.stops.map((stop) => stop.name);
+  const attributions = [...new Set(plan.legs.flatMap((leg) => leg.attribution ? [leg.attribution] : []))];
+  return (
+    <section className="rounded-xl border border-accent/40 bg-surface p-3" aria-label="Suggested route for this day">
+      <p className="font-bold">
+        Suggested order · {plan.totalMinutes} min travel
+        {plan.unknownLegs > 0 ? ` · ${plan.unknownLegs} leg${plan.unknownLegs === 1 ? "" : "s"} unknown` : ""}
+      </p>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Closest places first by straight-line distance
+        {lodging ? `, starting and ending at ${lodging.name}` : ""}. Times assume leaving at 10:00.
+      </p>
+      <ol className="mt-3 grid gap-1 text-sm">
+        {path.map((name, index) => (
+          <li key={`${index}-${name}`}>
+            <span className="font-semibold">
+              {lodging && (index === 0 || index === path.length - 1)
+                ? `${index === 0 ? "Start" : "End"} · ${name}`
+                : `${lodging ? index : index + 1}. ${name}`}
+            </span>
+            {index < plan.legs.length ? (
+              <span className="block pl-4 text-muted-foreground">↓ {legSummary(plan.legs[index]!)}</span>
+            ) : null}
+          </li>
+        ))}
+      </ol>
+      {plan.unplaceable.length > 0 ? (
+        <p className="mt-3 text-sm">
+          <strong>Not placed (no map location):</strong> {plan.unplaceable.map((stop) => stop.name).join(", ")}
+        </p>
+      ) : null}
+      {attributions.length > 0 ? (
+        <p className="mt-2 text-xs text-muted-foreground">Route times: {attributions.join(", ")}</p>
+      ) : null}
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          className="min-h-10 rounded-lg bg-accent px-3 font-bold text-ink-strong"
+          disabled={busy || plan.stops.length === 0}
+          onClick={apply}
+        >
+          {busy ? "Applying…" : "Apply this order"}
+        </button>
+        <button className="min-h-10 rounded-lg border px-3 font-bold" disabled={busy} onClick={cancel}>
+          Cancel
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function DayAssignmentPicker({
   places,
   busy,
@@ -253,6 +341,7 @@ export function TripSkeletonWorkspace({
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [unlockingItem, setUnlockingItem] = useState<ItineraryItemDto | null>(null);
+  const [routePlan, setRoutePlan] = useState<DayRoutePlanDto | null>(null);
   const placeCreateKey = useRef<string | null>(null);
   const itemCreateKey = useRef<string | null>(null);
   const actionKeys = useRef(new Map<string, string>());
@@ -474,6 +563,43 @@ export function TripSkeletonWorkspace({
     }
   }
 
+  async function planDayRoute(tripDayId: string) {
+    setBusyId(`route-plan:${tripDayId}`);
+    setError("");
+    try {
+      const response = await request<DayRoutePlanResponse>(
+        `/api/trips/${trip.id}/days/${tripDayId}/route-plan`,
+        { method: "POST", parse: parseDayRoutePlanResponse },
+      );
+      setRoutePlan(response.plan);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not plan this day");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function applyDayRoute(plan: DayRoutePlanDto) {
+    const orderedTripPlaceIds = plan.stops.map((stop) => stop.tripPlaceId);
+    const identity = `day-order:${plan.dayId}:${orderedTripPlaceIds.join(",")}`;
+    setBusyId(`route-apply:${plan.dayId}`);
+    setError("");
+    try {
+      await request(`/api/trips/${trip.id}/days/${plan.dayId}/place-order`, {
+        method: "PUT",
+        headers: { "Idempotency-Key": actionKey(identity) },
+        body: JSON.stringify({ orderedTripPlaceIds }),
+      });
+      actionKeys.current.delete(identity);
+      setRoutePlan(null);
+      onPlacesChanged();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not apply this order");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   function renderItem(item: ItineraryItemDto, continuation = false) {
     const start = itemEndpoint(item, "start");
     const end = displayedEndEndpoint(item, start);
@@ -659,7 +785,7 @@ export function TripSkeletonWorkspace({
           {skeleton.days.map((day, index) => {
             const assignedPlaces = tripPlaces.filter((place) =>
               !place.scheduled && place.assignedDayId === day.id
-            );
+            ).sort(byDayPosition);
             const fullItems = day.entries.flatMap((entry) => {
               const item = itemsById.get(entry.itemId);
               return entry.projection === "full" && item ? [item] : [];
@@ -769,6 +895,22 @@ export function TripSkeletonWorkspace({
               <div className="grid gap-3">
                 {day.entries.length === 0 && assignedPlaces.length === 0 ? (
                   <p className="empty-state">Open day. Add wishlist places, free time, or a commitment.</p>
+                ) : null}
+                {routePlan?.dayId === day.id ? (
+                  <DayRoutePreview
+                    plan={routePlan}
+                    busy={busyId === `route-apply:${day.id}`}
+                    apply={() => void applyDayRoute(routePlan)}
+                    cancel={() => setRoutePlan(null)}
+                  />
+                ) : assignedPlaces.length >= 2 ? (
+                  <button
+                    className="min-h-10 rounded-lg border border-accent px-3 font-bold"
+                    disabled={busyId !== null}
+                    onClick={() => void planDayRoute(day.id)}
+                  >
+                    {busyId === `route-plan:${day.id}` ? "Planning…" : "Plan this day's route"}
+                  </button>
                 ) : null}
                 {assignedPlaces.map((place) => (
                   <article key={place.id} className="itinerary-card" aria-label={`Planned wishlist place ${place.name}`}>

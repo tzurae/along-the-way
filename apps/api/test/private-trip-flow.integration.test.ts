@@ -27,6 +27,7 @@ import { TokenIssuer } from "../src/private-trips/token-issuer";
 import { PostgresTripSkeletonModule } from "../src/trip-skeleton/postgres-trip-skeleton-module";
 import { GooglePlacesProvider } from "../src/trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
+import { unrelatedDayRouteModule } from "./day-route-test-support";
 import { unrelatedDiscoveryModule } from "./discovery-test-support";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -139,6 +140,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       now: () => new Date(now),
     });
     app = createApp({
+      dayRoutes: unrelatedDayRouteModule,
       discovery: unrelatedDiscoveryModule,
       identityAccess,
       rateLimiter: new PostgresRateLimiter(

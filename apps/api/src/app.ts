@@ -22,6 +22,7 @@ import type {
   UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
 import type { DiscoveryModule } from "./discovery/discovery-module";
+import type { DayRouteModule } from "./planning/postgres-day-route-module";
 
 import {
   AppError,
@@ -39,6 +40,7 @@ const SESSION_COOKIE = "along_the_way_session";
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
 interface AppDependencies {
+  dayRoutes: DayRouteModule;
   discovery: DiscoveryModule;
   identityAccess: IdentityAccessModule;
   rateLimiter: RateLimiter;
@@ -286,6 +288,7 @@ async function jsonBody(context: Context) {
 }
 
 export function createApp({
+  dayRoutes,
   discovery,
   identityAccess,
   rateLimiter,
@@ -630,6 +633,41 @@ export function createApp({
         dayAssignmentsInput(body),
       );
       return context.json({ tripPlaces: assigned });
+    },
+  );
+
+  app.post(
+    "/api/trips/:tripId/days/:dayId/route-plan",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const plan = await dayRoutes.plan(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "dayId"),
+      );
+      return context.json({ plan });
+    },
+  );
+
+  app.put(
+    "/api/trips/:tripId/days/:dayId/place-order",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const body = await jsonBody(context);
+      const ordered = await dayRoutes.applyOrder(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "dayId"),
+        idempotencyKey(context),
+        {
+          orderedTripPlaceIds: arrayField(body, "orderedTripPlaceIds").map((value) =>
+            typeof value === "string" ? value : "",
+          ),
+        },
+      );
+      return context.json(ordered);
     },
   );
 
