@@ -61,6 +61,35 @@ Every evidence entry reports `isStale`: true once its `expiresAt` has passed,
 or, for web sources stored without an expiry, 30 days after `observedAt`.
 Stale evidence is labelled for re-checking and is never refreshed automatically.
 
+## AI discovery feedback and questions (Issue #66)
+
+Discovery mutations require an `Idempotency-Key` and the current version:
+
+- `POST /api/trips/:tripId/discovery/feedback` accepts `originalText` and an
+  optional `proposalId`. Feedback responses include `proposalName`,
+  `interpretationEdited`, and `isOwn`; clients only offer pending-feedback
+  actions when `isOwn` is true.
+- `POST /api/trips/:tripId/discovery/feedback/:feedbackId/decision` accepts
+  `expectedVersion`, `decision` (`confirm` or `reject`), and, when confirming,
+  an optional complete `interpretation` containing `interests`, `exclusions`,
+  nullable `pace` and `budget`, and `summary`. Supplying it replaces only the
+  structured interpretation, marks it edited, and makes that member-corrected
+  interpretation authoritative over conflicting original wording in later
+  planning and research; `originalText` is immutable. Only the feedback author
+  may confirm, edit, or reject it.
+- `PUT /api/trips/:tripId/discovery/brief/questions` accepts
+  `expectedVersion` and ordered `answers` entries `{ question, answer }`.
+  `answer: null` explicitly means skipped and unknown. Saving answers increments
+  the brief version even though its text is unchanged, so the next generation
+  and its idempotent replay use one consistent answer set. Changing the brief
+  text clears all earlier question answers.
+
+`DiscoveryBriefDto.questionAnswers` reloads saved answers and skips. Planning
+and research receive both forms: answered questions constrain the request,
+while skipped questions remain unknown and must not be guessed or asked again.
+Migration `014_discovery_feedback_answers` stores these answer records and the
+edited-interpretation marker.
+
 ## Activity participants (Issue #21)
 
 This slice of [Issue #21](https://github.com/tzurae/along-the-way/issues/21)

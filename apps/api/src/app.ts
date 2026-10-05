@@ -184,6 +184,28 @@ function stringArrayField(body: Record<string, unknown>, name: string) {
   }
   return values as string[];
 }
+function feedbackInterpretationField(body: Record<string, unknown>) {
+  if (body.interpretation === undefined) return undefined;
+  const interpretation = objectBody(body.interpretation);
+  return {
+    interests: stringArrayField(interpretation, "interests"),
+    exclusions: stringArrayField(interpretation, "exclusions"),
+    pace: nullableStringField(interpretation, "pace"),
+    budget: nullableStringField(interpretation, "budget"),
+    summary: stringField(interpretation, "summary"),
+  };
+}
+
+function discoveryQuestionAnswersField(body: Record<string, unknown>) {
+  return arrayField(body, "answers").map((value) => {
+    const answer = objectBody(value);
+    return {
+      question: stringField(answer, "question"),
+      answer: nullableStringField(answer, "answer"),
+    };
+  });
+}
+
 
 function tripPlaceInput(body: Record<string, unknown>): CreateTripPlaceInput {
   const method = stringField(body, "method");
@@ -488,6 +510,23 @@ export function createApp({
       ),
     });
   });
+  app.put("/api/trips/:tripId/discovery/brief/questions", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json({
+      discovery: await discovery.saveQuestionAnswers(
+        user.id,
+        uuidParam(context, "tripId"),
+        idempotencyKey(context),
+        {
+          expectedVersion: numberField(body, "expectedVersion"),
+          answers: discoveryQuestionAnswersField(body),
+        },
+      ),
+    });
+  });
+
 
   app.post("/api/trips/:tripId/discovery/generate", async (context) => {
     const { user } = await authenticated(context);
@@ -567,6 +606,7 @@ export function createApp({
         {
           expectedVersion: numberField(body, "expectedVersion"),
           decision,
+          interpretation: feedbackInterpretationField(body),
         },
       ),
     });

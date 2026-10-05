@@ -140,6 +140,10 @@ class ControlledDiscoveryModel implements DiscoveryModel {
   /** When set, research finds exactly these places, each cited by an official tourism page. */
   researchedPlaces: string[] | null = null;
   feedbackCalls = 0;
+  readonly planInputs: Array<Parameters<DiscoveryModel["plan"]>[0]> = [];
+  readonly researchInputs: Array<Parameters<DiscoveryModel["research"]>[0]> = [];
+  readonly feedbackInputs: Array<Parameters<DiscoveryModel["interpretFeedback"]>[0]> = [];
+  unresolvedQuestions: string[] = [];
   private releaseFirstPlan: (() => void) | null = null;
   private firstPlanStarted: (() => void) | null = null;
   readonly planStarted = new Promise<void>((resolve) => {
@@ -165,7 +169,8 @@ class ControlledDiscoveryModel implements DiscoveryModel {
     this.releaseFirstFeedback?.();
   }
 
-  async plan(): Promise<DiscoveryPlanResult> {
+  async plan(input: Parameters<DiscoveryModel["plan"]>[0]): Promise<DiscoveryPlanResult> {
+    this.planInputs.push(input);
     this.planCalls += 1;
     if (this.planCalls === 1) {
       this.firstPlanStarted?.();
@@ -180,7 +185,7 @@ class ControlledDiscoveryModel implements DiscoveryModel {
         exclusions: ["long walking days"],
         areas: ["Kyoto"],
       },
-      unresolvedQuestions: [],
+      unresolvedQuestions: this.unresolvedQuestions,
       request: {
         namedPlaces: [{ name: "Nishiki Market", area: "Kyoto" }, { name: "Saihoji", area: "Kyoto" }],
         categories: ["Food markets"],
@@ -194,7 +199,8 @@ class ControlledDiscoveryModel implements DiscoveryModel {
     };
   }
 
-  async research(): Promise<DiscoveryResearchResult> {
+  async research(input: Parameters<DiscoveryModel["research"]>[0]): Promise<DiscoveryResearchResult> {
+    this.researchInputs.push(input);
     this.researchCalls += 1;
     if (this.researchFailure) throw this.researchFailure;
     if (this.researchedPlaces) {
@@ -277,7 +283,10 @@ class ControlledDiscoveryModel implements DiscoveryModel {
     };
   }
 
-  async interpretFeedback(): Promise<InterpretedDiscoveryFeedback> {
+  async interpretFeedback(
+    input: Parameters<DiscoveryModel["interpretFeedback"]>[0],
+  ): Promise<InterpretedDiscoveryFeedback> {
+    this.feedbackInputs.push(input);
     this.feedbackCalls += 1;
     if (this.feedbackCalls === 1) {
       this.firstFeedbackStarted?.();
@@ -451,7 +460,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
 
   function discoveryRequest(cookie: string, path: string, key: string, body: unknown) {
     return app.request(path, {
-      method: path.endsWith("/brief") ? "PUT" : "POST",
+      method: path.includes("/discovery/brief") ? "PUT" : "POST",
       headers: {
         cookie,
         "content-type": "application/json",
@@ -550,33 +559,146 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(tripPlaces[0]?.contributions[0]?.intakeMethod).toBe("search");
 
     const firstFeedback = discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/feedback`, "feedback-1", {
-      originalText: "Too many temples. Keep the food markets and an unhurried pace.",
-      proposalId: null,
+      originalText: "This place looks too crowded. Keep the food focus and slow pace.",
+      proposalId: proposal.id,
     });
     await model.feedbackStarted;
     const duplicateFeedback = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/feedback`, "feedback-1", {
-      originalText: "Too many temples. Keep the food markets and an unhurried pace.",
-      proposalId: null,
+      originalText: "This place looks too crowded. Keep the food focus and slow pace.",
+      proposalId: proposal.id,
     });
     expect(duplicateFeedback.status).toBe(409);
     model.releaseFeedback();
     const feedbackResponse = await firstFeedback;
     expect(feedbackResponse.status).toBe(200);
     expect(model.feedbackCalls).toBe(1);
+    expect(model.feedbackInputs).toEqual([{
+      text: "This place looks too crowded. Keep the food focus and slow pace.",
+      proposalName: "Nishiki Market",
+    }]);
     const pendingFeedback = parseDiscoveryWorkspaceResponse(await feedbackResponse.json()).discovery.feedback[0];
-    expect(pendingFeedback?.status).toBe("pending");
-    expect(pendingFeedback?.interpretation.summary).toContain("food markets");
+    expect(pendingFeedback).toMatchObject({
+      proposalId: proposal.id,
+      proposalName: "Nishiki Market",
+      status: "pending",
+      isOwn: true,
+      interpretationEdited: false,
+    });
+
+    await database.insertInto("users").values({
+      email: "feedback-editor@example.test", display_name: "feedback editor", status: "active", created_at: now(), updated_at: now(),
+    }).execute();
+    const otherCookie = await login("feedback-editor@example.test");
+    const other = await database.selectFrom("users").select("id")
+      .where("email", "=", "feedback-editor@example.test").executeTakeFirstOrThrow();
+    await database.insertInto("trip_members").values({
+      trip_id: trip.id, user_id: other.id, role: "editor", removed_at: null,
+    }).execute();
+    const otherWorkspaceResponse = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie: otherCookie } });
+    expect(otherWorkspaceResponse.status).toBe(200);
+    expect(parseDiscoveryWorkspaceResponse(await otherWorkspaceResponse.json()).discovery.feedback[0]?.isOwn).toBe(false);
 
     if (!pendingFeedback) throw new Error("Expected feedback");
+    const editedInterpretation = {
+      interests: ["covered food markets"],
+      exclusions: ["crowded places"],
+      pace: "one main stop per day",
+      budget: "moderate",
+      summary: "Prefer quieter covered markets and keep each day slow.",
+    };
+    const refused = await discoveryRequest(
+      otherCookie,
+      `/api/trips/${trip.id}/discovery/feedback/${pendingFeedback.id}/decision`,
+      "other-confirm-feedback-1",
+      { expectedVersion: pendingFeedback.version, decision: "confirm", interpretation: editedInterpretation },
+    );
+    expect(refused.status).toBe(403);
+
     const confirmed = await discoveryRequest(
       cookie,
       `/api/trips/${trip.id}/discovery/feedback/${pendingFeedback.id}/decision`,
       "confirm-feedback-1",
-      { expectedVersion: pendingFeedback.version, decision: "confirm" },
+      { expectedVersion: pendingFeedback.version, decision: "confirm", interpretation: editedInterpretation },
     );
     expect(confirmed.status).toBe(200);
-    expect(parseDiscoveryWorkspaceResponse(await confirmed.json()).discovery.feedback[0]?.status)
-      .toBe("confirmed");
+    const confirmedFeedback = parseDiscoveryWorkspaceResponse(await confirmed.json()).discovery.feedback[0];
+    expect(confirmedFeedback).toMatchObject({
+      originalText: "This place looks too crowded. Keep the food focus and slow pace.",
+      interpretation: editedInterpretation,
+      interpretationEdited: true,
+      isOwn: true,
+    });
+
+    const regenerated = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "generate-with-feedback", {
+      expectedBriefVersion: generated.brief?.version,
+    });
+    expect(regenerated.status).toBe(200);
+    expect(model.planInputs.at(-1)?.confirmedFeedback).toHaveLength(1);
+    expect(model.planInputs.at(-1)?.confirmedFeedback[0]).toContain("Place: Nishiki Market");
+    expect(model.planInputs.at(-1)?.confirmedFeedback[0]).toContain("Member-corrected interpretation (authoritative; overrides original text)");
+    expect(model.planInputs.at(-1)?.confirmedFeedback[0]).toContain("Prefer quieter covered markets and keep each day slow.");
+    expect(model.planInputs.at(-1)?.confirmedFeedback[0]).not.toContain("Original:");
+    expect(model.researchInputs.at(-1)?.confirmedFeedback).toEqual(model.planInputs.at(-1)?.confirmedFeedback);
+  });
+
+  it("persists answered and skipped questions for model inputs and clears them when the brief changes", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    const questions = ["Indoor or outdoor markets?", "How much walking is acceptable?"];
+    model.unresolvedQuestions = questions;
+    model.releasePlan();
+    const saved = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "question-brief", {
+      originalText: "Recommend food markets in Kyoto.",
+      expectedVersion: null,
+    });
+    expect(saved.status).toBe(200);
+    const generatedResponse = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "question-generate-1", {
+      expectedBriefVersion: 1,
+    });
+    expect(generatedResponse.status).toBe(200);
+    const generated = parseDiscoveryWorkspaceResponse(await generatedResponse.json()).discovery;
+    expect(generated.brief).toMatchObject({ unresolvedQuestions: questions, questionAnswers: [], version: 1 });
+
+    const answers = [
+      { question: questions[0]!, answer: "Indoor markets" },
+      { question: questions[1]!, answer: null },
+    ];
+    const answeredResponse = await discoveryRequest(
+      cookie,
+      `/api/trips/${trip.id}/discovery/brief/questions`,
+      "question-answers",
+      { expectedVersion: generated.brief?.version, answers },
+    );
+    expect(answeredResponse.status).toBe(200);
+    const answered = parseDiscoveryWorkspaceResponse(await answeredResponse.json()).discovery;
+    expect(answered.brief).toMatchObject({ questionAnswers: answers, version: 2 });
+
+    const reloadedResponse = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
+    expect(reloadedResponse.status).toBe(200);
+    expect(parseDiscoveryWorkspaceResponse(await reloadedResponse.json()).discovery.brief?.questionAnswers).toEqual(answers);
+
+    const researchedResponse = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "question-generate-2", {
+      expectedBriefVersion: 2,
+    });
+    expect(researchedResponse.status).toBe(200);
+    expect(model.planInputs.at(-1)?.questionAnswers).toEqual(answers);
+    expect(model.researchInputs.at(-1)?.questionAnswers).toEqual(answers);
+    expect(parseDiscoveryWorkspaceResponse(await researchedResponse.json()).discovery.brief).toMatchObject({
+      unresolvedQuestions: [],
+      questionAnswers: answers,
+    });
+
+    const changedResponse = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "changed-question-brief", {
+      originalText: "Recommend quiet gardens instead.",
+      expectedVersion: 2,
+    });
+    expect(changedResponse.status).toBe(200);
+    expect(parseDiscoveryWorkspaceResponse(await changedResponse.json()).discovery.brief).toMatchObject({
+      originalText: "Recommend quiet gardens instead.",
+      unresolvedQuestions: [],
+      questionAnswers: [],
+      version: 3,
+    });
   });
 
   it("links generated claim sentences to evidence from their run and reports stale evidence", async () => {
@@ -886,13 +1008,16 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     const trip = await createTrip(cookie);
     const owner = await database.selectFrom("users").select("id").where("email", "=", "owner@example.test")
       .executeTakeFirstOrThrow();
-    // The shape the previous release stored: no shortfalls, kinds, endorsements or named places.
+    // The shape the previous release stored: no quality fields, question answers, or feedback ownership/edit marker.
     await database.insertInto("mutation_requests").values({
       actor_id: owner.id,
       operation: `discovery:generate:${trip.id}`,
       idempotency_key: "generate-before-deploy",
       response: {
-        brief: null,
+        brief: {
+          originalText: "Food markets.", structured: null, unresolvedQuestions: [], version: 1,
+          updatedAt: "2026-10-03T16:38:02.000Z",
+        },
         latestRun: {
           id: "00000000-0000-4000-8000-000000004401", status: "completed", modelId: "gpt-old", policyVersion: "discovery-v1",
           briefVersion: 1, generatedAt: "2026-10-03T16:38:02.000Z", errorCode: null,
@@ -917,7 +1042,15 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
           acceptedTripPlaceId: null,
           version: 1,
         }],
-        feedback: [],
+        feedback: [{
+          id: "00000000-0000-4000-8000-000000004403",
+          proposalId: null,
+          originalText: "More markets.",
+          interpretation: { interests: ["markets"], exclusions: [], pace: null, budget: null, summary: "More markets." },
+          status: "pending",
+          version: 1,
+          createdAt: "2026-10-03T16:38:02.000Z",
+        }],
         modelAvailable: true,
         placeProviderAvailable: true,
       },
@@ -936,6 +1069,12 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       recommendationSentences: null,
       tradeoffSentences: null,
       evidence: [expect.objectContaining({ isStale: false })],
+    });
+    expect(workspace.brief?.questionAnswers).toEqual([]);
+    expect(workspace.feedback[0]).toMatchObject({
+      proposalName: null,
+      interpretationEdited: false,
+      isOwn: false,
     });
     expect(model.planCalls).toBe(0);
   });

@@ -32,11 +32,18 @@ export interface StructuredDiscoveryBriefDto {
   exclusions: string[];
   areas: string[];
 }
+export interface DiscoveryQuestionAnswerDto {
+  question: string;
+  /** Null means the traveler explicitly skipped this question and it remains unknown. */
+  answer: string | null;
+}
+
 
 export interface DiscoveryBriefDto {
   originalText: string;
   structured: StructuredDiscoveryBriefDto | null;
   unresolvedQuestions: string[];
+  questionAnswers: DiscoveryQuestionAnswerDto[];
   version: number;
   updatedAt: string;
 }
@@ -135,17 +142,22 @@ export interface DiscoveryRunDto {
   shortfalls: DiscoveryShortfallDto[];
 }
 
+export interface DiscoveryFeedbackInterpretationDto {
+  interests: string[];
+  exclusions: string[];
+  pace: string | null;
+  budget: string | null;
+  summary: string;
+}
+
 export interface DiscoveryFeedbackDto {
   id: string;
   proposalId: string | null;
+  proposalName: string | null;
   originalText: string;
-  interpretation: {
-    interests: string[];
-    exclusions: string[];
-    pace: string | null;
-    budget: string | null;
-    summary: string;
-  };
+  interpretation: DiscoveryFeedbackInterpretationDto;
+  interpretationEdited: boolean;
+  isOwn: boolean;
   status: DiscoveryFeedbackStatus;
   version: number;
   createdAt: string;
@@ -173,6 +185,11 @@ export interface SaveDiscoveryBriefInput {
   originalText: string;
   expectedVersion?: number | null;
 }
+export interface SaveDiscoveryQuestionAnswersInput {
+  expectedVersion: number;
+  answers: DiscoveryQuestionAnswerDto[];
+}
+
 
 export interface GenerateDiscoveryInput {
   expectedBriefVersion: number;
@@ -190,6 +207,7 @@ export interface CreateDiscoveryFeedbackInput {
 export interface DecideDiscoveryFeedbackInput {
   expectedVersion: number;
   decision: "confirm" | "reject";
+  interpretation?: DiscoveryFeedbackInterpretationDto;
 }
 
 function invalid(): never {
@@ -221,6 +239,25 @@ function nullableNumber(value: unknown, minimum: number, maximum: number) {
 
 function strings(value: unknown) {
   return Array.isArray(value) ? value.map(text) : invalid();
+}
+
+function questionAnswer(value: unknown): DiscoveryQuestionAnswerDto {
+  const item = record(value);
+  return {
+    question: text(item.question),
+    answer: nullableText(item.answer),
+  };
+}
+
+function feedbackInterpretation(value: unknown): DiscoveryFeedbackInterpretationDto {
+  const item = record(value);
+  return {
+    interests: strings(item.interests),
+    exclusions: strings(item.exclusions),
+    pace: nullableText(item.pace),
+    budget: nullableText(item.budget),
+    summary: text(item.summary),
+  };
 }
 
 function endorsements(value: unknown): DiscoveryEndorsement[] {
@@ -355,19 +392,15 @@ function proposal(value: unknown): CandidateProposalDto {
 
 function feedback(value: unknown): DiscoveryFeedbackDto {
   const item = record(value);
-  const interpretation = record(item.interpretation);
   if (!["pending", "confirmed", "rejected"].includes(String(item.status))) invalid();
   return {
     id: text(item.id),
     proposalId: nullableText(item.proposalId),
+    proposalName: nullableText(item.proposalName),
     originalText: text(item.originalText),
-    interpretation: {
-      interests: strings(interpretation.interests),
-      exclusions: strings(interpretation.exclusions),
-      pace: nullableText(interpretation.pace),
-      budget: nullableText(interpretation.budget),
-      summary: text(interpretation.summary),
-    },
+    interpretation: feedbackInterpretation(item.interpretation),
+    interpretationEdited: typeof item.interpretationEdited === "boolean" ? item.interpretationEdited : invalid(),
+    isOwn: typeof item.isOwn === "boolean" ? item.isOwn : invalid(),
     status: item.status as DiscoveryFeedbackStatus,
     version: integer(item.version),
     createdAt: text(item.createdAt),
@@ -385,6 +418,9 @@ export function parseDiscoveryWorkspaceResponse(value: unknown): DiscoveryWorksp
       originalText: text(item.originalText),
       structured: item.structured === null ? null : structuredBrief(item.structured),
       unresolvedQuestions: strings(item.unresolvedQuestions),
+      questionAnswers: Array.isArray(item.questionAnswers)
+        ? item.questionAnswers.map(questionAnswer)
+        : invalid(),
       version: integer(item.version),
       updatedAt: text(item.updatedAt),
     };

@@ -16,6 +16,12 @@ export interface StructuredDiscoveryBrief {
   exclusions: string[];
   areas: string[];
 }
+export interface DiscoveryQuestionAnswer {
+  question: string;
+  /** Null means explicitly skipped: keep this unknown and do not infer an answer. */
+  answer: string | null;
+}
+
 
 /** What the traveler asked for, as the model understood it. */
 export interface DiscoveryRequest {
@@ -110,12 +116,14 @@ export interface DiscoveryModel {
     brief: string;
     trip: DiscoveryTripFacts;
     confirmedFeedback: string[];
+    questionAnswers: DiscoveryQuestionAnswer[];
   }): Promise<DiscoveryPlanResult>;
   research(input: {
     brief: StructuredDiscoveryBrief;
     request: DiscoveryRequest;
     trip: DiscoveryTripFacts;
     confirmedFeedback: string[];
+    questionAnswers: DiscoveryQuestionAnswer[];
     /** Names of places the traveler already rejected. */
     rejectedPlaces: string[];
     outputLanguage: string;

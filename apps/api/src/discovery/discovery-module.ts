@@ -5,6 +5,7 @@ import type {
   DiscoveryWorkspaceDto,
   GenerateDiscoveryInput,
   SaveDiscoveryBriefInput,
+  SaveDiscoveryQuestionAnswersInput,
 } from "@along-the-way/contracts/discovery";
 
 export interface DiscoveryModule {
@@ -14,6 +15,12 @@ export interface DiscoveryModule {
     tripId: string,
     idempotencyKey: string,
     input: SaveDiscoveryBriefInput,
+  ): Promise<DiscoveryWorkspaceDto>;
+  saveQuestionAnswers(
+    userId: string,
+    tripId: string,
+    idempotencyKey: string,
+    input: SaveDiscoveryQuestionAnswersInput,
   ): Promise<DiscoveryWorkspaceDto>;
   generate(
     userId: string,

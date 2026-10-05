@@ -138,6 +138,7 @@ export const tripSkeleton = {
     "trip_day.window_changed": "修改了一天的開始與結束時間",
     "discovery.brief_created": "建立了 AI 研究的需求",
     "discovery.brief_updated": "修改了 AI 研究的需求",
+    "discovery.questions_answered": "回答了 AI 的提問",
     "discovery.generated": "完成了一次 AI 研究",
     "discovery.proposal_accepted": "接受了 AI 推薦的地點",
     "discovery.proposal_rejected": "略過了 AI 推薦的地點",

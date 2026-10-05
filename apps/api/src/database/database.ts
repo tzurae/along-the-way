@@ -203,6 +203,7 @@ export interface DiscoveryBriefTable {
   original_text: string;
   structured_brief: unknown | null;
   unresolved_questions: unknown;
+  question_answers: Generated<unknown>;
   version: Generated<number>;
   updated_by: string;
   created_at: Timestamp;
@@ -283,6 +284,7 @@ export interface DiscoveryFeedbackTable {
   actor_id: string;
   original_text: string;
   interpretation: unknown;
+  interpretation_edited: Generated<boolean>;
   status: "pending" | "confirmed" | "rejected";
   version: Generated<number>;
   decided_at: Timestamp | null;

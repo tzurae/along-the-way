@@ -10,6 +10,7 @@ import type {
   DiscoveryWorkspaceDto,
   GenerateDiscoveryInput,
   SaveDiscoveryBriefInput,
+  SaveDiscoveryQuestionAnswersInput,
 } from "@along-the-way/contracts/discovery";
 import { parseDiscoveryWorkspaceResponse } from "@along-the-way/contracts/discovery";
 import type { ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
@@ -127,15 +128,46 @@ function jsonClaimSentences(value: unknown): CandidateProposalDto["recommendatio
   });
 }
 
+function storedQuestionAnswers(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((raw) => {
+    const item = jsonObject(raw);
+    if (typeof item.question !== "string" || (item.answer !== null && typeof item.answer !== "string")) return [];
+    return [{ question: item.question, answer: item.answer }];
+  });
+}
+
+function validatedStringList(value: unknown, field: string) {
+  if (!Array.isArray(value) || value.length > 12 || value.some((entry) => typeof entry !== "string")) {
+    throw new AppError("validation_error", `${field} must be an array of at most 12 strings`);
+  }
+  return value.map((entry) => requiredText(entry, field, 200));
+}
+
+function validatedInterpretation(input: DecideDiscoveryFeedbackInput["interpretation"]) {
+  if (!input) return null;
+  return {
+    interests: validatedStringList(input.interests, "interpretation.interests"),
+    exclusions: validatedStringList(input.exclusions, "interpretation.exclusions"),
+    pace: input.pace === null ? null : requiredText(input.pace, "interpretation.pace", 500),
+    budget: input.budget === null ? null : requiredText(input.budget, "interpretation.budget", 500),
+    summary: requiredText(input.summary, "interpretation.summary", 2_000),
+  };
+}
 /**
  * Older idempotent workspace snapshots lack later additive fields. A retry uses the
  * documented empty or unknown value instead of rejecting a response already returned.
  */
 function upgradeStoredWorkspace(value: unknown) {
   const workspace = jsonObject(value);
+  const brief = workspace.brief === null ? null : jsonObject(workspace.brief);
   const run = workspace.latestRun === null ? null : jsonObject(workspace.latestRun);
   return {
     ...workspace,
+    brief: brief && {
+      ...brief,
+      questionAnswers: Array.isArray(brief.questionAnswers) ? brief.questionAnswers : [],
+    },
     latestRun: run && {
       ...run,
       shortfalls: Array.isArray(run.shortfalls) ? run.shortfalls : [],
@@ -157,6 +189,14 @@ function upgradeStoredWorkspace(value: unknown) {
       })
       : workspace.proposals,
     decided: Array.isArray(workspace.decided) ? workspace.decided : [],
+    feedback: Array.isArray(workspace.feedback)
+      ? workspace.feedback.map((feedback) => ({
+        proposalName: null,
+        interpretationEdited: false,
+        isOwn: false,
+        ...jsonObject(feedback),
+      }))
+      : workspace.feedback,
   };
 }
 
@@ -211,7 +251,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
   async getWorkspace(userId: string, tripId: string) {
     uuid(tripId, "tripId");
     await this.requireMember(this.database, userId, tripId);
-    return this.readWorkspace(this.database, tripId);
+    return this.readWorkspace(this.database, tripId, userId);
   }
 
   async saveBrief(
@@ -243,6 +283,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           original_text: originalText,
           structured_brief: null,
           unresolved_questions: JSON.stringify([]),
+          question_answers: JSON.stringify([]),
           version: sql`version + 1`,
           updated_by: userId,
           updated_at: this.now(),
@@ -267,11 +308,80 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         targetId: tripId,
         summary: "Saved the trip discovery brief",
       });
-      const response = await this.readWorkspace(transaction, tripId);
+      const response = await this.readWorkspace(transaction, tripId, userId);
       await remember(transaction, userId, operation, key, response);
       return response;
     });
   }
+  async saveQuestionAnswers(
+    userId: string,
+    tripId: string,
+    rawKey: string,
+    input: SaveDiscoveryQuestionAnswersInput,
+  ) {
+    uuid(tripId, "tripId");
+    const key = requireIdempotencyKey(rawKey);
+    const version = expectedVersion(input.expectedVersion);
+    if (!Array.isArray(input.answers) || input.answers.length > 20) {
+      throw new AppError("validation_error", "answers must contain at most 20 question answers");
+    }
+    const operation = `discovery:brief-questions:${tripId}`;
+    return this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return replayedWorkspace(replay);
+      const brief = await transaction.selectFrom("discovery_briefs")
+        .select(["version", "unresolved_questions", "question_answers"])
+        .where("trip_id", "=", tripId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!brief) throw new AppError("validation_error", "Save a discovery brief first");
+      if (brief.version !== version) {
+        throw new AppError("conflict", "The discovery brief changed; reload before saving answers", 409, undefined, brief.version);
+      }
+      const previous = storedQuestionAnswers(brief.question_answers);
+      const orderedQuestions = [...previous.map((entry) => entry.question)];
+      for (const question of jsonStrings(brief.unresolved_questions)) {
+        if (!orderedQuestions.includes(question)) orderedQuestions.push(question);
+      }
+      const submitted = new Map<string, string | null>();
+      for (const answer of input.answers) {
+        if (!answer || typeof answer.question !== "string" || !orderedQuestions.includes(answer.question)) {
+          throw new AppError("validation_error", "Each answer must match a question for the current brief");
+        }
+        if (submitted.has(answer.question)) {
+          throw new AppError("validation_error", "Each question may be answered once");
+        }
+        submitted.set(
+          answer.question,
+          answer.answer === null ? null : requiredText(answer.answer, "answer", 1_000),
+        );
+      }
+      const answers = orderedQuestions.flatMap((question) => {
+        if (!submitted.has(question)) return [];
+        return [{ question, answer: submitted.get(question) ?? null }];
+      });
+      await transaction.updateTable("discovery_briefs").set({
+        question_answers: JSON.stringify(answers),
+        version: sql`version + 1`,
+        updated_by: userId,
+        updated_at: this.now(),
+      }).where("trip_id", "=", tripId).execute();
+      await recordEvent(transaction, {
+        tripId,
+        actorId: userId,
+        eventType: "discovery.questions_answered",
+        targetType: "discovery_brief",
+        targetId: tripId,
+        summary: "Saved answers to AI discovery questions",
+      });
+      const response = await this.readWorkspace(transaction, tripId, userId);
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
 
   async generate(
     userId: string,
@@ -289,13 +399,14 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     const earlyReplay = await replayed(this.database, userId, operation, key);
     if (earlyReplay) return aiRequestReplay(earlyReplay);
     const brief = await this.database.selectFrom("discovery_briefs")
-      .select(["original_text", "version"])
+      .select(["original_text", "version", "question_answers"])
       .where("trip_id", "=", tripId)
       .executeTakeFirst();
     if (!brief) throw new AppError("validation_error", "Save a discovery brief first");
     if (brief.version !== version) {
       throw new AppError("conflict", "The discovery brief changed; reload before generating", 409, undefined, brief.version);
     }
+    const questionAnswers = storedQuestionAnswers(brief.question_answers);
     const trip = await this.tripFacts(userId, tripId);
     const feedback = await this.confirmedFeedback(tripId);
     const rejected = await this.database.selectFrom("candidate_proposals")
@@ -320,6 +431,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         brief: brief.original_text,
         trip,
         confirmedFeedback: feedback,
+        questionAnswers,
       });
       if (this.placeLookup.available === false) {
         throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
@@ -329,6 +441,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         request: plan.request,
         trip,
         confirmedFeedback: feedback,
+        questionAnswers,
         rejectedPlaces: [...new Set(rejected.map((row) => row.name))],
         outputLanguage: plan.outputLanguage,
       });
@@ -381,7 +494,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         }
         await transaction.updateTable("discovery_briefs").set({
           structured_brief: plan.structuredBrief,
-          unresolved_questions: JSON.stringify(plan.unresolvedQuestions),
+          unresolved_questions: JSON.stringify(plan.unresolvedQuestions.filter((question) =>
+            !questionAnswers.some((answer) => answer.question === question))),
           updated_at: this.now(),
         }).where("trip_id", "=", tripId).execute();
         const run = await transaction.insertInto("discovery_runs").values({
@@ -516,7 +630,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           targetId: run.id,
           summary: `Generated ${verification.gate.shown.length} place proposals vouched for by two independent sources`,
         });
-        const response = await this.readWorkspace(transaction, tripId);
+        const response = await this.readWorkspace(transaction, tripId, userId);
         await transaction.updateTable("mutation_requests").set({ response })
           .where("actor_id", "=", userId)
           .where("operation", "=", operation)
@@ -666,7 +780,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           targetId: proposalId,
           summary: "Accepted an AI place proposal into the shared wishlist",
         });
-        const response = await this.readWorkspace(transaction, tripId);
+        const response = await this.readWorkspace(transaction, tripId, userId);
         await remember(transaction, userId, operation, key, response);
         return response;
       });
@@ -723,7 +837,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         targetId: proposalId,
         summary: "Rejected an AI place proposal",
       });
-      const response = await this.readWorkspace(transaction, tripId);
+      const response = await this.readWorkspace(transaction, tripId, userId);
       await remember(transaction, userId, operation, key, response);
       return response;
     });
@@ -809,7 +923,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         targetId: feedback.id,
         summary: "Interpreted discovery feedback for member confirmation",
       });
-      const response = await this.readWorkspace(transaction, tripId);
+      const response = await this.readWorkspace(transaction, tripId, userId);
       await transaction.updateTable("mutation_requests").set({ response })
         .where("actor_id", "=", userId)
         .where("operation", "=", operation)
@@ -833,6 +947,10 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     if (input.decision !== "confirm" && input.decision !== "reject") {
       throw new AppError("validation_error", "decision must be confirm or reject");
     }
+    const interpretation = validatedInterpretation(input.interpretation);
+    if (input.decision === "reject" && interpretation) {
+      throw new AppError("validation_error", "interpretation can only be edited when confirming feedback");
+    }
     const operation = `discovery:feedback-decision:${feedbackId}`;
     return this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
@@ -840,6 +958,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedWorkspace(replay);
       const updated = await transaction.updateTable("discovery_feedback").set({
+        ...(interpretation ? { interpretation, interpretation_edited: true } : {}),
         status: input.decision === "confirm" ? "confirmed" : "rejected",
         decided_at: this.now(),
         version: sql`version + 1`,
@@ -866,7 +985,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         targetId: feedbackId,
         summary: input.decision === "confirm" ? "Confirmed interpreted discovery feedback" : "Rejected interpreted discovery feedback",
       });
-      const response = await this.readWorkspace(transaction, tripId);
+      const response = await this.readWorkspace(transaction, tripId, userId);
       await remember(transaction, userId, operation, key, response);
       return response;
     });
@@ -957,18 +1076,31 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
   }
 
   private async confirmedFeedback(tripId: string) {
-    const rows = await this.database.selectFrom("discovery_feedback")
-      .select(["original_text", "interpretation"])
-      .where("trip_id", "=", tripId)
-      .where("status", "=", "confirmed")
-      .orderBy("created_at")
+    const rows = await this.database.selectFrom("discovery_feedback as feedback")
+      .leftJoin("candidate_proposals as proposal", "proposal.id", "feedback.proposal_id")
+      .select([
+        "feedback.original_text",
+        "feedback.interpretation",
+        "feedback.interpretation_edited",
+        "proposal.name as proposal_name",
+      ])
+      .where("feedback.trip_id", "=", tripId)
+      .where("feedback.status", "=", "confirmed")
+      .orderBy("feedback.created_at")
       .execute();
-    return rows.map((row) => `${row.original_text}\nInterpretation: ${JSON.stringify(row.interpretation)}`);
+    return rows.map((row) => [
+      row.proposal_name ? `Place: ${row.proposal_name}` : "Overall feedback",
+      ...(row.interpretation_edited ? [] : [`Original: ${row.original_text}`]),
+      row.interpretation_edited
+        ? `Member-corrected interpretation (authoritative; overrides original text): ${JSON.stringify(row.interpretation)}`
+        : `Member-confirmed interpretation: ${JSON.stringify(row.interpretation)}`,
+    ].join("\n"));
   }
 
   private async readWorkspace(
     executor: DatabaseExecutor,
     tripId: string,
+    userId: string,
   ): Promise<DiscoveryWorkspaceDto> {
     const briefRow = await executor.selectFrom("discovery_briefs").selectAll()
       .where("trip_id", "=", tripId).executeTakeFirst();
@@ -1063,16 +1195,20 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       });
       evidenceByProposal.set(row.proposal_id, values);
     }
-    const feedbackRows = await executor.selectFrom("discovery_feedback").selectAll()
-      .where("trip_id", "=", tripId)
-      .orderBy("created_at", "desc")
-      .orderBy("id", "desc")
+    const feedbackRows = await executor.selectFrom("discovery_feedback as feedback")
+      .leftJoin("candidate_proposals as proposal", "proposal.id", "feedback.proposal_id")
+      .selectAll("feedback")
+      .select("proposal.name as proposal_name")
+      .where("feedback.trip_id", "=", tripId)
+      .orderBy("feedback.created_at", "desc")
+      .orderBy("feedback.id", "desc")
       .execute();
     return {
       brief: briefRow ? {
         originalText: briefRow.original_text,
         structured: briefRow.structured_brief ? this.readStructuredBrief(briefRow.structured_brief) : null,
         unresolvedQuestions: jsonStrings(briefRow.unresolved_questions),
+        questionAnswers: storedQuestionAnswers(briefRow.question_answers),
         version: briefRow.version,
         updatedAt: isoTimestamp(briefRow.updated_at),
       } : null,
@@ -1117,6 +1253,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         return {
           id: feedback.id,
           proposalId: feedback.proposal_id,
+          proposalName: feedback.proposal_name,
           originalText: feedback.original_text,
           interpretation: {
             interests: jsonStrings(interpretation.interests),
@@ -1125,6 +1262,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
             budget: typeof interpretation.budget === "string" ? interpretation.budget : null,
             summary: typeof interpretation.summary === "string" ? interpretation.summary : "",
           },
+          interpretationEdited: feedback.interpretation_edited,
+          isOwn: feedback.actor_id === userId,
           status: feedback.status,
           version: feedback.version,
           createdAt: isoTimestamp(feedback.created_at),

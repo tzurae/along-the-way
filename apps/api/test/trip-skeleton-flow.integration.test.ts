@@ -2458,6 +2458,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         { migrationName: "011_day_plan_window", direction: "Up", status: "NotExecuted" },
         { migrationName: "012_endpoints_outside_route", direction: "Up", status: "NotExecuted" },
         { migrationName: "013_discovery_claims", direction: "Up", status: "NotExecuted" },
+        { migrationName: "014_discovery_feedback_answers", direction: "Up", status: "NotExecuted" },
       ]);
       await database.deleteFrom("mutation_requests")
         .where("actor_id", "=", owner.userId).where("operation", "=", "create_trip")
