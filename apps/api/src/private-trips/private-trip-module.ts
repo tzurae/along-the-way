@@ -86,7 +86,7 @@ export class AppError extends Error {
       | "trip_not_found"
       | "trip_place_not_found"
       | "trip_day_not_found"
-      | "contribution_not_found"
+      | "already_in_wishlist"
       | "duplicate_suggestion_not_found"
       | "discovery_proposal_not_found"
       | "discovery_feedback_not_found"

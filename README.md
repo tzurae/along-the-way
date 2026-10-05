@@ -127,7 +127,7 @@ release and clears their votes/assignments/legacy day rows, retaining contributi
 Explicit intake cannot unarchive a travel-only identity: it returns
 `409 travel_place` and preserves its archived row and contributions.
 Discovery excludes provider identities backed by travel-only places even when
-archived; ordinary withdrawn wishlist identities remain eligible for recommendation.
+archived; ordinary removed wishlist identities remain eligible for recommendation.
 
 Migration `016_travel_places` adds the non-null flag (default false), marks places
 used by at least one flight/lodging endpoint and no other item type, and archives
@@ -159,10 +159,12 @@ Stale evidence is labelled for re-checking and is never refreshed automatically.
 
 Discovery mutations require an `Idempotency-Key` and the current version:
 
-- `POST /api/trips/:tripId/discovery/feedback` accepts `originalText` and an
-  optional `proposalId`. Feedback responses include `proposalName`,
-  `interpretationEdited`, and `isOwn`; clients only offer pending-feedback
-  actions when `isOwn` is true.
+- `POST /api/trips/:tripId/discovery/feedback` accepts only whole-trip
+  `originalText`; a `proposalId` field is rejected with `400 validation_error`.
+  Candidate cards no longer offer a targeted feedback form. Historical targeted
+  records still display 「針對：X」 and reach the model labelled with that place.
+  Feedback responses retain `proposalId`, `proposalName`, `interpretationEdited`,
+  and `isOwn`; clients only offer pending-feedback actions when `isOwn` is true.
 - `POST /api/trips/:tripId/discovery/feedback/:feedbackId/decision` accepts
   `expectedVersion`, `decision` (`confirm` or `reject`), and, when confirming,
   an optional complete `interpretation` containing `interests`, `exclusions`,
@@ -371,13 +373,12 @@ wishlist place without duplicates; merging places keeps the union of votes.
 Day and whole-trip plan drafts prioritize places by vote count and no longer
 show preferences or conflicts. Formal itinerary items are never changed.
 
-Votes never block deleting or withdrawing. Deleting a place in the itinerary
-tab is refused only while another member's contribution is active or a formal
-itinerary endpoint uses the place. Withdrawing the last active contribution of
-a place no formal itinerary endpoint uses archives it and clears its day
-assignments and votes. Deleting a place accepted from an AI proposal first
-detaches the proposal; such a proposal reports `acceptedPlaceRemoved` and is
-shown as 「已從想去清單移除」.
+Votes and historical contributions never block removing a wishlist place or
+deleting a legacy place. Itinerary-tab deletion is refused with `place_in_use`
+only when a formal itinerary endpoint references the place. Wishlist removal
+works even in that case and leaves the legacy place and formal items intact.
+Accepted AI proposals return to `pending` when their wishlist place is removed
+or deleted, retaining proposal votes so members can accept them again.
 
 Migration `015_member_votes` clears the retired five-level choices but keeps
 the `member_place_preferences` table so a rolled-back previous release still
@@ -388,6 +389,73 @@ trigger, function and original proposal check, and refuses to run while an
 accepted proposal's place has been deleted. Stored idempotent replies from
 before 015 are read with empty vote defaults; zh-TW labels of historical
 preference events are kept.
+
+## Simplified wishlist (Issue #76)
+
+Explicit Google search and Maps-URL intake refuses an already-active provider
+identity in the same trip with `409 already_in_wishlist` (「這個地點已在想去清單。」).
+No additional wishlist row or contribution is written. Removing and re-adding an
+ordinary identity unarchives its existing row; travel-only identities still
+return `409 travel_place`. Manual intake and the possible-duplicate/merge flow
+are unchanged. AI acceptance continues to reuse an existing wishlist identity.
+
+`TripPlaceDto` exposes `notes` and `sourceUrl: string | null`, not contributions.
+The source is the earliest contribution's URL, falling back to the legacy
+place's URL. Contributions remain internal intake/merge history. Intake notes
+are the shared place notes on both `trip_places` and `places`, with their
+existing version/sync watermark maintained. Cards show notes and
+「開啟原始來源」 directly. Stored replies from older releases still parse:
+without `sourceUrl`, the old contributions supply it, otherwise it is null.
+
+`POST /api/trips/:tripId/trip-places/:tripPlaceId/remove` requires an
+`Idempotency-Key` and `{ "expectedVersion": number }`. Any active member can
+remove a place after confirming 「從想去清單移除」. Success and replay return
+204; stale active-place versions return 409. Removal archives only the wishlist
+row and deletes its votes, day assignment, and legacy desired/excluded-day
+sources. It never changes legacy places, formal items or endpoints. The event
+is `trip_place.removed` (「把地點移出想去清單」). The contribution-withdraw
+route and UI are gone; historical event labels remain readable.
+
+Removal, itinerary deletion, and discovery/read-time repair of an archived or
+missing accepted place reopen all its accepted proposals to `pending`, clear
+`decided_by`, `decided_at`, and `accepted_trip_place_id`, increment the proposal
+version, and record `discovery.proposal_reopened`. The canonical proposal for a
+provider identity is the newest proposal in the trip in **any status** (run
+creation time and ID, then proposal creation time and ID). Only when that
+canonical proposal is itself being reopened does it receive `reopened_at`;
+all older reopened acceptances remain hidden, superseded pending rows. Newer
+rejections and acceptances on active wishlist places remain authoritative.
+Active members' votes are unioned without duplicates only onto a reopened
+canonical proposal or a canonical pending proposal in the latest run, never
+onto an accepted or rejected proposal. The `reopened_at` marker keeps a reopened
+canonical candidate's original ID and evidence actionable across earlier
+research runs until the next successful research run.
+That run supersedes every earlier pending reopened candidate. If it recommends
+the same provider identity, its new candidate inherits active members' votes
+without duplicates; otherwise the old candidate disappears. Accepting or
+rejecting again also clears the marker. Unrelated superseded candidates stay
+hidden. Only active members' votes count and carry into an accepted wishlist place.
+Discovery GET repairs stale accepted proposals only when needed, in a separate
+transaction locking the trip before proposals. Mutation response projections
+are read-only; wishlist reconciliation already holds that same trip lock.
+Research excludes active wishlist identities, rejected places and travel
+identities, not ordinarily removed wishlist places.
+
+Migration `017_wishlist_simplify` first fills null wishlist notes from existing
+non-null legacy notes, including pre-upgrade intake rows whose versions already
+match. Only where both notes are null does it backfill both from distinct
+non-empty contribution notes in creation order, separated by a blank line and
+capped at 10,000 characters. Neither path advances either place version or the
+reconciliation watermark. Non-null legacy notes are never overwritten, and
+outstanding legacy edits still reconcile on the next wishlist read. The migration
+adds `reopened_at` and reopens historical accepted proposals with missing/archived
+wishlist places using the same canonical-card and active-vote-union rules,
+and records an event for each reopened proposal.
+**Down only drops `reopened_at`: the note backfill is a safe no-op on downgrade;
+prior notes and proposal decisions are not restored, and reopening events stay.**
+
+Implementation and added API, migration, contract and browser regressions are
+UNVERIFIED until the coordinator runs validation, including the real UI at 25080.
 
 The existing static site remains available at
 <https://tzurae.github.io/along-the-way/>.

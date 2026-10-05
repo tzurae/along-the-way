@@ -24,19 +24,6 @@ export interface ProviderPlaceCandidateDto {
   expiresAt: string;
 }
 
-export interface TripPlaceContributionDto {
-  id: string;
-  memberUserId: string;
-  memberEmail: string;
-  memberDisplayName: string | null;
-  intakeMethod: IntakeMethod;
-  sourceUrl: string | null;
-  originalNote: string | null;
-  createdAt: string;
-  withdrawnAt: string | null;
-  isOwn: boolean;
-}
-
 export interface MemberVoteDto {
   memberUserId: string;
   memberEmail: string;
@@ -77,7 +64,7 @@ export interface TripPlaceDto {
   budgetAmountMinor: number | null;
   budgetCurrency: string | null;
   notes: string | null;
-  contributions: TripPlaceContributionDto[];
+  sourceUrl: string | null;
   voters: MemberVoteDto[];
   voteCount: number;
   ownVote: boolean;
@@ -129,6 +116,10 @@ export interface UpdateTripPlacePlanningInput {
   budgetAmountMinor?: number | null;
   budgetCurrency?: string | null;
   notes?: string | null;
+}
+
+export interface RemoveTripPlaceInput {
+  expectedVersion: number;
 }
 
 export interface TripPlaceDayAssignmentInput {
@@ -215,24 +206,6 @@ function candidate(value: unknown): ProviderPlaceCandidateDto {
   };
 }
 
-function contribution(value: unknown): TripPlaceContributionDto {
-  const row = record(value);
-  const intakeMethod = row.intakeMethod;
-  if (intakeMethod !== "google-maps-url" && intakeMethod !== "search" && intakeMethod !== "manual") return invalid();
-  return {
-    id: text(row.id),
-    memberUserId: text(row.memberUserId),
-    memberEmail: text(row.memberEmail),
-    memberDisplayName: nullableText(row.memberDisplayName),
-    intakeMethod,
-    sourceUrl: nullableText(row.sourceUrl),
-    originalNote: nullableText(row.originalNote),
-    createdAt: text(row.createdAt),
-    withdrawnAt: nullableText(row.withdrawnAt),
-    isOwn: boolean(row.isOwn),
-  };
-}
-
 export function parseMemberVote(value: unknown): MemberVoteDto {
   const row = record(value);
   return {
@@ -291,7 +264,12 @@ function tripPlace(value: unknown): TripPlaceDto {
     budgetAmountMinor: nullableInteger(row.budgetAmountMinor),
     budgetCurrency: nullableText(row.budgetCurrency),
     notes: nullableText(row.notes),
-    contributions: Array.isArray(row.contributions) ? row.contributions.map(contribution) : invalid(),
+    // Stored idempotent replies predate sourceUrl; their contributions were ordered oldest first.
+    sourceUrl: row.sourceUrl === undefined
+      ? Array.isArray(row.contributions) && isRecord(row.contributions[0])
+        ? nullableText(row.contributions[0].sourceUrl ?? null)
+        : null
+      : nullableText(row.sourceUrl),
     voters: Array.isArray(row.voters) ? row.voters.map(parseMemberVote) : invalid(),
     voteCount: integer(row.voteCount),
     ownVote: boolean(row.ownVote),

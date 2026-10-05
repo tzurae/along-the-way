@@ -118,7 +118,6 @@ export interface CandidateProposalDto {
   voteCount: number;
   ownVote: boolean;
   votingAvailable: boolean;
-  acceptedPlaceRemoved: boolean;
   acceptedTripPlaceId: string | null;
   version: number;
   /** Kind of place it answers; null for proposals from before kinds were recorded. */
@@ -211,7 +210,6 @@ export interface UpdateCandidateProposalVoteInput {
 
 export interface CreateDiscoveryFeedbackInput {
   originalText: string;
-  proposalId?: string | null;
 }
 
 export interface DecideDiscoveryFeedbackInput {
@@ -398,7 +396,6 @@ function proposal(value: unknown): CandidateProposalDto {
     voteCount: integer(item.voteCount),
     ownVote: typeof item.ownVote === "boolean" ? item.ownVote : invalid(),
     votingAvailable: typeof item.votingAvailable === "boolean" ? item.votingAvailable : invalid(),
-    acceptedPlaceRemoved: typeof item.acceptedPlaceRemoved === "boolean" ? item.acceptedPlaceRemoved : invalid(),
     acceptedTripPlaceId: nullableText(item.acceptedTripPlaceId),
     version: integer(item.version),
     category: nullableText(item.category),

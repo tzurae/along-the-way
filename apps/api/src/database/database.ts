@@ -258,6 +258,8 @@ export interface CandidateProposalTable {
   accepted_trip_place_id: string | null;
   decided_by: string | null;
   decided_at: Timestamp | null;
+  /** Marks previously decided candidates that remain actionable across research runs. */
+  reopened_at: Timestamp | null;
   version: Generated<number>;
   created_at: Timestamp;
   updated_at: Timestamp;

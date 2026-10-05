@@ -592,6 +592,9 @@ export function createApp({
     const { user } = await authenticated(context);
     await rateLimiter.consume("trip_content", clientIp(context), user.id);
     const body = await jsonBody(context);
+    if ("proposalId" in body) {
+      throw new AppError("validation_error", "Feedback must apply to the whole trip");
+    }
     return context.json({
       discovery: await discovery.createFeedback(
         user.id,
@@ -599,7 +602,6 @@ export function createApp({
         idempotencyKey(context),
         {
           originalText: stringField(body, "originalText"),
-          proposalId: optionalStringField(body, "proposalId"),
         },
       ),
     });
@@ -839,18 +841,19 @@ export function createApp({
   );
 
   app.post(
-    "/api/trips/:tripId/trip-places/:tripPlaceId/contributions/:contributionId/withdraw",
+    "/api/trips/:tripId/trip-places/:tripPlaceId/remove",
     async (context) => {
       const { user } = await authenticated(context);
       await rateLimiter.consume("trip_content", clientIp(context), user.id);
-      const tripPlace = await tripPlaces.withdrawContribution(
+      const body = await jsonBody(context);
+      await tripPlaces.remove(
         user.id,
         uuidParam(context, "tripId"),
         uuidParam(context, "tripPlaceId"),
-        uuidParam(context, "contributionId"),
         idempotencyKey(context),
+        { expectedVersion: numberField(body, "expectedVersion") },
       );
-      return context.json({ tripPlace });
+      return context.body(null, 204);
     },
   );
 

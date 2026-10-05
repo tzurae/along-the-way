@@ -53,17 +53,6 @@ const placeTypeValues: PlaceType[] = [
 ];
 
 
-function intakeMethodLabel(
-  method: TripPlaceDto["contributions"][number]["intakeMethod"],
-  t: Messages["tripPlaces"],
-) {
-  switch (method) {
-    case "google-maps-url": return t.intakeMethod.googleMapsUrl;
-    case "search": return t.intakeMethod.search;
-    case "manual": return t.intakeMethod.manual;
-  }
-}
-
 function duplicateReason(reason: string, t: Messages["tripPlaces"]) {
   return reason.split(", ").map((part) => {
     if (part === "same normalized name") return t.duplicates.sameName;
@@ -471,12 +460,15 @@ export function TripPlaceWorkspace({
     }
   }
 
-  async function withdraw(place: TripPlaceDto, contributionId: string) {
-    const operation = `withdraw:${contributionId}`;
+  async function remove(place: TripPlaceDto) {
+    if (!window.confirm(t.workspace.confirmRemove(place.name))) return;
+    const operation = `remove:${place.id}`;
+    const payload = { expectedVersion: place.version };
     try {
-      await request(`/api/trips/${trip.id}/trip-places/${place.id}/contributions/${contributionId}/withdraw`, {
+      await request(`/api/trips/${trip.id}/trip-places/${place.id}/remove`, {
         method: "POST",
-        headers: { "Idempotency-Key": retryKey(retryKeys.current, operation, {}) },
+        headers: { "Idempotency-Key": retryKey(retryKeys.current, operation, payload) },
+        body: JSON.stringify(payload),
       });
       clearRetryKey(retryKeys.current, operation);
       await load();
@@ -575,18 +567,8 @@ export function TripPlaceWorkspace({
               <VoteControl name={place.name} voters={place.voters} voteCount={place.voteCount} ownVote={place.ownVote} votingAvailable={place.votingAvailable} disabled={Boolean(pendingVotes[place.id])} onChange={(voted) => void setVote(place, voted)} />
               {place.votingAvailable && failedVotes[place.id] && voteDraft !== undefined ? <button className="min-h-10 rounded-lg border px-3 font-bold" disabled={pendingVotes[place.id]} onClick={() => void setVote(place, voteDraft)}>{t.vote.retry}</button> : null}
 
-              <section aria-label={t.workspace.contributionsFor(place.name)}>
-                <h4 className="font-bold">{t.workspace.contributions}</h4>
-                <ul className="mt-2 grid gap-2">
-                  {place.contributions.map((contribution) => (
-                    <li key={contribution.id} className={`rounded-lg bg-surface p-3 ${contribution.withdrawnAt ? "opacity-60" : ""}`}>
-                      <div className="flex flex-wrap items-start justify-between gap-2"><span><strong>{contribution.memberDisplayName ?? contribution.memberEmail}</strong>・{intakeMethodLabel(contribution.intakeMethod, t)}{contribution.withdrawnAt ? `・${t.workspace.withdrawn}` : ""}</span>{contribution.isOwn && !contribution.withdrawnAt ? <button className="min-h-9 rounded-lg border px-3 text-sm font-bold" onClick={() => void withdraw(place, contribution.id)}>{t.workspace.withdrawMine}</button> : null}</div>
-                      <p className="mt-1 whitespace-pre-wrap text-sm">{contribution.originalNote ?? t.workspace.noOriginalNote}</p>
-                      {contribution.sourceUrl ? <a className="mt-1 block break-all text-sm font-bold text-accent-strong underline" href={contribution.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
-                    </li>
-                  ))}
-                </ul>
-              </section>
+              {place.notes ? <p className="whitespace-pre-wrap break-words text-sm">{place.notes}</p> : null}
+              {place.sourceUrl ? <a className="w-fit break-all text-sm font-bold text-accent-strong underline" href={place.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
               {place.duplicateSuggestions.filter((suggestion) =>
                 place.id < suggestion.otherTripPlaceId
               ).map((suggestion) => {
@@ -608,16 +590,9 @@ export function TripPlaceWorkspace({
                               <p className="text-sm">{t.placeType[candidate.type]}・{candidate.address ?? t.workspace.unknownAddress}</p>
                               <p className="mt-1 text-sm text-muted-foreground">
                                 {candidate.factsSource === "provider" ? t.duplicates.providerFacts : t.duplicates.memberFacts}
-                                {"・"}
-                                {candidate.contributions.filter((entry) => !entry.withdrawnAt).map((entry) =>
-                                  entry.memberDisplayName ?? entry.memberEmail
-                                ).join("、") || t.duplicates.noActiveContributor}
                               </p>
-                              <p className="mt-1 text-sm">
-                                {candidate.contributions.filter((entry) => !entry.withdrawnAt).map((entry) =>
-                                  entry.originalNote ?? entry.sourceUrl ?? t.duplicates.noSourceNote
-                                ).join("・") || t.duplicates.noActiveSourceNote}
-                              </p>
+                              {candidate.notes ? <p className="mt-1 whitespace-pre-wrap break-words text-sm">{candidate.notes}</p> : null}
+                              {candidate.sourceUrl ? <a className="mt-1 block break-all text-sm underline" href={candidate.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
                             </>
                           ) : <p className="mt-1 text-sm text-muted-foreground">{t.duplicates.unavailable}</p>}
                         </div>
@@ -629,6 +604,7 @@ export function TripPlaceWorkspace({
               })}
 
               <PlanningEditor tripId={trip.id} place={place} request={request} changed={changedPlaces} />
+              <button className="min-h-10 w-fit rounded-lg border px-3 text-sm font-bold" onClick={() => void remove(place)}>{t.workspace.remove}</button>
             </article>
           );
         })}

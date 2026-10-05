@@ -14,7 +14,6 @@ import { parseTripSkeletonResponse } from "@along-the-way/contracts/trip-skeleto
 import { createApp } from "../src/app";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
 import { runMigrations } from "../src/database/migrate";
-import { down as rollbackMemberVotes } from "../src/database/migrations/015_member_votes";
 import { seedDatabase } from "../src/database/seed";
 import type { RecommendationSourceChecks } from "../src/discovery/candidate-verification";
 import type {
@@ -130,7 +129,7 @@ class ControlledSourceChecks implements RecommendationSourceChecks {
     this.pages.push(url);
     if (url.endsWith("/nishiki")) return "Nishiki Market, Kyoto's kitchen, is a narrow covered street of food stalls.";
     if (url.endsWith("/gardens")) {
-      return "Kyoto's gardens: Gion Garden, Okazaki Garden, Shoren Garden, Ruined Garden, Seoul Garden and Floating Garden.";
+      return "Kyoto's gardens: Gion Garden, Okazaki Garden, Shoren Garden, Undecided Garden, Ruined Garden, Seoul Garden and Floating Garden.";
     }
     if (url.endsWith("/tiny-cafe")) return "Tiny Cafe serves hand-drip coffee near the market.";
     return null;
@@ -538,7 +537,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     // A response stored by the replaced release has no vote fields.
     await sql`
       update mutation_requests set response = jsonb_set(response, '{proposals}', (
-        select jsonb_agg((proposal - 'voters' - 'voteCount' - 'ownVote' - 'votingAvailable' - 'acceptedPlaceRemoved')
+        select jsonb_agg((proposal - 'voters' - 'voteCount' - 'ownVote' - 'votingAvailable')
           || '{"preferences":[],"preferenceConflict":false,"ownPreference":null}'::jsonb)
         from jsonb_array_elements(response -> 'proposals') proposal
       ))
@@ -556,7 +555,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     const oldReplay = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "generate-1", { expectedBriefVersion: 1 });
     expect(oldReplay.status).toBe(200);
     expect(parseDiscoveryWorkspaceResponse(await oldReplay.json()).discovery.proposals[0]).toMatchObject({
-      voters: [], voteCount: 0, ownVote: false, votingAvailable: false, acceptedPlaceRemoved: false,
+      voters: [], voteCount: 0, ownVote: false, votingAvailable: false,
     });
 
     const proposal = generated.proposals[0];
@@ -579,16 +578,22 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     const tripPlaces = parseTripPlaceListResponse(await placesResponse.json()).tripPlaces;
     expect(tripPlaces.map((place) => place.name)).toContain("Nishiki Market");
     expect(tripPlaces[0]?.aiProposalId).toBe(proposal.id);
-    expect(tripPlaces[0]?.contributions[0]?.intakeMethod).toBe("search");
+    expect(tripPlaces[0]?.sourceUrl).toBe(market.sourceUrl);
+    for (const proposalId of [proposal.id, null]) {
+      const targeted = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/feedback`, `refuse-target-${proposalId}`, {
+        originalText: "Do not create targeted feedback.", proposalId,
+      });
+      expect(targeted.status).toBe(400);
+      expect(await targeted.json()).toMatchObject({ error: { code: "validation_error" } });
+    }
+    expect(model.feedbackCalls).toBe(0);
 
     const firstFeedback = discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/feedback`, "feedback-1", {
       originalText: "This place looks too crowded. Keep the food focus and slow pace.",
-      proposalId: proposal.id,
     });
     await model.feedbackStarted;
     const duplicateFeedback = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/feedback`, "feedback-1", {
       originalText: "This place looks too crowded. Keep the food focus and slow pace.",
-      proposalId: proposal.id,
     });
     expect(duplicateFeedback.status).toBe(409);
     model.releaseFeedback();
@@ -597,12 +602,12 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(model.feedbackCalls).toBe(1);
     expect(model.feedbackInputs).toEqual([{
       text: "This place looks too crowded. Keep the food focus and slow pace.",
-      proposalName: "Nishiki Market",
+      proposalName: null,
     }]);
     const pendingFeedback = parseDiscoveryWorkspaceResponse(await feedbackResponse.json()).discovery.feedback[0];
     expect(pendingFeedback).toMatchObject({
-      proposalId: proposal.id,
-      proposalName: "Nishiki Market",
+      proposalId: null,
+      proposalName: null,
       status: "pending",
       isOwn: true,
       interpretationEdited: false,
@@ -622,6 +627,13 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(parseDiscoveryWorkspaceResponse(await otherWorkspaceResponse.json()).discovery.feedback[0]?.isOwn).toBe(false);
 
     if (!pendingFeedback) throw new Error("Expected feedback");
+    // Fixture from the retained release: targeted feedback remains readable and reaches the model.
+    await database.updateTable("discovery_feedback").set({ proposal_id: proposal.id })
+      .where("id", "=", pendingFeedback.id).execute();
+    const historical = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
+    expect(parseDiscoveryWorkspaceResponse(await historical.json()).discovery.feedback[0]).toMatchObject({
+      proposalId: proposal.id, proposalName: "Nishiki Market",
+    });
     const editedInterpretation = {
       interests: ["covered food markets"],
       exclusions: ["crowded places"],
@@ -932,7 +944,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       .toHaveLength(3);
   });
 
-  it.each(["withdraw", "delete", "travel"] as const)("recommends ordinarily removed identities again but excludes travel-only identities after %s", async (removal) => {
+  it.each(["remove", "delete", "travel", "archived", "missing"] as const)("reopens accepted proposals after %s and only excludes travel identities from research", async (removal) => {
     const cookie = await login();
     const trip = await createTrip(cookie, `Removed accepted place ${removal}`);
     await database.insertInto("users").values({
@@ -950,7 +962,8 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/vote`, "removed-vote", { voted: true })).status).toBe(200);
     const accepted = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/accept`, "removed-accept", { expectedVersion: proposal.version });
     expect(accepted.status).toBe(200);
-    expect(parseDiscoveryWorkspaceResponse(await accepted.json()).discovery.proposals[0]?.acceptedPlaceRemoved).toBe(false);
+    const acceptedProposal = parseDiscoveryWorkspaceResponse(await accepted.json()).discovery.proposals[0]!;
+    expect(acceptedProposal.status).toBe("accepted");
     const listed = await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } });
     const place = parseTripPlaceListResponse(await listed.json()).tripPlaces[0]!;
     expect(place.voteCount).toBe(1);
@@ -962,11 +975,18 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(assigned.status).toBe(200);
     const beforeResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie } });
     const before = parseTripSkeletonResponse(await beforeResponse.json()).skeleton;
-    if (removal === "withdraw") {
+    if (removal === "remove") {
+      const assignedPlace = parseTripPlaceListResponse(await assigned.json()).tripPlaces[0]!;
       const removed = await discoveryRequest(cookie,
-        `/api/trips/${trip.id}/trip-places/${place.id}/contributions/${place.contributions[0]!.id}/withdraw`, "removed-withdraw", {});
-      expect(removed.status).toBe(200);
-      expect(await removed.json()).toEqual({ tripPlace: null });
+        `/api/trips/${trip.id}/trip-places/${place.id}/remove`, "removed-wishlist", { expectedVersion: assignedPlace.version });
+      expect(removed.status).toBe(204);
+    } else if (removal === "archived") {
+      // A retained writer may archive without reopening the proposal.
+      await database.updateTable("trip_places").set({ archived_at: now() }).where("id", "=", place.id).execute();
+    } else if (removal === "missing") {
+      await database.updateTable("candidate_proposals").set({ accepted_trip_place_id: null }).where("id", "=", proposal.id).execute();
+      const legacy = before.places.find((entry) => entry.name === place.name)!;
+      await database.deleteFrom("places").where("id", "=", legacy.id).execute();
     } else if (removal === "travel") {
       const legacy = before.places.find((entry) => entry.name === place.name)!;
       await database.updateTable("places").set({ travel_only: true }).where("id", "=", legacy.id).execute();
@@ -983,18 +1003,19 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       expect(await database.selectFrom("trip_place_contributions").select("id").where("trip_place_id", "=", place.id).execute()).toEqual([]);
     }
     const workspace = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
-    expect(parseDiscoveryWorkspaceResponse(await workspace.json()).discovery.proposals[0]).toMatchObject({
-      status: "accepted", acceptedPlaceRemoved: true,
-      acceptedTripPlaceId: removal === "delete" ? null : place.id,
+    const reopened = parseDiscoveryWorkspaceResponse(await workspace.json()).discovery.proposals[0]!;
+    expect(reopened).toMatchObject({
+      status: "pending", acceptedTripPlaceId: null, version: acceptedProposal.version + 1,
+      ownVote: true, voteCount: 1,
     });
+    expect(await database.selectFrom("candidate_proposals").select(["decided_by", "decided_at"])
+      .where("id", "=", proposal.id).executeTakeFirstOrThrow()).toEqual({ decided_by: null, decided_at: null });
     const empty = await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } });
     expect(parseTripPlaceListResponse(await empty.json()).tripPlaces).toEqual([]);
-    expect(await database.selectFrom("trip_place_votes").selectAll().where("trip_place_id", "=", place.id).execute()).toEqual([]);
-    if (removal === "delete") {
-      await expect(database.transaction().execute((transaction) => rollbackMemberVotes(transaction as unknown as Kysely<unknown>)))
-        .rejects.toThrow("Cannot downgrade member votes while accepted proposals have deleted wishlist places");
+    if (removal !== "archived") {
+      expect(await database.selectFrom("trip_place_votes").selectAll().where("trip_place_id", "=", place.id).execute()).toEqual([]);
+      expect(await database.selectFrom("trip_place_day_assignments").selectAll().where("trip_place_id", "=", place.id).execute()).toEqual([]);
     }
-    expect(await database.selectFrom("trip_place_day_assignments").selectAll().where("trip_place_id", "=", place.id).execute()).toEqual([]);
     const after = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie } });
     expect(parseTripSkeletonResponse(await after.json()).skeleton.items).toEqual(before.items);
     const regenerated = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "removed-regenerate", { expectedBriefVersion: 1 });
@@ -1004,17 +1025,329 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       expect(next.proposals.map((entry) => entry.providerPlaceId)).not.toContain(proposal.providerPlaceId);
       expect(next.latestRun?.shortfalls).toContainEqual(expect.objectContaining({ code: "in_wishlist", subject: proposal.name }));
     } else {
-      expect(next.proposals.map((entry) => [entry.providerPlaceId, entry.status])).toContainEqual([proposal.providerPlaceId, "pending"]);
+      const replacements = next.proposals.filter((entry) => entry.providerPlaceId === proposal.providerPlaceId);
+      expect(replacements).toHaveLength(1);
+      expect(replacements[0]).toMatchObject({
+        runId: next.latestRun!.id, status: "pending", voteCount: 1, ownVote: true, voters: reopened.voters,
+      });
+      expect(replacements[0]!.id).not.toBe(proposal.id);
     }
     expect(next.decided).toEqual([]);
+    if (removal !== "travel") {
+      const replacement = next.proposals.find((entry) => entry.providerPlaceId === proposal.providerPlaceId)!;
+      const acceptedAgain = await discoveryRequest(cookie,
+        `/api/trips/${trip.id}/discovery/proposals/${replacement.id}/accept`, "removed-accept-again", { expectedVersion: replacement.version });
+      expect(acceptedAgain.status).toBe(200);
+      const decided = parseDiscoveryWorkspaceResponse(await acceptedAgain.json()).discovery;
+      expect(decided.proposals.filter((entry) => entry.providerPlaceId === proposal.providerPlaceId && entry.status === "pending"))
+        .toEqual([]);
+      const restoredResponse = await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } });
+      const restored = parseTripPlaceListResponse(await restoredResponse.json()).tripPlaces;
+      expect(restored).toHaveLength(1);
+      expect(restored[0]).toMatchObject({ providerPlaceId: proposal.providerPlaceId, aiProposalId: replacement.id, voteCount: 1 });
+    }
+  });
+
+  it.each(["reject", "not-recommended"] as const)("supersedes a reopened candidate on the next run: %s", async (outcome) => {
+    const cookie = await login();
+    const trip = await createTrip(cookie, `Superseded reopened candidate ${outcome}`);
+    const members = await database.insertInto("users").values([
+      { email: "active-voter@example.test", display_name: "Active voter", status: "active", created_at: now(), updated_at: now() },
+      { email: "removed-voter@example.test", display_name: "Removed voter", status: "active", created_at: now(), updated_at: now() },
+    ]).returning(["id", "email"]).execute();
+    const removedMember = members.find((member) => member.email === "removed-voter@example.test")!;
+    await database.insertInto("trip_members").values(members.map((member) => ({
+      trip_id: trip.id, user_id: member.id, role: "editor" as const, removed_at: null,
+    }))).execute();
+    for (const name of ["Gion Garden", "Shoren Garden"]) provider.known.set(name, {});
+    model.releasePlan();
+    model.researchedPlaces = ["Gion Garden"];
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "superseded-brief", {
+      originalText: "Quiet gardens.", expectedVersion: null,
+    })).status).toBe(200);
+    const firstResponse = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "superseded-first", {
+      expectedBriefVersion: 1,
+    });
+    expect(firstResponse.status).toBe(200);
+    const original = parseDiscoveryWorkspaceResponse(await firstResponse.json()).discovery.proposals[0]!;
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${original.id}/vote`,
+      "superseded-vote", { voted: true })).status).toBe(200);
+    await database.insertInto("discovery_proposal_votes").values(members.map((member) => ({
+      trip_id: trip.id, proposal_id: original.id, member_user_id: member.id,
+    }))).execute();
+    const accepted = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${original.id}/accept`,
+      "superseded-accept", { expectedVersion: original.version });
+    expect(accepted.status).toBe(200);
+    const acceptedProposal = parseDiscoveryWorkspaceResponse(await accepted.json()).discovery.proposals[0]!;
+    const listed = await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } });
+    const place = parseTripPlaceListResponse(await listed.json()).tripPlaces[0]!;
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/trip-places/${place.id}/remove`,
+      "superseded-remove", { expectedVersion: place.version })).status).toBe(204);
+    // Retained historical votes must not give a removed member a vote on the new candidate.
+    await database.updateTable("trip_members").set({ removed_at: now() })
+      .where("trip_id", "=", trip.id).where("user_id", "=", removedMember.id).execute();
+    model.researchedPlaces = outcome === "not-recommended" ? ["Shoren Garden"] : ["Gion Garden"];
+    const generated = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "superseded-next", {
+      expectedBriefVersion: 1,
+    });
+    expect(generated.status).toBe(200);
+    const workspace = parseDiscoveryWorkspaceResponse(await generated.json()).discovery;
+    expect(await database.selectFrom("candidate_proposals").select(["status", "reopened_at"])
+      .where("id", "=", original.id).executeTakeFirstOrThrow()).toEqual({ status: "pending", reopened_at: null });
+    if (outcome === "not-recommended") {
+      expect(workspace.proposals.map((proposal) => proposal.name)).toEqual(["Shoren Garden"]);
+    } else {
+      expect(workspace.proposals).toHaveLength(1);
+      const replacement = workspace.proposals[0]!;
+      expect(replacement.id).not.toBe(original.id);
+      expect(replacement).toMatchObject({
+        providerPlaceId: original.providerPlaceId, runId: workspace.latestRun!.id,
+        status: "pending", voteCount: 2, ownVote: true,
+      });
+      expect(replacement.voters).toEqual(acceptedProposal.voters.filter((voter) => voter.memberUserId !== removedMember.id));
+      expect(await database.selectFrom("discovery_proposal_votes").select("member_user_id")
+        .where("proposal_id", "=", replacement.id).orderBy("member_user_id").execute())
+        .toEqual(replacement.voters.map((voter) => voter.memberUserId).sort().map((member_user_id) => ({ member_user_id })));
+      const rejected = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${replacement.id}/reject`,
+        "superseded-reject", { expectedVersion: replacement.version });
+      expect(rejected.status).toBe(200);
+      expect(parseDiscoveryWorkspaceResponse(await rejected.json()).discovery.proposals)
+        .toEqual([expect.objectContaining({ id: replacement.id, status: "rejected" })]);
+    }
+    const reloaded = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
+    expect(reloaded.status).toBe(200);
+    expect(parseDiscoveryWorkspaceResponse(await reloaded.json()).discovery.proposals
+      .filter((proposal) => proposal.providerPlaceId === original.providerPlaceId && proposal.status === "pending")).toEqual([]);
   });
 
 
-  it("keeps earlier decisions after a new run and never proposes those places again", async () => {
+  it.each([false, true])("reopens one historical acceptance per identity (latest pending: %s)", async (latestPending) => {
+    const cookie = await login();
+    const trip = await createTrip(cookie, "Repeated historical acceptances");
+    const ownerId = trip.members[0]!.userId;
+    const second = await database.insertInto("users").values({
+      email: "historical-voter@example.test", display_name: "Historical voter", status: "active",
+      created_at: now(), updated_at: now(),
+    }).returning("id").executeTakeFirstOrThrow();
+    const removed = await database.insertInto("users").values({
+      email: "historical-removed@example.test", display_name: "Removed voter", status: "active",
+      created_at: now(), updated_at: now(),
+    }).returning("id").executeTakeFirstOrThrow();
+    await database.insertInto("trip_members").values([
+      { trip_id: trip.id, user_id: second.id, role: "editor", removed_at: null },
+      { trip_id: trip.id, user_id: removed.id, role: "editor", removed_at: now() },
+    ]).execute();
+    const intake = await discoveryRequest(cookie, `/api/trips/${trip.id}/trip-places`, "historical-place", {
+      method: "search", providerPlaceId: market.providerPlaceId, sourceUrl: market.sourceUrl, originalNote: null,
+    });
+    expect(intake.status).toBe(201);
+    const wishlistPlace = parseTripPlaceResponse(await intake.json()).tripPlace;
+    const proposalIds: string[] = [];
+    const states = latestPending ? ["accepted", "accepted", "pending"] : ["accepted", "accepted"];
+    for (const [index, status] of states.entries()) {
+      const run = await sql<{ id: string }>`
+        insert into discovery_runs (trip_id, brief_version, policy_version, model_id, status, search_plan, created_by, created_at)
+        values (${trip.id}, 1, 'historical', 'historical', 'completed', '{}'::jsonb, ${ownerId},
+          ${new Date(Date.UTC(2026, 8, 20 + index))})
+        returning id
+      `.execute(database);
+      const proposal = await sql<{ id: string }>`
+        insert into candidate_proposals (
+          trip_id, run_id, provider_place_id, name, place_type, recommendation, matched_needs,
+          tradeoffs, unknowns, confidence, status, decided_by, decided_at, accepted_trip_place_id, version, created_at
+        ) values (
+          ${trip.id}, ${run.rows[0]!.id}, ${market.providerPlaceId}, ${market.name}, 'activity', 'Historical recommendation',
+          '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'medium', ${status},
+          case when ${status} = 'accepted' then ${ownerId}::uuid else null end,
+          case when ${status} = 'accepted' then now() else null end,
+          case when ${status} = 'accepted' then ${wishlistPlace.id}::uuid else null end,
+          ${status === "accepted" ? 4 : 1}, ${new Date(Date.UTC(2026, 8, 27 - index))}
+        ) returning id
+      `.execute(database);
+      const id = proposal.rows[0]!.id;
+      proposalIds.push(id);
+      // The older row has newer created_at and overlapping votes: run recency wins and votes form a union.
+      await database.insertInto("discovery_proposal_votes").values(
+        (index === 0 ? [ownerId, second.id, removed.id] : [second.id])
+          .map((member_user_id) => ({ trip_id: trip.id, proposal_id: id, member_user_id })),
+      ).execute();
+    }
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/trip-places/${wishlistPlace.id}/remove`,
+      "historical-remove", { expectedVersion: wishlistPlace.version })).status).toBe(204);
+    const response = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
+    expect(response.status).toBe(200);
+    const workspace = parseDiscoveryWorkspaceResponse(await response.json()).discovery;
+    expect(workspace.proposals).toHaveLength(1);
+    const canonical = workspace.proposals[0]!;
+    expect(canonical).toMatchObject({
+      id: proposalIds.at(-1), status: "pending", acceptedTripPlaceId: null,
+      version: latestPending ? 1 : 5, ownVote: true, voteCount: 2,
+    });
+    expect(canonical.voters.map((voter) => voter.memberUserId).sort()).toEqual([ownerId, second.id].sort());
+    expect(await database.selectFrom("discovery_proposal_votes").select("member_user_id")
+      .where("proposal_id", "=", canonical.id).orderBy("member_user_id").execute())
+      .toEqual([ownerId, second.id].sort().map((member_user_id) => ({ member_user_id })));
+    for (const [index, id] of proposalIds.slice(0, 2).entries()) {
+      const reopened = await database.selectFrom("candidate_proposals")
+        .select(["status", "version", "reopened_at", "decided_by", "decided_at", "accepted_trip_place_id"])
+        .where("id", "=", id).executeTakeFirstOrThrow();
+      expect(reopened).toMatchObject({
+        status: "pending", version: 5, decided_by: null, decided_at: null, accepted_trip_place_id: null,
+      });
+      expect(reopened.reopened_at !== null).toBe(!latestPending && index === 1);
+    }
+    expect(await database.selectFrom("change_events").select("target_id")
+      .where("trip_id", "=", trip.id).where("event_type", "=", "discovery.proposal_reopened").orderBy("target_id").execute())
+      .toEqual(proposalIds.slice(0, 2).sort().map((target_id) => ({ target_id })));
+    const rejected = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${canonical.id}/reject`,
+      "historical-reject", { expectedVersion: canonical.version });
+    expect(rejected.status).toBe(200);
+    expect(parseDiscoveryWorkspaceResponse(await rejected.json()).discovery.proposals)
+      .toEqual([expect.objectContaining({ id: canonical.id, status: "rejected" })]);
+  });
+
+  it.each(["rejected", "accepted"] as const)("read-time repair preserves a newer %s decision for the same identity", async (newestStatus) => {
+    const cookie = await login();
+    const trip = await createTrip(cookie, "Newer historical decision");
+    const ownerId = trip.members[0]!.userId;
+    const second = await database.insertInto("users").values({
+      email: "newer-decision@example.test", display_name: "Newer decision", status: "active",
+      created_at: now(), updated_at: now(),
+    }).returning("id").executeTakeFirstOrThrow();
+    await database.insertInto("trip_members").values({
+      trip_id: trip.id, user_id: second.id, role: "editor", removed_at: null,
+    }).execute();
+    const intake = await discoveryRequest(cookie, `/api/trips/${trip.id}/trip-places`, "newer-decision-place", {
+      method: "search", providerPlaceId: market.providerPlaceId, sourceUrl: market.sourceUrl, originalNote: null,
+    });
+    expect(intake.status).toBe(201);
+    const wishlistPlace = parseTripPlaceResponse(await intake.json()).tripPlace;
+    if (newestStatus === "rejected") {
+      // Old withdrawal left the accepted proposal pointing at an archived row.
+      await database.updateTable("trip_places").set({ archived_at: now() }).where("id", "=", wishlistPlace.id).execute();
+    }
+    const proposalIds: string[] = [];
+    for (const [index, status] of ["accepted", newestStatus].entries()) {
+      const run = await sql<{ id: string }>`
+        insert into discovery_runs (trip_id, brief_version, policy_version, model_id, status, search_plan, created_by, created_at)
+        values (${trip.id}, 1, 'historical', 'historical', 'completed', '{}'::jsonb, ${ownerId},
+          ${new Date(Date.UTC(2026, 8, 20 + index))})
+        returning id
+      `.execute(database);
+      // A deleted old wishlist row may leave a null reference while a newer acceptance uses an active row.
+      const acceptedPlaceId = status !== "accepted" || (newestStatus === "accepted" && index === 0)
+        ? null : wishlistPlace.id;
+      const actorId = index === 0 ? ownerId : second.id;
+      const proposal = await sql<{ id: string }>`
+        insert into candidate_proposals (
+          trip_id, run_id, provider_place_id, name, place_type, recommendation, matched_needs,
+          tradeoffs, unknowns, confidence, status, decided_by, decided_at, accepted_trip_place_id, version, created_at
+        ) values (
+          ${trip.id}, ${run.rows[0]!.id}, ${market.providerPlaceId}, ${market.name}, 'activity', 'Historical recommendation',
+          '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'medium', ${status}, ${actorId}, now(), ${acceptedPlaceId}::uuid,
+          4, ${new Date(Date.UTC(2026, 8, 27 - index))}
+        ) returning id
+      `.execute(database);
+      const id = proposal.rows[0]!.id;
+      proposalIds.push(id);
+      await database.insertInto("discovery_proposal_votes").values({
+        trip_id: trip.id, proposal_id: id, member_user_id: actorId,
+      }).execute();
+    }
+    // The canonical identity decision can belong to an earlier run than the trip's latest run.
+    await sql`
+      insert into discovery_runs (trip_id, brief_version, policy_version, model_id, status, search_plan, created_by, created_at)
+      values (${trip.id}, 1, 'historical', 'historical', 'completed', '{}'::jsonb, ${ownerId}, '2026-09-25T12:00:00Z')
+    `.execute(database);
+    const canonicalId = proposalIds[1]!;
+    const canonicalBefore = await database.selectFrom("candidate_proposals").selectAll()
+      .where("id", "=", canonicalId).executeTakeFirstOrThrow();
+    const votesBefore = await database.selectFrom("discovery_proposal_votes").selectAll()
+      .where("trip_id", "=", trip.id).orderBy("proposal_id").orderBy("member_user_id").execute();
+    const response = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
+    expect(response.status).toBe(200);
+    const workspace = parseDiscoveryWorkspaceResponse(await response.json()).discovery;
+    expect(workspace.proposals).toEqual([]);
+    expect(workspace.decided).toEqual([expect.objectContaining({ proposalId: canonicalId, status: newestStatus })]);
+    expect(await database.selectFrom("candidate_proposals").selectAll()
+      .where("id", "=", canonicalId).executeTakeFirstOrThrow()).toEqual(canonicalBefore);
+    expect(await database.selectFrom("discovery_proposal_votes").selectAll()
+      .where("trip_id", "=", trip.id).orderBy("proposal_id").orderBy("member_user_id").execute()).toEqual(votesBefore);
+    expect(await database.selectFrom("candidate_proposals")
+      .select(["status", "version", "reopened_at", "decided_by", "decided_at", "accepted_trip_place_id"])
+      .where("id", "=", proposalIds[0]!).executeTakeFirstOrThrow()).toEqual({
+        status: "pending", version: 5, reopened_at: null, decided_by: null, decided_at: null, accepted_trip_place_id: null,
+      });
+    expect((await database.selectFrom("trip_places").select("archived_at")
+      .where("id", "=", wishlistPlace.id).executeTakeFirstOrThrow()).archived_at === null).toBe(newestStatus === "accepted");
+    expect(await database.selectFrom("change_events").select("target_id")
+      .where("trip_id", "=", trip.id).where("event_type", "=", "discovery.proposal_reopened").execute())
+      .toEqual([{ target_id: proposalIds[0] }]);
+  });
+
+  it("repairs stale accepted proposals in concurrent discovery and wishlist reads without reversing trip locks", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie, "Concurrent proposal repair");
+    model.releasePlan();
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "repair-brief", {
+      originalText: "Food markets.", expectedVersion: null,
+    })).status).toBe(200);
+    const generated = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "repair-generate", { expectedBriefVersion: 1 });
+    expect(generated.status).toBe(200);
+    const proposal = parseDiscoveryWorkspaceResponse(await generated.json()).discovery.proposals[0]!;
+    const accepted = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/accept`,
+      "repair-accept", { expectedVersion: proposal.version });
+    expect(accepted.status).toBe(200);
+    const acceptedProposal = parseDiscoveryWorkspaceResponse(await accepted.json()).discovery.proposals[0]!;
+    await database.updateTable("trip_places").set({ archived_at: now() })
+      .where("id", "=", acceptedProposal.acceptedTripPlaceId!).execute();
+
+    let requests: Promise<Response>[] = [];
+    let responses: Response[] = [];
+    try {
+      await database.transaction().execute(async (gate) => {
+        await gate.selectFrom("trips").select("id").where("id", "=", trip.id).forUpdate().executeTakeFirstOrThrow();
+        requests = [
+          Promise.resolve(app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } })),
+          Promise.resolve(app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } })),
+        ];
+        const deadline = Date.now() + 5_000;
+        while (true) {
+          const waiting = await sql<{ count: number }>`
+            select count(*)::integer as count from pg_stat_activity
+            where datname = current_database() and wait_event_type = 'Lock'
+          `.execute(database);
+          if (waiting.rows[0]!.count >= 2) break;
+          if (Date.now() >= deadline) throw new Error("Concurrent reads did not reach the trip lock barrier");
+        }
+        // Both reads must wait for the trip before taking the proposal row lock.
+        // A lock-free discovery repair would already hold it while waiting for its event's trip FK.
+        await sql`select id from candidate_proposals where id = ${proposal.id} for update nowait`.execute(gate);
+      });
+    } finally {
+      responses = await Promise.all(requests);
+    }
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(parseDiscoveryWorkspaceResponse(await responses[0]!.json()).discovery.proposals[0])
+      .toMatchObject({ id: proposal.id, status: "pending", acceptedTripPlaceId: null, version: acceptedProposal.version + 1 });
+    expect(parseTripPlaceListResponse(await responses[1]!.json()).tripPlaces).toEqual([]);
+    expect(await database.selectFrom("change_events").select("target_id")
+      .where("trip_id", "=", trip.id).where("event_type", "=", "discovery.proposal_reopened").execute())
+      .toEqual([{ target_id: proposal.id }]);
+  });
+
+  it("keeps earlier decisions and reopens only previously accepted candidates after a newer run", async () => {
     const cookie = await login();
     const trip = await createTrip(cookie);
+    await database.insertInto("users").values({
+      email: "returning-voter@example.test", display_name: "Returning voter", status: "active",
+      created_at: now(), updated_at: now(),
+    }).execute();
+    const member = await database.selectFrom("users").select("id")
+      .where("email", "=", "returning-voter@example.test").executeTakeFirstOrThrow();
+    await database.insertInto("trip_members").values({ trip_id: trip.id, user_id: member.id, role: "editor", removed_at: null }).execute();
     model.releasePlan();
-    for (const name of ["Gion Garden", "Okazaki Garden", "Shoren Garden"]) provider.known.set(name, {});
+    for (const name of ["Gion Garden", "Okazaki Garden", "Shoren Garden", "Undecided Garden"]) provider.known.set(name, {});
     expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "decided-brief", {
       originalText: "Quiet gardens.",
       expectedVersion: null,
@@ -1030,18 +1363,24 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       const response = await discoveryRequest(
         cookie,
         `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/${decision}`,
-        `${decision}-${proposal.id}`,
+        `${decision}-${proposal.id}-${proposal.version}`,
         { expectedVersion: proposal.version },
       );
       expect(response.status).toBe(200);
+      return parseDiscoveryWorkspaceResponse(await response.json()).discovery;
     };
 
-    model.researchedPlaces = ["Gion Garden", "Okazaki Garden"];
+    model.researchedPlaces = ["Gion Garden", "Okazaki Garden", "Undecided Garden"];
     const first = await generate("decided-run-1");
     const byName = new Map(first.proposals.map((proposal) => [proposal.name, proposal]));
     // Proposals created together have no defined order.
-    expect([...byName.keys()].sort()).toEqual(["Gion Garden", "Okazaki Garden"]);
-    await decide(byName.get("Gion Garden")!, "accept");
+    expect([...byName.keys()].sort()).toEqual(["Gion Garden", "Okazaki Garden", "Undecided Garden"]);
+    const originalGion = byName.get("Gion Garden")!;
+    const vote = await discoveryRequest(cookie,
+      `/api/trips/${trip.id}/discovery/proposals/${originalGion.id}/vote`, "earlier-run-vote", { voted: true });
+    expect(vote.status).toBe(200);
+    const accepted = await decide(originalGion, "accept");
+    const acceptedGion = accepted.proposals.find((entry) => entry.id === originalGion.id)!;
     await decide(byName.get("Okazaki Garden")!, "reject");
 
     // The second run finds both again, plus one new garden.
@@ -1071,16 +1410,29 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     // Taken off the wishlist again, the accepted place is no longer a decision to keep.
     const listed = await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } });
     const gion = parseTripPlaceListResponse(await listed.json()).tripPlaces.find((entry) => entry.name === "Gion Garden")!;
-    const withdrawn = await discoveryRequest(
+    const removed = await discoveryRequest(
       cookie,
-      `/api/trips/${trip.id}/trip-places/${gion.id}/contributions/${gion.contributions[0]!.id}/withdraw`,
-      "withdraw-gion",
-      {},
+      `/api/trips/${trip.id}/trip-places/${gion.id}/remove`,
+      "remove-gion",
+      { expectedVersion: gion.version },
     );
-    expect(withdrawn.status).toBe(200);
-    const afterWithdrawal = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
-    expect(parseDiscoveryWorkspaceResponse(await afterWithdrawal.json()).discovery.decided
-      .map((entry) => [entry.name, entry.status])).toEqual([["Okazaki Garden", "rejected"]]);
+    expect(removed.status).toBe(204);
+    const afterRemoval = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
+    const reopenedWorkspace = parseDiscoveryWorkspaceResponse(await afterRemoval.json()).discovery;
+    expect(reopenedWorkspace.decided.map((entry) => [entry.name, entry.status])).toEqual([["Okazaki Garden", "rejected"]]);
+    expect(reopenedWorkspace.proposals.map((entry) => entry.name).sort()).toEqual(["Gion Garden", "Shoren Garden"]);
+    const reopened = reopenedWorkspace.proposals.find((entry) => entry.id === originalGion.id)!;
+    expect(reopened).toMatchObject({
+      id: originalGion.id, runId: first.latestRun!.id, status: "pending", acceptedTripPlaceId: null,
+      version: acceptedGion.version + 1, evidence: originalGion.evidence, voters: acceptedGion.voters,
+      ownVote: true, voteCount: 1,
+    });
+    const acceptedAgain = await decide(reopened, "accept");
+    expect(acceptedAgain.proposals.map((entry) => entry.name)).toEqual(["Shoren Garden"]);
+    expect(acceptedAgain.decided).toContainEqual(expect.objectContaining({ proposalId: originalGion.id, status: "accepted" }));
+    const wishlist = await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } });
+    expect(parseTripPlaceListResponse(await wishlist.json()).tripPlaces.find((entry) => entry.id === gion.id))
+      .toMatchObject({ aiProposalId: originalGion.id, voteCount: 1 });
   });
 
   it("never proposes a closed, foreign or unmapped place, and keeps Google's facts out of storage", async () => {

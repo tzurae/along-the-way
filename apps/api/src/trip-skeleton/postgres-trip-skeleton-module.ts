@@ -23,6 +23,7 @@ import {
 import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { AlongTheWayDatabase } from "../database/database";
+import { reopenRemovedProposals } from "../discovery/reopen-removed-proposals";
 import { AppError } from "../private-trips/private-trip-module";
 import {
   dateOnly,
@@ -889,21 +890,6 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         .where("trip_id", "=", tripId)
         .where("legacy_place_id", "=", placeId)
         .executeTakeFirst();
-      if (tripPlace) {
-        const retainedByAnotherMember = await transaction.selectFrom("trip_place_contributions")
-          .select("id")
-          .where("trip_place_id", "=", tripPlace.id)
-          .where("member_user_id", "!=", userId)
-          .where("withdrawn_at", "is", null)
-          .executeTakeFirst();
-        if (retainedByAnotherMember) {
-          throw new AppError(
-            "place_in_use",
-            "A member still retains this place",
-            409,
-          );
-        }
-      }
       const referenced = await transaction
         .selectFrom("itinerary_endpoints")
         .select((builder) => builder.fn.countAll().as("count"))
@@ -914,11 +900,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         throw new AppError("place_in_use", "A referenced place cannot be deleted", 409);
       }
       if (tripPlace) {
-        await transaction.updateTable("candidate_proposals")
-          .set({ accepted_trip_place_id: null })
-          .where("trip_id", "=", tripId)
-          .where("accepted_trip_place_id", "=", tripPlace.id)
-          .execute();
+        await reopenRemovedProposals(transaction, tripId, this.now(), userId, tripPlace.id);
       }
       await transaction
         .deleteFrom("places")

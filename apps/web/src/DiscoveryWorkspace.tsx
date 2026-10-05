@@ -50,7 +50,7 @@ function shouldStartFreshRequest(error: unknown) {
 }
 
 // Where an outcome is reported: next to the control that caused it, or at the top.
-type NoticeArea = "general" | "find" | "again" | "feedback" | "questions" | `feedback:${string}`;
+type NoticeArea = "general" | "find" | "again" | "feedback" | "questions";
 
 function missingServices(
   workspace: DiscoveryWorkspaceDto,
@@ -182,7 +182,6 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const [workspace, setWorkspace] = useState<DiscoveryWorkspaceDto | null>(null);
   const [briefDraft, setBriefDraft] = useState("");
   const [feedbackDraft, setFeedbackDraft] = useState("");
-  const [proposalFeedbackDrafts, setProposalFeedbackDrafts] = useState<Record<string, string>>({});
   const [questionDrafts, setQuestionDrafts] = useState<Record<string, QuestionDraft>>({});
   const [editingFeedbackId, setEditingFeedbackId] = useState<string | null>(null);
   const [feedbackEditDraft, setFeedbackEditDraft] = useState<FeedbackEditDraft | null>(null);
@@ -333,11 +332,11 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   }
 
 
-  async function createFeedback(proposalId: string | null) {
-    const text = (proposalId ? proposalFeedbackDrafts[proposalId] : feedbackDraft)?.trim();
+  async function createFeedback() {
+    const text = feedbackDraft.trim();
     if (!text || pending || !workspace) return;
     const missing = missingServices(workspace, false, t);
-    const area: NoticeArea = proposalId ? `feedback:${proposalId}` : "feedback";
+    const area: NoticeArea = "feedback";
     if (missing.length > 0) {
       setNotice({
         area,
@@ -345,16 +344,11 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       });
       return;
     }
-    const operation = `feedback:${proposalId ?? "overall"}`;
+    const operation = "feedback:overall";
     await mutate(operation, `/api/trips/${trip.id}/discovery/feedback`, {
       originalText: text,
-      proposalId,
     }, area, () => {
-      if (proposalId) {
-        setProposalFeedbackDrafts((drafts) => ({ ...drafts, [proposalId]: "" }));
-      } else {
-        setFeedbackDraft("");
-      }
+      setFeedbackDraft("");
     });
   }
 
@@ -514,7 +508,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
               <div className="mt-4 grid gap-4 xl:grid-cols-2">
                 {workspace.proposals.map((proposal) => (
                   <article key={proposal.id} className="grid content-start gap-4 rounded-panel border border-ink/10 bg-surface-subtle p-4" aria-label={t.proposal.ariaLabel(proposal.name)}>
-                    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{proposal.category ?? t.placeType[proposal.type]}・{t.proposal.confidence(t.confidence[proposal.confidence])}</p><h4 className="font-display text-2xl">{proposal.name}</h4><p className="text-sm text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</p></div><span className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{proposal.acceptedPlaceRemoved ? t.proposal.removed : t.status[proposal.status]}</span></div>
+                    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{proposal.category ?? t.placeType[proposal.type]}・{t.proposal.confidence(t.confidence[proposal.confidence])}</p><h4 className="font-display text-2xl">{proposal.name}</h4><p className="text-sm text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</p></div><span className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{t.status[proposal.status]}</span></div>
                     {proposal.endorsements.length ? <div aria-label={t.proposal.recommendedByFor(proposal.name)}><strong>{t.proposal.recommendedBy}</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabel(endorsement, t)}</li>)}</ul></div> : null}
                     {proposal.recommendationSentences !== null
                       ? <ClaimSentenceList sentences={proposal.recommendationSentences} evidence={proposal.evidence} t={t} />
@@ -557,28 +551,6 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                       <VoteControl name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable={proposal.votingAvailable} disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} />
                     ) : null}
                     {proposal.status === "pending" ? <div className="flex flex-wrap gap-2"><button className="flex min-h-10 items-center gap-2 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "accept")}><Check aria-hidden="true" className="size-4" />{t.proposal.accept}</button><button className="flex min-h-10 items-center gap-2 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "reject")}><X aria-hidden="true" className="size-4" />{t.proposal.decline}</button></div> : null}
-                    <div className="rounded-xl border bg-surface p-3">
-                      <label className="grid gap-2 font-bold">
-                        {t.feedback.forPlace(proposal.name)}
-                        <textarea
-                          className="min-h-20 rounded-lg border p-3 font-normal"
-                          value={proposalFeedbackDrafts[proposal.id] ?? ""}
-                          onChange={(event) => setProposalFeedbackDrafts((drafts) => ({
-                            ...drafts,
-                            [proposal.id]: event.target.value,
-                          }))}
-                          placeholder={t.feedback.placePlaceholder}
-                        />
-                      </label>
-                      <button
-                        className="mt-2 min-h-10 rounded-lg border px-3 font-bold"
-                        disabled={pending !== null || !(proposalFeedbackDrafts[proposal.id] ?? "").trim()}
-                        onClick={() => void createFeedback(proposal.id)}
-                      >
-                        {pending === `feedback:${proposal.id}` ? t.feedback.interpreting : t.feedback.interpret}
-                      </button>
-                      {notice?.area === `feedback:${proposal.id}` ? <p className="mt-2 text-sm text-accent-strong" role="alert">{notice.text}</p> : null}
-                    </div>
                   </article>
                 ))}
               </div>
@@ -604,7 +576,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
           <section className="rounded-panel bg-surface-subtle p-4" aria-label={t.feedback.areaLabel}>
             <h3 className="font-display text-2xl">{t.feedback.title}</h3>
             <label className="mt-3 grid gap-2 font-bold">{t.feedback.label}<textarea className="min-h-24 rounded-xl border bg-surface p-3 font-normal" value={feedbackDraft} onChange={(event) => setFeedbackDraft(event.target.value)} placeholder={t.feedback.placeholder} /></label>
-            <button className="mt-3 min-h-11 rounded-xl border px-4 font-bold" disabled={pending !== null || !feedbackDraft.trim()} onClick={() => void createFeedback(null)}>{pending === "feedback:overall" ? t.feedback.interpreting : t.feedback.interpret}</button>
+            <button className="mt-3 min-h-11 rounded-xl border px-4 font-bold" disabled={pending !== null || !feedbackDraft.trim()} onClick={() => void createFeedback()}>{pending === "feedback:overall" ? t.feedback.interpreting : t.feedback.interpret}</button>
             {notice?.area === "feedback" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
             <div className="mt-4 grid gap-3">
               {workspace?.feedback.map((feedback) => {

@@ -19,6 +19,8 @@ import { createApp } from "../src/app";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
 import { runMigrations } from "../src/database/migrate";
 import { seedDatabase } from "../src/database/seed";
+import { OpenAiResponsesDiscoveryModel } from "../src/discovery/openai-responses-discovery-model";
+import { PostgresDiscoveryModule } from "../src/discovery/postgres-discovery-module";
 import type { EmailSender } from "../src/private-trips/email-sender";
 import { PostgresEmailWorker } from "../src/private-trips/postgres-email-worker";
 import { PostgresIdentityAccessModule } from "../src/private-trips/postgres-identity-access-module";
@@ -1030,7 +1032,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     expect(wishlist.status).toBe(200);
     const [projected] = parseTripPlaceListResponse(await wishlist.json()).tripPlaces;
     expect(projected?.notes).toBe("共享規劃備註已更新");
-    expect(projected?.contributions[0]?.originalNote).toBe("入口待確認");
+    expect(projected?.sourceUrl).toBe(created.sourceUrl);
 
     const staleCreate = await app.request(`/api/trips/${trip.id}/places`, {
       ...request,
@@ -2763,6 +2765,267 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       await migrationDatabase?.destroy();
     });
 
+    it("backfills notes consistently and reopens removed accepted proposals in 017 without restoring data on down", async () => {
+      const historicalTime = new Date("2026-09-28T12:00:00.000Z");
+      const cookie = await login();
+      const trip = await createTrip(cookie);
+      const ownerId = trip.members[0]!.userId;
+      const ordered = await createPlace(cookie, trip.id, "backfill-ordered", { name: "Ordered notes", type: "activity", notes: null });
+      const capped = await createPlace(cookie, trip.id, "backfill-capped", { name: "Long notes", type: "activity", notes: null });
+      const kept = await createPlace(cookie, trip.id, "backfill-kept", { name: "Existing notes", type: "activity", notes: "Keep the edited note" });
+      const empty = await createPlace(cookie, trip.id, "backfill-empty", { name: "No notes", type: "activity", notes: null });
+      const ahead = await createPlace(cookie, trip.id, "backfill-ahead", { name: "Unreconciled place", type: "activity", notes: null });
+      const newerNote = await createPlace(cookie, trip.id, "backfill-newer-note", { name: "Newer legacy note", type: "activity", notes: null });
+      const originalIntake = await createPlace(cookie, trip.id, "backfill-original-intake", {
+        name: "Pre-017 intake", type: "activity", notes: "Sunset if possible",
+      });
+      const before = await readSkeleton(cookie, trip.id);
+      try {
+        const old = await migrator.migrateTo("016_travel_places");
+        if (old.error) throw old.error;
+        // ac431b4 intake populated the legacy/contribution note, but left its equal-version mirror null.
+        await database.updateTable("trip_places").set({ notes: null }).where("id", "=", originalIntake.id).execute();
+        expect(await database.selectFrom("trip_places").select(["notes", "legacy_place_version"])
+          .where("id", "=", originalIntake.id).executeTakeFirstOrThrow())
+          .toEqual({ notes: null, legacy_place_version: originalIntake.version });
+        expect(await database.selectFrom("places").select(["notes", "version"])
+          .where("id", "=", originalIntake.id).executeTakeFirstOrThrow())
+          .toEqual({ notes: "Sunset if possible", version: originalIntake.version });
+        await database.updateTable("places").set({
+          name: "Corrected legacy name", address: "Corrected legacy address", version: sql`version + 1`,
+        }).where("id", "=", ahead.id).execute();
+        await database.updateTable("places").set({
+          notes: "Newer note from retained release", version: sql`version + 1`,
+        }).where("id", "=", newerNote.id).execute();
+        for (const [place, notes] of [
+          [ordered, ["First note", "Second note", "First note", "   "]],
+          [capped, ["x".repeat(10_010)]],
+          [kept, ["Do not replace the edited note"]],
+          [empty, ["   "]],
+          [ahead, ["Original contribution note"]],
+          [newerNote, ["Must not overwrite the newer note"]],
+          [originalIntake, ["Sunset if possible"]],
+        ] as const) {
+          await database.deleteFrom("trip_place_contributions").where("trip_place_id", "=", place.id).execute();
+          for (const [index, note] of notes.entries()) {
+            await database.insertInto("trip_place_contributions").values({
+              trip_id: trip.id, trip_place_id: place.id, member_user_id: ownerId,
+              intake_method: "manual", original_note: note, source_url: null,
+              provider_observed_at: null, withdrawn_at: index === 1 ? historicalTime : null,
+              created_at: new Date(`2026-09-${20 + index}T12:00:00.000Z`),
+            }).execute();
+          }
+        }
+        await database.updateTable("trip_places").set({ archived_at: historicalTime }).where("id", "=", ordered.id).execute();
+        const run = await sql<{ id: string }>`
+          insert into discovery_runs (trip_id, brief_version, policy_version, model_id, status, search_plan, created_by)
+          values (${trip.id}, 1, 'migration-fixture', 'fixture', 'completed', '{}'::jsonb, ${ownerId})
+          returning id
+        `.execute(database);
+        const proposals: Record<string, string> = {};
+        for (const [state, placeId] of [["archived", ordered.id], ["missing", null], ["active", kept.id]] as const) {
+          const proposal = await sql<{ id: string }>`
+            insert into candidate_proposals (
+              trip_id, run_id, provider_place_id, name, place_type, recommendation, matched_needs,
+              tradeoffs, unknowns, confidence, status, decided_by, decided_at, accepted_trip_place_id, version
+            ) values (
+              ${trip.id}, ${run.rows[0]!.id}, ${state}, ${state}, 'activity', 'Historical recommendation',
+              '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'medium', 'accepted', ${ownerId}, now(), ${placeId}, 4
+            ) returning id
+          `.execute(database);
+          proposals[state] = proposal.rows[0]!.id;
+          await database.insertInto("discovery_proposal_votes").values({
+            trip_id: trip.id, proposal_id: proposal.rows[0]!.id, member_user_id: ownerId,
+          }).execute();
+        }
+        const votesBefore = await database.selectFrom("discovery_proposal_votes").selectAll().orderBy("proposal_id").execute();
+        const contributionsBefore = await database.selectFrom("trip_place_contributions").selectAll().orderBy("id").execute();
+        const versionsBefore = await database.selectFrom("trip_places")
+          .select(["id", "version", "legacy_place_version"]).orderBy("id").execute();
+        const legacyVersionsBefore = await database.selectFrom("places").select(["id", "version"]).orderBy("id").execute();
+        const upgraded = await migrator.migrateToLatest();
+        if (upgraded.error) throw upgraded.error;
+        for (const [place, notes] of [
+          [ordered, "First note\n\nSecond note"],
+          [capped, "x".repeat(10_000)],
+          [kept, "Keep the edited note"],
+          [empty, null],
+          [ahead, "Original contribution note"],
+          [originalIntake, "Sunset if possible"],
+        ] as const) {
+          const wishlist = await database.selectFrom("trip_places").select(["notes", "legacy_place_version"])
+            .where("id", "=", place.id).executeTakeFirstOrThrow();
+          const legacy = await database.selectFrom("places").select(["notes", "version"])
+            .where("id", "=", place.id).executeTakeFirstOrThrow();
+          expect(wishlist.notes).toBe(notes);
+          expect(legacy.notes).toBe(notes);
+          expect(wishlist.legacy_place_version).toBe(place.version);
+        }
+        expect(await database.selectFrom("trip_places").select(["id", "version", "legacy_place_version"]).orderBy("id").execute())
+          .toEqual(versionsBefore);
+        expect(await database.selectFrom("places").select(["id", "version"]).orderBy("id").execute()).toEqual(legacyVersionsBefore);
+        expect((await database.selectFrom("trip_places").select("notes").where("id", "=", newerNote.id).executeTakeFirstOrThrow()).notes)
+          .toBe("Newer note from retained release");
+        expect((await database.selectFrom("places").select("notes").where("id", "=", newerNote.id).executeTakeFirstOrThrow()).notes)
+          .toBe("Newer note from retained release");
+        for (const state of ["archived", "missing"]) {
+          expect(await database.selectFrom("candidate_proposals")
+            .select(["status", "decided_by", "decided_at", "accepted_trip_place_id", "version"])
+            .where("id", "=", proposals[state]!).executeTakeFirstOrThrow()).toEqual({
+              status: "pending", decided_by: null, decided_at: null, accepted_trip_place_id: null, version: 5,
+            });
+          expect((await database.selectFrom("candidate_proposals").select("reopened_at")
+            .where("id", "=", proposals[state]!).executeTakeFirstOrThrow()).reopened_at).not.toBeNull();
+        }
+        expect(await database.selectFrom("candidate_proposals").select(["status", "accepted_trip_place_id", "version"])
+          .where("id", "=", proposals.active!).executeTakeFirstOrThrow())
+          .toEqual({ status: "accepted", accepted_trip_place_id: kept.id, version: 4 });
+        expect(await database.selectFrom("discovery_proposal_votes").selectAll().orderBy("proposal_id").execute()).toEqual(votesBefore);
+        expect(await database.selectFrom("trip_place_contributions").selectAll().orderBy("id").execute()).toEqual(contributionsBefore);
+        expect(await database.selectFrom("change_events").select("target_id")
+          .where("event_type", "=", "discovery.proposal_reopened").orderBy("target_id").execute())
+          .toEqual([proposals.archived!, proposals.missing!].sort().map((target_id) => ({ target_id })));
+        const after = await readSkeleton(cookie, trip.id);
+        expect(after.items).toEqual(before.items);
+        expect(after.days).toEqual(before.days);
+        const listed = await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } });
+        const projected = parseTripPlaceListResponse(await listed.json()).tripPlaces;
+        expect(projected.find((place) => place.id === capped.id)?.notes).toBe("x".repeat(10_000));
+        expect(projected.find((place) => place.id === ahead.id)).toMatchObject({
+          name: "Corrected legacy name", address: "Corrected legacy address", notes: "Original contribution note",
+        });
+        expect(projected.find((place) => place.id === newerNote.id)?.notes).toBe("Newer note from retained release");
+        expect(projected.find((place) => place.id === originalIntake.id)?.notes).toBe("Sunset if possible");
+        const placesAfter = await database.selectFrom("trip_places").selectAll().orderBy("id").execute();
+        const proposalsAfter = await database.selectFrom("candidate_proposals").selectAll().orderBy("id").execute();
+        const downgraded = await migrator.migrateTo("016_travel_places");
+        if (downgraded.error) throw downgraded.error;
+        expect(await database.selectFrom("trip_places").selectAll().orderBy("id").execute()).toEqual(placesAfter);
+        expect(await database.selectFrom("candidate_proposals").selectAll().orderBy("id").execute())
+          .toEqual(proposalsAfter.map(({ reopened_at: _reopenedAt, ...proposal }) => proposal));
+      } finally {
+        const restored = await migrator.migrateToLatest();
+        if (restored.error) throw restored.error;
+      }
+    });
+
+    it.each(["reopened", "pending", "rejected", "accepted"] as const)("canonicalizes historical acceptances in 017 (newest: %s)", async (newestStatus) => {
+      const latestPending = newestStatus === "pending";
+      const preserveDecision = newestStatus === "rejected" || newestStatus === "accepted";
+      const cookie = await login();
+      const trip = await createTrip(cookie);
+      const ownerId = trip.members[0]!.userId;
+      const place = await createPlace(cookie, trip.id, "historical-accepted-place", { name: "Historical place", type: "activity" });
+      const second = await database.insertInto("users").values({
+        email: "migration-voter@example.test", display_name: "Migration voter", status: "active",
+      }).returning("id").executeTakeFirstOrThrow();
+      const removed = await database.insertInto("users").values({
+        email: "migration-removed@example.test", display_name: "Removed voter", status: "active",
+      }).returning("id").executeTakeFirstOrThrow();
+      await database.insertInto("trip_members").values([
+        { trip_id: trip.id, user_id: second.id, role: "editor", removed_at: null },
+        { trip_id: trip.id, user_id: removed.id, role: "editor", removed_at: new Date("2026-09-28T12:00:00.000Z") },
+      ]).execute();
+      try {
+        const old = await migrator.migrateTo("016_travel_places");
+        if (old.error) throw old.error;
+        if (newestStatus !== "accepted") {
+          await database.updateTable("trip_places").set({ archived_at: new Date("2026-09-28T12:00:00.000Z") })
+            .where("id", "=", place.id).execute();
+        }
+        const proposalIds: string[] = [];
+        const states = preserveDecision ? ["accepted", newestStatus]
+          : latestPending ? ["accepted", "accepted", "pending"] : ["accepted", "accepted"];
+        for (const [index, status] of states.entries()) {
+          const run = await sql<{ id: string }>`
+            insert into discovery_runs (trip_id, brief_version, policy_version, model_id, status, search_plan, created_by, created_at)
+            values (${trip.id}, 1, 'migration-fixture', 'fixture', 'completed', '{}'::jsonb, ${ownerId},
+              ${new Date(Date.UTC(2026, 8, 20 + index))})
+            returning id
+          `.execute(database);
+          const proposal = await sql<{ id: string }>`
+            insert into candidate_proposals (
+              trip_id, run_id, provider_place_id, name, place_type, recommendation, matched_needs,
+              tradeoffs, unknowns, confidence, status, decided_by, decided_at, accepted_trip_place_id, version, created_at
+            ) values (
+              ${trip.id}, ${run.rows[0]!.id}, 'historical-shared-identity', ${place.name}, 'activity', 'Historical recommendation',
+              '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'medium', ${status},
+              case when ${status} in ('accepted', 'rejected') then ${ownerId}::uuid else null end,
+              case when ${status} in ('accepted', 'rejected') then now() else null end,
+              case when ${status} = 'accepted' and not ${newestStatus === "accepted" && index === 0}
+                then ${place.id}::uuid else null end,
+              ${status === "pending" ? 1 : 4}, ${new Date(Date.UTC(2026, 8, 27 - index))}
+            ) returning id
+          `.execute(database);
+          const id = proposal.rows[0]!.id;
+          proposalIds.push(id);
+          await database.insertInto("discovery_proposal_votes").values(
+            (index === 0 ? [ownerId, second.id, removed.id] : [second.id])
+              .map((member_user_id) => ({ trip_id: trip.id, proposal_id: id, member_user_id })),
+          ).execute();
+        }
+        // A later unrelated run must not erase the authoritative decision for this identity.
+        if (preserveDecision) {
+          await sql`
+            insert into discovery_runs (trip_id, brief_version, policy_version, model_id, status, search_plan, created_by, created_at)
+            values (${trip.id}, 1, 'migration-fixture', 'fixture', 'completed', '{}'::jsonb, ${ownerId}, '2026-09-25T12:00:00Z')
+          `.execute(database);
+        }
+        const canonicalId = proposalIds.at(-1)!;
+        const decisionBefore = await database.selectFrom("candidate_proposals")
+          .select(["status", "version", "decided_by", "decided_at", "accepted_trip_place_id", "updated_at"])
+          .where("id", "=", canonicalId).executeTakeFirstOrThrow();
+        const votesBefore = await database.selectFrom("discovery_proposal_votes").selectAll()
+          .where("trip_id", "=", trip.id).orderBy("proposal_id").orderBy("member_user_id").execute();
+        const upgraded = await migrator.migrateToLatest();
+        if (upgraded.error) throw upgraded.error;
+        const provider = new GooglePlacesProvider();
+        const discovery = new PostgresDiscoveryModule({
+          database, model: new OpenAiResponsesDiscoveryModel(), placeLookup: provider,
+          tripPlaces: new PostgresTripPlaceModule({ database, provider }),
+        });
+        const workspace = await discovery.getWorkspace(ownerId, trip.id);
+        if (preserveDecision) {
+          expect(workspace.proposals).toEqual([]);
+          expect(workspace.decided).toEqual([expect.objectContaining({ proposalId: canonicalId, status: newestStatus })]);
+          expect(await database.selectFrom("candidate_proposals")
+            .select(["status", "version", "decided_by", "decided_at", "accepted_trip_place_id", "updated_at"])
+            .where("id", "=", canonicalId).executeTakeFirstOrThrow()).toEqual(decisionBefore);
+          expect(await database.selectFrom("discovery_proposal_votes").selectAll()
+            .where("trip_id", "=", trip.id).orderBy("proposal_id").orderBy("member_user_id").execute()).toEqual(votesBefore);
+          expect((await database.selectFrom("trip_places").select("archived_at")
+            .where("id", "=", place.id).executeTakeFirstOrThrow()).archived_at === null).toBe(newestStatus === "accepted");
+        } else {
+          expect(workspace.proposals).toHaveLength(1);
+          const canonical = workspace.proposals[0]!;
+          expect(canonical).toMatchObject({
+            id: canonicalId, status: "pending", acceptedTripPlaceId: null,
+            version: latestPending ? 1 : 5, ownVote: true, voteCount: 2,
+          });
+          expect(canonical.voters.map((voter) => voter.memberUserId).sort()).toEqual([ownerId, second.id].sort());
+        }
+        expect(await database.selectFrom("candidate_proposals").select("id")
+          .where("trip_id", "=", trip.id).where("reopened_at", "is not", null).execute())
+          .toEqual(newestStatus === "reopened" ? [{ id: proposalIds[1] }] : []);
+        const reopenedIds = proposalIds.slice(0, preserveDecision ? 1 : 2);
+        expect(await database.selectFrom("candidate_proposals")
+          .select(["status", "version", "decided_by", "decided_at", "accepted_trip_place_id"])
+          .where("id", "in", reopenedIds).execute())
+          .toEqual(reopenedIds.map(() => ({
+            status: "pending", version: 5, decided_by: null, decided_at: null, accepted_trip_place_id: null,
+          })));
+        expect(await database.selectFrom("discovery_proposal_votes").select("member_user_id")
+          .where("proposal_id", "=", canonicalId).orderBy("member_user_id").execute())
+          .toEqual((preserveDecision ? [second.id] : [ownerId, second.id]).sort().map((member_user_id) => ({ member_user_id })));
+        expect(await database.selectFrom("change_events").select("target_id")
+          .where("trip_id", "=", trip.id).where("event_type", "=", "discovery.proposal_reopened").orderBy("target_id").execute())
+          .toEqual(reopenedIds.sort().map((target_id) => ({ target_id })));
+      } finally {
+        const restored = await migrator.migrateToLatest();
+        if (restored.error) throw restored.error;
+      }
+    });
+
     it("archives only exclusively travel-used wishlist places in 016 and never rewrites formal itinerary content", async () => {
       const cookie = await login();
       const trip = await createTrip(cookie);
@@ -2978,6 +3241,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         { migrationName: "014_discovery_feedback_answers", direction: "Up", status: "NotExecuted" },
         { migrationName: "015_member_votes", direction: "Up", status: "NotExecuted" },
         { migrationName: "016_travel_places", direction: "Up", status: "NotExecuted" },
+        { migrationName: "017_wishlist_simplify", direction: "Up", status: "NotExecuted" },
       ]);
       await database.deleteFrom("mutation_requests")
         .where("actor_id", "=", owner.userId).where("operation", "=", "create_trip")

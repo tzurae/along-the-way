@@ -4,6 +4,7 @@ import type {
   MergeTripPlacesInput,
   ProviderCandidatesResponse,
   ProviderPlaceCandidateDto,
+  RemoveTripPlaceInput,
   TripPlaceDto,
   UpdateMemberVoteInput,
   UpdateTripPlaceDayAssignmentsInput,
@@ -74,11 +75,11 @@ export interface TripPlaceModule {
     suggestionId: string,
     idempotencyKey: string,
   ): Promise<void>;
-  withdrawContribution(
+  remove(
     userId: string,
     tripId: string,
     tripPlaceId: string,
-    contributionId: string,
     idempotencyKey: string,
-  ): Promise<TripPlaceDto | null>;
+    input: RemoveTripPlaceInput,
+  ): Promise<void>;
 }

@@ -160,12 +160,21 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
       from trips trip where trip.name = '${tripName}';
     insert into candidate_proposal_evidence (proposal_id, evidence_id) values
       ('${proposalId}', '${googleEvidenceId}'), ('${proposalId}', '${webEvidenceId}');
+    insert into discovery_feedback (trip_id, proposal_id, actor_id, original_text, interpretation, status, decided_at)
+      select trip.id, '${proposalId}', member.user_id, 'Historical market feedback',
+        '{"interests":[],"exclusions":["crowds"],"pace":null,"budget":null,"summary":"Visit at a quieter time."}'::jsonb,
+        'confirmed', now()
+      from trips trip join trip_members member on member.trip_id = trip.id and member.role = 'owner'
+      where trip.name = '${tripName}';
   `);
 
   await page.reload();
   await openTab(page, "AI 找地點");
   const proposal = page.getByRole("article", { name: "AI 推薦：Nishiki Market" });
   await expect(proposal).toBeVisible();
+  await expect(proposal.getByRole("textbox")).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "研究意見" }).getByLabel("意見", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "研究意見" }).getByText("針對：Nishiki Market", { exact: true })).toBeVisible();
   await expect(proposal.getByText("A compact food-market stop matching the trip focus.")).toBeVisible();
   await expect(proposal.getByRole("link", { name: "Official Nishiki Market guide" })).toHaveAttribute("href", "https://kyoto.example.test/nishiki");
   // A run from before the quality checks still reads, and its card links to the place's own Google Maps page.
@@ -194,11 +203,21 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
     .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
   await expect(wishlist.getByText("1 票", { exact: true })).toBeVisible();
   await expect(wishlist.getByRole("button", { name: "已投票", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await wishlist.getByRole("button", { name: "撤回我的紀錄" }).click();
+  await expect(wishlist.getByRole("link", { name: "開啟原始來源" }))
+    .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
+  page.once("dialog", (dialog) => dialog.accept());
+  await wishlist.getByRole("button", { name: "從想去清單移除" }).click();
   await expect(wishlist.getByRole("heading", { name: "Nishiki Market" })).toHaveCount(0);
   await openTab(page, "AI 找地點");
-  await expect(proposal.getByText("已從想去清單移除", { exact: true })).toBeVisible();
+  await expect(proposal.getByRole("button", { name: "加入想去清單" })).toBeVisible();
+  await expect(proposal.getByRole("button", { name: "不適合這趟旅程" })).toBeVisible();
+  await expect(proposal.getByRole("button", { name: "已投票", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(proposal.getByText("已加入想去清單", { exact: true })).toHaveCount(0);
+  await proposal.getByRole("button", { name: "加入想去清單" }).click();
+  await expect(proposal.getByText("已加入想去清單", { exact: true })).toBeVisible();
+  await openTab(page, "想去清單");
+  await expect(wishlist.getByRole("heading", { name: "Nishiki Market" })).toHaveCount(1);
+  await expect(wishlist.getByText("1 票", { exact: true })).toBeVisible();
 });
 
 test("research and feedback explain missing AI configuration without sending anything", async ({ page, request }) => {

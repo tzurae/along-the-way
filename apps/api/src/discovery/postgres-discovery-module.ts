@@ -50,6 +50,7 @@ import {
   type RatedPlaceLookup,
 } from "../trip-places/google-places-provider";
 import type { TripPlaceModule } from "../trip-places/trip-place-module";
+import { reopenRemovedProposals } from "./reopen-removed-proposals";
 
 interface PostgresDiscoveryModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
@@ -186,7 +187,6 @@ function upgradeStoredWorkspace(value: unknown) {
           voteCount: 0,
           ownVote: false,
           votingAvailable: false,
-          acceptedPlaceRemoved: false,
           ...item,
           evidence: Array.isArray(item.evidence)
             ? item.evidence.map((entry) => ({ isStale: false, ...jsonObject(entry) }))
@@ -257,6 +257,28 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
   async getWorkspace(userId: string, tripId: string) {
     uuid(tripId, "tripId");
     await this.requireMember(this.database, userId, tripId);
+    const staleAccepted = await this.database.selectFrom("candidate_proposals as proposal")
+      .leftJoin("trip_places as place", (join) => join
+        .onRef("place.trip_id", "=", "proposal.trip_id")
+        .onRef("place.id", "=", "proposal.accepted_trip_place_id"))
+      .select("proposal.id")
+      .where("proposal.trip_id", "=", tripId)
+      .where("proposal.status", "=", "accepted")
+      .where((expression) => expression.or([
+        expression("place.id", "is", null),
+        expression("place.archived_at", "is not", null),
+      ]))
+      .limit(1)
+      .executeTakeFirst();
+    if (staleAccepted) {
+      // Repair separately from the projection, always in trip -> proposal lock order.
+      await this.database.transaction().execute(async (transaction) => {
+        await transaction.selectFrom("trips").select("id").where("id", "=", tripId)
+          .forUpdate().executeTakeFirstOrThrow();
+        await this.requireMember(transaction, userId, tripId);
+        await reopenRemovedProposals(transaction, tripId, this.now(), userId);
+      });
+    }
     return this.readWorkspace(this.database, tripId, userId);
   }
 
@@ -495,6 +517,10 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         await lockMutation(transaction, userId, operation, key);
         const replay = await replayed(transaction, userId, operation, key);
         if (replay && !isAiRequestClaim(replay)) return replayedWorkspace(replay);
+        // Serialize against removal/voting before touching old proposals, without blocking brief writers' event FKs.
+        await transaction.selectFrom("trips").select("id").where("id", "=", tripId)
+          .forKeyShare().executeTakeFirstOrThrow();
+        await this.requireMember(transaction, userId, tripId);
         const lockedBrief = await transaction.selectFrom("discovery_briefs")
           .select("version")
           .where("trip_id", "=", tripId)
@@ -633,6 +659,28 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
             [...new Set(evidenceIds)].map((evidenceId) => ({ proposal_id: proposal.id, evidence_id: evidenceId })),
           ).execute();
         }
+        // Reopened candidates last until the next successful run; retain only active members' interest
+        // when that run independently recommends the same identity again.
+        await sql`
+          with superseded as (
+            update candidate_proposals
+            set reopened_at = null
+            where trip_id = ${tripId} and run_id <> ${run.id}
+              and status = 'pending' and reopened_at is not null
+            returning id, provider_place_id
+          )
+          insert into discovery_proposal_votes (trip_id, proposal_id, member_user_id)
+          select distinct replacement.trip_id, replacement.id, vote.member_user_id
+          from superseded
+          join candidate_proposals as replacement
+            on replacement.provider_place_id = superseded.provider_place_id
+            and replacement.trip_id = ${tripId} and replacement.run_id = ${run.id}
+          join discovery_proposal_votes as vote on vote.proposal_id = superseded.id
+          join trip_members as member
+            on member.trip_id = vote.trip_id and member.user_id = vote.member_user_id
+          where member.removed_at is null
+          on conflict (proposal_id, member_user_id) do nothing
+        `.execute(transaction);
         await recordEvent(transaction, {
           tripId,
           actorId: userId,
@@ -838,6 +886,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         if (!activePlace) throw new AppError("conflict", "The accepted place was removed from the wishlist; reload", 409);
         const updated = await transaction.updateTable("candidate_proposals").set({
           status: "accepted",
+          reopened_at: null,
           accepted_trip_place_id: tripPlace.id,
           decided_by: userId,
           decided_at: this.now(),
@@ -920,6 +969,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       if (replay) return replayedWorkspace(replay);
       const updated = await transaction.updateTable("candidate_proposals").set({
         status: "rejected",
+        reopened_at: null,
         decided_by: userId,
         decided_at: this.now(),
         version: sql`version + 1`,
@@ -959,16 +1009,13 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     uuid(tripId, "tripId");
     const key = requireIdempotencyKey(rawKey);
     const originalText = requiredText(input.originalText, "originalText", 2_000);
-    const proposalId = input.proposalId ? uuid(input.proposalId, "proposalId") : null;
+    if ("proposalId" in input) {
+      throw new AppError("validation_error", "Feedback must apply to the whole trip");
+    }
     const operation = `discovery:feedback:${tripId}`;
     await this.requireMember(this.database, userId, tripId);
     const earlyReplay = await replayed(this.database, userId, operation, key);
     if (earlyReplay) return aiRequestReplay(earlyReplay);
-    const proposal = proposalId
-      ? await this.database.selectFrom("candidate_proposals").select("name")
-        .where("id", "=", proposalId).where("trip_id", "=", tripId).executeTakeFirst()
-      : null;
-    if (proposalId && !proposal) throw new AppError("discovery_proposal_not_found", "Candidate proposal not found", 404);
     const claimedReplay = await this.database.transaction().execute(async (transaction) => {
       await lockMutation(transaction, userId, operation, key);
       const existing = await replayed(transaction, userId, operation, key);
@@ -982,7 +1029,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     if (claimedReplay) return aiRequestReplay(claimedReplay);
     let interpretation: InterpretedDiscoveryFeedback;
     try {
-      interpretation = await this.model.interpretFeedback({ text: originalText, proposalName: proposal?.name ?? null });
+      interpretation = await this.model.interpretFeedback({ text: originalText, proposalName: null });
     } catch (error) {
       const failure = error instanceof DiscoveryModelUnavailableError || error instanceof DiscoveryModelResponseError
         ? new AppError("model_unavailable", error.message, 503)
@@ -1009,7 +1056,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       if (replay && !isAiRequestClaim(replay)) return replayedWorkspace(replay);
       const feedback = await transaction.insertInto("discovery_feedback").values({
         trip_id: tripId,
-        proposal_id: proposalId,
+        proposal_id: null,
         actor_id: userId,
         original_text: originalText,
         interpretation: {
@@ -1218,10 +1265,15 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       .executeTakeFirst();
     const proposalRows = run
       ? await executor.selectFrom("candidate_proposals")
-        .leftJoin("trip_places as acceptedPlace", "acceptedPlace.id", "candidate_proposals.accepted_trip_place_id")
         .selectAll("candidate_proposals")
-        .select("acceptedPlace.archived_at as accepted_place_archived_at")
-        .where("run_id", "=", run.id)
+        .where("trip_id", "=", tripId)
+        .where((expression) => expression.or([
+          expression("run_id", "=", run.id),
+          expression.and([
+            expression("status", "=", "pending"),
+            expression("reopened_at", "is not", null),
+          ]),
+        ]))
         .orderBy("candidate_proposals.created_at")
         .orderBy("candidate_proposals.id")
         .execute()
@@ -1379,8 +1431,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           voteCount: voters.length,
           ownVote: voters.some((member) => member.memberUserId === userId),
           votingAvailable: members.length >= 2,
-          acceptedPlaceRemoved: proposal.status === "accepted" &&
-            (proposal.accepted_trip_place_id === null || proposal.accepted_place_archived_at !== null),
           acceptedTripPlaceId: proposal.accepted_trip_place_id,
           version: proposal.version,
           category: proposal.category,
