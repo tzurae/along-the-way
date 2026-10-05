@@ -16,8 +16,7 @@ import type {
 import type {
   CreateTripPlaceInput,
   MergeTripPlacesInput,
-  PreferenceLevel,
-  UpdateMemberPreferenceInput,
+  UpdateMemberVoteInput,
   UpdateTripPlaceDayAssignmentsInput,
   UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
@@ -262,13 +261,11 @@ function dayAssignmentsInput(
   };
 }
 
-function preferenceInput(
-  body: Record<string, unknown>,
-): UpdateMemberPreferenceInput {
-  return {
-    level: stringField(body, "level") as PreferenceLevel,
-    expectedVersion: optionalNumberField(body, "expectedVersion"),
-  };
+function voteInput(body: Record<string, unknown>): UpdateMemberVoteInput {
+  if (typeof body.voted !== "boolean") {
+    throw new AppError("validation_error", "voted must be a boolean");
+  }
+  return { voted: body.voted };
 }
 
 function mergeInput(body: Record<string, unknown>): MergeTripPlacesInput {
@@ -542,17 +539,17 @@ export function createApp({
     });
   });
 
-  app.put("/api/trips/:tripId/discovery/proposals/:proposalId/preference", async (context) => {
+  app.put("/api/trips/:tripId/discovery/proposals/:proposalId/vote", async (context) => {
     const { user } = await authenticated(context);
     await rateLimiter.consume("trip_content", clientIp(context), user.id);
     const body = await jsonBody(context);
     return context.json({
-      discovery: await discovery.setProposalPreference(
+      discovery: await discovery.setProposalVote(
         user.id,
         uuidParam(context, "tripId"),
         uuidParam(context, "proposalId"),
         idempotencyKey(context),
-        preferenceInput(body),
+        voteInput(body),
       ),
     });
   });
@@ -789,17 +786,17 @@ export function createApp({
   );
 
   app.put(
-    "/api/trips/:tripId/trip-places/:tripPlaceId/preference",
+    "/api/trips/:tripId/trip-places/:tripPlaceId/vote",
     async (context) => {
       const { user } = await authenticated(context);
       await rateLimiter.consume("trip_content", clientIp(context), user.id);
       const body = await jsonBody(context);
-      const tripPlace = await tripPlaces.setOwnPreference(
+      const tripPlace = await tripPlaces.setOwnVote(
         user.id,
         uuidParam(context, "tripId"),
         uuidParam(context, "tripPlaceId"),
         idempotencyKey(context),
-        preferenceInput(body),
+        voteInput(body),
       );
       return context.json({ tripPlace });
     },

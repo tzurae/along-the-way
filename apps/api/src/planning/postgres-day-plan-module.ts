@@ -19,7 +19,6 @@ import type { ItineraryItemDto, TimelineDayDto, TripSkeletonDto } from "@along-t
 import type { Kysely, Transaction } from "kysely";
 
 import type { AlongTheWayDatabase } from "../database/database";
-import { preferencePriority } from "../member-preferences";
 import { AppError } from "../private-trips/private-trip-module";
 import {
   lockMutation,
@@ -39,7 +38,7 @@ import {
   type TimetableStop,
 } from "./day-timetable";
 import { hoursOn, type PlaceHoursLookup, type PlaceOpeningHours } from "./opening-hours";
-import { distributePlaces, placePreferences } from "./trip-distribution";
+import { distributePlaces } from "./trip-distribution";
 import { tripPlanBasis } from "./trip-plan-basis";
 
 /** Walking is suggested when it takes at most this long. */
@@ -126,14 +125,6 @@ function located(value: { latitude: number | null; longitude: number | null }) {
   return value.latitude !== null && value.longitude !== null;
 }
 
-/** The member preferences of the listed places, in list order; unrated places are left out. */
-function preferencesOf(tripPlaceIds: string[], placesById: Map<string, TripPlaceDto>) {
-  return tripPlaceIds.flatMap((id) => {
-    const place = placesById.get(id);
-    const preferences = place ? placePreferences(place) : null;
-    return preferences ? [preferences] : [];
-  });
-}
 
 /**
  * Every writer of day places, order or hours takes the trip row first, so they queue in one
@@ -257,7 +248,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
     const ordered = orderedIds.map((id) => stopsById.get(id)!);
     const hours = await this.hoursFor(ordered.map((stop) => stop.place));
     const result = await this.draftDay(context, ordered, hours);
-    return this.timetableDto(context, orderedIds, result, planned, order, new Map(places.map((place) => [place.id, place])));
+    return this.timetableDto(context, orderedIds, result, planned, order);
   }
 
   async tripPlan(userId: string, tripId: string): Promise<TripPlanDto> {
@@ -272,7 +263,6 @@ export class PostgresDayPlanModule implements DayPlanModule {
       throw new AppError("conflict", "The trip changed while planning; plan again", 409);
     }
 
-    const placesById = new Map(places.map((place) => [place.id, place]));
     const unplanned = places.filter((place) => !place.scheduled && place.assignedDayId === null);
     const unplaced: TripPlanUnplacedDto[] = unplanned.filter((place) => !located(place)).map((place) => ({
       tripPlaceId: place.id,
@@ -282,7 +272,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
     }));
     const candidates = unplanned.filter(located).map(plannedStop);
     if (candidates.length === 0) {
-      return { basis, days: [], unplaced, preferences: preferencesOf(unplaced.map((place) => place.tripPlaceId), placesById) };
+      return { basis, days: [], unplaced };
     }
 
     // A day without lodging, places or timed items takes the zone of the trip's places.
@@ -313,7 +303,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
         latitude: stop.latitude,
         longitude: stop.longitude,
         stayMinutes: stayMinutes(stop.place),
-        priority: preferencePriority(stop.place.preferences.map((entry) => entry.level)),
+        voteCount: stop.place.votingAvailable ? stop.place.voteCount : 0,
         hours: (dayId: string) => {
           const context = contextById.get(dayId)!;
           return hoursOn(candidateHours.get(stop.id) ?? null, context.day.date, context.today);
@@ -351,13 +341,13 @@ export class PostgresDayPlanModule implements DayPlanModule {
       const keptResult = { ...result, unscheduled: result.unscheduled.filter((place) => !addedIds.includes(place.tripPlaceId)) };
       days.push({
         timetable: this.timetableDto(
-          context, [...keptStops.map((stop) => stop.id), ...placedIds], keptResult, keptPlaces, "current", placesById,
+          context, [...keptStops.map((stop) => stop.id), ...placedIds], keptResult, keptPlaces, "current",
         ),
         addedTripPlaceIds: placedIds,
         orderedTripPlaceIds: [...keptPlaces.map((place) => place.id), ...placedIds],
       });
     }
-    return { basis, days, unplaced, preferences: preferencesOf(unplaced.map((place) => place.tripPlaceId), placesById) };
+    return { basis, days, unplaced };
   }
 
   /** Places planned for a day, in its order: applied positions first, then list (creation) order. */
@@ -498,7 +488,6 @@ export class PostgresDayPlanModule implements DayPlanModule {
     result: TimetableResult,
     planned: TripPlaceDto[],
     order: DayTimetableDto["order"],
-    placesById: Map<string, TripPlaceDto>,
   ): DayTimetableDto {
     const unscheduled = [
       ...result.unscheduled,
@@ -507,10 +496,6 @@ export class PostgresDayPlanModule implements DayPlanModule {
         name: place.name,
         reason: "no_location" as const,
       })),
-    ];
-    const listedIds = [
-      ...result.rows.flatMap((row) => (row.kind === "visit" ? [row.tripPlaceId] : [])),
-      ...unscheduled.map((place) => place.tripPlaceId),
     ];
     return {
       dayId: context.day.id,
@@ -523,7 +508,6 @@ export class PostgresDayPlanModule implements DayPlanModule {
       rows: result.rows,
       unscheduled,
       load: result.load,
-      preferences: preferencesOf(listedIds, placesById),
     };
   }
 

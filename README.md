@@ -250,26 +250,49 @@ HTTP with real magic-link sessions plus Chromium in `Pacific/Honolulu`):
 Not verified: an untouched data-bearing 008 down/up round trip (the repository
 supports migration-free rollback only).
 
-## Discovery proposal member preferences (Issue #67)
+## Member votes (Issue #73, replacing #67's five preference levels)
 
-An active Trip member sets only their own preference on a pending AI proposal
-with `PUT /api/trips/:tripId/discovery/proposals/:proposalId/preference`. The
-request requires an `Idempotency-Key` header and a JSON body containing
-`level` (`must`, `want`, `optional`, `neutral`, or `dislike`) plus
-`expectedVersion` (`null` for the first choice, then the version returned for
-that member's choice).
+Each active member has one vote per wishlist place and per pending AI proposal:
+voted or not. Voting exists only while the trip has at least two active members
+(`trip_members.removed_at is null`); with fewer, the vote endpoints return
+`409 voting_unavailable` and neither the wishlist nor plan drafts use vote
+order. Removed members' votes never count.
 
-Each `CandidateProposalDto` contains:
+- `PUT /api/trips/:tripId/trip-places/:tripPlaceId/vote` returns `{ tripPlace }`.
+- `PUT /api/trips/:tripId/discovery/proposals/:proposalId/vote` returns
+  `{ discovery }`; only `pending` proposals accept votes.
 
-- `preferences`: active members who expressed a choice, strongest first and in
-  roster order within the same level;
-- `preferenceConflict`: `true` only when at least one active member chose
-  `must` and at least one chose `dislike`;
-- `ownPreference`: the requesting member's `{ level, version }`, or `null`.
+Both require an `Idempotency-Key` and a body of `{ "voted": true }` or
+`{ "voted": false }` (set-state, no `expectedVersion`). They always change the
+signed-in member's own vote; a member ID in the body is ignored. A retry of a
+stored request replays its original result.
 
-Accepting a proposal copies its active members' choices to the resulting shared
-wishlist place. A preference already present on that TripPlace wins and is
-never overwritten. Proposal preferences never modify formal itinerary items.
+Place and proposal DTOs carry `voters` (`memberUserId`, `memberEmail`,
+`memberDisplayName`), `voteCount`, `ownVote` and `votingAvailable`. The
+wishlist is ordered by vote count, ties keeping creation order; voted cards are
+tinted and the top-voted cards (at least two votes) slightly more. AI proposal
+order is unchanged. Accepting a proposal copies active members' votes to the
+wishlist place without duplicates; merging places keeps the union of votes.
+Day and whole-trip plan drafts prioritize places by vote count and no longer
+show preferences or conflicts. Formal itinerary items are never changed.
+
+Votes never block deleting or withdrawing. Deleting a place in the itinerary
+tab is refused only while another member's contribution is active or a formal
+itinerary endpoint uses the place. Withdrawing the last active contribution of
+a place no formal itinerary endpoint uses archives it and clears its day
+assignments and votes. Deleting a place accepted from an AI proposal first
+detaches the proposal; such a proposal reports `acceptedPlaceRemoved` and is
+shown as 「已從想去清單移除」.
+
+Migration `015_member_votes` clears the retired five-level choices but keeps
+the `member_place_preferences` table so a rolled-back previous release still
+runs (a later contract migration removes it). It drops migration 005's shared
+delete trigger and function, adds both vote tables with composite foreign keys,
+and lets an accepted proposal keep a null accepted place. `down` restores the
+trigger, function and original proposal check, and refuses to run while an
+accepted proposal's place has been deleted. Stored idempotent replies from
+before 015 are read with empty vote defaults; zh-TW labels of historical
+preference events are kept.
 
 The existing static site remains available at
 <https://tzurae.github.io/along-the-way/>.

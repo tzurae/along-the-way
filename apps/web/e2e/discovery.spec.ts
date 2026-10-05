@@ -168,6 +168,18 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   // A run from before the quality checks still reads, and its card links to the place's own Google Maps page.
   await expect(proposal.getByRole("link", { name: "在 Google Maps 看照片" }))
     .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
+  await expect(proposal.getByRole("button", { name: "投票", exact: true })).toHaveCount(0);
+  await executeDatabase(`
+    insert into users (email, display_name, status) values ('discovery-member-${suffix}@example.test', 'Discovery member', 'active');
+    insert into trip_members (trip_id, user_id, role)
+      select trip.id, member.id, 'editor' from trips trip cross join users member
+      where trip.name = '${tripName}' and member.email = 'discovery-member-${suffix}@example.test';
+  `);
+  await page.reload();
+  await openTab(page, "AI 找地點");
+  await proposal.getByRole("button", { name: "投票", exact: true }).click();
+  await expect(proposal.getByRole("button", { name: "已投票", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(proposal.getByText("1 票", { exact: true })).toBeVisible();
   await proposal.getByRole("button", { name: "加入想去清單" }).click();
   await expect(proposal.getByText("已加入想去清單")).toBeVisible();
   await openTab(page, "想去清單");
@@ -177,6 +189,13 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   await expect(wishlist.getByText("AI 推薦", { exact: false })).toBeVisible();
   await expect(wishlist.getByRole("link", { name: "在 Google Maps 看照片" }))
     .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
+  await expect(wishlist.getByText("1 票", { exact: true })).toBeVisible();
+  await expect(wishlist.getByRole("button", { name: "已投票", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await wishlist.getByRole("button", { name: "撤回我的紀錄" }).click();
+  await expect(wishlist.getByRole("heading", { name: "Nishiki Market" })).toHaveCount(0);
+  await openTab(page, "AI 找地點");
+  await expect(proposal.getByText("已從想去清單移除", { exact: true })).toBeVisible();
+  await expect(proposal.getByText("已加入想去清單", { exact: true })).toHaveCount(0);
 });
 
 test("research and feedback explain missing AI configuration without sending anything", async ({ page, request }) => {

@@ -12,16 +12,16 @@ import {
   type DiscoveryWorkspaceDto,
 } from "@along-the-way/contracts/discovery";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
-import type { PreferenceLevel } from "@along-the-way/contracts/trip-places";
 import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
-import { PreferenceSummary } from "./PreferenceSummary";
+import { VoteControl } from "./VoteControl";
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
 
 interface DiscoveryWorkspaceProps {
   trip: TripDto;
   request: Request;
+  placesRevision: number;
   onPlacesChanged(): void;
 }
 
@@ -177,8 +177,8 @@ function resolvedQuestionAnswers(drafts: Record<string, QuestionDraft>): Discove
 }
 
 
-export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: DiscoveryWorkspaceProps) {
-  const { locale, t: { discovery: t, tripPlaces } } = useI18n();
+export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChanged }: DiscoveryWorkspaceProps) {
+  const { locale, t: { discovery: t } } = useI18n();
   const [workspace, setWorkspace] = useState<DiscoveryWorkspaceDto | null>(null);
   const [briefDraft, setBriefDraft] = useState("");
   const [feedbackDraft, setFeedbackDraft] = useState("");
@@ -230,6 +230,18 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Wishlist and member changes made in other tabs only refresh the projection; unsaved brief
+  // and question drafts typed here must survive them.
+  const refreshSignal = `${placesRevision}:${trip.members.length}`;
+  const lastRefreshSignal = useRef(refreshSignal);
+  useEffect(() => {
+    if (lastRefreshSignal.current === refreshSignal) return;
+    lastRefreshSignal.current = refreshSignal;
+    void request(`/api/trips/${trip.id}/discovery`)
+      .then((value) => setWorkspace(parseDiscoveryWorkspaceResponse(value).discovery))
+      .catch((error: unknown) => setNotice({ area: "general", text: errorMessage(error, t.errors.failed) }));
+  }, [refreshSignal, request, t.errors.failed, trip.id]);
 
   async function mutate(
     operation: string,
@@ -309,11 +321,11 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
       decision === "accept" ? onPlacesChanged : undefined,
     );
   }
-  async function setProposalPreference(proposal: CandidateProposalDto, level: PreferenceLevel) {
+  async function setProposalVote(proposal: CandidateProposalDto, voted: boolean) {
     await mutate(
-      `preference:${proposal.id}`,
-      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/preference`,
-      { level, expectedVersion: proposal.ownPreference?.version ?? null },
+      `vote:${proposal.id}`,
+      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/vote`,
+      { voted },
       "general",
       undefined,
       "PUT",
@@ -502,7 +514,7 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
               <div className="mt-4 grid gap-4 xl:grid-cols-2">
                 {workspace.proposals.map((proposal) => (
                   <article key={proposal.id} className="grid content-start gap-4 rounded-panel border border-ink/10 bg-surface-subtle p-4" aria-label={t.proposal.ariaLabel(proposal.name)}>
-                    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{proposal.category ?? t.placeType[proposal.type]}・{t.proposal.confidence(t.confidence[proposal.confidence])}</p><h4 className="font-display text-2xl">{proposal.name}</h4><p className="text-sm text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</p></div><span className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{t.status[proposal.status]}</span></div>
+                    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{proposal.category ?? t.placeType[proposal.type]}・{t.proposal.confidence(t.confidence[proposal.confidence])}</p><h4 className="font-display text-2xl">{proposal.name}</h4><p className="text-sm text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</p></div><span className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{proposal.acceptedPlaceRemoved ? t.proposal.removed : t.status[proposal.status]}</span></div>
                     {proposal.endorsements.length ? <div aria-label={t.proposal.recommendedByFor(proposal.name)}><strong>{t.proposal.recommendedBy}</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabel(endorsement, t)}</li>)}</ul></div> : null}
                     {proposal.recommendationSentences !== null
                       ? <ClaimSentenceList sentences={proposal.recommendationSentences} evidence={proposal.evidence} t={t} />
@@ -542,13 +554,7 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
                       </ul>
                     </div>
                     {proposal.status === "pending" ? (
-                      <section className="grid gap-3" aria-label={t.proposal.memberPreferencesFor(proposal.name)}>
-                        <PreferenceSummary preferences={proposal.preferences.length > 0 ? {
-                          members: proposal.preferences,
-                          conflict: proposal.preferenceConflict,
-                        } : undefined} />
-                        <label className="grid gap-1 font-semibold">{t.proposal.yourPreference}<select className="min-h-11 rounded-lg border bg-surface px-3" disabled={pending !== null} value={proposal.ownPreference?.level ?? ""} onChange={(event) => { if (event.target.value) void setProposalPreference(proposal, event.target.value as PreferenceLevel); }}><option value="" disabled>{t.proposal.noPreference}</option>{Object.entries(tripPlaces.preference).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-                      </section>
+                      <VoteControl name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable={proposal.votingAvailable} disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} />
                     ) : null}
                     {proposal.status === "pending" ? <div className="flex flex-wrap gap-2"><button className="flex min-h-10 items-center gap-2 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "accept")}><Check aria-hidden="true" className="size-4" />{t.proposal.accept}</button><button className="flex min-h-10 items-center gap-2 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "reject")}><X aria-hidden="true" className="size-4" />{t.proposal.decline}</button></div> : null}
                     <div className="rounded-xl border bg-surface p-3">

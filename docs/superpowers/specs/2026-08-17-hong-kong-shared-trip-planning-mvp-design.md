@@ -186,6 +186,8 @@
 
 ### 9. Explainable planning engine
 
+> Superseded by #73: five-level preferences and conflicts were replaced by one vote per member.
+
 - Planning Service 先列舉所有日期及可插入位置，再執行 hard feasibility gate。通過者才進入軟性排序。
 - 軟性因素包含：每位成員偏好、額外交通時間、折返、當日可用時間比例、用餐時間、預算、室內／戶外屬性、候選優先度與既有項目的可替代性。
 - 初始排序採可讀級距而非不可追蹤的黑盒權重：額外交通 15 分鐘內為佳、16–30 分鐘為可接受、31–60 分鐘為明顯代價、超過 60 分鐘除非存在 must 偏好否則不列為推薦；使用超過每日可用時間 95% 視為不可行，81–95% 標為緊湊；超過預算是軟性風險而非自動禁止。

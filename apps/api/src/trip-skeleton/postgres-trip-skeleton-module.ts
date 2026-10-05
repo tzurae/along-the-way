@@ -630,31 +630,13 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         .where("legacy_place_id", "=", placeId)
         .executeTakeFirst();
       if (tripPlace) {
-        const [retainedByAnotherMember, activeContributions, activePreference] = await Promise.all([
-          transaction.selectFrom("trip_place_contributions")
-            .select("id")
-            .where("trip_place_id", "=", tripPlace.id)
-            .where("member_user_id", "!=", userId)
-            .where("withdrawn_at", "is", null)
-            .executeTakeFirst(),
-          transaction.selectFrom("trip_place_contributions")
-            .select((builder) => builder.fn.countAll().as("count"))
-            .where("trip_place_id", "=", tripPlace.id)
-            .where("withdrawn_at", "is", null)
-            .executeTakeFirstOrThrow(),
-          transaction.selectFrom("member_place_preferences as preference")
-            .innerJoin("trip_members as member", "member.user_id", "preference.member_user_id")
-            .select("preference.member_user_id")
-            .where("preference.trip_place_id", "=", tripPlace.id)
-            .where("member.trip_id", "=", tripId)
-            .where("member.removed_at", "is", null)
-            .executeTakeFirst(),
-        ]);
-        if (
-          retainedByAnotherMember ||
-          Number(activeContributions.count) > 1 ||
-          activePreference
-        ) {
+        const retainedByAnotherMember = await transaction.selectFrom("trip_place_contributions")
+          .select("id")
+          .where("trip_place_id", "=", tripPlace.id)
+          .where("member_user_id", "!=", userId)
+          .where("withdrawn_at", "is", null)
+          .executeTakeFirst();
+        if (retainedByAnotherMember) {
           throw new AppError(
             "place_in_use",
             "A member still retains this place",
@@ -670,6 +652,13 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         .executeTakeFirstOrThrow();
       if (Number(referenced.count) > 0) {
         throw new AppError("place_in_use", "A referenced place cannot be deleted", 409);
+      }
+      if (tripPlace) {
+        await transaction.updateTable("candidate_proposals")
+          .set({ accepted_trip_place_id: null })
+          .where("trip_id", "=", tripId)
+          .where("accepted_trip_place_id", "=", tripPlace.id)
+          .execute();
       }
       await transaction
         .deleteFrom("places")

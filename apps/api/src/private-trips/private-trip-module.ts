@@ -92,6 +92,7 @@ export class AppError extends Error {
       | "provider_unavailable"
       | "research_in_progress"
       | "research_limit_reached"
+      | "voting_unavailable"
       | "invite_not_found"
       | "conflict"
       | "invalid_magic_link"

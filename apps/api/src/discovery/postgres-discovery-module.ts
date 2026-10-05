@@ -11,14 +11,13 @@ import type {
   GenerateDiscoveryInput,
   SaveDiscoveryBriefInput,
   SaveDiscoveryQuestionAnswersInput,
-  UpdateCandidateProposalPreferenceInput,
+  UpdateCandidateProposalVoteInput,
 } from "@along-the-way/contracts/discovery";
 import { parseDiscoveryWorkspaceResponse } from "@along-the-way/contracts/discovery";
-import type { PreferenceLevel, ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
+import type { ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
 import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { AlongTheWayDatabase } from "../database/database";
-import { summarizeMemberPreferences } from "../member-preferences";
 import { AppError } from "../private-trips/private-trip-module";
 import {
   dateOnly,
@@ -68,7 +67,6 @@ const SHORTFALL_CODES: readonly DiscoveryShortfallDto["code"][] = [
   "not_researched", "not_found", "name_mismatch", "single_source", "category_short", "in_wishlist", "rejected",
   "permanently_closed", "temporarily_closed", "outside_trip", "no_location",
 ];
-const PREFERENCE_LEVELS: readonly PreferenceLevel[] = ["must", "want", "optional", "neutral", "dislike"];
 
 /** Research runs one trip may start per hour; each run costs model and Google calls. */
 const RESEARCH_PER_TRIP_PER_HOUR = 6;
@@ -184,9 +182,11 @@ function upgradeStoredWorkspace(value: unknown) {
           endorsements: [],
           recommendationSentences: null,
           tradeoffSentences: null,
-          preferences: [],
-          preferenceConflict: false,
-          ownPreference: null,
+          voters: [],
+          voteCount: 0,
+          ownVote: false,
+          votingAvailable: false,
+          acceptedPlaceRemoved: false,
           ...item,
           evidence: Array.isArray(item.evidence)
             ? item.evidence.map((entry) => ({ isStale: false, ...jsonObject(entry) }))
@@ -690,74 +690,59 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     }
   }
 
-  async setProposalPreference(
+  async setProposalVote(
     userId: string,
     tripId: string,
     proposalId: string,
     rawKey: string,
-    input: UpdateCandidateProposalPreferenceInput,
+    input: UpdateCandidateProposalVoteInput,
   ) {
     uuid(tripId, "tripId");
     uuid(proposalId, "proposalId");
-    if (!PREFERENCE_LEVELS.some((level) => level === input.level)) {
-      throw new AppError("validation_error", "preference level is invalid");
+    if (typeof input.voted !== "boolean") {
+      throw new AppError("validation_error", "voted must be a boolean");
     }
     const key = requireIdempotencyKey(rawKey);
-    const operation = `discovery:preference:${proposalId}`;
+    const operation = `discovery:vote:${proposalId}`;
     return this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
+      await transaction.selectFrom("trips").select("id").where("id", "=", tripId).forUpdate().executeTakeFirstOrThrow();
+      await this.requireMember(transaction, userId, tripId);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedWorkspace(replay);
+      const members = await transaction.selectFrom("trip_members")
+        .select((builder) => builder.fn.countAll().as("count"))
+        .where("trip_id", "=", tripId).where("removed_at", "is", null)
+        .executeTakeFirstOrThrow();
+      if (Number(members.count) < 2) {
+        throw new AppError("voting_unavailable", "Voting needs at least two active trip members", 409);
+      }
       const proposal = await transaction.selectFrom("candidate_proposals")
         .select(["id", "status"])
-        .where("id", "=", proposalId)
-        .where("trip_id", "=", tripId)
-        .forUpdate()
-        .executeTakeFirst();
+        .where("id", "=", proposalId).where("trip_id", "=", tripId)
+        .forUpdate().executeTakeFirst();
       if (!proposal) throw new AppError("discovery_proposal_not_found", "Candidate proposal not found", 404);
       if (proposal.status !== "pending") {
-        throw new AppError("conflict", "Preferences can only be changed on a pending proposal", 409);
+        throw new AppError("conflict", "Votes can only be changed on a pending proposal", 409);
       }
-      const current = await transaction.selectFrom("discovery_proposal_preferences")
-        .select("version")
-        .where("proposal_id", "=", proposalId)
-        .where("member_user_id", "=", userId)
-        .forUpdate()
-        .executeTakeFirst();
-      if (current) {
-        if (input.expectedVersion === null || input.expectedVersion === undefined) {
-          throw new AppError("conflict", `Version conflict; current version is ${current.version}`, 409, undefined, current.version);
-        }
-        const version = expectedVersion(input.expectedVersion);
-        if (version !== current.version) {
-          throw new AppError("conflict", `Version conflict; current version is ${current.version}`, 409, undefined, current.version);
-        }
-        await transaction.updateTable("discovery_proposal_preferences").set({
-          preference: input.level,
-          version: sql`version + 1`,
-          updated_at: this.now(),
-        }).where("proposal_id", "=", proposalId)
-          .where("member_user_id", "=", userId)
-          .execute();
-      } else {
-        if (input.expectedVersion !== null && input.expectedVersion !== undefined) {
-          throw new AppError("conflict", "Preference does not exist yet", 409);
-        }
-        await transaction.insertInto("discovery_proposal_preferences").values({
+      if (input.voted) {
+        await transaction.insertInto("discovery_proposal_votes").values({
           trip_id: tripId,
           proposal_id: proposalId,
           member_user_id: userId,
-          preference: input.level,
-        }).execute();
+        }).onConflict((conflict) => conflict.columns(["proposal_id", "member_user_id"]).doNothing()).execute();
+      } else {
+        await transaction.deleteFrom("discovery_proposal_votes")
+          .where("proposal_id", "=", proposalId).where("member_user_id", "=", userId).execute();
       }
       await recordEvent(transaction, {
         tripId,
         actorId: userId,
-        eventType: "discovery.proposal_preference_updated",
+        eventType: "discovery.proposal_vote_changed",
         targetType: "candidate_proposal",
         targetId: proposalId,
-        summary: `Set own proposal preference to ${input.level}`,
+        summary: input.voted ? "Voted for an AI place proposal" : "Removed own vote from an AI place proposal",
       });
       const response = await this.readWorkspace(transaction, tripId, userId);
       await remember(transaction, userId, operation, key, response);
@@ -840,6 +825,12 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         await lockMutation(transaction, userId, operation, key);
         const existingReplay = await replayed(transaction, userId, operation, key);
         if (existingReplay) return replayedWorkspace(existingReplay);
+        await transaction.selectFrom("trips").select("id").where("id", "=", tripId).forUpdate().executeTakeFirstOrThrow();
+        await this.requireMember(transaction, userId, tripId);
+        const activePlace = await transaction.selectFrom("trip_places").select("id")
+          .where("id", "=", tripPlace.id).where("trip_id", "=", tripId)
+          .where("archived_at", "is", null).forUpdate().executeTakeFirst();
+        if (!activePlace) throw new AppError("conflict", "The accepted place was removed from the wishlist; reload", 409);
         const updated = await transaction.updateTable("candidate_proposals").set({
           status: "accepted",
           accepted_trip_place_id: tripPlace.id,
@@ -853,41 +844,35 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           .returning("id")
           .executeTakeFirst();
         if (!updated) throw new AppError("conflict", "Candidate acceptance state changed", 409);
-        const proposalPreferences = await transaction.selectFrom("discovery_proposal_preferences as preference")
+        const proposalVotes = await transaction.selectFrom("discovery_proposal_votes as vote")
           .innerJoin("trip_members as member", (join) => join
-            .onRef("member.trip_id", "=", "preference.trip_id")
-            .onRef("member.user_id", "=", "preference.member_user_id"))
-          .select(["preference.member_user_id", "preference.preference"])
-          .where("preference.proposal_id", "=", proposalId)
+            .onRef("member.trip_id", "=", "vote.trip_id")
+            .onRef("member.user_id", "=", "vote.member_user_id"))
+          .select("vote.member_user_id")
+          .where("vote.proposal_id", "=", proposalId)
           .where("member.removed_at", "is", null)
           .execute();
-        const carriedPreferences = proposalPreferences.length === 0
+        const carriedVotes = proposalVotes.length === 0
           ? []
-          : await transaction.insertInto("member_place_preferences").values(proposalPreferences.map((preference) => ({
+          : await transaction.insertInto("trip_place_votes").values(proposalVotes.map((vote) => ({
               trip_id: tripId,
               trip_place_id: tripPlace.id,
-              member_user_id: preference.member_user_id,
-              preference: preference.preference,
-            }))).onConflict((conflict) => conflict
-              .columns(["trip_place_id", "member_user_id"])
-              .doNothing())
-            .returning(["member_user_id", "preference"])
-            .execute();
-        if (carriedPreferences.length > 0) {
+              member_user_id: vote.member_user_id,
+            }))).onConflict((conflict) => conflict.columns(["trip_place_id", "member_user_id"]).doNothing())
+            .returning("member_user_id").execute();
+        if (carriedVotes.length > 0) {
           await transaction.updateTable("trip_places").set({
             version: sql`version + 1`,
             updated_at: this.now(),
           }).where("id", "=", tripPlace.id).execute();
-          for (const preference of carriedPreferences) {
-            await recordEvent(transaction, {
-              tripId,
-              actorId: userId,
-              eventType: "member_place_preference.carried_from_proposal",
-              targetType: "trip_place",
-              targetId: tripPlace.id,
-              summary: `Carried proposal preference ${preference.preference} into the shared wishlist`,
-            });
-          }
+          await recordEvent(transaction, {
+            tripId,
+            actorId: userId,
+            eventType: "trip_place.vote_carried_from_proposal",
+            targetType: "trip_place",
+            targetId: tripPlace.id,
+            summary: `Carried ${carriedVotes.length} proposal vote(s) into the shared wishlist`,
+          });
         }
         await recordEvent(transaction, {
           tripId,
@@ -1227,10 +1212,13 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       .orderBy("id", "desc")
       .executeTakeFirst();
     const proposalRows = run
-      ? await executor.selectFrom("candidate_proposals").selectAll()
+      ? await executor.selectFrom("candidate_proposals")
+        .leftJoin("trip_places as acceptedPlace", "acceptedPlace.id", "candidate_proposals.accepted_trip_place_id")
+        .selectAll("candidate_proposals")
+        .select("acceptedPlace.archived_at as accepted_place_archived_at")
         .where("run_id", "=", run.id)
-        .orderBy("created_at")
-        .orderBy("id")
+        .orderBy("candidate_proposals.created_at")
+        .orderBy("candidate_proposals.id")
         .execute()
       : [];
     const proposalIds = proposalRows.map((proposal) => proposal.id);
@@ -1243,16 +1231,13 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         .where("member.removed_at", "is", null)
         .orderBy("member.joined_at")
         .execute();
-    const proposalPreferenceRows = proposalIds.length === 0
+    const proposalVoteRows = proposalIds.length === 0
       ? []
-      : await executor.selectFrom("discovery_proposal_preferences")
-        .select(["proposal_id", "member_user_id", "preference", "version"])
+      : await executor.selectFrom("discovery_proposal_votes")
+        .select(["proposal_id", "member_user_id"])
         .where("proposal_id", "in", proposalIds)
         .execute();
-    const proposalPreferencesByKey = new Map(proposalPreferenceRows.map((preference) => [
-      `${preference.proposal_id}:${preference.member_user_id}`,
-      preference,
-    ]));
+    const proposalVotesByKey = new Set(proposalVoteRows.map((vote) => `${vote.proposal_id}:${vote.member_user_id}`));
     // Earlier runs' decisions stay visible after a new run replaces their undecided proposals:
     // one entry per place, its newest decision, unless the latest run lists the place itself.
     const earlierDecisions = run
@@ -1264,6 +1249,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           "proposal.name",
           "proposal.status",
           "proposal.decided_at",
+          "proposal.accepted_trip_place_id",
           "tripPlace.archived_at as accepted_place_archived_at",
         ])
         .where("proposal.trip_id", "=", tripId)
@@ -1280,7 +1266,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       if (listedPlaceIds.has(row.provider_place_id)) continue;
       listedPlaceIds.add(row.provider_place_id);
       // Accepted, then taken off the wishlist: no longer decided, and a new run may propose it.
-      if (row.status === "accepted" && row.accepted_place_archived_at) continue;
+      if (row.status === "accepted" && (row.accepted_trip_place_id === null || row.accepted_place_archived_at)) continue;
       if ((row.status === "accepted" || row.status === "rejected") && row.decided_at) {
         decided.push({
           proposalId: row.id,
@@ -1360,13 +1346,11 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         shortfalls: this.readShortfalls(run.shortfalls),
       } : null,
       proposals: proposalRows.map((proposal) => {
-        const preferenceEntries = members.map((member) => ({
+        const voters = members.filter((member) => proposalVotesByKey.has(`${proposal.id}:${member.user_id}`)).map((member) => ({
           memberUserId: member.user_id,
-          memberName: member.display_name || member.email,
-          level: proposalPreferencesByKey.get(`${proposal.id}:${member.user_id}`)?.preference ?? null,
+          memberEmail: member.email,
+          memberDisplayName: member.display_name,
         }));
-        const preferenceSummary = summarizeMemberPreferences(preferenceEntries);
-        const ownPreference = proposalPreferencesByKey.get(`${proposal.id}:${userId}`);
         return {
           id: proposal.id,
           runId: proposal.run_id,
@@ -1386,11 +1370,12 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           confidence: proposal.confidence,
           status: proposal.status,
           evidence: evidenceByProposal.get(proposal.id) ?? [],
-          preferences: preferenceSummary.members,
-          preferenceConflict: preferenceSummary.conflict,
-          ownPreference: ownPreference
-            ? { level: ownPreference.preference, version: ownPreference.version }
-            : null,
+          voters,
+          voteCount: voters.length,
+          ownVote: voters.some((member) => member.memberUserId === userId),
+          votingAvailable: members.length >= 2,
+          acceptedPlaceRemoved: proposal.status === "accepted" &&
+            (proposal.accepted_trip_place_id === null || proposal.accepted_place_archived_at !== null),
           acceptedTripPlaceId: proposal.accepted_trip_place_id,
           version: proposal.version,
           category: proposal.category,

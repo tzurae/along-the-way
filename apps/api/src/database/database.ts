@@ -160,14 +160,11 @@ export interface TripPlaceContributionTable {
   created_at: Timestamp;
 }
 
-export interface MemberPlacePreferenceTable {
+export interface TripPlaceVoteTable {
   trip_id: string;
   trip_place_id: string;
   member_user_id: string;
-  preference: "must" | "want" | "optional" | "neutral" | "dislike";
-  version: Generated<number>;
   created_at: Timestamp;
-  updated_at: Timestamp;
 }
 
 export interface TripPlaceDayTable {
@@ -271,14 +268,11 @@ export interface CandidateProposalTable {
   /** DiscoveryClaimSentenceDto[]; null for proposals created before sentence attribution. */
   tradeoff_sentences: Generated<unknown | null>;
 }
-export interface DiscoveryProposalPreferenceTable {
+export interface DiscoveryProposalVoteTable {
   trip_id: string;
   proposal_id: string;
   member_user_id: string;
-  preference: "must" | "want" | "optional" | "neutral" | "dislike";
-  version: Generated<number>;
   created_at: Timestamp;
-  updated_at: Timestamp;
 }
 
 
@@ -437,7 +431,7 @@ export interface AlongTheWayDatabase {
   place_identities: PlaceIdentityTable;
   trip_places: TripPlaceTable;
   trip_place_contributions: TripPlaceContributionTable;
-  member_place_preferences: MemberPlacePreferenceTable;
+  trip_place_votes: TripPlaceVoteTable;
   trip_place_desired_days: TripPlaceDayTable;
   trip_place_excluded_days: TripPlaceDayTable;
   trip_place_day_assignments: TripPlaceDayAssignmentTable;
@@ -447,7 +441,7 @@ export interface AlongTheWayDatabase {
   discovery_evidence: DiscoveryEvidenceTable;
   candidate_proposals: CandidateProposalTable;
   candidate_proposal_evidence: CandidateProposalEvidenceTable;
-  discovery_proposal_preferences: DiscoveryProposalPreferenceTable;
+  discovery_proposal_votes: DiscoveryProposalVoteTable;
   discovery_feedback: DiscoveryFeedbackTable;
   itinerary_items: ItineraryItemTable;
   itinerary_item_participants: ItineraryItemParticipantTable;

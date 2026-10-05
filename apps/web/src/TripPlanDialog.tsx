@@ -16,7 +16,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useI18n } from "./i18n";
-import { PreferenceSummary } from "./PreferenceSummary";
 import { loadLabel, reasonLabel, span, TimetableRow } from "./TimetableView";
 
 type JsonRequest = <T>(url: string, options?: RequestInit & { parse?: (value: unknown) => unknown }) => Promise<T>;
@@ -105,11 +104,6 @@ export function TripPlanDialog({
 
   const names = new Map(plan?.days.flatMap((day) => day.timetable.rows.flatMap((row) =>
     row.kind === "visit" ? [[row.tripPlaceId, row.name] as const] : [])) ?? []);
-  // Each day's timetable rates its own places; the plan rates the places it could not add.
-  const preferences = new Map([
-    ...(plan?.days.flatMap((day) => day.timetable.preferences) ?? []),
-    ...(plan?.preferences ?? []),
-  ].map((entry) => [entry.tripPlaceId, entry]));
 
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
@@ -149,7 +143,6 @@ export function TripPlanDialog({
                     <TimetableRow
                       key={`${row.kind}-${index}`}
                       row={row}
-                      preferences={row.kind === "visit" ? preferences.get(row.tripPlaceId) : undefined}
                     />
                   ))}
                 </ol>
@@ -160,7 +153,6 @@ export function TripPlanDialog({
                       {day.timetable.unscheduled.map((place) => (
                         <li key={place.tripPlaceId}>
                           {place.name}（{reasonLabel(place.reason, t.timetable)}）
-                          <PreferenceSummary preferences={preferences.get(place.tripPlaceId)} />
                         </li>
                       ))}
                     </ul>
@@ -176,7 +168,6 @@ export function TripPlanDialog({
                     <li key={place.tripPlaceId}>
                       <strong>{place.name}</strong>・{reasonLabel(place.reason, t.timetable)}
                       {place.date ? t.tripPlan.onDate(place.date) : ""}
-                      <PreferenceSummary preferences={preferences.get(place.tripPlaceId)} />
                     </li>
                   ))}
                 </ul>

@@ -13,7 +13,6 @@ import {
   parseProviderCandidatesResponse,
   parseTripPlaceListResponse,
   parseTripPlaceResponse,
-  type PreferenceLevel,
   type ProviderPlaceCandidateDto,
   type TripPlaceDto,
 } from "@along-the-way/contracts/trip-places";
@@ -21,6 +20,7 @@ import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 
 import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
+import { VoteControl } from "./VoteControl";
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -378,10 +378,10 @@ export function TripPlaceWorkspace({
   const [adding, setAdding] = useState(false);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
-  const [preferenceDrafts, setPreferenceDrafts] = useState<Record<string, PreferenceLevel>>({});
-  const [failedPreferences, setFailedPreferences] = useState<Record<string, true>>({});
-  const [pendingPreferences, setPendingPreferences] = useState<Record<string, true>>({});
-  const pendingPreferenceIds = useRef(new Set<string>());
+  const [voteDrafts, setVoteDrafts] = useState<Record<string, boolean>>({});
+  const [failedVotes, setFailedVotes] = useState<Record<string, true>>({});
+  const [pendingVotes, setPendingVotes] = useState<Record<string, true>>({});
+  const pendingVoteIds = useRef(new Set<string>());
   const retryKeys = useRef<RetryKeys>(new Map());
 
   const refreshPlaces = useCallback(async () => {
@@ -403,7 +403,7 @@ export function TripPlaceWorkspace({
 
   useEffect(() => {
     void load();
-  }, [load, placesRevision]);
+  }, [load, placesRevision, trip.members.length]);
 
   async function changedPlaces() {
     await load();
@@ -415,22 +415,21 @@ export function TripPlaceWorkspace({
     [places],
   );
 
-  async function setPreference(place: TripPlaceDto, level: PreferenceLevel) {
-    if (pendingPreferenceIds.current.has(place.id)) return;
-    pendingPreferenceIds.current.add(place.id);
-    setPendingPreferences((current) => ({ ...current, [place.id]: true }));
-    const own = place.preferences.find((preference) => preference.isOwn);
-    const operation = `preference:${place.id}`;
-    const payload = { level, expectedVersion: own?.version ?? null };
-    setPreferenceDrafts((current) => ({ ...current, [place.id]: level }));
-    setFailedPreferences((current) => {
+  async function setVote(place: TripPlaceDto, voted: boolean) {
+    if (pendingVoteIds.current.has(place.id)) return;
+    pendingVoteIds.current.add(place.id);
+    setPendingVotes((current) => ({ ...current, [place.id]: true }));
+    const operation = `vote:${place.id}`;
+    const payload = { voted };
+    setVoteDrafts((current) => ({ ...current, [place.id]: voted }));
+    setFailedVotes((current) => {
       const next = { ...current };
       delete next[place.id];
       return next;
     });
     try {
-      const response = await request<{ tripPlace: TripPlaceDto }>(
-        `/api/trips/${trip.id}/trip-places/${place.id}/preference`,
+      await request(
+        `/api/trips/${trip.id}/trip-places/${place.id}/vote`,
         {
           method: "PUT",
           headers: { "Idempotency-Key": retryKey(retryKeys.current, operation, payload) },
@@ -438,34 +437,33 @@ export function TripPlaceWorkspace({
           parse: parseTripPlaceResponse,
         },
       );
+      await refreshPlaces();
       clearRetryKey(retryKeys.current, operation);
-      setPlaces((current) => current.map((candidate) =>
-        candidate.id === response.tripPlace.id ? response.tripPlace : candidate
-      ));
-      setPreferenceDrafts((current) => {
+      setVoteDrafts((current) => {
         const next = { ...current };
         delete next[place.id];
         return next;
       });
       setMessage("");
-      setFailedPreferences((current) => {
+      setFailedVotes((current) => {
         const next = { ...current };
         delete next[place.id];
         return next;
       });
+      onPlacesChanged();
     } catch (error) {
-      if (errorCode(error) === "conflict") {
+      if (errorCode(error) === "conflict" || errorCode(error) === "voting_unavailable") {
         try {
           await refreshPlaces();
         } catch {
-          // The original conflict remains the actionable error.
+          // Keep the original mutation error actionable.
         }
       }
       setMessage(errorMessage(error, t.errors.requestFailed));
-      setFailedPreferences((current) => ({ ...current, [place.id]: true }));
+      setFailedVotes((current) => ({ ...current, [place.id]: true }));
     } finally {
-      pendingPreferenceIds.current.delete(place.id);
-      setPendingPreferences((current) => {
+      pendingVoteIds.current.delete(place.id);
+      setPendingVotes((current) => {
         const next = { ...current };
         delete next[place.id];
         return next;
@@ -482,6 +480,7 @@ export function TripPlaceWorkspace({
       });
       clearRetryKey(retryKeys.current, operation);
       await load();
+      onPlacesChanged();
     } catch (error) {
       setMessage(errorMessage(error, t.errors.requestFailed));
     }
@@ -525,6 +524,8 @@ export function TripPlaceWorkspace({
     }
   }
 
+  const highestVoteCount = places.reduce((highest, place) => Math.max(highest, place.voteCount), 0);
+
   return (
     <section className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8" aria-labelledby="shared-wishlist-heading">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -543,8 +544,10 @@ export function TripPlaceWorkspace({
 
       <div className="mt-6 grid gap-5 xl:grid-cols-2">
         {places.map((place) => {
-          const ownPreference = place.preferences.find((preference) => preference.isOwn);
-          const preferenceDraft = preferenceDrafts[place.id];
+          const voteDraft = voteDrafts[place.id];
+          const tint = place.votingAvailable && place.voteCount > 0
+            ? place.voteCount === highestVoteCount && highestVoteCount >= 2 ? "bg-accent/20" : "bg-accent/10"
+            : "bg-surface-subtle";
           const typeLabel = t.placeType[place.type];
           const factsLabel = place.factsSource === "provider"
             ? `${typeLabel}・${place.providerAttribution ?? t.workspace.providerFacts}`
@@ -552,7 +555,7 @@ export function TripPlaceWorkspace({
               ? `${typeLabel}・${t.workspace.memberFactsWithGoogle}`
               : `${typeLabel}・${t.workspace.manualEntry}`;
           return (
-            <article aria-label={t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress)} key={place.id} className="grid content-start gap-4 rounded-panel border border-ink/10 bg-surface-subtle p-4 sm:p-5">
+            <article aria-label={t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress)} key={place.id} className={`grid content-start gap-4 rounded-panel border border-ink/10 ${tint} p-4 sm:p-5`}>
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{factsLabel}{place.aiProposalId ? `・${t.workspace.aiProposal}` : ""}</p>
@@ -563,26 +566,14 @@ export function TripPlaceWorkspace({
               </div>
               {place.providerObservedAt ? <p className="text-sm text-muted-foreground">{t.workspace.providerObserved(new Date(place.providerObservedAt).toLocaleString(locale))}{place.providerFactsExpired ? `・${t.workspace.expiredFacts}` : ""}</p> : null}
               {place.provider === "google" && place.providerPlaceId ? <a className="inline-flex min-h-10 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
-              {place.preferenceConflict ? <p className="rounded-xl border border-accent-strong bg-surface p-3 font-bold text-accent-strong" role="status">{t.workspace.preferenceConflict}</p> : null}
 
               {place.assignedDayId ? (
                 <p className="rounded-xl bg-surface p-3 font-semibold">
                   {t.workspace.plannedFor(trip.days.find((day) => day.id === place.assignedDayId)?.date ?? t.workspace.unavailableTripDay)}
                 </p>
               ) : null}
-              <section aria-label={t.workspace.memberPreferencesFor(place.name)}>
-                <h4 className="font-bold">{t.workspace.memberPreferences}</h4>
-                <ul className="mt-2 grid gap-2 sm:grid-cols-2">
-                  {place.preferences.map((preference) => (
-                    <li key={preference.memberUserId} className="rounded-lg bg-surface p-3">
-                      <strong className="block">{preference.memberDisplayName ?? preference.memberEmail}{preference.isOwn ? `・${t.workspace.you}` : ""}</strong>
-                      <span className="text-sm">{preference.level ? t.preference[preference.level] : t.workspace.noPreference}</span>
-                    </li>
-                  ))}
-                </ul>
-                <label className="mt-3 grid gap-1 font-semibold">{t.workspace.yourPreference}<select className="min-h-11 rounded-lg border bg-surface px-3" disabled={pendingPreferences[place.id]} value={preferenceDraft ?? ownPreference?.level ?? ""} onChange={(event) => { if (event.target.value) void setPreference(place, event.target.value as PreferenceLevel); }}><option value="">{t.workspace.noPreference}</option>{Object.entries(t.preference).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-                {failedPreferences[place.id] && preferenceDraft ? <button className="mt-2 min-h-10 rounded-lg border px-3 font-bold" disabled={pendingPreferences[place.id]} onClick={() => void setPreference(place, preferenceDraft)}>{t.workspace.retryPreference}</button> : null}
-              </section>
+              <VoteControl name={place.name} voters={place.voters} voteCount={place.voteCount} ownVote={place.ownVote} votingAvailable={place.votingAvailable} disabled={Boolean(pendingVotes[place.id])} onChange={(voted) => void setVote(place, voted)} />
+              {place.votingAvailable && failedVotes[place.id] && voteDraft !== undefined ? <button className="min-h-10 rounded-lg border px-3 font-bold" disabled={pendingVotes[place.id]} onClick={() => void setVote(place, voteDraft)}>{t.vote.retry}</button> : null}
 
               <section aria-label={t.workspace.contributionsFor(place.name)}>
                 <h4 className="font-bold">{t.workspace.contributions}</h4>

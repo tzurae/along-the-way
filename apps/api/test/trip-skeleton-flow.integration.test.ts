@@ -82,7 +82,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         trip_place_duplicate_suggestions,
         trip_place_excluded_days,
         trip_place_desired_days,
-        member_place_preferences,
+        trip_place_votes,
         trip_place_contributions,
         trip_places,
         place_identities,
@@ -2359,6 +2359,46 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       await migrationDatabase?.destroy();
     });
 
+    it("clears old choices but keeps their table for a rolled-back release, and restores the delete guard on downgrade", async () => {
+      const cookie = await login();
+      const trip = await createTrip(cookie);
+      await joinMember(cookie, trip.id, "migration-voter@example.test", "migration-voter");
+      const place = await createPlace(cookie, trip.id, "vote-migration-place", {
+        name: "Migration cafe", type: "activity", timeZone: "Asia/Tokyo",
+      });
+      const listed = await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } });
+      const tripPlace = parseTripPlaceListResponse(await listed.json()).tripPlaces[0]!;
+      try {
+        const old = await migrator.migrateTo("014_discovery_feedback_answers");
+        if (old.error) throw old.error;
+        await sql`
+          insert into member_place_preferences (trip_id, trip_place_id, member_user_id, preference)
+          values (${trip.id}, ${tripPlace.id}, ${trip.members[0]!.userId}, 'must')
+        `.execute(database);
+        await expect(database.deleteFrom("places").where("id", "=", place.id).execute()).rejects.toMatchObject({ code: "23503" });
+        const upgraded = await migrator.migrateToLatest();
+        if (upgraded.error) throw upgraded.error;
+        expect((await sql`select * from member_place_preferences`.execute(database)).rows).toEqual([]);
+        const after = await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } });
+        expect(parseTripPlaceListResponse(await after.json()).tripPlaces[0]).toMatchObject({
+          voteCount: 0, ownVote: false, voters: [], votingAvailable: true,
+        });
+        expect((await mutate(cookie, `/api/trips/${trip.id}/trip-places/${tripPlace.id}/vote`, "migrated-vote", { voted: true }, "PUT")).status).toBe(200);
+        const downgraded = await migrator.migrateTo("014_discovery_feedback_answers");
+        if (downgraded.error) throw downgraded.error;
+        expect((await sql`select * from member_place_preferences`.execute(database)).rows).toEqual([]);
+        await sql`
+          insert into member_place_preferences (trip_id, trip_place_id, member_user_id, preference)
+          values (${trip.id}, ${tripPlace.id}, ${trip.members[0]!.userId}, 'want')
+        `.execute(database);
+        await expect(database.deleteFrom("places").where("id", "=", place.id).execute()).rejects.toMatchObject({ code: "23503" });
+      } finally {
+        const restored = await migrator.migrateToLatest();
+        if (restored.error) throw restored.error;
+      }
+    });
+
+
     it("upgrades historical replies without substituting current members or item state and safely refuses missing targets", async () => {
       const cookie = await login();
       const trip = await createTrip(cookie);
@@ -2459,7 +2499,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         { migrationName: "012_endpoints_outside_route", direction: "Up", status: "NotExecuted" },
         { migrationName: "013_discovery_claims", direction: "Up", status: "NotExecuted" },
         { migrationName: "014_discovery_feedback_answers", direction: "Up", status: "NotExecuted" },
-        { migrationName: "015_discovery_proposal_preferences", direction: "Up", status: "NotExecuted" },
+        { migrationName: "015_member_votes", direction: "Up", status: "NotExecuted" },
       ]);
       await database.deleteFrom("mutation_requests")
         .where("actor_id", "=", owner.userId).where("operation", "=", "create_trip")

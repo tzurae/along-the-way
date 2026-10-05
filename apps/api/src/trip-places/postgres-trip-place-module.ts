@@ -3,11 +3,10 @@ import {
   parseTripPlaceResponse,
   type CreateTripPlaceInput,
   type MergeTripPlacesInput,
-  type PreferenceLevel,
   type ProviderCandidatesResponse,
   type ProviderPlaceCandidateDto,
   type TripPlaceDto,
-  type UpdateMemberPreferenceInput,
+  type UpdateMemberVoteInput,
   type UpdateTripPlaceDayAssignmentsInput,
   type UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
@@ -60,13 +59,6 @@ interface ManualPlaceFacts {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const PREFERENCE_LEVELS = new Set<PreferenceLevel>([
-  "must",
-  "want",
-  "optional",
-  "neutral",
-  "dislike",
-]);
 const PLACE_TYPES = new Set<PlaceType>([
   "airport",
   "station",
@@ -183,12 +175,20 @@ function timeZone(value: unknown) {
   }
 }
 
+function upgradeStoredTripPlace(value: unknown) {
+  if (typeof value !== "object" || value === null) return value;
+  return { voters: [], voteCount: 0, ownVote: false, votingAvailable: false, ...value };
+}
+
 function replayedTripPlace(value: unknown) {
-  return parseTripPlaceResponse({ tripPlace: value }).tripPlace;
+  return parseTripPlaceResponse({ tripPlace: upgradeStoredTripPlace(value) }).tripPlace;
 }
 
 function replayedTripPlaces(value: unknown) {
-  return parseTripPlaceListResponse(value).tripPlaces;
+  const stored = value as { tripPlaces?: unknown };
+  return parseTripPlaceListResponse({
+    tripPlaces: Array.isArray(stored.tripPlaces) ? stored.tripPlaces.map(upgradeStoredTripPlace) : stored.tripPlaces,
+  }).tripPlaces;
 }
 
 function normalizedSimilarity(value: string | null) {
@@ -854,53 +854,43 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     });
   }
 
-  async setOwnPreference(
+  async setOwnVote(
     userId: string,
     tripId: string,
     tripPlaceId: string,
     rawKey: string,
-    input: UpdateMemberPreferenceInput,
+    input: UpdateMemberVoteInput,
   ) {
     uuid(tripPlaceId, "tripPlaceId");
-    if (!PREFERENCE_LEVELS.has(input.level)) {
-      throw new AppError("validation_error", "preference level is invalid");
+    if (typeof input.voted !== "boolean") {
+      throw new AppError("validation_error", "voted must be a boolean");
     }
     const key = requireIdempotencyKey(rawKey);
-    const operation = `tp:pref:${tripPlaceId}`;
+    const operation = `tp:vote:${tripPlaceId}`;
     return this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
+      await this.lockTripContent(transaction, tripId);
+      await this.requireMember(transaction, userId, tripId);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedTripPlace(replay);
-      await this.lockTripContent(transaction, tripId);
+      const members = await transaction.selectFrom("trip_members")
+        .select((builder) => builder.fn.countAll().as("count"))
+        .where("trip_id", "=", tripId).where("removed_at", "is", null)
+        .executeTakeFirstOrThrow();
+      if (Number(members.count) < 2) {
+        throw new AppError("voting_unavailable", "Voting needs at least two active trip members", 409);
+      }
       await this.lockTripPlace(transaction, tripId, tripPlaceId);
-      const current = await transaction.selectFrom("member_place_preferences")
-        .select("version")
-        .where("trip_place_id", "=", tripPlaceId)
-        .where("member_user_id", "=", userId)
-        .forUpdate()
-        .executeTakeFirst();
-      if (current) {
-        if (input.expectedVersion === null || input.expectedVersion === undefined) {
-          throw new AppError("conflict", `Version conflict; current version is ${current.version}`, 409, undefined, current.version);
-        }
-        this.expectedVersion(current.version, input.expectedVersion);
-        await transaction.updateTable("member_place_preferences").set({
-          preference: input.level,
-          version: sql`version + 1`,
-          updated_at: this.now(),
-        }).where("trip_place_id", "=", tripPlaceId)
-          .where("member_user_id", "=", userId).execute();
-      } else {
-        if (input.expectedVersion !== null && input.expectedVersion !== undefined) {
-          throw new AppError("conflict", "Preference does not exist yet", 409);
-        }
-        await transaction.insertInto("member_place_preferences").values({
+      if (input.voted) {
+        await transaction.insertInto("trip_place_votes").values({
           trip_id: tripId,
           trip_place_id: tripPlaceId,
           member_user_id: userId,
-          preference: input.level,
-        }).execute();
+        }).onConflict((conflict) => conflict.columns(["trip_place_id", "member_user_id"]).doNothing()).execute();
+      } else {
+        await transaction.deleteFrom("trip_place_votes")
+          .where("trip_place_id", "=", tripPlaceId).where("member_user_id", "=", userId).execute();
       }
       await transaction.updateTable("trip_places").set({
         version: sql`version + 1`,
@@ -909,10 +899,10 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       await recordEvent(transaction, {
         tripId,
         actorId: userId,
-        eventType: "member_place_preference.updated",
+        eventType: "trip_place.vote_changed",
         targetType: "trip_place",
         targetId: tripPlaceId,
-        summary: `Set own preference to ${input.level}`,
+        summary: input.voted ? "Voted for a wishlist place" : "Removed own vote from a wishlist place",
       });
       const response = await this.readOne(transaction, userId, tripId, tripPlaceId);
       await remember(transaction, userId, operation, key, response);
@@ -1014,33 +1004,17 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       await transaction.updateTable("trip_place_contributions")
         .set({ trip_place_id: target.id })
         .where("trip_place_id", "=", source.id).execute();
-      const sourcePreferences = await transaction.selectFrom("member_place_preferences")
-        .selectAll().where("trip_place_id", "=", source.id).execute();
-      for (const preference of sourcePreferences) {
-        const targetPreference = await transaction.selectFrom("member_place_preferences")
-          .select(["version", "updated_at"])
-          .where("trip_place_id", "=", target.id)
-          .where("member_user_id", "=", preference.member_user_id)
-          .executeTakeFirst();
-        if (!targetPreference) {
-          await transaction.updateTable("member_place_preferences")
-            .set({ trip_place_id: target.id })
-            .where("trip_place_id", "=", source.id)
-            .where("member_user_id", "=", preference.member_user_id).execute();
-        } else {
-          if (new Date(preference.updated_at).getTime() > new Date(targetPreference.updated_at).getTime()) {
-            await transaction.updateTable("member_place_preferences").set({
-              preference: preference.preference,
-              version: targetPreference.version + 1,
-              updated_at: preference.updated_at,
-            }).where("trip_place_id", "=", target.id)
-              .where("member_user_id", "=", preference.member_user_id).execute();
-          }
-          await transaction.deleteFrom("member_place_preferences")
-            .where("trip_place_id", "=", source.id)
-            .where("member_user_id", "=", preference.member_user_id).execute();
-        }
-      }
+      await transaction.insertInto("trip_place_votes")
+        .columns(["trip_id", "trip_place_id", "member_user_id", "created_at"])
+        .expression(transaction.selectFrom("trip_place_votes")
+          .select(["trip_id", sql<string>`${target.id}`.as("trip_place_id"), "member_user_id", "created_at"])
+          .where("trip_place_id", "=", source.id))
+        .onConflict((conflict) => conflict.columns(["trip_place_id", "member_user_id"]).doNothing())
+        .execute();
+      await transaction.deleteFrom("trip_place_votes").where("trip_place_id", "=", source.id).execute();
+      await transaction.updateTable("candidate_proposals")
+        .set({ accepted_trip_place_id: target.id })
+        .where("trip_id", "=", tripId).where("accepted_trip_place_id", "=", source.id).execute();
       await this.mergeDayPreferences(
         transaction,
         "trip_place_desired_days",
@@ -1168,7 +1142,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         .where("withdrawn_at", "is", null)
         .returning("id").executeTakeFirst();
       if (!withdrawn) throw new AppError("contribution_not_found", "Contribution not found", 404);
-      const [remaining, scheduled, preferred, assigned] = await Promise.all([
+      const [remaining, scheduled] = await Promise.all([
         transaction.selectFrom("trip_place_contributions").select("id")
           .where("trip_place_id", "=", tripPlaceId).where("withdrawn_at", "is", null).executeTakeFirst(),
         transaction.selectFrom("itinerary_endpoints").innerJoin("trip_places", (join) =>
@@ -1176,20 +1150,16 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
             .onRef("trip_places.trip_id", "=", "itinerary_endpoints.trip_id"))
           .select("itinerary_endpoints.itinerary_item_id")
           .where("trip_places.id", "=", tripPlaceId).executeTakeFirst(),
-        transaction.selectFrom("member_place_preferences as preference")
-          .innerJoin("trip_members as member", "member.user_id", "preference.member_user_id")
-          .select("preference.trip_place_id")
-          .where("preference.trip_place_id", "=", tripPlaceId)
-          .where("member.trip_id", "=", tripId)
-          .where("member.removed_at", "is", null)
-          .executeTakeFirst(),
-        transaction.selectFrom("trip_place_day_assignments")
-          .select("trip_place_id")
-          .where("trip_place_id", "=", tripPlaceId)
-          .executeTakeFirst(),
       ]);
-      const retained = Boolean(remaining || scheduled || preferred || assigned);
+      const retained = Boolean(remaining || scheduled);
       if (!retained) {
+        // Migration 007 derives assignments from these rows; clear the source as well.
+        await transaction.deleteFrom("trip_place_desired_days")
+          .where("trip_place_id", "=", tripPlaceId).execute();
+        await transaction.deleteFrom("trip_place_day_assignments")
+          .where("trip_place_id", "=", tripPlaceId).execute();
+        await transaction.deleteFrom("trip_place_votes")
+          .where("trip_place_id", "=", tripPlaceId).execute();
         await transaction.updateTable("trip_places").set({
           archived_at: this.now(),
           version: sql`version + 1`,
@@ -1476,7 +1446,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     if (placeRows.length === 0) return [];
     const ids = placeRows.map((row) => row.id);
     const legacyPlaceIds = placeRows.map((row) => row.legacy_place_id);
-    const [contributions, members, preferenceRows, assignmentRows, duplicateRows, scheduledRows, aiProposalRows] = await Promise.all([
+    const [contributions, members, voteRows, assignmentRows, duplicateRows, scheduledRows, aiProposalRows] = await Promise.all([
       executor.selectFrom("trip_place_contributions as contribution")
         .innerJoin("users", "users.id", "contribution.member_user_id")
         .select([
@@ -1490,7 +1460,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         .select(["trip_members.user_id", "trip_members.joined_at", "users.email", "users.display_name"])
         .where("trip_members.trip_id", "=", tripId).where("trip_members.removed_at", "is", null)
         .orderBy("trip_members.joined_at").execute(),
-      executor.selectFrom("member_place_preferences").selectAll()
+      executor.selectFrom("trip_place_votes").selectAll()
         .where("trip_place_id", "in", ids).execute(),
       executor.selectFrom("trip_place_day_assignments").selectAll()
         .where("trip_place_id", "in", ids).execute(),
@@ -1512,14 +1482,11 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         ? [[proposal.accepted_trip_place_id, proposal.id] as const]
         : []),
     );
-    const preferencesByKey = new Map(preferenceRows.map((row) => [
-      `${row.trip_place_id}:${row.member_user_id}`,
-      row,
-    ]));
+    const votesByKey = new Set(voteRows.map((row) => `${row.trip_place_id}:${row.member_user_id}`));
     const assignmentByPlaceId = new Map(
       assignmentRows.map((assignment) => [assignment.trip_place_id, assignment]),
     );
-    return placeRows.map((row): TripPlaceDto => {
+    const places = placeRows.map((row): TripPlaceDto => {
       const placeContributions = contributions.filter((entry) => entry.trip_place_id === row.id).map((entry) => ({
         id: entry.id,
         memberUserId: entry.member_user_id,
@@ -1532,21 +1499,11 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         withdrawnAt: entry.withdrawn_at ? isoTimestamp(entry.withdrawn_at) : null,
         isOwn: entry.member_user_id === userId,
       }));
-      const preferences = members.map((member) => {
-        const preference = preferencesByKey.get(`${row.id}:${member.user_id}`);
-        return {
-          memberUserId: member.user_id,
-          memberEmail: member.email,
-          memberDisplayName: member.display_name,
-          level: preference?.preference ?? null,
-          version: preference?.version ?? null,
-          updatedAt: preference ? isoTimestamp(preference.updated_at) : null,
-          isOwn: member.user_id === userId,
-        };
-      });
-      const hasConflict =
-        preferences.some((preference) => preference.level === "must") &&
-        preferences.some((preference) => preference.level === "dislike");
+      const voters = members.filter((member) => votesByKey.has(`${row.id}:${member.user_id}`)).map((member) => ({
+        memberUserId: member.user_id,
+        memberEmail: member.email,
+        memberDisplayName: member.display_name,
+      }));
       const suggestions = duplicateRows.filter((suggestion) =>
         suggestion.first_trip_place_id === row.id || suggestion.second_trip_place_id === row.id,
       ).map((suggestion) => ({
@@ -1605,13 +1562,16 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         budgetAmountMinor: row.budget_amount_minor === null ? null : Number(row.budget_amount_minor),
         budgetCurrency: row.budget_currency,
         notes: row.notes,
-        preferenceConflict: hasConflict,
         contributions: placeContributions,
-        preferences,
+        voters,
+        voteCount: voters.length,
+        ownVote: voters.some((member) => member.memberUserId === userId),
+        votingAvailable: members.length >= 2,
         duplicateSuggestions: suggestions,
         version: row.version,
       };
     });
+    return members.length >= 2 ? places.sort((left, right) => right.voteCount - left.voteCount) : places;
   }
 
   private async readOne(

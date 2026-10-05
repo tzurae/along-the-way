@@ -30,9 +30,11 @@ function response(assignedDayId: string | null) {
       budgetAmountMinor: 1200,
       budgetCurrency: "JPY",
       notes: null,
-      preferenceConflict: false,
       contributions: [],
-      preferences: [],
+      voters: [{ memberUserId: "member-1", memberEmail: "one@example.test", memberDisplayName: null }],
+      voteCount: 1,
+      ownVote: true,
+      votingAvailable: true,
       duplicateSuggestions: [],
       version: 2,
     }],
@@ -43,6 +45,17 @@ describe("trip place day assignment contract", () => {
   it("preserves one explicit planned day", () => {
     expect(parseTripPlaceListResponse(response("day-2")).tripPlaces[0]?.assignedDayId)
       .toBe("day-2");
+  });
+
+  it("preserves active voters and rejects non-boolean own votes", () => {
+    const input = response(null);
+    const place = parseTripPlaceListResponse(input).tripPlaces[0]!;
+    expect(place.voters).toEqual([{ memberUserId: "member-1", memberEmail: "one@example.test", memberDisplayName: null }]);
+    expect(place.voteCount).toBe(1);
+    expect(place.ownVote).toBe(true);
+    expect(() => parseTripPlaceListResponse({
+      tripPlaces: [{ ...input.tripPlaces[0], ownVote: "true" }],
+    })).toThrow("Invalid trip place response");
   });
 
   it("rejects the removed preferred and excluded day shape", () => {

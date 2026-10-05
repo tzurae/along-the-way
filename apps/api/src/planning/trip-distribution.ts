@@ -1,7 +1,3 @@
-import type { PlacePreferencesDto } from "@along-the-way/contracts/day-plans";
-import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
-
-import { summarizeMemberPreferences } from "../member-preferences";
 import { straightLineMeters, type GeoPoint } from "./day-route-order";
 import type { DayHours } from "./opening-hours";
 
@@ -10,19 +6,6 @@ export const NEARBY_METERS = 10_000;
 /** A day takes new places while its estimated load stays at or below this share of its hours. */
 export const LOAD_LIMIT_PERCENT = 70;
 
-/**
- * Each member's own preference, strongest first, with no merging: the plan ranks a place by
- * its best preference, so this is where a member who dislikes it stays visible.
- * Null when no member rated the place.
- */
-export function placePreferences(place: Pick<TripPlaceDto, "id" | "preferences">): PlacePreferencesDto | null {
-  const summary = summarizeMemberPreferences(place.preferences.map((entry) => ({
-    memberUserId: entry.memberUserId,
-    memberName: entry.memberDisplayName || entry.memberEmail,
-    level: entry.level,
-  })));
-  return summary.members.length === 0 ? null : { tripPlaceId: place.id, ...summary };
-}
 
 export interface StayPoint extends GeoPoint {
   stayMinutes: number;
@@ -47,8 +30,8 @@ export interface DistributionDay {
 }
 
 export interface DistributionCandidate extends StayPoint {
-  /** Lower comes first: the best preference any member gave the place. */
-  priority: number;
+  /** Active members' votes; zero when voting is unavailable. Higher comes first. */
+  voteCount: number;
   hours(dayId: string): DayHours;
 }
 
@@ -84,15 +67,15 @@ export function estimatedLoadMinutes(day: DistributionDay, places: StayPoint[]) 
 }
 
 /**
- * Adds each candidate, best preference first and otherwise in list order, to a day where it
+ * Adds each candidate, most votes first and otherwise in list order, to a day where it
  * is open and the estimated load stays within the limit. The nearest day with something
  * within 10 km wins; otherwise the earliest day without places; otherwise it stays unplaced.
  * New places go after a day's existing ones. The result depends only on the input.
  */
 export function distributePlaces(days: DistributionDay[], candidates: DistributionCandidate[]): Distribution {
   const byDate = [...days].sort((left, right) => left.date.localeCompare(right.date));
-  // A stable sort keeps list order within one preference level.
-  const ordered = [...candidates].sort((left, right) => left.priority - right.priority);
+  // A stable sort keeps list order when vote counts tie.
+  const ordered = [...candidates].sort((left, right) => right.voteCount - left.voteCount);
   const placed = new Map(byDate.map((day) => [day.id, [...day.kept]]));
   const added = new Map(byDate.map((day) => [day.id, [] as string[]]));
   const unplaced: Distribution["unplaced"] = [];

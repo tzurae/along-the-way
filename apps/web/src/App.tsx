@@ -584,6 +584,7 @@ export function App() {
               <DiscoveryWorkspace
                 trip={selectedTrip}
                 request={request}
+                placesRevision={placesRevision}
                 onPlacesChanged={placesChanged}
               />
             </div>

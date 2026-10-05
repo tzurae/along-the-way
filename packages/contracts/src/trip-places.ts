@@ -1,12 +1,6 @@
 import { isRecord } from "./type-guards";
 import type { PlaceType } from "./trip-skeleton";
 
-export type PreferenceLevel =
-  | "must"
-  | "want"
-  | "optional"
-  | "neutral"
-  | "dislike";
 export type TripPlaceStatus =
   | "ready"
   | "needs-location"
@@ -43,14 +37,10 @@ export interface TripPlaceContributionDto {
   isOwn: boolean;
 }
 
-export interface MemberPlacePreferenceDto {
+export interface MemberVoteDto {
   memberUserId: string;
   memberEmail: string;
   memberDisplayName: string | null;
-  level: PreferenceLevel | null;
-  version: number | null;
-  updatedAt: string | null;
-  isOwn: boolean;
 }
 
 export interface DuplicateSuggestionDto {
@@ -87,9 +77,11 @@ export interface TripPlaceDto {
   budgetAmountMinor: number | null;
   budgetCurrency: string | null;
   notes: string | null;
-  preferenceConflict: boolean;
   contributions: TripPlaceContributionDto[];
-  preferences: MemberPlacePreferenceDto[];
+  voters: MemberVoteDto[];
+  voteCount: number;
+  ownVote: boolean;
+  votingAvailable: boolean;
   duplicateSuggestions: DuplicateSuggestionDto[];
   version: number;
 }
@@ -149,9 +141,8 @@ export interface UpdateTripPlaceDayAssignmentsInput {
   assignments: TripPlaceDayAssignmentInput[];
 }
 
-export interface UpdateMemberPreferenceInput {
-  level: PreferenceLevel;
-  expectedVersion?: number | null;
+export interface UpdateMemberVoteInput {
+  voted: boolean;
 }
 
 export interface MergeTripPlacesInput {
@@ -204,16 +195,6 @@ function placeType(value: unknown): PlaceType {
   return invalid();
 }
 
-function preferenceLevel(value: unknown): PreferenceLevel {
-  if (
-    value === "must" ||
-    value === "want" ||
-    value === "optional" ||
-    value === "neutral" ||
-    value === "dislike"
-  ) return value;
-  return invalid();
-}
 
 function candidate(value: unknown): ProviderPlaceCandidateDto {
   const row = record(value);
@@ -252,16 +233,12 @@ function contribution(value: unknown): TripPlaceContributionDto {
   };
 }
 
-function preference(value: unknown): MemberPlacePreferenceDto {
+export function parseMemberVote(value: unknown): MemberVoteDto {
   const row = record(value);
   return {
     memberUserId: text(row.memberUserId),
     memberEmail: text(row.memberEmail),
     memberDisplayName: nullableText(row.memberDisplayName),
-    level: row.level === null ? null : preferenceLevel(row.level),
-    version: row.version === null ? null : integer(row.version),
-    updatedAt: nullableText(row.updatedAt),
-    isOwn: boolean(row.isOwn),
   };
 }
 
@@ -314,9 +291,11 @@ function tripPlace(value: unknown): TripPlaceDto {
     budgetAmountMinor: nullableInteger(row.budgetAmountMinor),
     budgetCurrency: nullableText(row.budgetCurrency),
     notes: nullableText(row.notes),
-    preferenceConflict: boolean(row.preferenceConflict),
     contributions: Array.isArray(row.contributions) ? row.contributions.map(contribution) : invalid(),
-    preferences: Array.isArray(row.preferences) ? row.preferences.map(preference) : invalid(),
+    voters: Array.isArray(row.voters) ? row.voters.map(parseMemberVote) : invalid(),
+    voteCount: integer(row.voteCount),
+    ownVote: boolean(row.ownVote),
+    votingAvailable: boolean(row.votingAvailable),
     duplicateSuggestions: Array.isArray(row.duplicateSuggestions)
       ? row.duplicateSuggestions.map(duplicate)
       : invalid(),

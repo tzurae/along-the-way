@@ -18,7 +18,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useI18n } from "./i18n";
-import { PreferenceSummary } from "./PreferenceSummary";
 import {
   clock,
   describeStartAndEnd,
@@ -169,7 +168,6 @@ export function DayPlanDialog({
         row.kind !== "start" && row.travel?.attribution ? [row.travel.attribution] : []))]
     : [];
   const hoursChecked = timetable?.rows.some((row) => row.kind === "visit" && row.hours === "listed") ?? false;
-  const preferences = new Map(timetable?.preferences.map((entry) => [entry.tripPlaceId, entry]) ?? []);
 
   return (
     <Dialog open={day !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -216,7 +214,6 @@ export function DayPlanDialog({
                   <TimetableRow
                     key={`${row.kind}-${index}`}
                     row={row}
-                    preferences={row.kind === "visit" ? preferences.get(row.tripPlaceId) : undefined}
                   />
                 ))}
               </ol>
@@ -230,7 +227,6 @@ export function DayPlanDialog({
                   {timetable.unscheduled.map((place) => (
                     <li key={place.tripPlaceId}>
                       <strong>{place.name}</strong>・{reasonLabel(place.reason, t.timetable)}
-                      <PreferenceSummary preferences={preferences.get(place.tripPlaceId)} />
                     </li>
                   ))}
                 </ul>

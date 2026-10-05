@@ -2,12 +2,10 @@ import type {
   DayLegDto,
   DayTimetableDto,
   DayTimetableRowDto,
-  PlacePreferencesDto,
   TripPlanReason,
 } from "@along-the-way/contracts/day-plans";
 
 import { useI18n, type Messages } from "./i18n";
-import { PreferenceSummary } from "./PreferenceSummary";
 
 export function reasonLabel(reason: TripPlanReason, t: Messages["timetable"]) {
   switch (reason) {
@@ -72,7 +70,7 @@ function legSummary(leg: DayLegDto, t: Messages["timetable"]) {
 }
 
 
-export function TimetableRow({ row, preferences }: { row: DayTimetableRowDto; preferences?: PlacePreferencesDto }) {
+export function TimetableRow({ row }: { row: DayTimetableRowDto }) {
   const { t } = useI18n();
   const travel = row.kind !== "start" && row.travel
     ? <p className="text-sm text-muted-foreground">↓ {legSummary(row.travel, t.timetable)}</p>
@@ -106,7 +104,6 @@ export function TimetableRow({ row, preferences }: { row: DayTimetableRowDto; pr
               {"・"}
               {row.hours === "listed" ? t.timetable.openAccordingToGoogle : t.timetable.openingHoursUnknown}
             </p>
-            <PreferenceSummary preferences={preferences} />
           </div>
         </li>
       );
