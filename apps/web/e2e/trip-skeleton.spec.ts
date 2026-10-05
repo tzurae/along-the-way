@@ -104,9 +104,12 @@ async function executeDatabase(command: string) {
   ]);
 }
 
+const SKELETON_TRIP_NAMES = ["大阪京都家庭旅行 %", "US Japan pilot %", "Travel separation %", "DST travel %"];
+
 async function cleanupSkeletonTrips() {
+  const trips = SKELETON_TRIP_NAMES.map((pattern) => `name like '${pattern}'`).join(" or ");
   await executeDatabase(
-    "delete from itinerary_items where trip_id in (select id from trips where name like '大阪京都家庭旅行 %' or name like 'US Japan pilot %'); delete from trips where name like '大阪京都家庭旅行 %' or name like 'US Japan pilot %';",
+    `delete from itinerary_items where trip_id in (select id from trips where ${trips}); delete from trips where ${trips};`,
   );
 }
 
@@ -292,11 +295,13 @@ async function travelConstraint(page: Page, item: ItineraryItemDto, type: string
       method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify({ expectedItemVersion: item.version, type, status, minimumBufferMinutes }),
     });
-    return response.status;
+    const trip = await fetch(`/api/trips/${item.tripId}`).then((reply) => reply.json());
+    return { status: response.status, tripName: trip.trip.name as string };
   }, { item, type, status, minimumBufferMinutes });
-  expect(result).toBe(201);
+  expect(result.status).toBe(201);
+  // A reload selects the first listed trip, so reopen the trip under test.
   await page.reload();
-  await openTab(page, "行程");
+  await openTrip(page, result.tripName);
 }
 
 async function addFlight(
@@ -796,7 +801,8 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
 
   await page.reload();
   await openTrip(page, name);
-  await expect(page.getByText("JL002").first()).toBeVisible();
+  // The hidden overview panel also lists the flight, so look inside the visible timeline.
+  await expect(page.getByRole("region", { name: "每日行程", exact: true }).getByText("JL002").first()).toBeVisible();
   await expect(page.getByText("JL003")).toHaveCount(0);
   await openTab(page, "最近變更");
   await expect(page.getByText("修改了固定行程").first()).toBeVisible();
@@ -809,9 +815,11 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   const mobilePage = await mobileContext.newPage();
   await mobilePage.goto("/");
   await openTrip(mobilePage, name);
-  await expect(mobilePage.getByText("JL002").first()).toBeVisible();
-  await expect(mobilePage.getByText(/2027-11-01 11:00 · America\/Los_Angeles \(.+, -07:00\)/).first()).toBeVisible();
-  await expect(mobilePage.getByText(/2027-11-02 14:00 · Asia\/Tokyo \(.+, \+09:00\)/).first()).toBeVisible();
+  // The hidden overview panel also lists the flight, so look inside the visible itinerary panel.
+  const mobileItinerary = mobilePage.locator("#trip-panel-itinerary");
+  await expect(mobileItinerary.getByText("JL002").first()).toBeVisible();
+  await expect(mobileItinerary.getByText(/2027-11-01 11:00 · America\/Los_Angeles \(.+, -07:00\)/).first()).toBeVisible();
+  await expect(mobileItinerary.getByText(/2027-11-02 14:00 · Asia\/Tokyo \(.+, \+09:00\)/).first()).toBeVisible();
   const shellBox = await mobilePage.locator("#trip-panel-itinerary .trip-skeleton-shell").boundingBox();
   expect(shellBox?.x).toBeGreaterThanOrEqual(0);
   expect(shellBox ? shellBox.x + shellBox.width : Number.POSITIVE_INFINITY).toBeLessThanOrEqual(390);

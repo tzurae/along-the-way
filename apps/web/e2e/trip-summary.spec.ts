@@ -336,6 +336,9 @@ test("private trips work across four identities, viewports, and rejection paths"
   }
 
   await page.reload();
+  // A reload selects the first listed trip; other specs' trips may be listed before this one.
+  await page.getByRole("button", { name: /^大阪京都家庭旅行 \d+ 位成員/ }).click();
+  await expect(page.getByRole("heading", { name: "大阪京都家庭旅行", exact: true })).toBeVisible();
   await openTab(page, "總覽");
   await expect(page.getByText("wife@example.test")).toBeVisible();
   await expect(page.getByText("mother@example.test")).toBeVisible();

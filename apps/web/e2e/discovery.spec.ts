@@ -105,7 +105,8 @@ async function openTab(page: Page, name: "AI 找地點" | "想去清單") {
 }
 
 async function cleanup() {
-  await executeDatabase("delete from trips where name like 'Discovery browser %'; delete from users where email like 'discovery-%@example.test';");
+  // Trips now start with flight endpoints, whose country-stop references block a direct trip delete.
+  await executeDatabase("delete from itinerary_items where trip_id in (select id from trips where name like 'Discovery browser %'); delete from trips where name like 'Discovery browser %'; delete from users where email like 'discovery-%@example.test';");
 }
 
 test.beforeEach(() => executeDatabase("truncate table rate_limit_windows"));

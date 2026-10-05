@@ -329,7 +329,8 @@ test("members keep independent wishlist contributions and votes on desktop", asy
   await expect(firstDay.getByRole("article", {
     name: "已規劃的想去清單地點：Cross-surface Cafe",
   })).toBeVisible();
-  await expect(firstDay.getByText(/1 個已規劃項目・¥1,200/)).toBeVisible();
+  // The required outbound flight lands on the first day, so the day also lists it.
+  await expect(firstDay.getByText(/2 個已規劃項目・¥1,200/)).toBeVisible();
   await openTab(ownerPage, "想去清單");
   await expect(mergedCard.getByText("已排在 2026-11-03")).toBeVisible();
   await openTab(ownerPage, "行程");
