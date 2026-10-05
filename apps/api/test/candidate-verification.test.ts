@@ -20,8 +20,8 @@ function place(name: string, providerPlaceId: string): RatedPlaceCandidate {
 function researched(overrides: Partial<ResearchedCandidate>): ResearchedCandidate {
   return {
     name: "伊根舟屋", localName: null, englishName: null, area: "伊根町", category: "Scenery", namedPlace: null,
-    recommendation: "Boathouses over the bay.", matchedNeeds: [], tradeoffs: [], unknowns: [], confidence: "high",
-    sources: [], ...overrides,
+    recommendationSentences: [{ text: "Boathouses over the bay.", sourceUrls: [] }],
+    matchedNeeds: [], tradeoffSentences: [], unknowns: [], confidence: "high", sources: [], ...overrides,
   };
 }
 

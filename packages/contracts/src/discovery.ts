@@ -68,6 +68,11 @@ export interface DiscoveryShortfallDto {
   count: number | null;
 }
 
+export interface DiscoveryClaimSentenceDto {
+  text: string;
+  evidenceIds: string[];
+}
+
 export interface DiscoveryEvidenceDto {
   id: string;
   kind: "google-place" | "web-source";
@@ -77,6 +82,7 @@ export interface DiscoveryEvidenceDto {
   attribution: string;
   observedAt: string;
   expiresAt: string | null;
+  isStale: boolean;
 }
 
 export interface CandidateProposalDto {
@@ -90,8 +96,12 @@ export interface CandidateProposalDto {
   longitude: number | null;
   sourceUrl: string | null;
   recommendation: string;
+  /** Sentence-level recommendation attribution; null for proposals created before this contract. */
+  recommendationSentences: DiscoveryClaimSentenceDto[] | null;
   matchedNeeds: string[];
   tradeoffs: string[];
+  /** Sentence-level tradeoff attribution; null for proposals created before this contract. */
+  tradeoffSentences: DiscoveryClaimSentenceDto[] | null;
   unknowns: string[];
   confidence: DiscoveryConfidence;
   status: DiscoveryProposalStatus;
@@ -281,6 +291,22 @@ function searchPlan(value: unknown): DiscoverySearchPlanDto {
   };
 }
 
+function claimSentence(value: unknown): DiscoveryClaimSentenceDto {
+  const item = record(value);
+  return {
+    text: text(item.text),
+    evidenceIds: strings(item.evidenceIds),
+  };
+}
+
+function nullableClaimSentences(value: unknown) {
+  return value === null
+    ? null
+    : Array.isArray(value)
+      ? value.map(claimSentence)
+      : invalid();
+}
+
 function evidence(value: unknown): DiscoveryEvidenceDto {
   const item = record(value);
   if (item.kind !== "google-place" && item.kind !== "web-source") invalid();
@@ -293,6 +319,7 @@ function evidence(value: unknown): DiscoveryEvidenceDto {
     attribution: text(item.attribution),
     observedAt: text(item.observedAt),
     expiresAt: nullableText(item.expiresAt),
+    isStale: typeof item.isStale === "boolean" ? item.isStale : invalid(),
   };
 }
 
@@ -311,8 +338,10 @@ function proposal(value: unknown): CandidateProposalDto {
     longitude: nullableNumber(item.longitude, -180, 180),
     sourceUrl: nullableText(item.sourceUrl),
     recommendation: text(item.recommendation),
+    recommendationSentences: nullableClaimSentences(item.recommendationSentences),
     matchedNeeds: strings(item.matchedNeeds),
     tradeoffs: strings(item.tradeoffs),
+    tradeoffSentences: nullableClaimSentences(item.tradeoffSentences),
     unknowns: strings(item.unknowns),
     confidence: item.confidence as DiscoveryConfidence,
     status: item.status as DiscoveryProposalStatus,

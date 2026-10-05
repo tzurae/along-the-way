@@ -4,6 +4,7 @@ import { Bot, Check, ExternalLink, Images, RefreshCw, Search, X } from "lucide-r
 import {
   parseDiscoveryWorkspaceResponse,
   type CandidateProposalDto,
+  type DiscoveryClaimSentenceDto,
   type DiscoveryEndorsement,
   type DiscoveryShortfallDto,
   type DiscoveryWorkspaceDto,
@@ -100,6 +101,54 @@ function shortfallText(shortfall: DiscoveryShortfallDto, t: Messages["discovery"
     case "no_location":
       return t.shortfall.noLocation;
   }
+}
+
+function ClaimSentenceList({
+  sentences,
+  evidence,
+  t,
+}: {
+  sentences: DiscoveryClaimSentenceDto[];
+  evidence: CandidateProposalDto["evidence"];
+  t: Messages["discovery"];
+}) {
+  const numberedEvidence = new Map(
+    evidence.map((item, index) => [item.id, { item, number: index + 1 }]),
+  );
+  return (
+    <ul className="grid list-disc gap-2 pl-5 text-sm">
+      {sentences.map((sentence, sentenceIndex) => {
+        const cited = sentence.evidenceIds.flatMap((id) => {
+          const numbered = numberedEvidence.get(id);
+          return numbered ? [numbered] : [];
+        });
+        return (
+          <li key={`${sentenceIndex}:${sentence.text}`}>
+            <span>{sentence.text}</span>
+            {cited.length ? (
+              <span className="ml-1 inline-flex flex-wrap items-baseline gap-1">
+                {cited.map(({ item, number }) => (
+                  <a
+                    key={item.id}
+                    className="text-xs font-bold text-accent-strong underline"
+                    href={item.sourceUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label={t.proposal.citationLabel(number, item.title)}
+                  >
+                    [{number}]
+                  </a>
+                ))}
+                {cited.some(({ item }) => item.isStale)
+                  ? <span className="text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span>
+                  : null}
+              </span>
+            ) : <span className="ml-2 text-xs text-muted-foreground">{t.proposal.inference}</span>}
+          </li>
+        );
+      })}
+    </ul>
+  );
 }
 
 
@@ -297,10 +346,43 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
                   <article key={proposal.id} className="grid content-start gap-4 rounded-panel border border-ink/10 bg-surface-subtle p-4" aria-label={t.proposal.ariaLabel(proposal.name)}>
                     <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{proposal.category ?? t.placeType[proposal.type]}・{t.proposal.confidence(t.confidence[proposal.confidence])}</p><h4 className="font-display text-2xl">{proposal.name}</h4><p className="text-sm text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</p></div><span className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{t.status[proposal.status]}</span></div>
                     {proposal.endorsements.length ? <div aria-label={t.proposal.recommendedByFor(proposal.name)}><strong>{t.proposal.recommendedBy}</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabel(endorsement, t)}</li>)}</ul></div> : null}
-                    <p>{proposal.recommendation}</p>
+                    {proposal.recommendationSentences !== null
+                      ? <ClaimSentenceList sentences={proposal.recommendationSentences} evidence={proposal.evidence} t={t} />
+                      : <p>{proposal.recommendation}</p>}
                     <a className="inline-flex min-h-10 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(proposal.name, proposal.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.proposal.viewPhotos}</a>
-                    <div className="grid gap-3 sm:grid-cols-3"><div><strong>{t.proposal.matches}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.matchedNeeds.map((item) => <li key={item}>{item}</li>)}</ul></div><div><strong>{t.proposal.tradeoffs}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul></div><div><strong>{t.proposal.unknowns}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.unknowns.map((item) => <li key={item}>{item}</li>)}</ul></div></div>
-                    <div><strong>{t.proposal.evidence}</strong><ul className="mt-1 grid gap-1">{proposal.evidence.map((item) => <li key={item.id}><a className="inline-flex items-center gap-1 break-all font-bold text-accent-strong underline" href={item.sourceUrl} target="_blank" rel="noreferrer">{item.title}<ExternalLink aria-hidden="true" className="size-3" /></a><span className="ml-2 text-xs text-muted-foreground">{item.attribution}・{t.proposal.observedAt(new Date(item.observedAt).toLocaleString(locale))}</span></li>)}</ul></div>
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <div><strong>{t.proposal.matches}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.matchedNeeds.map((item) => <li key={item}>{item}</li>)}</ul></div>
+                      <div>
+                        <strong>{t.proposal.tradeoffs}</strong>
+                        {proposal.tradeoffSentences !== null
+                          ? <ClaimSentenceList sentences={proposal.tradeoffSentences} evidence={proposal.evidence} t={t} />
+                          : <ul className="mt-1 list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul>}
+                      </div>
+                      <div><strong>{t.proposal.unknowns}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.unknowns.map((item) => <li key={item}>{item}</li>)}</ul></div>
+                    </div>
+                    <div>
+                      <strong>{t.proposal.evidence}</strong>
+                      <ul className="mt-1 grid gap-1">
+                        {proposal.evidence.map((item, evidenceIndex) => {
+                          const number = evidenceIndex + 1;
+                          return (
+                            <li key={item.id}>
+                              <a
+                                className="inline-flex items-center gap-1 break-all font-bold text-accent-strong underline"
+                                href={item.sourceUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                aria-label={t.proposal.citationLabel(number, item.title)}
+                              >
+                                [{number}] {item.title}<ExternalLink aria-hidden="true" className="size-3" />
+                              </a>
+                              <span className="ml-2 text-xs text-muted-foreground">{item.attribution}・{t.proposal.observedAt(new Date(item.observedAt).toLocaleString(locale))}</span>
+                              {item.isStale ? <span className="ml-2 text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span> : null}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
                     {proposal.status === "pending" ? <div className="flex flex-wrap gap-2"><button className="flex min-h-10 items-center gap-2 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "accept")}><Check aria-hidden="true" className="size-4" />{t.proposal.accept}</button><button className="flex min-h-10 items-center gap-2 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "reject")}><X aria-hidden="true" className="size-4" />{t.proposal.decline}</button></div> : null}
                   </article>
                 ))}

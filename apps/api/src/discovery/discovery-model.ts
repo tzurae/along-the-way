@@ -61,6 +61,12 @@ export interface DiscoveryWebSource {
 /** What the research model says a cited page is; checked against the host before it counts. */
 export type WebSourceType = "government" | "tourism_board" | "wikivoyage" | "place_official" | "other";
 
+export interface DiscoveryClaimSentence {
+  text: string;
+  /** Only URLs returned by web search during this research request. */
+  sourceUrls: string[];
+}
+
 export interface ResearchedCandidate {
   /** Name in the output language. */
   name: string;
@@ -73,9 +79,9 @@ export interface ResearchedCandidate {
   category: string | null;
   /** The traveler-named place this answers, exactly as in the request, or null. */
   namedPlace: string | null;
-  recommendation: string;
+  recommendationSentences: DiscoveryClaimSentence[];
   matchedNeeds: string[];
-  tradeoffs: string[];
+  tradeoffSentences: DiscoveryClaimSentence[];
   unknowns: string[];
   confidence: DiscoveryConfidence;
   /** Only URLs web search actually returned. */

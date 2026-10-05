@@ -3,6 +3,7 @@ import { isRecord } from "@along-the-way/contracts/private-trips";
 import {
   DiscoveryModelResponseError,
   DiscoveryModelUnavailableError,
+  type DiscoveryClaimSentence,
   type DiscoveryModel,
   type DiscoveryPlanResult,
   type DiscoveryResearchResult,
@@ -66,6 +67,40 @@ function asStrings(value: unknown, maximum: number, message: string) {
     throw new DiscoveryModelResponseError(message);
   }
   return [...new Set(value.map((entry) => entry.trim()).filter(Boolean))];
+}
+
+function plainClaimText(value: unknown, message: string) {
+  const text = asString(value, message)
+    .replace(/\(\s*!?\[[^\]]*\]\([^)]*\)\s*\)/gu, "")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/gu, "$1")
+    .replace(/cite[^]*/gu, "")
+    .replace(/【[^】]*[†‡][^】]*】/gu, "")
+    .replace(/\[(?:\^?\d+(?:\s*[-,]\s*\d+)*|source\s*\d*|來源\s*\d*|出處\s*\d*)\]/giu, "")
+    .replace(/\s+/gu, " ")
+    .replace(/\s+([,.;:!?，。；：！？])/gu, "$1")
+    .trim();
+  return text;
+}
+
+function claimSentences(
+  value: unknown,
+  allowedSources: ReadonlySet<string>,
+  message: string,
+): DiscoveryClaimSentence[] {
+  if (!Array.isArray(value) || value.length > 12) {
+    throw new DiscoveryModelResponseError(message);
+  }
+  return value.flatMap((raw) => {
+    const item = asObject(raw, message);
+    const text = plainClaimText(item.text, message);
+    if (!text) return [];
+    const sourceUrls: string[] = [];
+    for (const rawUrl of asStrings(item.sourceUrls, 8, message)) {
+      const url = httpUrl(rawUrl);
+      if (url && allowedSources.has(url) && !sourceUrls.includes(url)) sourceUrls.push(url);
+    }
+    return [{ text, sourceUrls }];
+  });
 }
 
 function httpUrl(value: unknown) {
@@ -199,6 +234,14 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
 
   async research(input: Parameters<DiscoveryModel["research"]>[0]): Promise<DiscoveryResearchResult> {
     const namedPlaces = input.request.namedPlaces.map((place) => place.name);
+    const claimArraySchema = {
+      type: "array",
+      maxItems: 12,
+      items: objectSchema({
+        text: { type: "string" },
+        sourceUrls: stringArray(8),
+      }),
+    } as const;
     const schema = objectSchema({
       candidates: {
         type: "array",
@@ -213,9 +256,9 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
           namedPlace: namedPlaces.length
             ? { anyOf: [{ type: "string", enum: namedPlaces }, { type: "null" }] }
             : { type: "null" },
-          recommendation: { type: "string" },
+          recommendation: { ...claimArraySchema, minItems: 1 },
           matchedNeeds: stringArray(12),
-          tradeoffs: stringArray(12),
+          tradeoffs: claimArraySchema,
           unknowns: stringArray(12),
           confidence: { type: "string", enum: ["high", "medium", "low"] },
           sources: {
@@ -240,8 +283,9 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
             "Never recommend anything in request.alreadyArranged, request.exclusions, or rejectedPlaces.",
             "name is the place's own name in outputLanguage, exactly as it is commonly written; localName is its own name in request.localLanguage; englishName is its own English name; area is the city to look it up in, in request.localLanguage.",
             "sources: cite only URLs web search returned that describe or recommend the place, labeled government (a government site), tourism_board (an official tourism organization), wikivoyage (a Wikivoyage page), place_official (the place's own website), or other.",
+            "recommendation and tradeoffs are lists of short, standalone plain-text sentences. For each sentence, sourceUrls cites only the web-search result URLs that support that sentence. Never put Markdown links or citation markers in text. Use an empty sourceUrls list for model inference.",
             "Do not invent opening hours, price, route time, accessibility, or availability; put missing critical facts in unknowns.",
-            "Write every recommendation, matchedNeeds, tradeoffs, and unknowns entry in outputLanguage, translating facts from sources in other languages.",
+            "Write every recommendation sentence, matchedNeeds entry, tradeoff sentence, and unknowns entry in outputLanguage, translating facts from sources in other languages.",
             `Return at most ${MAX_RESEARCHED} candidates and only the required schema.`,
           ].join(" "),
         },
@@ -272,7 +316,6 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
       if (!key || seen.has(key)) continue;
       if (category === null ? namedPlace === null : !input.request.categories.includes(category)) continue;
       if (namedPlace !== null && !namedPlaces.includes(namedPlace)) continue;
-      seen.add(key);
       const sources = new Map<string, WebSourceType>();
       for (const rawSource of item.sources) {
         const source = asObject(rawSource, "AI discovery returned an invalid source");
@@ -281,6 +324,18 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
         // Only pages web search actually returned may vouch for a place.
         if (url && type && allowedSources.has(url) && !sources.has(url)) sources.set(url, type);
       }
+      const recommendationSentences = claimSentences(
+        item.recommendation,
+        allowedSources,
+        "AI discovery returned invalid recommendation sentences",
+      );
+      if (!recommendationSentences.length) continue;
+      const tradeoffSentences = claimSentences(
+        item.tradeoffs,
+        allowedSources,
+        "AI discovery returned invalid tradeoff sentences",
+      );
+      seen.add(key);
       candidates.push({
         name,
         localName: asNullableString(item.localName, "AI discovery returned an invalid local name")?.trim() || null,
@@ -288,9 +343,9 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
         area: asString(item.area, "AI discovery omitted a place area").trim(),
         category,
         namedPlace,
-        recommendation: asString(item.recommendation, "AI discovery omitted its recommendation"),
+        recommendationSentences,
         matchedNeeds: asStrings(item.matchedNeeds, 12, "AI discovery returned invalid matched needs"),
-        tradeoffs: asStrings(item.tradeoffs, 12, "AI discovery returned invalid tradeoffs"),
+        tradeoffSentences,
         unknowns: asStrings(item.unknowns, 12, "AI discovery returned invalid unknowns"),
         confidence,
         sources: [...sources].map(([url, type]) => ({ url, type })),

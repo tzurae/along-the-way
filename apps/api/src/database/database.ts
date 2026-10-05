@@ -265,6 +265,10 @@ export interface CandidateProposalTable {
   category: string | null;
   /** DiscoveryEndorsement[]; empty for proposals from before endorsements were recorded. */
   endorsements: Generated<unknown>;
+  /** DiscoveryClaimSentenceDto[]; null for proposals created before sentence attribution. */
+  recommendation_sentences: Generated<unknown | null>;
+  /** DiscoveryClaimSentenceDto[]; null for proposals created before sentence attribution. */
+  tradeoff_sentences: Generated<unknown | null>;
 }
 
 export interface CandidateProposalEvidenceTable {

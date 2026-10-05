@@ -209,10 +209,13 @@ class ControlledDiscoveryModel implements DiscoveryModel {
           area: "Kyoto",
           category: "Food markets",
           matchedNeeds: ["gardens"],
-          tradeoffs: [],
+          tradeoffSentences: [],
           unknowns: [],
           confidence: "medium" as const,
-          recommendation: `${name} is a quiet garden.`,
+          recommendationSentences: [{
+            text: `${name} is a quiet garden.`,
+            sourceUrls: ["https://kyoto.example.test/gardens"],
+          }],
           sources: [{ url: "https://kyoto.example.test/gardens", type: "tourism_board" as const }],
         })),
       };
@@ -221,7 +224,7 @@ class ControlledDiscoveryModel implements DiscoveryModel {
       area: "Kyoto",
       category: "Food markets",
       matchedNeeds: ["food markets"],
-      tradeoffs: [],
+      tradeoffSentences: [],
       unknowns: ["holiday opening hours"],
       confidence: "medium" as const,
     };
@@ -229,6 +232,7 @@ class ControlledDiscoveryModel implements DiscoveryModel {
       modelId: this.modelId,
       sources: [
         { url: "https://kyoto.example.test/nishiki", title: "Official Nishiki Market guide" },
+        { url: "https://travel.example.test/nishiki-crowds", title: "When to visit Nishiki Market" },
         { url: "https://kyoto.example.test/tiny-cafe", title: "Tiny Cafe feature" },
       ],
       candidates: [
@@ -238,8 +242,14 @@ class ControlledDiscoveryModel implements DiscoveryModel {
           localName: "錦市場",
           englishName: "Nishiki Market",
           namedPlace: "Nishiki Market",
-          recommendation: "A compact food-market stop matching the trip's main interest.",
-          tradeoffs: ["busy around lunch"],
+          recommendationSentences: [{
+            text: "A compact food-market stop matching the trip's main interest.",
+            sourceUrls: ["https://kyoto.example.test/nishiki"],
+          }],
+          tradeoffSentences: [{
+            text: "Busy around lunch.",
+            sourceUrls: ["https://travel.example.test/nishiki-crowds"],
+          }],
           sources: [{ url: "https://kyoto.example.test/nishiki", type: "tourism_board" }],
         },
         {
@@ -248,7 +258,10 @@ class ControlledDiscoveryModel implements DiscoveryModel {
           localName: null,
           englishName: null,
           namedPlace: null,
-          recommendation: "A quiet coffee stop.",
+          recommendationSentences: [{
+            text: "A quiet coffee stop.",
+            sourceUrls: ["https://kyoto.example.test/tiny-cafe"],
+          }],
           sources: [{ url: "https://kyoto.example.test/tiny-cafe", type: "tourism_board" }],
         },
         {
@@ -257,7 +270,7 @@ class ControlledDiscoveryModel implements DiscoveryModel {
           localName: "高雄",
           englishName: "Takao",
           namedPlace: null,
-          recommendation: "Mountain temples with early autumn leaves.",
+          recommendationSentences: [{ text: "Mountain temples with early autumn leaves.", sourceUrls: [] }],
           sources: [],
         },
       ],
@@ -483,6 +496,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       "google-place:Google Maps",
       "web-source:Official tourism site",
       "web-source:Wikivoyage",
+      "web-source:travel.example.test",
     ]);
     expect(generated.latestRun?.searchPlan).toMatchObject({
       categories: ["Food markets"],
@@ -563,6 +577,82 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(confirmed.status).toBe(200);
     expect(parseDiscoveryWorkspaceResponse(await confirmed.json()).discovery.feedback[0]?.status)
       .toBe("confirmed");
+  });
+
+  it("links generated claim sentences to evidence from their run and reports stale evidence", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "claim-brief", {
+      originalText: "Food markets at an unhurried pace.",
+      expectedVersion: null,
+    })).status).toBe(200);
+    const generation = discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "claim-run", {
+      expectedBriefVersion: 1,
+    });
+    await model.planStarted;
+    model.releasePlan();
+    const generatedResponse = await generation;
+    expect(generatedResponse.status).toBe(200);
+    const generated = parseDiscoveryWorkspaceResponse(await generatedResponse.json()).discovery;
+    const proposal = generated.proposals[0];
+    if (!proposal) throw new Error("Expected proposal");
+
+    expect(proposal.recommendationSentences).toEqual([{
+      text: "A compact food-market stop matching the trip's main interest.",
+      evidenceIds: [expect.any(String)],
+    }]);
+    expect(proposal.tradeoffSentences).toEqual([{
+      text: "Busy around lunch.",
+      evidenceIds: [expect.any(String)],
+    }]);
+    expect(proposal.recommendation).toBe("A compact food-market stop matching the trip's main interest.");
+    expect(proposal.tradeoffs).toEqual(["Busy around lunch."]);
+    const evidenceIds = new Set(proposal.evidence.map((item) => item.id));
+    const citedIds = [
+      ...(proposal.recommendationSentences ?? []),
+      ...(proposal.tradeoffSentences ?? []),
+    ].flatMap((sentence) => sentence.evidenceIds);
+    expect(citedIds).toHaveLength(2);
+    expect(citedIds.every((id) => evidenceIds.has(id))).toBe(true);
+    expect(proposal.evidence.filter((item) => item.kind === "web-source")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceUrl: "https://kyoto.example.test/nishiki",
+          expiresAt: "2026-10-28T12:00:00.000Z",
+          isStale: false,
+        }),
+        expect.objectContaining({
+          sourceUrl: "https://travel.example.test/nishiki-crowds",
+          title: "When to visit Nishiki Market",
+          attribution: "travel.example.test",
+          expiresAt: "2026-10-28T12:00:00.000Z",
+          isStale: false,
+        }),
+      ]),
+    );
+    const linkedEvidence = await database.selectFrom("candidate_proposal_evidence as link")
+      .innerJoin("discovery_evidence as evidence", "evidence.id", "link.evidence_id")
+      .select(["evidence.id", "evidence.run_id"])
+      .where("link.proposal_id", "=", proposal.id)
+      .execute();
+    expect(linkedEvidence.map((item) => item.id)).toEqual(expect.arrayContaining(citedIds));
+    expect(new Set(linkedEvidence.map((item) => item.run_id))).toEqual(new Set([proposal.runId]));
+
+    await database.updateTable("discovery_evidence")
+      .set({ expires_at: "2026-09-27T12:00:00.000Z" })
+      .where("run_id", "=", proposal.runId)
+      .where("evidence_kind", "=", "google-place")
+      .execute();
+    await database.updateTable("discovery_evidence")
+      .set({ observed_at: "2026-08-27T12:00:00.000Z", expires_at: null })
+      .where("run_id", "=", proposal.runId)
+      .where("evidence_kind", "=", "web-source")
+      .execute();
+    const refreshedResponse = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
+    expect(refreshedResponse.status).toBe(200);
+    const refreshed = parseDiscoveryWorkspaceResponse(await refreshedResponse.json()).discovery.proposals[0];
+    expect(refreshed?.evidence).not.toHaveLength(0);
+    expect(refreshed?.evidence.every((item) => item.isStale)).toBe(true);
   });
 
   it("keeps earlier decisions after a new run and never proposes those places again", async () => {
@@ -782,7 +872,13 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       shortfalls: [],
       searchPlan: { queries: ["Kyoto food markets"], categories: ["market"], defaultCategories: false, namedPlaces: [], alreadyArranged: [] },
     });
-    expect(workspace.proposals).toEqual([expect.objectContaining({ name: "Nishiki Market", category: null, endorsements: [] })]);
+    expect(workspace.proposals).toEqual([expect.objectContaining({
+      name: "Nishiki Market",
+      category: null,
+      endorsements: [],
+      recommendationSentences: null,
+      tradeoffSentences: null,
+    })]);
   });
 
   it("replays a response stored before the quality checks instead of failing", async () => {
@@ -807,7 +903,19 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
           providerPlaceId: market.providerPlaceId, name: market.name, type: market.type, address: market.address,
           latitude: market.latitude, longitude: market.longitude, sourceUrl: market.sourceUrl,
           recommendation: "An older recommendation.", matchedNeeds: [], tradeoffs: [], unknowns: [], confidence: "medium",
-          status: "pending", evidence: [], acceptedTripPlaceId: null, version: 1,
+          status: "pending",
+          evidence: [{
+            id: "00000000-0000-4000-8000-000000004403",
+            kind: "google-place",
+            providerPlaceId: market.providerPlaceId,
+            sourceUrl: market.sourceUrl,
+            title: market.name,
+            attribution: market.attribution,
+            observedAt: market.observedAt,
+            expiresAt: market.expiresAt,
+          }],
+          acceptedTripPlaceId: null,
+          version: 1,
         }],
         feedback: [],
         modelAvailable: true,
@@ -822,7 +930,13 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(replay.status).toBe(200);
     const workspace = parseDiscoveryWorkspaceResponse(await replay.json()).discovery;
     expect(workspace.latestRun).toMatchObject({ shortfalls: [], searchPlan: { namedPlaces: [], defaultCategories: false } });
-    expect(workspace.proposals[0]).toMatchObject({ category: null, endorsements: [] });
+    expect(workspace.proposals[0]).toMatchObject({
+      category: null,
+      endorsements: [],
+      recommendationSentences: null,
+      tradeoffSentences: null,
+      evidence: [expect.objectContaining({ isStale: false })],
+    });
     expect(model.planCalls).toBe(0);
   });
 

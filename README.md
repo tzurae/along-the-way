@@ -44,6 +44,23 @@ bun run build
 Staging setup, HTTPS deployment, persistent data, and rollback are documented in
 [`docs/operations/staging.md`](docs/operations/staging.md).
 
+## AI discovery claim sources (Issue #65)
+
+Each `CandidateProposalDto` from a new research run contains
+`recommendationSentences` and `tradeoffSentences`: ordered `{ text,
+evidenceIds }` entries. `text` is plain text with markdown links and citation
+markers removed. `evidenceIds` reference entries in that proposal's `evidence`
+and may only point to URLs the run's own web search returned; an empty list
+means the sentence is model inference and is shown as unverified. Cited pages
+are stored as `web-source` evidence of that run, expiring 30 days after they
+were observed. Proposals created before migration `013_discovery_claims` keep
+`null` sentence lists and show their original `recommendation` and `tradeoffs`;
+no sources are invented for them.
+
+Every evidence entry reports `isStale`: true once its `expiresAt` has passed,
+or, for web sources stored without an expiry, 30 days after `observedAt`.
+Stale evidence is labelled for re-checking and is never refreshed automatically.
+
 ## Activity participants (Issue #21)
 
 This slice of [Issue #21](https://github.com/tzurae/along-the-way/issues/21)

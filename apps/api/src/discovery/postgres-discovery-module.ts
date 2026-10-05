@@ -35,6 +35,7 @@ import {
 import {
   DiscoveryModelResponseError,
   DiscoveryModelUnavailableError,
+  type DiscoveryClaimSentence,
   type DiscoveryModel,
   type DiscoverySearchPlan,
   type DiscoveryTripFacts,
@@ -70,6 +71,7 @@ const RESEARCH_PER_TRIP_PER_HOUR = 6;
 /** Research runs one member may start per hour, across all trips. */
 const RESEARCH_PER_ACCOUNT_PER_HOUR = 10;
 const GENERATE_OPERATION_PREFIX = "discovery:generate:";
+const WEB_EVIDENCE_FRESHNESS_MS = 30 * 24 * 60 * 60 * 1_000;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EMPTY_PLAN: DiscoverySearchPlan = {
@@ -114,9 +116,20 @@ function jsonStrings(value: unknown) {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
+function jsonClaimSentences(value: unknown): CandidateProposalDto["recommendationSentences"] {
+  if (value === null) return null;
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((raw) => {
+    const sentence = jsonObject(raw);
+    return typeof sentence.text === "string"
+      ? [{ text: sentence.text, evidenceIds: jsonStrings(sentence.evidenceIds) }]
+      : [];
+  });
+}
+
 /**
- * Workspace snapshots stored for idempotent replay before quality checks existed lack their
- * fields; a retried request replays them as "none recorded" instead of failing to parse.
+ * Older idempotent workspace snapshots lack later additive fields. A retry uses the
+ * documented empty or unknown value instead of rejecting a response already returned.
  */
 function upgradeStoredWorkspace(value: unknown) {
   const workspace = jsonObject(value);
@@ -129,7 +142,19 @@ function upgradeStoredWorkspace(value: unknown) {
       searchPlan: { defaultCategories: false, namedPlaces: [], alreadyArranged: [], ...jsonObject(run.searchPlan) },
     },
     proposals: Array.isArray(workspace.proposals)
-      ? workspace.proposals.map((proposal) => ({ category: null, endorsements: [], ...jsonObject(proposal) }))
+      ? workspace.proposals.map((proposal) => {
+        const item = jsonObject(proposal);
+        return {
+          category: null,
+          endorsements: [],
+          recommendationSentences: null,
+          tradeoffSentences: null,
+          ...item,
+          evidence: Array.isArray(item.evidence)
+            ? item.evidence.map((entry) => ({ isStale: false, ...jsonObject(entry) }))
+            : item.evidence,
+        };
+      })
       : workspace.proposals,
     decided: Array.isArray(workspace.decided) ? workspace.decided : [],
   };
@@ -376,6 +401,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         const webSource = async (url: string, title: string, attribution: string) => {
           const existing = webEvidence.get(url);
           if (existing) return existing;
+          const observedAt = this.now();
           const row = await transaction.insertInto("discovery_evidence").values({
             trip_id: tripId,
             run_id: run.id,
@@ -384,12 +410,30 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
             source_url: url,
             title,
             attribution,
-            observed_at: this.now(),
-            expires_at: null,
+            observed_at: observedAt,
+            expires_at: new Date(observedAt.getTime() + WEB_EVIDENCE_FRESHNESS_MS),
             facts: { sourceOnly: true },
           }).returning("id").executeTakeFirstOrThrow();
           webEvidence.set(url, row.id);
           return row.id;
+        };
+        const storeClaimSentences = async (
+          sentences: DiscoveryClaimSentence[],
+          proposalEvidenceIds: string[],
+        ) => {
+          const stored: NonNullable<CandidateProposalDto["recommendationSentences"]> = [];
+          for (const sentence of sentences) {
+            const citedEvidenceIds: string[] = [];
+            for (const url of sentence.sourceUrls) {
+              const title = sourceTitles.get(url);
+              if (!title) continue;
+              const evidenceId = await webSource(url, title, new URL(url).hostname);
+              if (!citedEvidenceIds.includes(evidenceId)) citedEvidenceIds.push(evidenceId);
+              proposalEvidenceIds.push(evidenceId);
+            }
+            stored.push({ text: sentence.text, evidenceIds: citedEvidenceIds });
+          }
+          return stored;
         };
         for (const { index, members, endorsements } of verification.gate.shown) {
           const { researched, place } = verification.candidates[index]!;
@@ -409,29 +453,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
             observed_at: place.observedAt,
             expires_at: place.expiresAt,
             facts: place,
-          }).returning("id").executeTakeFirstOrThrow();
-          const proposal = await transaction.insertInto("candidate_proposals").values({
-            trip_id: tripId,
-            run_id: run.id,
-            provider_place_id: place.providerPlaceId,
-            name: place.name,
-            place_type: place.type,
-            address: place.address,
-            latitude: place.latitude,
-            longitude: place.longitude,
-            source_url: place.sourceUrl,
-            recommendation: researched.recommendation,
-            matched_needs: JSON.stringify(researched.matchedNeeds),
-            tradeoffs: JSON.stringify(researched.tradeoffs),
-            unknowns: JSON.stringify(researched.unknowns),
-            confidence: researched.confidence,
-            status: "pending",
-            accepted_trip_place_id: null,
-            decided_by: null,
-            decided_at: null,
-            // A named place of no requested kind shows the kind a merged entry was found for.
-            category: researched.category ?? merged.find((entry) => entry.researched.category)?.researched.category ?? null,
-            endorsements: JSON.stringify(endorsements),
           }).returning("id").executeTakeFirstOrThrow();
           const evidenceIds = [googleEvidence.id];
           const official = new Set<string>();
@@ -456,6 +477,33 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
               "Place's own website",
             ));
           }
+          const recommendationSentences = await storeClaimSentences(researched.recommendationSentences, evidenceIds);
+          const tradeoffSentences = await storeClaimSentences(researched.tradeoffSentences, evidenceIds);
+          const proposal = await transaction.insertInto("candidate_proposals").values({
+            trip_id: tripId,
+            run_id: run.id,
+            provider_place_id: place.providerPlaceId,
+            name: place.name,
+            place_type: place.type,
+            address: place.address,
+            latitude: place.latitude,
+            longitude: place.longitude,
+            source_url: place.sourceUrl,
+            recommendation: recommendationSentences.map((sentence) => sentence.text).join(" "),
+            matched_needs: JSON.stringify(researched.matchedNeeds),
+            tradeoffs: JSON.stringify(tradeoffSentences.map((sentence) => sentence.text)),
+            unknowns: JSON.stringify(researched.unknowns),
+            confidence: researched.confidence,
+            status: "pending",
+            accepted_trip_place_id: null,
+            decided_by: null,
+            decided_at: null,
+            // A named place of no requested kind shows the kind a merged entry was found for.
+            category: researched.category ?? merged.find((entry) => entry.researched.category)?.researched.category ?? null,
+            endorsements: JSON.stringify(endorsements),
+            recommendation_sentences: JSON.stringify(recommendationSentences),
+            tradeoff_sentences: JSON.stringify(tradeoffSentences),
+          }).returning("id").executeTakeFirstOrThrow();
           await transaction.insertInto("candidate_proposal_evidence").values(
             [...new Set(evidenceIds)].map((evidenceId) => ({ proposal_id: proposal.id, evidence_id: evidenceId })),
           ).execute();
@@ -995,8 +1043,13 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         .execute()
       : [];
     const evidenceByProposal = new Map<string, CandidateProposalDto["evidence"]>();
+    const workspaceReadAt = this.now().getTime();
     for (const row of evidenceRows) {
       const values = evidenceByProposal.get(row.proposal_id) ?? [];
+      const staleAt = row.expires_at?.getTime()
+        ?? (row.evidence_kind === "web-source"
+          ? row.observed_at.getTime() + WEB_EVIDENCE_FRESHNESS_MS
+          : null);
       values.push({
         id: row.id,
         kind: row.evidence_kind,
@@ -1006,6 +1059,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         attribution: row.attribution,
         observedAt: isoTimestamp(row.observed_at),
         expiresAt: row.expires_at ? isoTimestamp(row.expires_at) : null,
+        isStale: staleAt !== null && staleAt < workspaceReadAt,
       });
       evidenceByProposal.set(row.proposal_id, values);
     }
@@ -1044,8 +1098,10 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         longitude: proposal.longitude,
         sourceUrl: proposal.source_url,
         recommendation: proposal.recommendation,
+        recommendationSentences: jsonClaimSentences(proposal.recommendation_sentences),
         matchedNeeds: jsonStrings(proposal.matched_needs),
         tradeoffs: jsonStrings(proposal.tradeoffs),
+        tradeoffSentences: jsonClaimSentences(proposal.tradeoff_sentences),
         unknowns: jsonStrings(proposal.unknowns),
         confidence: proposal.confidence,
         status: proposal.status,

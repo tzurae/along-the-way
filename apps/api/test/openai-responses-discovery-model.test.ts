@@ -50,7 +50,7 @@ function researched(overrides: Record<string, unknown>) {
     area: "京都市",
     category: "Temples",
     namedPlace: null,
-    recommendation: "Autumn leaves from Tsutenkyo bridge.",
+    recommendation: [{ text: "Autumn leaves from Tsutenkyo bridge.", sourceUrls: [] }],
     matchedNeeds: ["temples"],
     tradeoffs: [],
     unknowns: [],
@@ -125,13 +125,30 @@ describe("OpenAI Responses discovery model", () => {
     }
   });
 
-  it("researches with web search and keeps only pages web search returned", async () => {
+  it("keeps only this search's citations, strips markdown, and leaves uncited sentences as inference", async () => {
     const official = { url: "https://kyoto.travel/en/tofukuji.html", title: "Tofuku-ji | Kyoto City Official Travel Guide" };
+    const invented = "https://invented.example.test/tofukuji";
     const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => completed({
       candidates: [researched({
+        recommendation: [
+          {
+            text: `Autumn leaves are visible from Tsutenkyo bridge ([kyoto.travel](${official.url}?utm_source=openai)). [1] citeturn0search0`,
+            sourceUrls: [official.url, invented],
+          },
+          { text: "The pacing should feel calm.", sourceUrls: [] },
+          { text: "citeturn0search0", sourceUrls: [official.url] },
+        ],
+        tradeoffs: [
+          {
+            text: `[Crowds](${invented}) can build around noon. 【2†source】`,
+            sourceUrls: [invented, official.url],
+          },
+          { text: "", sourceUrls: [] },
+          { text: "【3†source】", sourceUrls: [official.url] },
+        ],
         sources: [
           { url: official.url, type: "tourism_board" },
-          { url: "https://invented.example.test/tofukuji", type: "government" },
+          { url: invented, type: "government" },
           { url: official.url, type: "other" },
         ],
       })],
@@ -144,6 +161,11 @@ describe("OpenAI Responses discovery model", () => {
     expect(result.candidates).toEqual([expect.objectContaining({
       name: "Tofuku-ji",
       localName: "東福寺",
+      recommendationSentences: [
+        { text: "Autumn leaves are visible from Tsutenkyo bridge.", sourceUrls: [official.url] },
+        { text: "The pacing should feel calm.", sourceUrls: [] },
+      ],
+      tradeoffSentences: [{ text: "Crowds can build around noon.", sourceUrls: [official.url] }],
       sources: [{ url: official.url, type: "tourism_board" }],
     })]);
     expect(result.sources).toEqual([official]);
@@ -154,6 +176,21 @@ describe("OpenAI Responses discovery model", () => {
     const item = body.text.format.schema.properties.candidates.items.properties;
     expect(item.category.anyOf[0].enum).toEqual(["Temples", "Local food"]);
     expect(item.namedPlace.anyOf[0].enum).toEqual(["Saihoji"]);
+  });
+
+  it("drops a candidate when stripping citations leaves no recommendation sentence", async () => {
+    const result = await model(vi.fn(async () => completed({
+      candidates: [
+        researched({
+          name: "Citation-only place",
+          recommendation: [{ text: "【3†source】", sourceUrls: [] }],
+        }),
+        researched({ name: "Empty recommendation place", recommendation: [] }),
+        researched({ name: "Nishiki Market", category: "Local food" }),
+      ],
+    }))).research({ trip: facts, brief, request, confirmedFeedback: [], rejectedPlaces: [], outputLanguage: "en" });
+
+    expect(result.candidates.map((entry) => entry.name)).toEqual(["Nishiki Market"]);
   });
 
   it("drops repeated places and places filed under kinds or named places the request lacks", async () => {
