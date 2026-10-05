@@ -454,9 +454,14 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       // Read after research, which takes minutes, so a place accepted meanwhile is not proposed again.
       const wishlist = await this.database.selectFrom("trip_places as tripPlace")
         .innerJoin("place_identities as identity", "identity.id", "tripPlace.place_id")
+        .innerJoin("places as legacy", (join) => join.onRef("legacy.id", "=", "tripPlace.legacy_place_id")
+          .onRef("legacy.trip_id", "=", "tripPlace.trip_id"))
         .select("identity.provider_place_id")
         .where("tripPlace.trip_id", "=", tripId)
-        .where("tripPlace.archived_at", "is", null)
+        .where((expression) => expression.or([
+          expression("tripPlace.archived_at", "is", null),
+          expression("legacy.travel_only", "=", true),
+        ]))
         .where("identity.provider_place_id", "is not", null)
         .execute();
       const verification = await verifyResearchedCandidates({

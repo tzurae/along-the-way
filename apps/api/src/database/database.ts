@@ -84,6 +84,7 @@ export interface PlaceTable {
   trip_id: string;
   name: string;
   place_type: "airport" | "station" | "lodging" | "restaurant" | "activity" | "other";
+  travel_only: Generated<boolean>;
   address: string | null;
   latitude: number | null;
   longitude: number | null;

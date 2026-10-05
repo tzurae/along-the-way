@@ -79,6 +79,8 @@ export class AppError extends Error {
       | "constraint_not_found"
       | "item_locked"
       | "place_in_use"
+      | "travel_place"
+      | "flight_order"
       | "unauthenticated"
       | "forbidden"
       | "trip_not_found"

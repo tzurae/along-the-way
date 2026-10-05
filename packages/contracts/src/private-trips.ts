@@ -66,11 +66,23 @@ export interface TripSummaryDto {
   role: MemberRole;
 }
 
+export interface TripFlightInput {
+  serviceNumber: string;
+  carrier: string | null;
+  departureAirport: { name: string; timeZone: string };
+  arrivalAirport: { name: string; timeZone: string };
+  departureLocalDateTime: string;
+  arrivalLocalDateTime: string;
+  departureUtcOffset?: string | null;
+  arrivalUtcOffset?: string | null;
+}
+
 export interface CreateTripInput {
   name: string;
   startDate: string;
   endDate: string;
   countryCodes: string[];
+  flights: { outbound: TripFlightInput; return: TripFlightInput };
 }
 
 export interface SessionResponse {

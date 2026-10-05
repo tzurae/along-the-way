@@ -474,6 +474,11 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         .where("place_id", "=", identity.id)
         .forUpdate()
         .executeTakeFirst();
+      if (existing) {
+        const legacy = await transaction.selectFrom("places").select("travel_only")
+          .where("trip_id", "=", tripId).where("id", "=", existing.legacy_place_id).executeTakeFirstOrThrow();
+        if (legacy.travel_only) throw new AppError("travel_place", "Travel-only places cannot be added to the wishlist", 409);
+      }
       const legacyPlace = existing
         ? { id: existing.legacy_place_id, version: existing.legacy_place_version }
         : await transaction.insertInto("places").values({
@@ -1236,6 +1241,25 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       )
     `.execute(transaction);
 
+    // A retained release can mirror travel places while 016 remains applied.
+    // Normalize those active mirrors on redeploy, preserving their contributions.
+    const travelMirrors = await transaction.selectFrom("trip_places as wishlist")
+      .innerJoin("places as place", (join) => join.onRef("place.id", "=", "wishlist.legacy_place_id")
+        .onRef("place.trip_id", "=", "wishlist.trip_id"))
+      .select("wishlist.id").where("wishlist.trip_id", "=", tripId)
+      .where("wishlist.archived_at", "is", null).where("place.travel_only", "=", true).execute();
+    if (travelMirrors.length > 0) {
+      const ids = travelMirrors.map((place) => place.id);
+      // Delete legacy sources before assignments because their triggers derive assignments.
+      for (const table of ["trip_place_desired_days", "trip_place_excluded_days", "trip_place_day_assignments", "trip_place_votes"] as const) {
+        await transaction.deleteFrom(table).where("trip_place_id", "in", ids).execute();
+      }
+      const archivedAt = this.now();
+      await transaction.updateTable("trip_places").set({
+        archived_at: archivedAt, version: sql`version + 1`, updated_at: archivedAt,
+      }).where("trip_id", "=", tripId).where("id", "in", ids).execute();
+    }
+
     await sql`
       update trip_places as trip_place
       set
@@ -1252,6 +1276,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         updated_at = legacy.updated_at
       from places as legacy
       where trip_place.trip_id = ${tripId}
+        and not legacy.travel_only
         and legacy.version > trip_place.legacy_place_version
         and legacy.trip_id = trip_place.trip_id
         and legacy.id = trip_place.legacy_place_id
@@ -1279,6 +1304,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       set legacy_place_version = legacy.version
       from places as legacy
       where trip_place.trip_id = ${tripId}
+        and not legacy.travel_only
         and legacy.version > trip_place.legacy_place_version
         and legacy.trip_id = trip_place.trip_id
         and legacy.id = trip_place.legacy_place_id
@@ -1299,6 +1325,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         on legacy.trip_id = trip_place.trip_id
         and legacy.id = trip_place.legacy_place_id
       where trip_place.trip_id = ${tripId}
+        and not legacy.travel_only
         and identity.id = trip_place.place_id
         and identity.provider = 'manual'
         and legacy.updated_at > identity.updated_at
@@ -1344,6 +1371,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         "origin.created_at",
       ])
       .where("legacy.trip_id", "=", tripId)
+      .where("legacy.travel_only", "=", false)
       .where("tripPlace.id", "is", null)
       .execute();
     for (const legacy of missing) {

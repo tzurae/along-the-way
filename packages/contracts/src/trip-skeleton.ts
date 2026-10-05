@@ -43,6 +43,22 @@ export interface UpdatePlaceInput extends CreatePlaceInput {
   expectedVersion: number;
 }
 
+export interface TripLodgingInput {
+  hotel: {
+    name: string;
+    address?: string | null;
+    latitude?: number | null;
+    longitude?: number | null;
+    timeZone: string;
+    sourceUrl?: string | null;
+  };
+  countryStopId: string;
+  checkInLocalDateTime: string;
+  checkOutLocalDateTime: string;
+  checkInUtcOffset?: string | null;
+  checkOutUtcOffset?: string | null;
+}
+
 export type ItineraryItemType =
   | "flight"
   | "lodging"

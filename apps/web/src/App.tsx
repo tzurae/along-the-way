@@ -11,27 +11,17 @@ import {
   type TripSummaryDto,
   type UserDto,
 } from "@along-the-way/contracts/private-trips";
-import { countryOptions } from "@along-the-way/contracts/countries";
 
+import { countryStopLabel } from "./country-stop-label";
 import { CreateTripDialog } from "./CreateTripDialog";
 import { DiscoveryWorkspace } from "./DiscoveryWorkspace";
 import { TripSkeletonWorkspace } from "./TripSkeletonWorkspace";
 import { TripPlaceWorkspace } from "./TripPlaceWorkspace";
+import { TravelWorkspace } from "./TravelWorkspace";
 import { useI18n, type Messages } from "./i18n";
 
-const countryNames = new Map(
-  countryOptions("zh-Hant").map((country) => [
-    country.code,
-    `${country.flag} ${country.localizedName} (${country.code})`,
-  ]),
-);
-
-const tripTabIds = ["overview", "discovery", "wishlist", "itinerary", "recent"] as const;
+const tripTabIds = ["overview", "discovery", "wishlist", "lodging", "itinerary", "recent"] as const;
 type TripTab = (typeof tripTabIds)[number];
-
-function countryStopLabel(countryCode: string) {
-  return countryNames.get(countryCode) ?? countryCode;
-}
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -207,9 +197,12 @@ interface TripWorkspaceProps {
   trip: TripDto;
   currentUser: UserDto;
   onChanged: () => Promise<void>;
+  request<T>(url: string, options?: RequestOptions): Promise<T>;
+  revision: number;
+  onTravelChanged(): Promise<void>;
 }
 
-function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
+function TripWorkspace({ trip, currentUser, onChanged, request, revision, onTravelChanged }: TripWorkspaceProps) {
   const { t } = useI18n();
   const [inviteEmail, setInviteEmail] = useState("");
   const [message, setMessage] = useState("");
@@ -287,6 +280,9 @@ function TripWorkspace({ trip, currentUser, onChanged }: TripWorkspaceProps) {
       <div className="mt-5 grid grid-cols-2 gap-px overflow-hidden rounded-xl bg-ink/10 sm:max-w-sm">
         <div className="bg-surface-subtle p-4"><strong className="block text-2xl">{trip.memberCount}</strong>{t.app.memberUnit}</div>
         <div className="bg-surface-subtle p-4"><strong className="block text-2xl">{trip.dayCount}</strong>{t.app.dayUnit}</div>
+      </div>
+      <div className="mt-8">
+        <TravelWorkspace key={trip.id} trip={trip} type="flight" request={request} revision={revision} onChanged={onTravelChanged} />
       </div>
 
       <div className="mt-8 grid gap-6 lg:grid-cols-[1fr_0.9fr]">
@@ -478,6 +474,7 @@ export function App() {
     { value: "overview", label: t.app.tabs.overview },
     { value: "discovery", label: t.app.tabs.discovery },
     { value: "wishlist", label: t.app.tabs.wishlist },
+    { value: "lodging", label: t.app.tabs.lodging },
     { value: "itinerary", label: t.app.tabs.itinerary },
     { value: "recent", label: t.app.tabs.recent },
   ] as const;
@@ -573,7 +570,8 @@ export function App() {
               aria-labelledby="trip-tab-overview"
               hidden={activeTripTab !== "overview"}
             >
-              <TripWorkspace trip={selectedTrip} currentUser={user} onChanged={() => loadTrip(selectedTrip.id)} />
+              <TripWorkspace trip={selectedTrip} currentUser={user} onChanged={() => loadTrip(selectedTrip.id)}
+                request={request} revision={placesRevision} onTravelChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }} />
             </div>
             <div
               id="trip-panel-discovery"
@@ -601,6 +599,11 @@ export function App() {
                 onPlacesChanged={placesChanged}
               />
             </div>
+            <div id="trip-panel-lodging" role="tabpanel" aria-labelledby="trip-tab-lodging" hidden={activeTripTab !== "lodging"}
+              className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8">
+              <TravelWorkspace key={selectedTrip.id} trip={selectedTrip} type="lodging" request={request} revision={placesRevision}
+                onChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }} />
+            </div>
             <div
               id="trip-panel-itinerary"
               role="tabpanel"
@@ -614,6 +617,11 @@ export function App() {
                 placesRevision={placesRevision}
                 onPlacesChanged={placesChanged}
                 recentChangesContainer={recentChangesContainer}
+                onTravelEdit={(type) => {
+                  const tab = type === "flight" ? "overview" : "lodging";
+                  setActiveTripTab(tab);
+                  document.getElementById(`trip-tab-${tab}`)?.focus();
+                }}
               />
             </div>
             <div

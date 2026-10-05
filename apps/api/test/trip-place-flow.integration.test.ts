@@ -55,6 +55,7 @@ import {
 } from "../src/trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
 import { unrelatedDiscoveryModule } from "./discovery-test-support";
+import { tripFlights } from "./travel-test-support";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required");
@@ -364,6 +365,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         startDate: "2026-10-21",
         endDate: "2026-10-27",
         countryCodes: ["JP"],
+        flights: tripFlights(),
       }),
     });
     expect(response.status).toBe(201);
@@ -460,6 +462,74 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       },
     );
   }
+
+  it("refuses re-adding an archived travel-only identity without restoring its wishlist row", async () => {
+    const owner = await login("owner@example.test");
+    const trip = await createTrip(owner.cookie, "Archived travel place");
+    const created = await addProvider(owner.cookie, trip.id, "travel-original", "Original contribution");
+    expect(created.status).toBe(201);
+    const place = parseTripPlaceResponse(await created.json()).tripPlace;
+    const row = await database.selectFrom("trip_places").select("legacy_place_id")
+      .where("id", "=", place.id).executeTakeFirstOrThrow();
+    // A retained provider identity can be archived by migration 016; it remains addressable
+    // by a later search result, but explicit intake must not unarchive its travel-only row.
+    await database.updateTable("places").set({ travel_only: true }).where("id", "=", row.legacy_place_id).execute();
+    await database.updateTable("trip_places").set({ archived_at: new Date("2026-10-01T00:00:00Z") })
+      .where("id", "=", place.id).execute();
+    const before = await database.selectFrom("trip_place_contributions").selectAll()
+      .where("trip_place_id", "=", place.id).execute();
+    const rejected = await addProvider(owner.cookie, trip.id, "travel-readd", "Must not be saved");
+    expect(rejected.status).toBe(409);
+    expect(await rejected.json()).toMatchObject({ error: { code: "travel_place" } });
+    expect(await list(owner.cookie, trip.id)).toEqual([]);
+    expect(await database.selectFrom("trip_place_contributions").selectAll()
+      .where("trip_place_id", "=", place.id).execute()).toEqual(before);
+    const skeleton = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    expect(parseTripSkeletonResponse(await skeleton.json()).skeleton.places.find((entry) => entry.id === row.legacy_place_id)?.name).toBe(place.name);
+  });
+
+  it("normalizes active travel mirrors from a retained release without deleting contributions or formal content", async () => {
+    const owner = await login("owner@example.test");
+    const trip = await createTrip(owner.cookie, "Travel mirror after redeploy");
+    // Votes need two active members.
+    const second = await login("second@example.test");
+    await addMember(trip.id, second.user.id);
+    const skeletonResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    const before = parseTripSkeletonResponse(await skeletonResponse.json()).skeleton;
+    const airport = before.places.find((place) => place.type === "airport")!;
+    // Simulate a retained release, whose reconciliation does not know about the flag.
+    await database.updateTable("places").set({ travel_only: false }).where("id", "=", airport.id).execute();
+    const mirrored = (await list(owner.cookie, trip.id)).find((place) => place.name === airport.name)!;
+    const ordinaryResponse = await addProvider(owner.cookie, trip.id, "ordinary-redeploy", "Keep this wishlist place");
+    const ordinary = parseTripPlaceResponse(await ordinaryResponse.json()).tripPlace;
+    for (const place of [mirrored, ordinary]) {
+      expect((await setVote(owner.cookie, trip.id, place.id, true, `redeploy-vote-${place.id}`)).status).toBe(200);
+      await database.insertInto("trip_place_desired_days").values({
+        trip_id: trip.id, trip_place_id: place.id, trip_day_id: trip.days[0]!.id,
+      }).execute();
+      await database.insertInto("trip_place_excluded_days").values({
+        trip_id: trip.id, trip_place_id: place.id, trip_day_id: trip.days[1]!.id,
+      }).execute();
+    }
+    const contributions = await database.selectFrom("trip_place_contributions").selectAll()
+      .where("trip_place_id", "=", mirrored.id).execute();
+    await database.updateTable("places").set({ travel_only: true }).where("id", "=", airport.id).execute();
+    expect((await list(owner.cookie, trip.id)).map((place) => place.id)).toEqual([ordinary.id]);
+    for (const table of ["trip_place_desired_days", "trip_place_excluded_days", "trip_place_day_assignments", "trip_place_votes"] as const) {
+      expect(await database.selectFrom(table).selectAll().where("trip_place_id", "=", mirrored.id).execute(), table).toEqual([]);
+      expect(await database.selectFrom(table).select("trip_place_id").where("trip_place_id", "=", ordinary.id).execute(), table)
+        .toEqual([{ trip_place_id: ordinary.id }]);
+    }
+    expect(await database.selectFrom("trip_place_contributions").selectAll().where("trip_place_id", "=", mirrored.id).execute()).toEqual(contributions);
+    const archived = await database.selectFrom("trip_places").selectAll().where("id", "=", mirrored.id).executeTakeFirstOrThrow();
+    expect(archived.archived_at).not.toBeNull();
+    expect((await list(owner.cookie, trip.id)).map((place) => place.id)).toEqual([ordinary.id]);
+    expect(await database.selectFrom("trip_places").selectAll().where("id", "=", mirrored.id).executeTakeFirstOrThrow()).toEqual(archived);
+    const afterResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    const after = parseTripSkeletonResponse(await afterResponse.json()).skeleton;
+    expect(after.items).toEqual(before.items);
+    expect(after.places).toContainEqual(airport);
+  });
 
   it("deduplicates provider identity while preserving every member contribution and vote", async () => {
     const owner = await login("owner@example.test");
@@ -1688,6 +1758,13 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         },
         body: payload === undefined ? undefined : json(payload),
       });
+    // This scenario supplies its own arrival/departure pair and measured airport routes;
+    // do not leave the general creation fixture as extra fixed blocks on its arrival day.
+    const initial = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    for (const flight of parseTripSkeletonResponse(await initial.json()).skeleton.items) {
+      expect((await send("DELETE", `/api/trips/${trip.id}/items/${flight.id}`, `remove-${flight.id}`,
+        { expectedVersion: flight.version })).status).toBe(204);
+    }
     const tripVersion = async () => {
       const response = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
       return parseTripSkeletonResponse(await response.json()).skeleton.tripVersion;
@@ -2246,7 +2323,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     });
     const legacy = parseTripSkeletonResponse(
       await skeletonResponse.json(),
-    ).skeleton.places[0]!;
+    ).skeleton.places.find((candidate) => candidate.name === place.name)!;
 
     await sql`
       create or replace function issue22_block_vote_insert()
@@ -2503,7 +2580,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect((await addProvider(owner.cookie, trip.id, "delete-owner-again", "Second own source")).status).toBe(201);
     const deletePlace = async (key: string) => {
       const response = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
-      const legacy = parseTripSkeletonResponse(await response.json()).skeleton.places[0]!;
+      const legacy = parseTripSkeletonResponse(await response.json()).skeleton.places.find((candidate) => candidate.name === place.name)!;
       return app.request(`/api/trips/${trip.id}/places/${legacy.id}`, {
         method: "DELETE",
         headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": key, origin: "https://app.example.test" },

@@ -2,10 +2,11 @@ import {
   inferCountryRoute,
   MAX_TRIP_COUNTRY_STOPS,
 } from "@along-the-way/contracts/countries";
-import { parseTripResponse } from "@along-the-way/contracts/private-trips";
+import { isRecord, parseTripResponse } from "@along-the-way/contracts/private-trips";
 import { sql, type Kysely } from "kysely";
 
 import type { AlongTheWayDatabase } from "../database/database";
+import { PostgresTripSkeletonModule } from "../trip-skeleton/postgres-trip-skeleton-module";
 import {
   AppError,
   type CreateTripInput,
@@ -175,12 +176,15 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
     input: CreateTripInput,
   ): Promise<TripReadModel> {
     const key = requireIdempotencyKey(rawKey);
-    const validated = validateTripInput(input);
 
     return this.database.transaction().execute(async (transaction) => {
       await lockMutation(transaction, userId, "create_trip", key);
       const replay = await replayed(transaction, userId, "create_trip", key);
       if (replay) return replayedTrip(replay);
+      const validated = validateTripInput(input);
+      if (!isRecord(input.flights) || !input.flights.outbound || !input.flights.return) {
+        throw new AppError("validation_error", "Outbound and return flights are required");
+      }
 
       const trip = await transaction
         .insertInto("trips")
@@ -198,7 +202,7 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
         .returning("id")
         .executeTakeFirstOrThrow();
 
-      await transaction
+      const stops = await transaction
         .insertInto("trip_country_stops")
         .values(
           validated.countryStops.map((stop) => ({
@@ -208,6 +212,7 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
             time_zone: stop.timeZone,
           })),
         )
+        .returning(["id", "position"])
         .execute();
 
       const days: Array<{ trip_id: string; date: string; title: null }> = [];
@@ -230,6 +235,20 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
           removed_at: null,
         })
         .execute();
+      const skeleton = new PostgresTripSkeletonModule({ database: this.database, now: this.now });
+      stops.sort((left, right) => left.position - right.position);
+      const outboundInput = await skeleton.flightInputInTransaction(transaction, userId, trip.id, input.flights.outbound, {
+        departure: null, arrival: stops[0]!.id,
+      });
+      const outbound = await skeleton.createItemInTransaction(transaction, userId, trip.id, outboundInput);
+      const returnInput = await skeleton.flightInputInTransaction(transaction, userId, trip.id, input.flights.return, {
+        departure: stops.at(-1)!.id, arrival: null,
+      });
+      const returning = await skeleton.createItemInTransaction(transaction, userId, trip.id, returnInput);
+      if (new Date(returning.endpoints.find((endpoint) => endpoint.role === "start")!.instant).valueOf() <=
+          new Date(outbound.endpoints.find((endpoint) => endpoint.role === "end")!.instant).valueOf()) {
+        throw new AppError("flight_order", "Return departure must be after outbound arrival");
+      }
       await recordEvent(transaction, {
         tripId: trip.id,
         actorId: userId,

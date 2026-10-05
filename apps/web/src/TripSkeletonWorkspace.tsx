@@ -51,6 +51,7 @@ interface TripSkeletonWorkspaceProps {
   placesRevision: number;
   onPlacesChanged(): void;
   recentChangesContainer: HTMLElement | null;
+  onTravelEdit(type: "flight" | "lodging"): void;
 }
 
 
@@ -265,6 +266,7 @@ export function TripSkeletonWorkspace({
   placesRevision,
   onPlacesChanged,
   recentChangesContainer,
+  onTravelEdit,
 }: TripSkeletonWorkspaceProps) {
   const { t, locale } = useI18n();
   const [skeleton, setSkeleton] = useState<TripSkeletonDto | null>(null);
@@ -429,7 +431,7 @@ export function TripSkeletonWorkspace({
       actionKeys.current.delete(identity);
       setUnlockingItem(null);
       await load();
-      if (action === "delete") onPlacesChanged();
+      onPlacesChanged();
     } catch (reason) {
       setError(reason instanceof Error
         ? reason.message
@@ -457,6 +459,7 @@ export function TripSkeletonWorkspace({
       });
       actionKeys.current.delete(identity);
       await load();
+      onPlacesChanged();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : t.tripSkeleton.constraintUpdateError);
     } finally {
@@ -543,7 +546,11 @@ export function TripSkeletonWorkspace({
                 <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => setUnlockingItem(item)}><Unlock /> {t.tripSkeleton.unlock}</Button>
               ) : (
                 <>
-                  <ItineraryItemDialog countryStops={trip.countryStops} members={trip.members} places={skeleton?.places ?? []} item={item} save={(input) => saveItem(input, item)} />
+                  {item.type === "flight" || item.type === "lodging" ? (
+                    <Button size="sm" variant="outline" onClick={() => onTravelEdit(item.type as "flight" | "lodging")}>
+                      {item.type === "flight" ? t.travel.editInOverview : t.travel.editInLodging}
+                    </Button>
+                  ) : <ItineraryItemDialog countryStops={trip.countryStops} members={trip.members} places={skeleton?.places ?? []} item={item} save={(input) => saveItem(input, item)} />}
                   <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => void itemAction(item, "lock")}><Lock /> {t.tripSkeleton.lock}</Button>
                   <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => void itemAction(item, "delete")}><Trash2 /> {t.tripSkeleton.delete}</Button>
                 </>

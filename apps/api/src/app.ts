@@ -12,7 +12,9 @@ import type {
   UpdateItineraryItemInput,
   UpdatePlaceInput,
   ZonedEndpointInput,
+  TripLodgingInput,
 } from "@along-the-way/contracts/trip-skeleton";
+import type { TripFlightInput } from "@along-the-way/contracts/private-trips";
 import type {
   CreateTripPlaceInput,
   MergeTripPlacesInput,
@@ -454,6 +456,8 @@ export function createApp({
       startDate: stringField(body, "startDate"),
       endDate: stringField(body, "endDate"),
       countryCodes,
+      // The workspace validates this after replaying historical create_trip responses.
+      flights: body.flights as CreateTripInput["flights"],
     };
     const trip = await tripWorkspace.createTrip(
       user.id,
@@ -893,6 +897,42 @@ export function createApp({
       numberField(body, "expectedVersion"),
     );
     return context.body(null, 204);
+  });
+
+  app.post("/api/trips/:tripId/flights", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const item = await tripSkeleton.createFlight(user.id, uuidParam(context, "tripId"), idempotencyKey(context),
+      numberField(body, "expectedTripVersion"), body as unknown as TripFlightInput);
+    return context.json({ item }, 201);
+  });
+
+  app.patch("/api/trips/:tripId/flights/:itemId", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const item = await tripSkeleton.updateFlight(user.id, uuidParam(context, "tripId"), uuidParam(context, "itemId"),
+      idempotencyKey(context), numberField(body, "expectedVersion"), body as unknown as TripFlightInput);
+    return context.json({ item });
+  });
+
+  app.post("/api/trips/:tripId/lodgings", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const item = await tripSkeleton.createLodging(user.id, uuidParam(context, "tripId"), idempotencyKey(context),
+      numberField(body, "expectedTripVersion"), body as unknown as TripLodgingInput);
+    return context.json({ item }, 201);
+  });
+
+  app.patch("/api/trips/:tripId/lodgings/:itemId", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const item = await tripSkeleton.updateLodging(user.id, uuidParam(context, "tripId"), uuidParam(context, "itemId"),
+      idempotencyKey(context), numberField(body, "expectedVersion"), body as unknown as TripLodgingInput);
+    return context.json({ item });
   });
 
   app.post("/api/trips/:tripId/items", async (context) => {

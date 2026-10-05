@@ -44,6 +44,100 @@ bun run build
 Staging setup, HTTPS deployment, persistent data, and rollback are documented in
 [`docs/operations/staging.md`](docs/operations/staging.md).
 
+## Shared flights and lodging (Issue #74)
+
+`POST /api/trips` requires `name`, `startDate`, `endDate`, ordered `countryCodes`
+and `flights: { outbound, return }`. Each flight is:
+
+```ts
+{
+  serviceNumber: string;
+  carrier: string | null;
+  departureAirport: { name: string; timeZone: string };
+  arrivalAirport: { name: string; timeZone: string };
+  departureLocalDateTime: string; // YYYY-MM-DDTHH:mm
+  arrivalLocalDateTime: string;   // YYYY-MM-DDTHH:mm
+  departureUtcOffset?: string | null; // e.g. "-04:00" for a repeated local hour
+  arrivalUtcOffset?: string | null;
+}
+```
+
+All endpoint local dates must lie within the trip dates, even outside the route.
+Named IANA zones and existing DST validation apply. Each arrival must be strictly
+after departure; the return must depart after the outbound arrival. Creation
+persists the trip, stops, days, owner, airports and both flights in one transaction:
+any error rolls everything back. Historical `create_trip` responses replay before
+the new flight requirement is checked. The outbound arrival uses the first stop;
+the return departure uses the last; the other two endpoints are outside the route
+(`countryStopId: null`). Flight titles are service numbers. New travel items select
+all active members explicitly at save time, not the `null` pending-confirmation party.
+For repeated DST hours, supply the chosen UTC offset. Omitting an offset on PATCH
+retains the current occurrence only when its local time and timezone are unchanged;
+explicit `null` clears that choice and normal endpoint validation applies.
+
+Trip members use these idempotent, versioned travel routes:
+
+| Route | Body additions to the travel input | Result |
+| --- | --- | --- |
+| `POST /api/trips/:tripId/flights` | `expectedTripVersion` | `{ item }`, 201 |
+| `PATCH /api/trips/:tripId/flights/:itemId` | `expectedVersion` | `{ item }`, 200 |
+| `POST /api/trips/:tripId/lodgings` | `expectedTripVersion` | `{ item }`, 201 |
+| `PATCH /api/trips/:tripId/lodgings/:itemId` | `expectedVersion` | `{ item }`, 200 |
+
+Every mutation requires `Idempotency-Key`. Lodging input is
+`{ hotel: { name, address?, latitude?, longitude?, timeZone, sourceUrl? }, countryStopId,
+checkInLocalDateTime, checkOutLocalDateTime, checkInUtcOffset?, checkOutUtcOffset? }`;
+hotel name, country stop and named timezone are required. Address, coordinates and
+source URL are optional: omitted facts remain unchanged on reuse/PATCH, while an
+explicit `null` clears them. Supply both coordinates when changing or clearing them.
+New places default omitted facts to null. The optional offsets use the same repeated-hour rules as
+flights. Checkout cannot precede check-in. Both endpoints use the same hotel, stop
+and timezone. Undeclared nested airport/hotel fields are rejected with 400.
+Google hotel search reuses `POST /api/trips/:tripId/trip-places/search` for candidates
+only; selecting one does not add it to the wishlist. Manual hotel entry is supported.
+Travel PATCH changes only the service/hotel name, carrier where applicable,
+airports/hotel and endpoint times; notes, source URL, money, booking/confirmation
+details, participants, constraints and locks are retained. Locked items still
+require unlocking. Delete uses `DELETE /api/trips/:tripId/items/:itemId` with
+`expectedVersion`; existing lock/unlock routes continue to apply.
+
+The overview lists every stored flight by departure instant: first 去程, last 回程,
+intermediate flights 其他航班. Fewer than two produces a nonblocking 尚未填寫航班
+prompt and add form. Old flights are neither migrated nor deleted. The 住宿 tab,
+between wishlist and itinerary, manages stays in check-in order. 行程 no longer
+offers flights or lodging in its item dialog; its existing cards link to the
+overview/lodging editors. Mounted skeleton, wishlist and travel panels reload via
+the revision mechanism; skeleton/planning APIs keep returning every travel item.
+Itinerary lock/unlock and constraint edits also broadcast that revision. An editor
+already open keeps its original optimistic version rather than silently rebasing.
+Already-open planner drafts are not automatically regenerated (which would make
+paid route calls); their existing plan-basis check refuses stale application.
+
+Travel endpoints use legacy `places` rows marked `travel_only = true`, never
+wishlist rows. Within a trip, a travel place with the same trimmed case-insensitive
+name and timezone is reused. Submitted hotel address, coordinates and source URL
+update that travel-only place and its version, unless any referencing item is
+locked. A place referenced by a non-travel item is never changed this way.
+The lodging editor compares facts with its opening snapshot and omits untouched
+ones, so a time-only save cannot overwrite another stay's shared-hotel enrichment.
+PATCH retains an unchanged existing airport/hotel endpoint, including mixed-use
+legacy places and their routing facts. Eager wishlist mirroring skips travel
+places; reconciliation also archives active travel mirrors introduced by a retained
+release and clears their votes/assignments/legacy day rows, retaining contributions.
+Explicit intake cannot unarchive a travel-only identity: it returns
+`409 travel_place` and preserves its archived row and contributions.
+Discovery excludes provider identities backed by travel-only places even when
+archived; ordinary withdrawn wishlist identities remain eligible for recommendation.
+
+Migration `016_travel_places` adds the non-null flag (default false), marks places
+used by at least one flight/lodging endpoint and no other item type, and archives
+their linked wishlist rows. It clears votes, day assignments and legacy
+desired/excluded-day rows, but retains contributions, legacy places, all formal
+items and endpoints. Mixed-use places remain unchanged. **Down only drops the
+flag; it does not unarchive wishlist rows or restore cleared votes/assignments.**
+The #74 implementation and added regression coverage are UNVERIFIED until the
+coordinator runs the API, migration and browser checks.
+
 ## AI discovery claim sources (Issue #65)
 
 Each `CandidateProposalDto` from a new research run contains
@@ -101,7 +195,8 @@ the personal current/next and offline features of Issue #28.
   identity used for authorization and membership removal; the two are not aliases.
 - Create and update item requests require `participantMemberIds`: `null` means
   pending confirmation; an explicit collection must be nonempty, duplicate-free,
-  and contain membership IDs from this Trip. Nothing defaults to the whole roster.
+  and contain membership IDs from this Trip. Generic item routes do not default
+  to the whole roster; the dedicated travel routes explicitly select active members.
 - Responses expose `participants`, either `null` or enriched entries containing
   `memberId`, `displayName`, `email`, and `removed`. Adding another participant
   updates the existing item and preserves its stable ID.

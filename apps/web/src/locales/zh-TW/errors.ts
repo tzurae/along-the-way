@@ -10,6 +10,8 @@ export const errors = {
     constraint_not_found: "找不到限制。",
     item_locked: "固定行程已鎖定。",
     place_in_use: "這個地點正在使用中。",
+    travel_place: "這個地點用於航班或住宿，不會加入想去清單。",
+    flight_order: "回程起飛時間必須晚於去程抵達時間。",
     unauthenticated: "請先登入。",
     forbidden: "你沒有執行這項操作的權限。",
     trip_not_found: "找不到旅程。",

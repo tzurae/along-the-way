@@ -39,6 +39,7 @@ import type {
 } from "../src/trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
 import { unrelatedDayPlanModule } from "./day-plan-test-support";
+import { tripFlights } from "./travel-test-support";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required");
@@ -459,6 +460,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
         startDate: "2026-10-21",
         endDate: "2026-10-27",
         countryCodes: ["JP"],
+        flights: tripFlights(),
       }),
     });
     expect(response.status).toBe(201);
@@ -930,7 +932,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       .toHaveLength(3);
   });
 
-  it.each(["withdraw", "delete"] as const)("reports an accepted place removed after %s and allows recommending it again", async (removal) => {
+  it.each(["withdraw", "delete", "travel"] as const)("recommends ordinarily removed identities again but excludes travel-only identities after %s", async (removal) => {
     const cookie = await login();
     const trip = await createTrip(cookie, `Removed accepted place ${removal}`);
     await database.insertInto("users").values({
@@ -965,6 +967,11 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
         `/api/trips/${trip.id}/trip-places/${place.id}/contributions/${place.contributions[0]!.id}/withdraw`, "removed-withdraw", {});
       expect(removed.status).toBe(200);
       expect(await removed.json()).toEqual({ tripPlace: null });
+    } else if (removal === "travel") {
+      const legacy = before.places.find((entry) => entry.name === place.name)!;
+      await database.updateTable("places").set({ travel_only: true }).where("id", "=", legacy.id).execute();
+      const normalized = await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } });
+      expect(parseTripPlaceListResponse(await normalized.json()).tripPlaces).toEqual([]);
     } else {
       const legacy = before.places.find((entry) => entry.name === place.name)!;
       const removed = await app.request(`/api/trips/${trip.id}/places/${legacy.id}`, {
@@ -993,7 +1000,12 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     const regenerated = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "removed-regenerate", { expectedBriefVersion: 1 });
     expect(regenerated.status).toBe(200);
     const next = parseDiscoveryWorkspaceResponse(await regenerated.json()).discovery;
-    expect(next.proposals.map((entry) => [entry.providerPlaceId, entry.status])).toContainEqual([proposal.providerPlaceId, "pending"]);
+    if (removal === "travel") {
+      expect(next.proposals.map((entry) => entry.providerPlaceId)).not.toContain(proposal.providerPlaceId);
+      expect(next.latestRun?.shortfalls).toContainEqual(expect.objectContaining({ code: "in_wishlist", subject: proposal.name }));
+    } else {
+      expect(next.proposals.map((entry) => [entry.providerPlaceId, entry.status])).toContainEqual([proposal.providerPlaceId, "pending"]);
+    }
     expect(next.decided).toEqual([]);
   });
 

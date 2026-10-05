@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 
 import { expect, test, type APIRequestContext, type Page, type Route } from "@playwright/test";
 import { isRecord } from "@along-the-way/contracts/private-trips";
+import { fillTripFlights } from "./travel-support";
 
 const execFileAsync = promisify(execFile);
 const MAILPIT_API_URL = process.env.MAILPIT_API_URL ?? "http://127.0.0.1:8025";
@@ -94,6 +95,7 @@ async function createTrip(page: Page, name: string) {
   await page.locator(`[data-day="${label(9)}"]`).click();
   await dialog.getByLabel("新增國家").fill("Japan");
   await page.getByRole("option", { name: /\(JP\)/ }).dispatchEvent("click");
+  await fillTripFlights(dialog, "2026-11-03", "2026-11-09");
   await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
   await expect(page.getByRole("heading", { name })).toBeVisible();
 }
