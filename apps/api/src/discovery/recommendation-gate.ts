@@ -3,6 +3,8 @@ import type {
   DiscoveryShortfallDto,
 } from "@along-the-way/contracts/discovery";
 
+import type { BusinessStatus } from "../planning/opening-hours";
+
 /** Below this many reviews a Google rating is too fragile to count, whatever its value. */
 export const GOOGLE_MIN_REVIEWS = 200;
 export const GOOGLE_MIN_RATING = 4;
@@ -13,7 +15,18 @@ export const MIN_PER_CATEGORY = 2;
 export type GateResolution =
   | { status: "not_found" }
   | { status: "name_mismatch" }
-  | { status: "resolved"; providerPlaceId: string; rating: number | null; userRatingCount: number | null };
+  | {
+      status: "resolved";
+      providerPlaceId: string;
+      rating: number | null;
+      userRatingCount: number | null;
+      /** Google's business status; null when Google gave none. */
+      businessStatus: BusinessStatus | null;
+      /** Country of the place's address; null when Google gave none. */
+      countryCode: string | null;
+      /** Google gave coordinates for the place. */
+      located: boolean;
+    };
 
 export interface GateCandidate {
   displayName: string;
@@ -39,6 +52,8 @@ export interface GateInput {
   rejectedProviderPlaceIds: ReadonlySet<string>;
   /** Places already on the trip's shared wishlist, however they got there. */
   wishlistProviderPlaceIds: ReadonlySet<string>;
+  /** Country codes of the trip's stops; a place in another country is never proposed. */
+  tripCountryCodes: ReadonlySet<string>;
 }
 
 export interface GateResult {
@@ -63,6 +78,23 @@ function shortfall(
   count: number | null = null,
 ): DiscoveryShortfallDto {
   return { code, subject, named, endorsements, count };
+}
+
+/** Google's facts about a place that can rule it out of a trip. */
+export interface PlaceFacts {
+  businessStatus: BusinessStatus | null;
+  countryCode: string | null;
+  located: boolean;
+}
+
+/** Why Google's facts rule the place out of this trip, whatever its sources say; null when nothing does. */
+export function infeasible(facts: PlaceFacts, tripCountryCodes: ReadonlySet<string>): DiscoveryShortfallDto["code"] | null {
+  if (facts.businessStatus === "closed_permanently") return "permanently_closed";
+  if (facts.businessStatus === "closed_temporarily") return "temporarily_closed";
+  if (!facts.located) return "no_location";
+  // An unknown country cannot rule a place out.
+  if (facts.countryCode !== null && !tripCountryCodes.has(facts.countryCode)) return "outside_trip";
+  return null;
 }
 
 /**
@@ -115,7 +147,15 @@ export function gateRecommendations(input: GateInput): GateResult {
     const decided = decidedAs(resolution.providerPlaceId);
     if (decided) {
       shortfalls.push(shortfall(decided, candidate.displayName, named));
-      if (endorsements.length >= MIN_ENDORSEMENTS) passedDecided.push(place.members);
+      // The decision is the reason given; it still covers its kind only if it could be visited.
+      if (endorsements.length >= MIN_ENDORSEMENTS && infeasible(resolution, input.tripCountryCodes) === null) {
+        passedDecided.push(place.members);
+      }
+      continue;
+    }
+    const ruledOut = infeasible(resolution, input.tripCountryCodes);
+    if (ruledOut) {
+      shortfalls.push(shortfall(ruledOut, candidate.displayName, named));
       continue;
     }
     if (endorsements.length < MIN_ENDORSEMENTS) {

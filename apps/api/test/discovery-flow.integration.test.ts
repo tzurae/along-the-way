@@ -68,8 +68,12 @@ class ControlledPlaceProvider implements PlaceProvider, RatedPlaceLookup {
   readonly available = true;
   readonly attribution = "Google Maps";
   lookups: string[] = [];
-  /** Further places Google knows, by name; each is well reviewed. */
-  readonly known = new Set<string>();
+  /** Further places Google knows, by name: well reviewed and, unless overridden, open, in Japan, with coordinates. */
+  readonly known = new Map<string, {
+    businessStatus?: RatedPlaceCandidate["businessStatus"];
+    countryCode?: string;
+    located?: boolean;
+  }>();
   async search() {
     return [market];
   }
@@ -78,19 +82,29 @@ class ControlledPlaceProvider implements PlaceProvider, RatedPlaceLookup {
   }
   async lookup(query: string): Promise<RatedPlaceCandidate[]> {
     this.lookups.push(query);
-    const known = [...this.known].find((name) => query.includes(name));
+    const open = { businessStatus: "operational" as const, countryCode: "JP" };
+    const known = [...this.known.keys()].find((name) => query.includes(name));
     if (known) {
-      return [{ candidate: place(known, `ChIJ-${known.replaceAll(" ", "-")}`), rating: 4.5, userRatingCount: 1_000, websiteUri: null }];
+      const facts = this.known.get(known)!;
+      const candidate = place(known, `ChIJ-${known.replaceAll(" ", "-")}`);
+      return [{
+        candidate: facts.located === false ? { ...candidate, latitude: null, longitude: null } : candidate,
+        rating: 4.5,
+        userRatingCount: 1_000,
+        websiteUri: null,
+        businessStatus: facts.businessStatus ?? open.businessStatus,
+        countryCode: facts.countryCode ?? open.countryCode,
+      }];
     }
     if (query.includes("Nishiki")) {
-      return [{ candidate: market, rating: 4.4, userRatingCount: 12_000, websiteUri: "https://www.kyoto-nishiki.or.jp/" }];
+      return [{ candidate: market, rating: 4.4, userRatingCount: 12_000, websiteUri: "https://www.kyoto-nishiki.or.jp/", ...open }];
     }
     if (query.includes("Tiny Cafe")) {
       // A near-perfect rating from too few reviews to count.
-      return [{ candidate: place("Tiny Cafe", "ChIJ-Tiny-Cafe"), rating: 4.9, userRatingCount: 40, websiteUri: null }];
+      return [{ candidate: place("Tiny Cafe", "ChIJ-Tiny-Cafe"), rating: 4.9, userRatingCount: 40, websiteUri: null, ...open }];
     }
     if (query.includes("Takao") || query.includes("高雄")) {
-      return [{ candidate: place("Takao Kanko Hotel", "ChIJ-Takao-Hotel"), rating: 4.3, userRatingCount: 900, websiteUri: null }];
+      return [{ candidate: place("Takao Kanko Hotel", "ChIJ-Takao-Hotel"), rating: 4.3, userRatingCount: 900, websiteUri: null, ...open }];
     }
     return [];
   }
@@ -108,7 +122,9 @@ class ControlledSourceChecks implements RecommendationSourceChecks {
   async pageText(url: string) {
     this.pages.push(url);
     if (url.endsWith("/nishiki")) return "Nishiki Market, Kyoto's kitchen, is a narrow covered street of food stalls.";
-    if (url.endsWith("/gardens")) return "Kyoto's gardens: Gion Garden, Okazaki Garden and Shoren Garden.";
+    if (url.endsWith("/gardens")) {
+      return "Kyoto's gardens: Gion Garden, Okazaki Garden, Shoren Garden, Ruined Garden, Seoul Garden and Floating Garden.";
+    }
     if (url.endsWith("/tiny-cafe")) return "Tiny Cafe serves hand-drip coffee near the market.";
     return null;
   }
@@ -550,7 +566,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     const cookie = await login();
     const trip = await createTrip(cookie);
     model.releasePlan();
-    provider.known.add("Gion Garden").add("Okazaki Garden").add("Shoren Garden");
+    for (const name of ["Gion Garden", "Okazaki Garden", "Shoren Garden"]) provider.known.set(name, {});
     expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "decided-brief", {
       originalText: "Quiet gardens.",
       expectedVersion: null,
@@ -617,6 +633,45 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     const afterWithdrawal = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
     expect(parseDiscoveryWorkspaceResponse(await afterWithdrawal.json()).discovery.decided
       .map((entry) => [entry.name, entry.status])).toEqual([["Okazaki Garden", "rejected"]]);
+  });
+
+  it("never proposes a closed, foreign or unmapped place, and keeps Google's facts out of storage", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    model.releasePlan();
+    provider.known
+      .set("Shoren Garden", {})
+      .set("Ruined Garden", { businessStatus: "closed_permanently" })
+      .set("Seoul Garden", { countryCode: "KR" })
+      .set("Floating Garden", { located: false });
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "feasible-brief", {
+      originalText: "Quiet gardens.",
+      expectedVersion: null,
+    })).status).toBe(200);
+    // Each place is reviewed on Google and named by an official page: only Google's facts rule some out.
+    model.researchedPlaces = ["Shoren Garden", "Ruined Garden", "Seoul Garden", "Floating Garden"];
+    const response = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "feasible-run", {
+      expectedBriefVersion: 1,
+    });
+    expect(response.status).toBe(200);
+    const workspace = parseDiscoveryWorkspaceResponse(await response.json()).discovery;
+
+    expect(workspace.proposals.map((proposal) => proposal.name)).toEqual(["Shoren Garden"]);
+    const ruledOut = ["permanently_closed", "temporarily_closed", "outside_trip", "no_location"];
+    expect(workspace.latestRun?.shortfalls.filter((entry) => ruledOut.includes(entry.code))).toEqual([
+      { code: "permanently_closed", subject: "Ruined Garden", named: false, endorsements: [], count: null },
+      { code: "outside_trip", subject: "Seoul Garden", named: false, endorsements: [], count: null },
+      { code: "no_location", subject: "Floating Garden", named: false, endorsements: [], count: null },
+    ]);
+    // The facts come with the lookups the run already makes: one per place.
+    expect(provider.lookups).toHaveLength(4);
+    // Business status and country are used to screen, never stored.
+    const stored = await sql<{ count: string }>`
+      select count(*)::text as count from discovery_evidence
+      where facts::text ilike '%businessStatus%' or facts::text ilike '%closed_permanently%'
+        or facts::text ilike '%countryCode%' or facts::text ilike '%"KR"%'
+    `.execute(database);
+    expect(stored.rows[0]?.count).toBe("0");
   });
 
   it("keeps shortlists from before the quality checks readable", async () => {

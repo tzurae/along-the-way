@@ -15,7 +15,15 @@ export type DiscoveryShortfallCode =
   /** Already on the trip's shared wishlist, so not proposed again. */
   | "in_wishlist"
   /** A member rejected it in an earlier research run. */
-  | "rejected";
+  | "rejected"
+  /** Google Maps lists it as permanently closed. */
+  | "permanently_closed"
+  /** Google Maps lists it as temporarily closed. */
+  | "temporarily_closed"
+  /** Its address is in none of the trip's countries. */
+  | "outside_trip"
+  /** Google Maps has no coordinates for it. */
+  | "no_location";
 
 export interface StructuredDiscoveryBriefDto {
   interests: string[];
@@ -213,6 +221,7 @@ function endorsements(value: unknown): DiscoveryEndorsement[] {
 
 const SHORTFALL_CODES: readonly DiscoveryShortfallCode[] = [
   "not_researched", "not_found", "name_mismatch", "single_source", "category_short", "in_wishlist", "rejected",
+  "permanently_closed", "temporarily_closed", "outside_trip", "no_location",
 ];
 
 function shortfall(value: unknown): DiscoveryShortfallDto {

@@ -1,13 +1,29 @@
 import { describe, expect, it } from "vitest";
 
-import { gateRecommendations, type GateCandidate } from "../src/discovery/recommendation-gate";
+import { gateRecommendations, type GateCandidate, type GateResolution } from "../src/discovery/recommendation-gate";
+
+type Resolved = Extract<GateResolution, { status: "resolved" }>;
+
+/** A place Google found, by default well reviewed, open, with coordinates, in Japan where the test trip goes. */
+function resolved(providerPlaceId: string, overrides: Partial<Omit<Resolved, "status" | "providerPlaceId">> = {}): Resolved {
+  return {
+    status: "resolved",
+    providerPlaceId,
+    rating: 4.6,
+    userRatingCount: 5_000,
+    businessStatus: "operational",
+    countryCode: "JP",
+    located: true,
+    ...overrides,
+  };
+}
 
 function candidate(overrides: Partial<GateCandidate> & { id: string }): GateCandidate {
   return {
     displayName: overrides.id,
     category: "Temples",
     namedPlace: null,
-    resolution: { status: "resolved", providerPlaceId: overrides.id, rating: 4.6, userRatingCount: 5_000 },
+    resolution: resolved(overrides.id),
     wikivoyage: true,
     officialTourism: false,
     ...overrides,
@@ -19,6 +35,7 @@ const base = {
   categories: [],
   rejectedProviderPlaceIds: new Set<string>(),
   wishlistProviderPlaceIds: new Set<string>(),
+  tripCountryCodes: new Set(["JP"]),
 };
 
 describe("recommendation quality gate", () => {
@@ -28,7 +45,7 @@ describe("recommendation quality gate", () => {
       candidates: [
         candidate({ id: "two-sources" }),
         candidate({ id: "google-only", wikivoyage: false }),
-        candidate({ id: "official-only", wikivoyage: false, officialTourism: true, resolution: { status: "resolved", providerPlaceId: "official-only", rating: null, userRatingCount: null } }),
+        candidate({ id: "official-only", wikivoyage: false, officialTourism: true, resolution: resolved("official-only", { rating: null, userRatingCount: null }) }),
       ],
     });
     expect(result.shown).toEqual([{ index: 0, members: [0], endorsements: ["google_reviews", "wikivoyage"] }]);
@@ -40,7 +57,7 @@ describe("recommendation quality gate", () => {
 
   it("counts Google reviews only with at least 200 reviews and a 4.0 rating", () => {
     const withGoogle = (id: string, rating: number, userRatingCount: number) =>
-      candidate({ id, officialTourism: false, wikivoyage: true, resolution: { status: "resolved", providerPlaceId: id, rating, userRatingCount } });
+      candidate({ id, officialTourism: false, wikivoyage: true, resolution: resolved(id, { rating, userRatingCount }) });
     const result = gateRecommendations({
       ...base,
       candidates: [
@@ -91,7 +108,7 @@ describe("recommendation quality gate", () => {
       candidates: [
         candidate({ id: "Kinkakuji" }),
         candidate({ id: "Tofukuji", namedPlace: "Tofukuji" }),
-        candidate({ id: "Kinkakuji again", resolution: { status: "resolved", providerPlaceId: "Kinkakuji", rating: 4.6, userRatingCount: 5_000 } }),
+        candidate({ id: "Kinkakuji again", resolution: resolved("Kinkakuji") }),
       ],
     });
     expect(result.shown.map(({ index }) => index)).toEqual([1, 0]);
@@ -109,7 +126,7 @@ describe("recommendation quality gate", () => {
         candidate({ id: "Kinkakuji" }),
         // Named by the traveler and on the wishlist, also rejected once: the wishlist is the reason.
         candidate({ id: "Fushimi", displayName: "Fushimi Inari", namedPlace: "Fushimi Inari" }),
-        candidate({ id: "Ginkakuji again", resolution: { status: "resolved", providerPlaceId: "Ginkakuji", rating: 4.6, userRatingCount: 5_000 } }),
+        candidate({ id: "Ginkakuji again", resolution: resolved("Ginkakuji") }),
       ],
     });
     expect(result.shown.map(({ index }) => index)).toEqual([1]);
@@ -157,7 +174,7 @@ describe("recommendation quality gate", () => {
   });
 
   it("adds up the sources of entries that turn out to be the same Google place", () => {
-    const saihoji = { status: "resolved" as const, providerPlaceId: "ChIJ-saihoji", rating: 4.5, userRatingCount: 2_133 };
+    const saihoji = resolved("ChIJ-saihoji", { rating: 4.5, userRatingCount: 2_133 });
     const result = gateRecommendations({
       ...base,
       namedPlaces: ["Saihoji"],
@@ -188,7 +205,7 @@ describe("recommendation quality gate", () => {
   });
 
   it("counts a merged place under the kind any of its entries was researched for", () => {
-    const saihoji = { status: "resolved" as const, providerPlaceId: "ChIJ-saihoji", rating: 4.5, userRatingCount: 2_133 };
+    const saihoji = resolved("ChIJ-saihoji", { rating: 4.5, userRatingCount: 2_133 });
     const result = gateRecommendations({
       ...base,
       namedPlaces: ["Saihoji"],
@@ -201,5 +218,50 @@ describe("recommendation quality gate", () => {
     });
     expect(result.shown.map(({ index }) => index)).toEqual([0, 2]);
     expect(result.shortfalls).toEqual([]);
+  });
+
+  it("never proposes a closed, foreign or unmapped place, however well sourced, and says why", () => {
+    const facts = (id: string, overrides: Partial<Resolved>) => candidate({ id, resolution: resolved(id, overrides) });
+    const result = gateRecommendations({
+      ...base,
+      categories: ["Temples"],
+      wishlistProviderPlaceIds: new Set(["Closed but kept"]),
+      candidates: [
+        candidate({ id: "Kiyomizu" }),
+        facts("Gone", { businessStatus: "closed_permanently" }),
+        facts("Renovating", { businessStatus: "closed_temporarily" }),
+        facts("Gyeongbokgung", { countryCode: "KR" }),
+        facts("Nowhere", { located: false }),
+        // Google gave no country: nothing to rule it out on.
+        facts("Unknown country", { countryCode: null }),
+        // Already on the wishlist: that is the reason given, not the closure.
+        facts("Closed but kept", { businessStatus: "closed_permanently" }),
+      ],
+    });
+    expect(result.shown.map(({ index }) => index)).toEqual([0, 5]);
+    expect(result.shortfalls).toEqual([
+      { code: "permanently_closed", subject: "Gone", named: false, endorsements: [], count: null },
+      { code: "temporarily_closed", subject: "Renovating", named: false, endorsements: [], count: null },
+      { code: "outside_trip", subject: "Gyeongbokgung", named: false, endorsements: [], count: null },
+      { code: "no_location", subject: "Nowhere", named: false, endorsements: [], count: null },
+      { code: "in_wishlist", subject: "Closed but kept", named: false, endorsements: [], count: null },
+    ]);
+  });
+
+  it("does not count an already-decided place toward its kind once Google rules it out", () => {
+    const result = gateRecommendations({
+      ...base,
+      categories: ["Gardens"],
+      wishlistProviderPlaceIds: new Set(["Moss garden"]),
+      candidates: [
+        candidate({ id: "New garden", category: "Gardens" }),
+        candidate({ id: "Moss garden", category: "Gardens", resolution: resolved("Moss garden", { businessStatus: "closed_permanently" }) }),
+      ],
+    });
+    expect(result.shown.map(({ index }) => index)).toEqual([0]);
+    expect(result.shortfalls).toEqual([
+      { code: "in_wishlist", subject: "Moss garden", named: false, endorsements: [], count: null },
+      { code: "category_short", subject: "Gardens", named: false, endorsements: [], count: 1 },
+    ]);
   });
 });

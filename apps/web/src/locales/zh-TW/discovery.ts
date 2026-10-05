@@ -24,6 +24,10 @@ export const discovery = {
     nonePassed: "沒有地點通過品質檢查。",
     inWishlist: "已在想去清單，不再推薦。",
     rejectedBefore: "之前拒絕過，不再推薦。",
+    permanentlyClosed: "Google Maps 顯示已永久歇業，不推薦。",
+    temporarilyClosed: "Google Maps 顯示暫停營業中，不推薦；出發前可再確認是否恢復。",
+    outsideTrip: "不在這趟旅程的國家，不推薦。",
+    noLocation: "Google Maps 沒有提供座標，無法排進行程，不推薦。",
   },
   status: {
     pending: "可供審查",
