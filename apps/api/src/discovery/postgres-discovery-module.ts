@@ -3,6 +3,7 @@ import type {
   CreateDiscoveryFeedbackInput,
   DecideCandidateProposalInput,
   DecideDiscoveryFeedbackInput,
+  DiscoveryDecisionDto,
   DiscoveryEndorsement,
   DiscoveryFeedbackDto,
   DiscoveryShortfallDto,
@@ -60,7 +61,7 @@ interface PostgresDiscoveryModuleOptions {
 
 const ENDORSEMENTS: readonly DiscoveryEndorsement[] = ["google_reviews", "wikivoyage", "official_tourism"];
 const SHORTFALL_CODES: readonly DiscoveryShortfallDto["code"][] = [
-  "not_researched", "not_found", "name_mismatch", "single_source", "category_short",
+  "not_researched", "not_found", "name_mismatch", "single_source", "category_short", "in_wishlist", "rejected",
 ];
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -123,6 +124,7 @@ function upgradeStoredWorkspace(value: unknown) {
     proposals: Array.isArray(workspace.proposals)
       ? workspace.proposals.map((proposal) => ({ category: null, endorsements: [], ...jsonObject(proposal) }))
       : workspace.proposals,
+    decided: Array.isArray(workspace.decided) ? workspace.decided : [],
   };
 }
 
@@ -295,6 +297,14 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         rejectedPlaces: [...new Set(rejected.map((row) => row.name))],
         outputLanguage: plan.outputLanguage,
       });
+      // Read after research, which takes minutes, so a place accepted meanwhile is not proposed again.
+      const wishlist = await this.database.selectFrom("trip_places as tripPlace")
+        .innerJoin("place_identities as identity", "identity.id", "tripPlace.place_id")
+        .select("identity.provider_place_id")
+        .where("tripPlace.trip_id", "=", tripId)
+        .where("tripPlace.archived_at", "is", null)
+        .where("identity.provider_place_id", "is not", null)
+        .execute();
       const verification = await verifyResearchedCandidates({
         candidates: research.candidates,
         request: plan.request,
@@ -302,6 +312,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         placeLookup: this.placeLookup,
         sourceChecks: this.sourceChecks,
         rejectedProviderPlaceIds: new Set(rejected.map((row) => row.provider_place_id)),
+        wishlistProviderPlaceIds: new Set(wishlist.flatMap((row) => row.provider_place_id ?? [])),
       }).catch((error: unknown) => {
         if (error instanceof ProviderUnavailableError) {
           throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
@@ -861,6 +872,44 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         .execute()
       : [];
     const proposalIds = proposalRows.map((proposal) => proposal.id);
+    // Earlier runs' decisions stay visible after a new run replaces their undecided proposals:
+    // one entry per place, its newest decision, unless the latest run lists the place itself.
+    const earlierDecisions = run
+      ? await executor.selectFrom("candidate_proposals as proposal")
+        .leftJoin("trip_places as tripPlace", "tripPlace.id", "proposal.accepted_trip_place_id")
+        .select([
+          "proposal.id",
+          "proposal.provider_place_id",
+          "proposal.name",
+          "proposal.status",
+          "proposal.decided_at",
+          "tripPlace.archived_at as accepted_place_archived_at",
+        ])
+        .where("proposal.trip_id", "=", tripId)
+        .where("proposal.run_id", "<>", run.id)
+        .where("proposal.status", "in", ["accepted", "rejected"])
+        .where("proposal.decided_at", "is not", null)
+        .orderBy("proposal.decided_at", "desc")
+        .orderBy("proposal.id", "desc")
+        .execute()
+      : [];
+    const listedPlaceIds = new Set(proposalRows.map((proposal) => proposal.provider_place_id));
+    const decided: DiscoveryDecisionDto[] = [];
+    for (const row of earlierDecisions) {
+      if (listedPlaceIds.has(row.provider_place_id)) continue;
+      listedPlaceIds.add(row.provider_place_id);
+      // Accepted, then taken off the wishlist: no longer decided, and a new run may propose it.
+      if (row.status === "accepted" && row.accepted_place_archived_at) continue;
+      if ((row.status === "accepted" || row.status === "rejected") && row.decided_at) {
+        decided.push({
+          proposalId: row.id,
+          providerPlaceId: row.provider_place_id,
+          name: row.name,
+          status: row.status,
+          decidedAt: isoTimestamp(row.decided_at),
+        });
+      }
+    }
     const evidenceRows = proposalIds.length
       ? await executor.selectFrom("candidate_proposal_evidence as link")
         .innerJoin("discovery_evidence as evidence", "evidence.id", "link.evidence_id")
@@ -941,6 +990,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         category: proposal.category,
         endorsements: this.readEndorsements(proposal.endorsements),
       })),
+      decided,
       feedback: feedbackRows.map((feedback): DiscoveryFeedbackDto => {
         const interpretation = jsonObject(feedback.interpretation);
         return {

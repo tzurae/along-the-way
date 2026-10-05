@@ -68,6 +68,8 @@ class ControlledPlaceProvider implements PlaceProvider, RatedPlaceLookup {
   readonly available = true;
   readonly attribution = "Google Maps";
   lookups: string[] = [];
+  /** Further places Google knows, by name; each is well reviewed. */
+  readonly known = new Set<string>();
   async search() {
     return [market];
   }
@@ -76,6 +78,10 @@ class ControlledPlaceProvider implements PlaceProvider, RatedPlaceLookup {
   }
   async lookup(query: string): Promise<RatedPlaceCandidate[]> {
     this.lookups.push(query);
+    const known = [...this.known].find((name) => query.includes(name));
+    if (known) {
+      return [{ candidate: place(known, `ChIJ-${known.replaceAll(" ", "-")}`), rating: 4.5, userRatingCount: 1_000, websiteUri: null }];
+    }
     if (query.includes("Nishiki")) {
       return [{ candidate: market, rating: 4.4, userRatingCount: 12_000, websiteUri: "https://www.kyoto-nishiki.or.jp/" }];
     }
@@ -102,6 +108,7 @@ class ControlledSourceChecks implements RecommendationSourceChecks {
   async pageText(url: string) {
     this.pages.push(url);
     if (url.endsWith("/nishiki")) return "Nishiki Market, Kyoto's kitchen, is a narrow covered street of food stalls.";
+    if (url.endsWith("/gardens")) return "Kyoto's gardens: Gion Garden, Okazaki Garden and Shoren Garden.";
     if (url.endsWith("/tiny-cafe")) return "Tiny Cafe serves hand-drip coffee near the market.";
     return null;
   }
@@ -114,6 +121,8 @@ class ControlledDiscoveryModel implements DiscoveryModel {
   researchCalls = 0;
   /** An unexpected failure (not a model or provider error) to raise from research. */
   researchFailure: Error | null = null;
+  /** When set, research finds exactly these places, each cited by an official tourism page. */
+  researchedPlaces: string[] | null = null;
   feedbackCalls = 0;
   private releaseFirstPlan: (() => void) | null = null;
   private firstPlanStarted: (() => void) | null = null;
@@ -172,6 +181,26 @@ class ControlledDiscoveryModel implements DiscoveryModel {
   async research(): Promise<DiscoveryResearchResult> {
     this.researchCalls += 1;
     if (this.researchFailure) throw this.researchFailure;
+    if (this.researchedPlaces) {
+      return {
+        modelId: this.modelId,
+        sources: [{ url: "https://kyoto.example.test/gardens", title: "Official Kyoto gardens guide" }],
+        candidates: this.researchedPlaces.map((name) => ({
+          name,
+          localName: null,
+          englishName: null,
+          namedPlace: null,
+          area: "Kyoto",
+          category: "Food markets",
+          matchedNeeds: ["gardens"],
+          tradeoffs: [],
+          unknowns: [],
+          confidence: "medium" as const,
+          recommendation: `${name} is a quiet garden.`,
+          sources: [{ url: "https://kyoto.example.test/gardens", type: "tourism_board" as const }],
+        })),
+      };
+    }
     const base = {
       area: "Kyoto",
       category: "Food markets",
@@ -515,6 +544,79 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(confirmed.status).toBe(200);
     expect(parseDiscoveryWorkspaceResponse(await confirmed.json()).discovery.feedback[0]?.status)
       .toBe("confirmed");
+  });
+
+  it("keeps earlier decisions after a new run and never proposes those places again", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    model.releasePlan();
+    provider.known.add("Gion Garden").add("Okazaki Garden").add("Shoren Garden");
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "decided-brief", {
+      originalText: "Quiet gardens.",
+      expectedVersion: null,
+    })).status).toBe(200);
+    const generate = async (key: string) => {
+      const response = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, key, {
+        expectedBriefVersion: 1,
+      });
+      expect(response.status).toBe(200);
+      return parseDiscoveryWorkspaceResponse(await response.json()).discovery;
+    };
+    const decide = async (proposal: { id: string; version: number }, decision: "accept" | "reject") => {
+      const response = await discoveryRequest(
+        cookie,
+        `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/${decision}`,
+        `${decision}-${proposal.id}`,
+        { expectedVersion: proposal.version },
+      );
+      expect(response.status).toBe(200);
+    };
+
+    model.researchedPlaces = ["Gion Garden", "Okazaki Garden"];
+    const first = await generate("decided-run-1");
+    const byName = new Map(first.proposals.map((proposal) => [proposal.name, proposal]));
+    // Proposals created together have no defined order.
+    expect([...byName.keys()].sort()).toEqual(["Gion Garden", "Okazaki Garden"]);
+    await decide(byName.get("Gion Garden")!, "accept");
+    await decide(byName.get("Okazaki Garden")!, "reject");
+
+    // The second run finds both again, plus one new garden.
+    model.researchedPlaces = ["Gion Garden", "Okazaki Garden", "Shoren Garden"];
+    const second = await generate("decided-run-2");
+    expect(second.proposals.map((proposal) => [proposal.name, proposal.status])).toEqual([["Shoren Garden", "pending"]]);
+    expect(second.latestRun?.shortfalls.filter((entry) => entry.code === "in_wishlist" || entry.code === "rejected"))
+      .toEqual([
+        { code: "in_wishlist", subject: "Gion Garden", named: false, endorsements: [], count: null },
+        { code: "rejected", subject: "Okazaki Garden", named: false, endorsements: [], count: null },
+      ]);
+    // The two decided places passed the checks, so the kind is not reported as short.
+    expect(second.latestRun?.shortfalls.some((entry) => entry.code === "category_short")).toBe(false);
+    const decided = second.decided.map((entry) => [entry.name, entry.status]);
+    expect(decided).toEqual(expect.arrayContaining([["Gion Garden", "accepted"], ["Okazaki Garden", "rejected"]]));
+    expect(decided).toHaveLength(2);
+    expect(second.decided.map((entry) => entry.proposalId).sort())
+      .toEqual([byName.get("Gion Garden")!.id, byName.get("Okazaki Garden")!.id].sort());
+
+    // A reload shows the same thing.
+    const reloaded = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
+    expect(reloaded.status).toBe(200);
+    const workspace = parseDiscoveryWorkspaceResponse(await reloaded.json()).discovery;
+    expect(workspace.proposals.map((proposal) => proposal.name)).toEqual(["Shoren Garden"]);
+    expect(workspace.decided).toEqual(second.decided);
+
+    // Taken off the wishlist again, the accepted place is no longer a decision to keep.
+    const listed = await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } });
+    const gion = parseTripPlaceListResponse(await listed.json()).tripPlaces.find((entry) => entry.name === "Gion Garden")!;
+    const withdrawn = await discoveryRequest(
+      cookie,
+      `/api/trips/${trip.id}/trip-places/${gion.id}/contributions/${gion.contributions[0]!.id}/withdraw`,
+      "withdraw-gion",
+      {},
+    );
+    expect(withdrawn.status).toBe(200);
+    const afterWithdrawal = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
+    expect(parseDiscoveryWorkspaceResponse(await afterWithdrawal.json()).discovery.decided
+      .map((entry) => [entry.name, entry.status])).toEqual([["Okazaki Garden", "rejected"]]);
   });
 
   it("keeps shortlists from before the quality checks readable", async () => {

@@ -50,7 +50,7 @@ function lookup(answers: (query: string, language: string | undefined) => RatedP
 async function verify(candidates: ResearchedCandidate[], placeLookup: RatedPlaceLookup) {
   return verifyResearchedCandidates({
     candidates, request, outputLanguage: "zh-TW", placeLookup, sourceChecks: noSources,
-    rejectedProviderPlaceIds: new Set(),
+    rejectedProviderPlaceIds: new Set(), wishlistProviderPlaceIds: new Set(),
   });
 }
 
@@ -106,7 +106,7 @@ describe("researched candidate verification", () => {
 
     const result = await verifyResearchedCandidates({
       candidates, request: { ...request, namedPlaces: [{ name: "Saihoji", area: "京都市" }] }, outputLanguage: "zh-TW",
-      placeLookup, sourceChecks: noSources, rejectedProviderPlaceIds: new Set(),
+      placeLookup, sourceChecks: noSources, rejectedProviderPlaceIds: new Set(), wishlistProviderPlaceIds: new Set(),
     });
 
     expect(placeLookup.queries.length).toBe(MAX_GOOGLE_LOOKUPS);

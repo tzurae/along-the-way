@@ -87,6 +87,10 @@ function shortfallText(shortfall: DiscoveryShortfallDto, t: Messages["discovery"
     }
     case "category_short":
       return shortfall.count ? t.shortfall.onePassed : t.shortfall.nonePassed;
+    case "in_wishlist":
+      return t.shortfall.inWishlist;
+    case "rejected":
+      return t.shortfall.rejectedBefore;
   }
 }
 
@@ -294,7 +298,15 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
                 ))}
               </div>
             </section>
-          ) : workspace?.latestRun ? <p className="rounded-panel border border-dashed p-5 text-center text-muted-foreground">{t.proposal.nonePassed}</p> : null}
+          ) : workspace?.latestRun ? <p className="rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.some((shortfall) => shortfall.code === "in_wishlist" || shortfall.code === "rejected") ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}
+
+          {workspace?.decided.length ? (
+            <section className="rounded-panel border border-ink/10 p-4" aria-label={t.decided.areaLabel}>
+              <h3 className="font-display text-2xl">{t.decided.title}</h3>
+              <p className="mt-1 text-sm text-muted-foreground">{t.decided.description}</p>
+              <ul className="mt-3 grid gap-2">{workspace.decided.map((decision) => <li key={decision.proposalId} className="flex flex-wrap items-baseline justify-between gap-2 rounded-lg bg-surface-subtle p-3"><strong>{decision.name}</strong><span className="text-sm">{decision.status === "accepted" ? t.decided.accepted : t.decided.rejected}・{t.decided.decidedAt(new Date(decision.decidedAt).toLocaleDateString(locale))}</span></li>)}</ul>
+            </section>
+          ) : null}
 
           {workspace?.latestRun?.shortfalls.length ? (
             <section className="rounded-panel border border-ink/10 p-4" aria-label={t.missing.areaLabel}>

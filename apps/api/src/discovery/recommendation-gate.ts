@@ -35,7 +35,10 @@ export interface GateInput {
   candidates: readonly GateCandidate[];
   namedPlaces: readonly string[];
   categories: readonly string[];
+  /** Places a member rejected in an earlier run. */
   rejectedProviderPlaceIds: ReadonlySet<string>;
+  /** Places already on the trip's shared wishlist, however they got there. */
+  wishlistProviderPlaceIds: ReadonlySet<string>;
 }
 
 export interface GateResult {
@@ -70,12 +73,16 @@ export function gateRecommendations(input: GateInput): GateResult {
   const order = input.candidates
     .map((candidate, index) => ({ candidate, index }))
     .sort((left, right) => Number(right.candidate.namedPlace !== null) - Number(left.candidate.namedPlace !== null));
+  // A place the members already decided on is never proposed again; the wishlist wins when both apply.
+  const decidedAs = (providerPlaceId: string) => input.wishlistProviderPlaceIds.has(providerPlaceId)
+    ? "in_wishlist" as const
+    : input.rejectedProviderPlaceIds.has(providerPlaceId) ? "rejected" as const : null;
   // Researched entries that resolve to one Google place are one place: their sources add up,
   // and the first (a traveler-named one when there is one) represents it.
   const places = new Map<string, { index: number; members: number[]; endorsements: Set<DiscoveryEndorsement> }>();
   for (const { candidate, index } of order) {
     const { resolution } = candidate;
-    if (resolution.status !== "resolved" || input.rejectedProviderPlaceIds.has(resolution.providerPlaceId)) continue;
+    if (resolution.status !== "resolved") continue;
     const place = places.get(resolution.providerPlaceId) ?? { index, members: [], endorsements: new Set() };
     place.members.push(index);
     if (googleReviewsEndorse(resolution.rating, resolution.userRatingCount)) place.endorsements.add("google_reviews");
@@ -86,6 +93,8 @@ export function gateRecommendations(input: GateInput): GateResult {
 
   const shown: GateResult["shown"] = [];
   const shortfalls: DiscoveryShortfallDto[] = [];
+  // Already-decided places that pass the checks: not shown again, but not quality failures either.
+  const passedDecided: number[][] = [];
   for (const named of input.namedPlaces) {
     if (!input.candidates.some((candidate) => candidate.namedPlace === named)) {
       shortfalls.push(shortfall("not_researched", named, true));
@@ -99,18 +108,26 @@ export function gateRecommendations(input: GateInput): GateResult {
       continue;
     }
     const place = places.get(resolution.providerPlaceId);
+    // One entry per place, however many researched entries resolved to it.
     if (!place || place.index !== index) continue;
     const endorsements = (["google_reviews", "wikivoyage", "official_tourism"] as const)
       .filter((endorsement) => place.endorsements.has(endorsement));
+    const decided = decidedAs(resolution.providerPlaceId);
+    if (decided) {
+      shortfalls.push(shortfall(decided, candidate.displayName, named));
+      if (endorsements.length >= MIN_ENDORSEMENTS) passedDecided.push(place.members);
+      continue;
+    }
     if (endorsements.length < MIN_ENDORSEMENTS) {
       shortfalls.push(shortfall("single_source", candidate.displayName, named, endorsements));
       continue;
     }
     shown.push({ index, members: place.members, endorsements });
   }
-  // A shown place answers every kind any of its merged entries was researched for.
+  // A place that passed answers every kind any of its merged entries was researched for.
+  const passed = [...shown.map(({ members }) => members), ...passedDecided];
   for (const category of input.categories) {
-    const count = shown.filter(({ members }) =>
+    const count = passed.filter((members) =>
       members.some((member) => input.candidates[member]!.category === category)).length;
     if (count < MIN_PER_CATEGORY) shortfalls.push(shortfall("category_short", category, false, [], count));
   }

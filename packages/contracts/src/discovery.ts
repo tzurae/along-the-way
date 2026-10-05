@@ -11,7 +11,11 @@ export type DiscoveryShortfallCode =
   | "not_found"
   | "name_mismatch"
   | "single_source"
-  | "category_short";
+  | "category_short"
+  /** Already on the trip's shared wishlist, so not proposed again. */
+  | "in_wishlist"
+  /** A member rejected it in an earlier research run. */
+  | "rejected";
 
 export interface StructuredDiscoveryBriefDto {
   interests: string[];
@@ -92,6 +96,15 @@ export interface CandidateProposalDto {
   endorsements: DiscoveryEndorsement[];
 }
 
+/** A proposal from an earlier research run that a member accepted or rejected. */
+export interface DiscoveryDecisionDto {
+  proposalId: string;
+  providerPlaceId: string;
+  name: string;
+  status: "accepted" | "rejected";
+  decidedAt: string;
+}
+
 export interface DiscoveryRunDto {
   id: string;
   status: "completed" | "failed";
@@ -124,6 +137,11 @@ export interface DiscoveryWorkspaceDto {
   brief: DiscoveryBriefDto | null;
   latestRun: DiscoveryRunDto | null;
   proposals: CandidateProposalDto[];
+  /**
+   * Accepted or rejected places not among the latest run's proposals, newest decision first,
+   * one per place; a new run replaces earlier undecided proposals.
+   */
+  decided: DiscoveryDecisionDto[];
   feedback: DiscoveryFeedbackDto[];
   modelAvailable: boolean;
   placeProviderAvailable: boolean;
@@ -194,7 +212,7 @@ function endorsements(value: unknown): DiscoveryEndorsement[] {
 }
 
 const SHORTFALL_CODES: readonly DiscoveryShortfallCode[] = [
-  "not_researched", "not_found", "name_mismatch", "single_source", "category_short",
+  "not_researched", "not_found", "name_mismatch", "single_source", "category_short", "in_wishlist", "rejected",
 ];
 
 function shortfall(value: unknown): DiscoveryShortfallDto {
@@ -206,6 +224,18 @@ function shortfall(value: unknown): DiscoveryShortfallDto {
     named: typeof item.named === "boolean" ? item.named : invalid(),
     endorsements: endorsements(item.endorsements),
     count: item.count === null ? null : integer(item.count),
+  };
+}
+
+function decision(value: unknown): DiscoveryDecisionDto {
+  const item = record(value);
+  if (item.status !== "accepted" && item.status !== "rejected") invalid();
+  return {
+    proposalId: text(item.proposalId),
+    providerPlaceId: text(item.providerPlaceId),
+    name: text(item.name),
+    status: item.status,
+    decidedAt: text(item.decidedAt),
   };
 }
 
@@ -342,6 +372,7 @@ export function parseDiscoveryWorkspaceResponse(value: unknown): DiscoveryWorksp
       brief,
       latestRun,
       proposals: Array.isArray(root.proposals) ? root.proposals.map(proposal) : invalid(),
+      decided: Array.isArray(root.decided) ? root.decided.map(decision) : invalid(),
       feedback: Array.isArray(root.feedback) ? root.feedback.map(feedback) : invalid(),
       modelAvailable: typeof root.modelAvailable === "boolean" ? root.modelAvailable : invalid(),
       placeProviderAvailable: typeof root.placeProviderAvailable === "boolean" ? root.placeProviderAvailable : invalid(),
