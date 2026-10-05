@@ -62,6 +62,7 @@ interface PostgresDiscoveryModuleOptions {
 const ENDORSEMENTS: readonly DiscoveryEndorsement[] = ["google_reviews", "wikivoyage", "official_tourism"];
 const SHORTFALL_CODES: readonly DiscoveryShortfallDto["code"][] = [
   "not_researched", "not_found", "name_mismatch", "single_source", "category_short", "in_wishlist", "rejected",
+  "permanently_closed", "temporarily_closed", "outside_trip", "no_location",
 ];
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -313,6 +314,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         sourceChecks: this.sourceChecks,
         rejectedProviderPlaceIds: new Set(rejected.map((row) => row.provider_place_id)),
         wishlistProviderPlaceIds: new Set(wishlist.flatMap((row) => row.provider_place_id ?? [])),
+        tripCountryCodes: new Set(trip.countries.map((country) => country.code)),
       }).catch((error: unknown) => {
         if (error instanceof ProviderUnavailableError) {
           throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);

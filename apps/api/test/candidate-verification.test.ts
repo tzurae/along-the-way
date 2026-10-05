@@ -14,7 +14,7 @@ function place(name: string, providerPlaceId: string): RatedPlaceCandidate {
     timeZone: null, sourceUrl: null, attribution: "Google Maps",
     observedAt: "2026-10-04T00:00:00.000Z", expiresAt: "2026-11-03T00:00:00.000Z",
   };
-  return { candidate, rating: 4.5, userRatingCount: 5_000, websiteUri: null };
+  return { candidate, rating: 4.5, userRatingCount: 5_000, websiteUri: null, businessStatus: "operational", countryCode: "JP" };
 }
 
 function researched(overrides: Partial<ResearchedCandidate>): ResearchedCandidate {
@@ -50,7 +50,7 @@ function lookup(answers: (query: string, language: string | undefined) => RatedP
 async function verify(candidates: ResearchedCandidate[], placeLookup: RatedPlaceLookup) {
   return verifyResearchedCandidates({
     candidates, request, outputLanguage: "zh-TW", placeLookup, sourceChecks: noSources,
-    rejectedProviderPlaceIds: new Set(), wishlistProviderPlaceIds: new Set(),
+    rejectedProviderPlaceIds: new Set(), wishlistProviderPlaceIds: new Set(), tripCountryCodes: new Set(["JP"]),
   });
 }
 
@@ -61,6 +61,27 @@ describe("researched candidate verification", () => {
       place("伊根舟屋", "ChIJ-boathouses"),
     ]));
     expect(result.candidates[0]?.place?.providerPlaceId).toBe("ChIJ-boathouses");
+  });
+
+  it("among equal name matches, takes a listing that could be visited over a closed or foreign one", async () => {
+    // The old listing of a business that moved, listed first.
+    const moved = await verify([researched({})], lookup(() => [
+      { ...place("伊根舟屋", "ChIJ-old-boathouses"), businessStatus: "closed_permanently" },
+      place("伊根舟屋", "ChIJ-boathouses"),
+    ]));
+    expect(moved.candidates[0]?.place?.providerPlaceId).toBe("ChIJ-boathouses");
+    expect(moved.gate.shortfalls.filter((entry) => entry.code === "permanently_closed")).toEqual([]);
+    // A same-name place abroad, listed first.
+    const abroad = await verify([researched({})], lookup(() => [
+      { ...place("伊根舟屋", "ChIJ-abroad"), countryCode: "KR" },
+      place("伊根舟屋", "ChIJ-boathouses"),
+    ]));
+    expect(abroad.candidates[0]?.place?.providerPlaceId).toBe("ChIJ-boathouses");
+    // With only the closed listing, it is still identified, and the gate says why it is not shown.
+    const closedOnly = await verify([researched({})], lookup(() => [
+      { ...place("伊根舟屋", "ChIJ-old-boathouses"), businessStatus: "closed_permanently" },
+    ]));
+    expect(closedOnly.gate.shortfalls.map((entry) => entry.code)).toContain("permanently_closed");
   });
 
   it("finds a place by its local name and keeps the traveler-language name Google first gave", async () => {
@@ -107,6 +128,7 @@ describe("researched candidate verification", () => {
     const result = await verifyResearchedCandidates({
       candidates, request: { ...request, namedPlaces: [{ name: "Saihoji", area: "京都市" }] }, outputLanguage: "zh-TW",
       placeLookup, sourceChecks: noSources, rejectedProviderPlaceIds: new Set(), wishlistProviderPlaceIds: new Set(),
+      tripCountryCodes: new Set(["JP"]),
     });
 
     expect(placeLookup.queries.length).toBe(MAX_GOOGLE_LOOKUPS);

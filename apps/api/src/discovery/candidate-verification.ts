@@ -12,7 +12,7 @@ import {
   pageMentions,
 } from "./official-pages";
 import { placeNameMatch } from "./place-names";
-import { gateRecommendations, type GateCandidate, type GateResult } from "./recommendation-gate";
+import { gateRecommendations, infeasible, type GateCandidate, type GateResult } from "./recommendation-gate";
 import { WikivoyageVerifier, type WikivoyagePage } from "./wikivoyage";
 
 /** External checks, injectable so tests never reach Wikivoyage or arbitrary web pages. */
@@ -94,6 +94,7 @@ export async function verifyResearchedCandidates(input: {
   sourceChecks: RecommendationSourceChecks;
   rejectedProviderPlaceIds: ReadonlySet<string>;
   wishlistProviderPlaceIds: ReadonlySet<string>;
+  tripCountryCodes: ReadonlySet<string>;
 }): Promise<VerificationResult> {
   const queries: string[] = [];
   let lookups = 0;
@@ -118,11 +119,20 @@ export async function verifyResearchedCandidates(input: {
     .map((candidate, index) => ({ candidate, index }))
     .sort((left, right) => Number(right.candidate.namedPlace !== null) - Number(left.candidate.namedPlace !== null));
   // An exact name anywhere in Google's answer beats a close one earlier in it; the order
-  // Google returns is not stable, and a close match is the weaker identification.
+  // Google returns is not stable, and a close match is the weaker identification. Among equal
+  // matches, a listing that could be visited beats a closed, foreign or unmapped one, such as
+  // the old listing of a business that moved.
+  const visitable = (entry: RatedPlaceCandidate) => infeasible({
+    businessStatus: entry.businessStatus,
+    countryCode: entry.countryCode,
+    located: entry.candidate.latitude !== null && entry.candidate.longitude !== null,
+  }, input.tripCountryCodes) === null;
   const best = (candidate: ResearchedCandidate, results: readonly RatedPlaceCandidate[] | null) => {
     if (!results) return null;
     const graded = results.map((entry) => ({ entry, match: placeNameMatch(names(candidate), entry.candidate.name) }));
-    return (graded.find((item) => item.match === "exact") ?? graded.find((item) => item.match === "close"))?.entry ?? null;
+    const pick = (match: "exact" | "close") =>
+      graded.find((item) => item.match === match && visitable(item.entry)) ?? graded.find((item) => item.match === match);
+    return (pick("exact") ?? pick("close"))?.entry ?? null;
   };
 
   // 1. Every place: its name in the traveler's language, answered in that language.
@@ -209,6 +219,9 @@ export async function verifyResearchedCandidates(input: {
           providerPlaceId: place.providerPlaceId,
           rating: match.rating,
           userRatingCount: match.userRatingCount,
+          businessStatus: match.businessStatus,
+          countryCode: match.countryCode,
+          located: place.latitude !== null && place.longitude !== null,
         },
         wikivoyage: wikivoyagePage !== null,
         officialTourism: officialPage !== null,
@@ -225,6 +238,7 @@ export async function verifyResearchedCandidates(input: {
       categories: input.request.categories,
       rejectedProviderPlaceIds: input.rejectedProviderPlaceIds,
       wishlistProviderPlaceIds: input.wishlistProviderPlaceIds,
+      tripCountryCodes: input.tripCountryCodes,
     }),
   };
 }

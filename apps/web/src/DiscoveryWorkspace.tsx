@@ -91,6 +91,14 @@ function shortfallText(shortfall: DiscoveryShortfallDto, t: Messages["discovery"
       return t.shortfall.inWishlist;
     case "rejected":
       return t.shortfall.rejectedBefore;
+    case "permanently_closed":
+      return t.shortfall.permanentlyClosed;
+    case "temporarily_closed":
+      return t.shortfall.temporarilyClosed;
+    case "outside_trip":
+      return t.shortfall.outsideTrip;
+    case "no_location":
+      return t.shortfall.noLocation;
   }
 }
 
@@ -298,7 +306,7 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
                 ))}
               </div>
             </section>
-          ) : workspace?.latestRun ? <p className="rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.some((shortfall) => shortfall.code === "in_wishlist" || shortfall.code === "rejected") ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}
+          ) : workspace?.latestRun ? <p className="rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.length ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}
 
           {workspace?.decided.length ? (
             <section className="rounded-panel border border-ink/10 p-4" aria-label={t.decided.areaLabel}>

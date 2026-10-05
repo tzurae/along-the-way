@@ -97,7 +97,7 @@ describe("Google Places provider adapter", () => {
     );
   });
 
-  it("looks places up with rating, review count and website, keeping only plausible values", async () => {
+  it("looks places up with rating, review count, website, business status and country, keeping only plausible values", async () => {
     let fields = "";
     let body: unknown;
     const provider = new GooglePlacesProvider({
@@ -107,8 +107,15 @@ describe("Google Places provider adapter", () => {
         body = JSON.parse(String(init?.body));
         return Response.json({
           places: [
-            { id: "ChIJ-tofukuji", displayName: { text: "東福寺" }, rating: 4.5, userRatingCount: 11_353, websiteUri: "https://tofukuji.jp/" },
-            { id: "ChIJ-broken", displayName: { text: "Broken" }, rating: 9, userRatingCount: -3 },
+            {
+              id: "ChIJ-tofukuji", displayName: { text: "東福寺" }, rating: 4.5, userRatingCount: 11_353, websiteUri: "https://tofukuji.jp/",
+              businessStatus: "OPERATIONAL",
+              addressComponents: [
+                { longText: "京都市", shortText: "京都市", types: ["locality", "political"] },
+                { longText: "日本", shortText: "jp", types: ["country", "political"] },
+              ],
+            },
+            { id: "ChIJ-broken", displayName: { text: "Broken" }, rating: 9, userRatingCount: -3, businessStatus: "SOMETHING_NEW", addressComponents: [{ shortText: "Japan", types: ["country"] }] },
           ],
         });
       },
@@ -116,12 +123,20 @@ describe("Google Places provider adapter", () => {
 
     const results = await provider.lookup("京都 東福寺", { languageCode: "zh-TW" });
 
-    expect(fields.split(",")).toEqual(expect.arrayContaining(["places.id", "places.rating", "places.userRatingCount", "places.websiteUri"]));
+    expect(fields.split(",")).toEqual(expect.arrayContaining([
+      "places.id", "places.rating", "places.userRatingCount", "places.websiteUri", "places.businessStatus", "places.addressComponents",
+    ]));
     expect(fields).not.toMatch(/review(s|Summary)|photo/i);
     expect(body).toEqual({ textQuery: "京都 東福寺", maxResultCount: 3, languageCode: "zh-TW" });
     expect(results).toEqual([
-      { candidate: expect.objectContaining({ providerPlaceId: "ChIJ-tofukuji", name: "東福寺" }), rating: 4.5, userRatingCount: 11_353, websiteUri: "https://tofukuji.jp/" },
-      { candidate: expect.objectContaining({ providerPlaceId: "ChIJ-broken" }), rating: null, userRatingCount: null, websiteUri: null },
+      {
+        candidate: expect.objectContaining({ providerPlaceId: "ChIJ-tofukuji", name: "東福寺" }),
+        rating: 4.5, userRatingCount: 11_353, websiteUri: "https://tofukuji.jp/", businessStatus: "operational", countryCode: "JP",
+      },
+      {
+        candidate: expect.objectContaining({ providerPlaceId: "ChIJ-broken" }),
+        rating: null, userRatingCount: null, websiteUri: null, businessStatus: null, countryCode: null,
+      },
     ]);
   });
 

@@ -76,6 +76,10 @@ export interface RatedPlaceCandidate {
   userRatingCount: number | null;
   /** The place's own website, which is not an independent recommendation. */
   websiteUri: string | null;
+  /** Whether the place is open for business: used only to screen, never stored. */
+  businessStatus: BusinessStatus | null;
+  /** ISO 3166-1 alpha-2 country of the place's address: used only to screen, never stored. */
+  countryCode: string | null;
 }
 
 export interface RatedPlaceLookup {
@@ -109,13 +113,29 @@ const SEARCH_FIELD_MASK = [
   "places.primaryType",
   "places.googleMapsUri",
 ].join(",");
-// rating, userRatingCount and websiteUri move the request to the Enterprise SKU.
+// rating, userRatingCount and websiteUri move the request to the Enterprise SKU; the
+// businessStatus and addressComponents (Pro) fields then cost nothing more.
 const LOOKUP_FIELD_MASK = [
   SEARCH_FIELD_MASK,
   "places.rating",
   "places.userRatingCount",
   "places.websiteUri",
+  "places.businessStatus",
+  "places.addressComponents",
 ].join(",");
+
+/** The two-letter country code among Google address components, or null when absent. */
+function addressCountry(value: unknown): string | null {
+  if (!Array.isArray(value)) return null;
+  for (const raw of value) {
+    const component = record(raw);
+    if (!Array.isArray(component?.types) || !component.types.includes("country")) continue;
+    const code = typeof component.shortText === "string" ? component.shortText.toUpperCase() : "";
+    return /^[A-Z]{2}$/.test(code) ? code : null;
+  }
+  return null;
+}
+
 const LOOKUP_RESULT_COUNT = 3;
 const DETAILS_FIELD_MASK = [
   "id",
@@ -229,6 +249,8 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
         rating,
         userRatingCount: typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : null,
         websiteUri: typeof item?.websiteUri === "string" ? item.websiteUri : null,
+        businessStatus: typeof item?.businessStatus === "string" ? BUSINESS_STATUS[item.businessStatus] ?? null : null,
+        countryCode: addressCountry(item?.addressComponents),
       };
     });
   }
