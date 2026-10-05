@@ -93,6 +93,7 @@ export async function verifyResearchedCandidates(input: {
   placeLookup: RatedPlaceLookup;
   sourceChecks: RecommendationSourceChecks;
   rejectedProviderPlaceIds: ReadonlySet<string>;
+  wishlistProviderPlaceIds: ReadonlySet<string>;
 }): Promise<VerificationResult> {
   const queries: string[] = [];
   let lookups = 0;
@@ -223,6 +224,7 @@ export async function verifyResearchedCandidates(input: {
       namedPlaces: input.request.namedPlaces.map((place) => place.name),
       categories: input.request.categories,
       rejectedProviderPlaceIds: input.rejectedProviderPlaceIds,
+      wishlistProviderPlaceIds: input.wishlistProviderPlaceIds,
     }),
   };
 }

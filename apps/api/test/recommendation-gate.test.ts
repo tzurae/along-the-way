@@ -14,7 +14,12 @@ function candidate(overrides: Partial<GateCandidate> & { id: string }): GateCand
   };
 }
 
-const base = { namedPlaces: [], categories: [], rejectedProviderPlaceIds: new Set<string>() };
+const base = {
+  namedPlaces: [],
+  categories: [],
+  rejectedProviderPlaceIds: new Set<string>(),
+  wishlistProviderPlaceIds: new Set<string>(),
+};
 
 describe("recommendation quality gate", () => {
   it("shows a place only when two independent kinds of source vouch for it", () => {
@@ -79,20 +84,59 @@ describe("recommendation quality gate", () => {
     ]);
   });
 
-  it("lists named places first, shows a Google place once, and silently skips rejected ones", () => {
+  it("lists named places first and shows a Google place once", () => {
     const result = gateRecommendations({
       ...base,
       namedPlaces: ["Tofukuji"],
-      rejectedProviderPlaceIds: new Set(["rejected"]),
       candidates: [
         candidate({ id: "Kinkakuji" }),
-        candidate({ id: "rejected" }),
         candidate({ id: "Tofukuji", namedPlace: "Tofukuji" }),
         candidate({ id: "Kinkakuji again", resolution: { status: "resolved", providerPlaceId: "Kinkakuji", rating: 4.6, userRatingCount: 5_000 } }),
       ],
     });
-    expect(result.shown.map(({ index }) => index)).toEqual([2, 0]);
+    expect(result.shown.map(({ index }) => index)).toEqual([1, 0]);
     expect(result.shortfalls).toEqual([]);
+  });
+
+  it("never proposes a place already on the wishlist or rejected, and says why once per place", () => {
+    const result = gateRecommendations({
+      ...base,
+      namedPlaces: ["Fushimi Inari"],
+      rejectedProviderPlaceIds: new Set(["Ginkakuji", "Fushimi"]),
+      wishlistProviderPlaceIds: new Set(["Fushimi"]),
+      candidates: [
+        candidate({ id: "Ginkakuji" }),
+        candidate({ id: "Kinkakuji" }),
+        // Named by the traveler and on the wishlist, also rejected once: the wishlist is the reason.
+        candidate({ id: "Fushimi", displayName: "Fushimi Inari", namedPlace: "Fushimi Inari" }),
+        candidate({ id: "Ginkakuji again", resolution: { status: "resolved", providerPlaceId: "Ginkakuji", rating: 4.6, userRatingCount: 5_000 } }),
+      ],
+    });
+    expect(result.shown.map(({ index }) => index)).toEqual([1]);
+    expect(result.shortfalls).toEqual([
+      { code: "in_wishlist", subject: "Fushimi Inari", named: true, endorsements: [], count: null },
+      { code: "rejected", subject: "Ginkakuji", named: false, endorsements: [], count: null },
+    ]);
+  });
+
+  it("counts an already-decided place that passes the checks toward its kind, not as a failure", () => {
+    const result = gateRecommendations({
+      ...base,
+      categories: ["Temples", "Gardens"],
+      wishlistProviderPlaceIds: new Set(["Ginkakuji", "Weak garden"]),
+      candidates: [
+        candidate({ id: "Kinkakuji" }),
+        candidate({ id: "Ginkakuji" }),
+        // Only one source vouches for it: on the wishlist, but it does not cover Gardens.
+        candidate({ id: "Weak garden", category: "Gardens", wikivoyage: false }),
+      ],
+    });
+    expect(result.shown.map(({ index }) => index)).toEqual([0]);
+    expect(result.shortfalls).toEqual([
+      { code: "in_wishlist", subject: "Ginkakuji", named: false, endorsements: [], count: null },
+      { code: "in_wishlist", subject: "Weak garden", named: false, endorsements: [], count: null },
+      { code: "category_short", subject: "Gardens", named: false, endorsements: [], count: 0 },
+    ]);
   });
 
   it("reports a kind of place with fewer than two shown places", () => {

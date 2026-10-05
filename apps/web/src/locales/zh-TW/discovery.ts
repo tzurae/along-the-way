@@ -22,6 +22,8 @@ export const discovery = {
     noSource: "沒有獨立來源推薦；至少需要兩個。",
     onePassed: "只有一個地點通過品質檢查。",
     nonePassed: "沒有地點通過品質檢查。",
+    inWishlist: "已在想去清單，不再推薦。",
+    rejectedBefore: "之前拒絕過，不再推薦。",
   },
   status: {
     pending: "可供審查",
@@ -101,6 +103,15 @@ export const discovery = {
     accept: "加入想去清單",
     decline: "不適合這趟旅程",
     nonePassed: "這次沒有地點通過品質檢查。",
+    noneNew: "這次沒有新的候選地點；原因列在「缺少的內容」。",
+  },
+  decided: {
+    areaLabel: "之前的決定",
+    title: "之前的決定",
+    description: "之前幾輪研究中加入想去清單或拒絕的地點。重新研究時不會再推薦。",
+    accepted: "已加入想去清單",
+    rejected: "已拒絕",
+    decidedAt: (date: string) => `決定於 ${date}`,
   },
   missing: {
     areaLabel: "缺少的內容",
