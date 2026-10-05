@@ -4,7 +4,12 @@ import { sql, type Kysely } from "kysely";
 
 import { parseDiscoveryWorkspaceResponse } from "@along-the-way/contracts/discovery";
 import { parseTripResponse } from "@along-the-way/contracts/private-trips";
-import { parseTripPlaceListResponse, type ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
+import {
+  parseTripPlaceListResponse,
+  parseTripPlaceResponse,
+  type PreferenceLevel,
+  type ProviderPlaceCandidateDto,
+} from "@along-the-way/contracts/trip-places";
 
 import { createApp } from "../src/app";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
@@ -332,6 +337,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     await sql`
       truncate table
         discovery_feedback,
+        discovery_proposal_preferences,
         candidate_proposal_evidence,
         candidate_proposals,
         discovery_evidence,
@@ -460,7 +466,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
 
   function discoveryRequest(cookie: string, path: string, key: string, body: unknown) {
     return app.request(path, {
-      method: path.includes("/discovery/brief") ? "PUT" : "POST",
+      method: path.includes("/discovery/brief") || path.endsWith("/preference") ? "PUT" : "POST",
       headers: {
         cookie,
         "content-type": "application/json",
@@ -775,6 +781,165 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     const refreshed = parseDiscoveryWorkspaceResponse(await refreshedResponse.json()).discovery.proposals[0];
     expect(refreshed?.evidence).not.toHaveLength(0);
     expect(refreshed?.evidence.every((item) => item.isStale)).toBe(true);
+  });
+
+  it("keeps any number of active members' proposal preferences separate and carries them into the wishlist", async () => {
+    const ownerCookie = await login();
+    const trip = await createTrip(ownerCookie, "Proposal preference trip");
+    const owner = await database.selectFrom("users").select("id")
+      .where("email", "=", "owner@example.test").executeTakeFirstOrThrow();
+    const addMember = async (emailAddress: string) => {
+      // Sign-up is invitation-only: the account must exist before a magic link is sent.
+      await database.insertInto("users").values({
+        email: emailAddress, display_name: emailAddress.split("@")[0]!, status: "active", created_at: now(), updated_at: now(),
+      }).execute();
+      const cookie = await login(emailAddress);
+      const user = await database.selectFrom("users").select("id")
+        .where("email", "=", emailAddress).executeTakeFirstOrThrow();
+      await database.insertInto("trip_members").values({
+        trip_id: trip.id,
+        user_id: user.id,
+        role: "editor",
+        removed_at: null,
+      }).execute();
+      return { cookie, userId: user.id };
+    };
+    const second = await addMember("second-preference@example.test");
+    const third = await addMember("third-preference@example.test");
+    const fourth = await addMember("fourth-preference@example.test");
+    model.releasePlan();
+    expect((await discoveryRequest(ownerCookie, `/api/trips/${trip.id}/discovery/brief`, "preference-brief", {
+      originalText: "Food markets.",
+      expectedVersion: null,
+    })).status).toBe(200);
+    const generatedResponse = await discoveryRequest(
+      ownerCookie,
+      `/api/trips/${trip.id}/discovery/generate`,
+      "preference-generate",
+      { expectedBriefVersion: 1 },
+    );
+    expect(generatedResponse.status).toBe(200);
+    const proposal = parseDiscoveryWorkspaceResponse(await generatedResponse.json()).discovery.proposals[0];
+    if (!proposal) throw new Error("Expected proposal");
+
+    const setPreference = async (
+      cookie: string,
+      key: string,
+      level: PreferenceLevel,
+      expectedPreferenceVersion: number | null,
+      claimedMemberUserId?: string,
+    ) => {
+      const response = await discoveryRequest(
+        cookie,
+        `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/preference`,
+        key,
+        {
+          level,
+          expectedVersion: expectedPreferenceVersion,
+          ...(claimedMemberUserId ? { memberUserId: claimedMemberUserId } : {}),
+        },
+      );
+      expect(response.status).toBe(200);
+      return parseDiscoveryWorkspaceResponse(await response.json()).discovery.proposals[0]!;
+    };
+    await setPreference(ownerCookie, "proposal-preference-owner", "must", null);
+    await setPreference(second.cookie, "proposal-preference-second", "dislike", null);
+    await setPreference(third.cookie, "proposal-preference-third", "want", null);
+    const fourMembers = await setPreference(fourth.cookie, "proposal-preference-fourth", "optional", null);
+    expect(fourMembers.preferences.map((preference) => [preference.memberUserId, preference.level])).toEqual([
+      [owner.id, "must"],
+      [third.userId, "want"],
+      [fourth.userId, "optional"],
+      [second.userId, "dislike"],
+    ]);
+    expect(fourMembers.preferenceConflict).toBe(true);
+
+    const attemptedImpersonation = await setPreference(
+      fourth.cookie,
+      "proposal-preference-cannot-impersonate",
+      "neutral",
+      fourMembers.ownPreference?.version ?? null,
+      owner.id,
+    );
+    expect(attemptedImpersonation.ownPreference).toEqual({ level: "neutral", version: 2 });
+    expect(attemptedImpersonation.preferences.find((preference) => preference.memberUserId === owner.id)?.level)
+      .toBe("must");
+    expect(attemptedImpersonation.preferences.find((preference) => preference.memberUserId === second.userId)?.level)
+      .toBe("dislike");
+
+    await database.updateTable("trip_members").set({ removed_at: now() })
+      .where("trip_id", "=", trip.id)
+      .where("user_id", "=", third.userId)
+      .execute();
+    const reloadedResponse = await app.request(`/api/trips/${trip.id}/discovery`, {
+      headers: { cookie: ownerCookie },
+    });
+    expect(reloadedResponse.status).toBe(200);
+    const reloadedProposal = parseDiscoveryWorkspaceResponse(await reloadedResponse.json()).discovery.proposals[0]!;
+    expect(reloadedProposal.preferences.map((preference) => [preference.memberUserId, preference.level])).toEqual([
+      [owner.id, "must"],
+      [fourth.userId, "neutral"],
+      [second.userId, "dislike"],
+    ]);
+    expect(reloadedProposal.preferenceConflict).toBe(true);
+
+    const existingPlaceResponse = await app.request(`/api/trips/${trip.id}/trip-places`, {
+      method: "POST",
+      headers: {
+        cookie: ownerCookie,
+        "content-type": "application/json",
+        "idempotency-key": "existing-proposal-place",
+        origin: "https://app.example.test",
+      },
+      body: json({
+        method: "search",
+        providerPlaceId: proposal.providerPlaceId,
+        sourceUrl: proposal.sourceUrl,
+        originalNote: null,
+      }),
+    });
+    expect(existingPlaceResponse.status).toBe(201);
+    const existingPlace = parseTripPlaceResponse(await existingPlaceResponse.json()).tripPlace;
+    const existingPreference = await app.request(
+      `/api/trips/${trip.id}/trip-places/${existingPlace.id}/preference`,
+      {
+        method: "PUT",
+        headers: {
+          cookie: fourth.cookie,
+          "content-type": "application/json",
+          "idempotency-key": "existing-fourth-preference",
+          origin: "https://app.example.test",
+        },
+        body: json({ level: "want", expectedVersion: null }),
+      },
+    );
+    expect(existingPreference.status).toBe(200);
+
+    const accepted = await discoveryRequest(
+      ownerCookie,
+      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/accept`,
+      "accept-proposal-preferences",
+      { expectedVersion: proposal.version },
+    );
+    expect(accepted.status).toBe(200);
+    const removedPreference = await database.selectFrom("member_place_preferences")
+      .select("member_user_id")
+      .where("trip_place_id", "=", existingPlace.id)
+      .where("member_user_id", "=", third.userId)
+      .executeTakeFirst();
+    expect(removedPreference).toBeUndefined();
+    const listedResponse = await app.request(`/api/trips/${trip.id}/trip-places`, {
+      headers: { cookie: ownerCookie },
+    });
+    expect(listedResponse.status).toBe(200);
+    const listed = parseTripPlaceListResponse(await listedResponse.json()).tripPlaces
+      .find((place) => place.id === existingPlace.id)!;
+    expect(listed.preferences.map((preference) => [preference.memberUserId, preference.level])).toEqual([
+      [owner.id, "must"],
+      [second.userId, "dislike"],
+      [fourth.userId, "want"],
+    ]);
+    expect(listed.preferenceConflict).toBe(true);
   });
 
   it("keeps earlier decisions after a new run and never proposes those places again", async () => {

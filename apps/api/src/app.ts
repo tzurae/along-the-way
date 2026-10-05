@@ -542,6 +542,21 @@ export function createApp({
     });
   });
 
+  app.put("/api/trips/:tripId/discovery/proposals/:proposalId/preference", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json({
+      discovery: await discovery.setProposalPreference(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "proposalId"),
+        idempotencyKey(context),
+        preferenceInput(body),
+      ),
+    });
+  });
+
   app.post("/api/trips/:tripId/discovery/proposals/:proposalId/accept", async (context) => {
     const { user } = await authenticated(context);
     await rateLimiter.consume("trip_content", clientIp(context), user.id);

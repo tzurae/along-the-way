@@ -1,6 +1,7 @@
+import type { MemberPreferenceDto } from "./day-plans";
+import type { PreferenceLevel } from "./trip-places";
 import { isRecord } from "./type-guards";
 import type { PlaceType } from "./trip-skeleton";
-
 export type DiscoveryConfidence = "high" | "medium" | "low";
 export type DiscoveryProposalStatus = "pending" | "accepting" | "accepted" | "rejected";
 export type DiscoveryFeedbackStatus = "pending" | "confirmed" | "rejected";
@@ -91,6 +92,11 @@ export interface DiscoveryEvidenceDto {
   expiresAt: string | null;
   isStale: boolean;
 }
+export interface CandidateOwnPreferenceDto {
+  level: PreferenceLevel;
+  version: number;
+}
+
 
 export interface CandidateProposalDto {
   id: string;
@@ -113,6 +119,12 @@ export interface CandidateProposalDto {
   confidence: DiscoveryConfidence;
   status: DiscoveryProposalStatus;
   evidence: DiscoveryEvidenceDto[];
+  /** Active members who expressed a preference, strongest first and in roster order within a level. */
+  preferences: MemberPreferenceDto[];
+  /** At least one active member chose must and at least one chose dislike. */
+  preferenceConflict: boolean;
+  /** The current member's choice and its independently versioned row. */
+  ownPreference: CandidateOwnPreferenceDto | null;
   acceptedTripPlaceId: string | null;
   version: number;
   /** Kind of place it answers; null for proposals from before kinds were recorded. */
@@ -198,6 +210,11 @@ export interface GenerateDiscoveryInput {
 export interface DecideCandidateProposalInput {
   expectedVersion: number;
 }
+export interface UpdateCandidateProposalPreferenceInput {
+  level: PreferenceLevel;
+  expectedVersion?: number | null;
+}
+
 
 export interface CreateDiscoveryFeedbackInput {
   originalText: string;
@@ -265,6 +282,21 @@ function endorsements(value: unknown): DiscoveryEndorsement[] {
     entry === "google_reviews" || entry === "wikivoyage" || entry === "official_tourism" ? entry : invalid()
   );
 }
+const PREFERENCE_LEVELS: readonly PreferenceLevel[] = ["must", "want", "optional", "neutral", "dislike"];
+
+function preferenceLevel(value: unknown): PreferenceLevel {
+  return PREFERENCE_LEVELS.find((entry) => entry === value) ?? invalid();
+}
+
+function memberPreference(value: unknown): MemberPreferenceDto {
+  const item = record(value);
+  return {
+    memberUserId: text(item.memberUserId),
+    memberName: text(item.memberName),
+    level: preferenceLevel(item.level),
+  };
+}
+
 
 const SHORTFALL_CODES: readonly DiscoveryShortfallCode[] = [
   "not_researched", "not_found", "name_mismatch", "single_source", "category_short", "in_wishlist", "rejected",
@@ -383,6 +415,12 @@ function proposal(value: unknown): CandidateProposalDto {
     confidence: item.confidence as DiscoveryConfidence,
     status: item.status as DiscoveryProposalStatus,
     evidence: Array.isArray(item.evidence) ? item.evidence.map(evidence) : invalid(),
+    preferences: Array.isArray(item.preferences) ? item.preferences.map(memberPreference) : invalid(),
+    preferenceConflict: typeof item.preferenceConflict === "boolean" ? item.preferenceConflict : invalid(),
+    ownPreference: item.ownPreference === null ? null : {
+      level: preferenceLevel(record(item.ownPreference).level),
+      version: integer(record(item.ownPreference).version),
+    },
     acceptedTripPlaceId: nullableText(item.acceptedTripPlaceId),
     version: integer(item.version),
     category: nullableText(item.category),

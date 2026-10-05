@@ -18,11 +18,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useI18n } from "./i18n";
+import { PreferenceSummary } from "./PreferenceSummary";
 import {
   clock,
   describeStartAndEnd,
   loadLabel,
-  PreferenceSummary,
   reasonLabel,
   span,
   TimetableRow,

@@ -250,5 +250,26 @@ HTTP with real magic-link sessions plus Chromium in `Pacific/Honolulu`):
 Not verified: an untouched data-bearing 008 down/up round trip (the repository
 supports migration-free rollback only).
 
+## Discovery proposal member preferences (Issue #67)
+
+An active Trip member sets only their own preference on a pending AI proposal
+with `PUT /api/trips/:tripId/discovery/proposals/:proposalId/preference`. The
+request requires an `Idempotency-Key` header and a JSON body containing
+`level` (`must`, `want`, `optional`, `neutral`, or `dislike`) plus
+`expectedVersion` (`null` for the first choice, then the version returned for
+that member's choice).
+
+Each `CandidateProposalDto` contains:
+
+- `preferences`: active members who expressed a choice, strongest first and in
+  roster order within the same level;
+- `preferenceConflict`: `true` only when at least one active member chose
+  `must` and at least one chose `dislike`;
+- `ownPreference`: the requesting member's `{ level, version }`, or `null`.
+
+Accepting a proposal copies its active members' choices to the resulting shared
+wishlist place. A preference already present on that TripPlace wins and is
+never overwritten. Proposal preferences never modify formal itinerary items.
+
 The existing static site remains available at
 <https://tzurae.github.io/along-the-way/>.

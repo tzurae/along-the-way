@@ -6,6 +6,7 @@ import type {
   GenerateDiscoveryInput,
   SaveDiscoveryBriefInput,
   SaveDiscoveryQuestionAnswersInput,
+  UpdateCandidateProposalPreferenceInput,
 } from "@along-the-way/contracts/discovery";
 
 export interface DiscoveryModule {
@@ -27,6 +28,13 @@ export interface DiscoveryModule {
     tripId: string,
     idempotencyKey: string,
     input: GenerateDiscoveryInput,
+  ): Promise<DiscoveryWorkspaceDto>;
+  setProposalPreference(
+    userId: string,
+    tripId: string,
+    proposalId: string,
+    idempotencyKey: string,
+    input: UpdateCandidateProposalPreferenceInput,
   ): Promise<DiscoveryWorkspaceDto>;
   acceptProposal(
     userId: string,

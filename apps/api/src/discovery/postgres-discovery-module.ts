@@ -11,12 +11,14 @@ import type {
   GenerateDiscoveryInput,
   SaveDiscoveryBriefInput,
   SaveDiscoveryQuestionAnswersInput,
+  UpdateCandidateProposalPreferenceInput,
 } from "@along-the-way/contracts/discovery";
 import { parseDiscoveryWorkspaceResponse } from "@along-the-way/contracts/discovery";
-import type { ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
+import type { PreferenceLevel, ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
 import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { AlongTheWayDatabase } from "../database/database";
+import { summarizeMemberPreferences } from "../member-preferences";
 import { AppError } from "../private-trips/private-trip-module";
 import {
   dateOnly,
@@ -66,6 +68,7 @@ const SHORTFALL_CODES: readonly DiscoveryShortfallDto["code"][] = [
   "not_researched", "not_found", "name_mismatch", "single_source", "category_short", "in_wishlist", "rejected",
   "permanently_closed", "temporarily_closed", "outside_trip", "no_location",
 ];
+const PREFERENCE_LEVELS: readonly PreferenceLevel[] = ["must", "want", "optional", "neutral", "dislike"];
 
 /** Research runs one trip may start per hour; each run costs model and Google calls. */
 const RESEARCH_PER_TRIP_PER_HOUR = 6;
@@ -181,6 +184,9 @@ function upgradeStoredWorkspace(value: unknown) {
           endorsements: [],
           recommendationSentences: null,
           tradeoffSentences: null,
+          preferences: [],
+          preferenceConflict: false,
+          ownPreference: null,
           ...item,
           evidence: Array.isArray(item.evidence)
             ? item.evidence.map((entry) => ({ isStale: false, ...jsonObject(entry) }))
@@ -684,6 +690,81 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     }
   }
 
+  async setProposalPreference(
+    userId: string,
+    tripId: string,
+    proposalId: string,
+    rawKey: string,
+    input: UpdateCandidateProposalPreferenceInput,
+  ) {
+    uuid(tripId, "tripId");
+    uuid(proposalId, "proposalId");
+    if (!PREFERENCE_LEVELS.some((level) => level === input.level)) {
+      throw new AppError("validation_error", "preference level is invalid");
+    }
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `discovery:preference:${proposalId}`;
+    return this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return replayedWorkspace(replay);
+      const proposal = await transaction.selectFrom("candidate_proposals")
+        .select(["id", "status"])
+        .where("id", "=", proposalId)
+        .where("trip_id", "=", tripId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!proposal) throw new AppError("discovery_proposal_not_found", "Candidate proposal not found", 404);
+      if (proposal.status !== "pending") {
+        throw new AppError("conflict", "Preferences can only be changed on a pending proposal", 409);
+      }
+      const current = await transaction.selectFrom("discovery_proposal_preferences")
+        .select("version")
+        .where("proposal_id", "=", proposalId)
+        .where("member_user_id", "=", userId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (current) {
+        if (input.expectedVersion === null || input.expectedVersion === undefined) {
+          throw new AppError("conflict", `Version conflict; current version is ${current.version}`, 409, undefined, current.version);
+        }
+        const version = expectedVersion(input.expectedVersion);
+        if (version !== current.version) {
+          throw new AppError("conflict", `Version conflict; current version is ${current.version}`, 409, undefined, current.version);
+        }
+        await transaction.updateTable("discovery_proposal_preferences").set({
+          preference: input.level,
+          version: sql`version + 1`,
+          updated_at: this.now(),
+        }).where("proposal_id", "=", proposalId)
+          .where("member_user_id", "=", userId)
+          .execute();
+      } else {
+        if (input.expectedVersion !== null && input.expectedVersion !== undefined) {
+          throw new AppError("conflict", "Preference does not exist yet", 409);
+        }
+        await transaction.insertInto("discovery_proposal_preferences").values({
+          trip_id: tripId,
+          proposal_id: proposalId,
+          member_user_id: userId,
+          preference: input.level,
+        }).execute();
+      }
+      await recordEvent(transaction, {
+        tripId,
+        actorId: userId,
+        eventType: "discovery.proposal_preference_updated",
+        targetType: "candidate_proposal",
+        targetId: proposalId,
+        summary: `Set own proposal preference to ${input.level}`,
+      });
+      const response = await this.readWorkspace(transaction, tripId, userId);
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
   async acceptProposal(
     userId: string,
     tripId: string,
@@ -772,6 +853,42 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           .returning("id")
           .executeTakeFirst();
         if (!updated) throw new AppError("conflict", "Candidate acceptance state changed", 409);
+        const proposalPreferences = await transaction.selectFrom("discovery_proposal_preferences as preference")
+          .innerJoin("trip_members as member", (join) => join
+            .onRef("member.trip_id", "=", "preference.trip_id")
+            .onRef("member.user_id", "=", "preference.member_user_id"))
+          .select(["preference.member_user_id", "preference.preference"])
+          .where("preference.proposal_id", "=", proposalId)
+          .where("member.removed_at", "is", null)
+          .execute();
+        const carriedPreferences = proposalPreferences.length === 0
+          ? []
+          : await transaction.insertInto("member_place_preferences").values(proposalPreferences.map((preference) => ({
+              trip_id: tripId,
+              trip_place_id: tripPlace.id,
+              member_user_id: preference.member_user_id,
+              preference: preference.preference,
+            }))).onConflict((conflict) => conflict
+              .columns(["trip_place_id", "member_user_id"])
+              .doNothing())
+            .returning(["member_user_id", "preference"])
+            .execute();
+        if (carriedPreferences.length > 0) {
+          await transaction.updateTable("trip_places").set({
+            version: sql`version + 1`,
+            updated_at: this.now(),
+          }).where("id", "=", tripPlace.id).execute();
+          for (const preference of carriedPreferences) {
+            await recordEvent(transaction, {
+              tripId,
+              actorId: userId,
+              eventType: "member_place_preference.carried_from_proposal",
+              targetType: "trip_place",
+              targetId: tripPlace.id,
+              summary: `Carried proposal preference ${preference.preference} into the shared wishlist`,
+            });
+          }
+        }
         await recordEvent(transaction, {
           tripId,
           actorId: userId,
@@ -1117,6 +1234,25 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         .execute()
       : [];
     const proposalIds = proposalRows.map((proposal) => proposal.id);
+    const members = proposalIds.length === 0
+      ? []
+      : await executor.selectFrom("trip_members as member")
+        .innerJoin("users", "users.id", "member.user_id")
+        .select(["member.user_id", "users.email", "users.display_name"])
+        .where("member.trip_id", "=", tripId)
+        .where("member.removed_at", "is", null)
+        .orderBy("member.joined_at")
+        .execute();
+    const proposalPreferenceRows = proposalIds.length === 0
+      ? []
+      : await executor.selectFrom("discovery_proposal_preferences")
+        .select(["proposal_id", "member_user_id", "preference", "version"])
+        .where("proposal_id", "in", proposalIds)
+        .execute();
+    const proposalPreferencesByKey = new Map(proposalPreferenceRows.map((preference) => [
+      `${preference.proposal_id}:${preference.member_user_id}`,
+      preference,
+    ]));
     // Earlier runs' decisions stay visible after a new run replaces their undecided proposals:
     // one entry per place, its newest decision, unless the latest run lists the place itself.
     const earlierDecisions = run
@@ -1223,30 +1359,44 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         errorCode: run.error_code,
         shortfalls: this.readShortfalls(run.shortfalls),
       } : null,
-      proposals: proposalRows.map((proposal) => ({
-        id: proposal.id,
-        runId: proposal.run_id,
-        providerPlaceId: proposal.provider_place_id,
-        name: proposal.name,
-        type: proposal.place_type,
-        address: proposal.address,
-        latitude: proposal.latitude,
-        longitude: proposal.longitude,
-        sourceUrl: proposal.source_url,
-        recommendation: proposal.recommendation,
-        recommendationSentences: jsonClaimSentences(proposal.recommendation_sentences),
-        matchedNeeds: jsonStrings(proposal.matched_needs),
-        tradeoffs: jsonStrings(proposal.tradeoffs),
-        tradeoffSentences: jsonClaimSentences(proposal.tradeoff_sentences),
-        unknowns: jsonStrings(proposal.unknowns),
-        confidence: proposal.confidence,
-        status: proposal.status,
-        evidence: evidenceByProposal.get(proposal.id) ?? [],
-        acceptedTripPlaceId: proposal.accepted_trip_place_id,
-        version: proposal.version,
-        category: proposal.category,
-        endorsements: this.readEndorsements(proposal.endorsements),
-      })),
+      proposals: proposalRows.map((proposal) => {
+        const preferenceEntries = members.map((member) => ({
+          memberUserId: member.user_id,
+          memberName: member.display_name || member.email,
+          level: proposalPreferencesByKey.get(`${proposal.id}:${member.user_id}`)?.preference ?? null,
+        }));
+        const preferenceSummary = summarizeMemberPreferences(preferenceEntries);
+        const ownPreference = proposalPreferencesByKey.get(`${proposal.id}:${userId}`);
+        return {
+          id: proposal.id,
+          runId: proposal.run_id,
+          providerPlaceId: proposal.provider_place_id,
+          name: proposal.name,
+          type: proposal.place_type,
+          address: proposal.address,
+          latitude: proposal.latitude,
+          longitude: proposal.longitude,
+          sourceUrl: proposal.source_url,
+          recommendation: proposal.recommendation,
+          recommendationSentences: jsonClaimSentences(proposal.recommendation_sentences),
+          matchedNeeds: jsonStrings(proposal.matched_needs),
+          tradeoffs: jsonStrings(proposal.tradeoffs),
+          tradeoffSentences: jsonClaimSentences(proposal.tradeoff_sentences),
+          unknowns: jsonStrings(proposal.unknowns),
+          confidence: proposal.confidence,
+          status: proposal.status,
+          evidence: evidenceByProposal.get(proposal.id) ?? [],
+          preferences: preferenceSummary.members,
+          preferenceConflict: preferenceSummary.conflict,
+          ownPreference: ownPreference
+            ? { level: ownPreference.preference, version: ownPreference.version }
+            : null,
+          acceptedTripPlaceId: proposal.accepted_trip_place_id,
+          version: proposal.version,
+          category: proposal.category,
+          endorsements: this.readEndorsements(proposal.endorsements),
+        };
+      }),
       decided,
       feedback: feedbackRows.map((feedback): DiscoveryFeedbackDto => {
         const interpretation = jsonObject(feedback.interpretation);

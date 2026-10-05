@@ -271,6 +271,16 @@ export interface CandidateProposalTable {
   /** DiscoveryClaimSentenceDto[]; null for proposals created before sentence attribution. */
   tradeoff_sentences: Generated<unknown | null>;
 }
+export interface DiscoveryProposalPreferenceTable {
+  trip_id: string;
+  proposal_id: string;
+  member_user_id: string;
+  preference: "must" | "want" | "optional" | "neutral" | "dislike";
+  version: Generated<number>;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
 
 export interface CandidateProposalEvidenceTable {
   proposal_id: string;
@@ -437,6 +447,7 @@ export interface AlongTheWayDatabase {
   discovery_evidence: DiscoveryEvidenceTable;
   candidate_proposals: CandidateProposalTable;
   candidate_proposal_evidence: CandidateProposalEvidenceTable;
+  discovery_proposal_preferences: DiscoveryProposalPreferenceTable;
   discovery_feedback: DiscoveryFeedbackTable;
   itinerary_items: ItineraryItemTable;
   itinerary_item_participants: ItineraryItemParticipantTable;

@@ -19,6 +19,7 @@ import type { ItineraryItemDto, TimelineDayDto, TripSkeletonDto } from "@along-t
 import type { Kysely, Transaction } from "kysely";
 
 import type { AlongTheWayDatabase } from "../database/database";
+import { preferencePriority } from "../member-preferences";
 import { AppError } from "../private-trips/private-trip-module";
 import {
   lockMutation,
@@ -38,7 +39,7 @@ import {
   type TimetableStop,
 } from "./day-timetable";
 import { hoursOn, type PlaceHoursLookup, type PlaceOpeningHours } from "./opening-hours";
-import { distributePlaces, placePreferences, preferencePriority } from "./trip-distribution";
+import { distributePlaces, placePreferences } from "./trip-distribution";
 import { tripPlanBasis } from "./trip-plan-basis";
 
 /** Walking is suggested when it takes at most this long. */

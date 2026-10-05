@@ -1,11 +1,11 @@
 import type { MemberPlacePreferenceDto, PreferenceLevel } from "@along-the-way/contracts/trip-places";
 import { describe, expect, it } from "vitest";
 
+import { preferencePriority } from "../src/member-preferences";
 import type { DayHours } from "../src/planning/opening-hours";
 import {
   distributePlaces,
   placePreferences,
-  preferencePriority,
   type DistributionCandidate,
   type DistributionDay,
 } from "../src/planning/trip-distribution";

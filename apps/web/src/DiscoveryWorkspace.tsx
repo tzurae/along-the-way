@@ -12,9 +12,10 @@ import {
   type DiscoveryWorkspaceDto,
 } from "@along-the-way/contracts/discovery";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
-
+import type { PreferenceLevel } from "@along-the-way/contracts/trip-places";
 import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
+import { PreferenceSummary } from "./PreferenceSummary";
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
 
@@ -177,7 +178,7 @@ function resolvedQuestionAnswers(drafts: Record<string, QuestionDraft>): Discove
 
 
 export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: DiscoveryWorkspaceProps) {
-  const { locale, t: { discovery: t } } = useI18n();
+  const { locale, t: { discovery: t, tripPlaces } } = useI18n();
   const [workspace, setWorkspace] = useState<DiscoveryWorkspaceDto | null>(null);
   const [briefDraft, setBriefDraft] = useState("");
   const [feedbackDraft, setFeedbackDraft] = useState("");
@@ -236,13 +237,14 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
     payload: unknown,
     area: NoticeArea,
     after?: () => void,
+    method?: "POST" | "PUT",
   ) {
     if (pending) return;
     setPending(operation);
     setNotice(null);
     try {
       const next = apply(await request(path, {
-        method: operation === "save-brief" || operation === "save-questions" ? "PUT" : "POST",
+        method: method ?? (operation === "save-brief" || operation === "save-questions" ? "PUT" : "POST"),
         headers: {
           "Content-Type": "application/json",
           "Idempotency-Key": retryKey(retryKeys.current, operation, payload),
@@ -307,6 +309,17 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
       decision === "accept" ? onPlacesChanged : undefined,
     );
   }
+  async function setProposalPreference(proposal: CandidateProposalDto, level: PreferenceLevel) {
+    await mutate(
+      `preference:${proposal.id}`,
+      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/preference`,
+      { level, expectedVersion: proposal.ownPreference?.version ?? null },
+      "general",
+      undefined,
+      "PUT",
+    );
+  }
+
 
   async function createFeedback(proposalId: string | null) {
     const text = (proposalId ? proposalFeedbackDrafts[proposalId] : feedbackDraft)?.trim();
@@ -528,6 +541,15 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
                         })}
                       </ul>
                     </div>
+                    {proposal.status === "pending" ? (
+                      <section className="grid gap-3" aria-label={t.proposal.memberPreferencesFor(proposal.name)}>
+                        <PreferenceSummary preferences={proposal.preferences.length > 0 ? {
+                          members: proposal.preferences,
+                          conflict: proposal.preferenceConflict,
+                        } : undefined} />
+                        <label className="grid gap-1 font-semibold">{t.proposal.yourPreference}<select className="min-h-11 rounded-lg border bg-surface px-3" disabled={pending !== null} value={proposal.ownPreference?.level ?? ""} onChange={(event) => { if (event.target.value) void setProposalPreference(proposal, event.target.value as PreferenceLevel); }}><option value="" disabled>{t.proposal.noPreference}</option>{Object.entries(tripPlaces.preference).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+                      </section>
+                    ) : null}
                     {proposal.status === "pending" ? <div className="flex flex-wrap gap-2"><button className="flex min-h-10 items-center gap-2 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "accept")}><Check aria-hidden="true" className="size-4" />{t.proposal.accept}</button><button className="flex min-h-10 items-center gap-2 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "reject")}><X aria-hidden="true" className="size-4" />{t.proposal.decline}</button></div> : null}
                     <div className="rounded-xl border bg-surface p-3">
                       <label className="grid gap-2 font-bold">

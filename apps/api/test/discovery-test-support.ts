@@ -9,6 +9,7 @@ export const unrelatedDiscoveryModule = {
   saveBrief: unexpectedDiscoveryCall,
   saveQuestionAnswers: unexpectedDiscoveryCall,
   generate: unexpectedDiscoveryCall,
+  setProposalPreference: unexpectedDiscoveryCall,
   acceptProposal: unexpectedDiscoveryCall,
   rejectProposal: unexpectedDiscoveryCall,
   createFeedback: unexpectedDiscoveryCall,

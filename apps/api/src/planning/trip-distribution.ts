@@ -1,6 +1,7 @@
 import type { PlacePreferencesDto } from "@along-the-way/contracts/day-plans";
-import type { PreferenceLevel, TripPlaceDto } from "@along-the-way/contracts/trip-places";
+import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
 
+import { summarizeMemberPreferences } from "../member-preferences";
 import { straightLineMeters, type GeoPoint } from "./day-route-order";
 import type { DayHours } from "./opening-hours";
 
@@ -9,36 +10,18 @@ export const NEARBY_METERS = 10_000;
 /** A day takes new places while its estimated load stays at or below this share of its hours. */
 export const LOAD_LIMIT_PERCENT = 70;
 
-const PREFERENCE_PRIORITY: Record<PreferenceLevel, number> = {
-  must: 0,
-  want: 1,
-  optional: 2,
-  neutral: 3,
-  dislike: 4,
-};
-
-/** Lower is planned first: the best preference any member gave; unrated counts as neutral. */
-export function preferencePriority(levels: Array<PreferenceLevel | null>) {
-  const ranks = levels.flatMap((level) => (level === null ? [] : [PREFERENCE_PRIORITY[level]]));
-  return ranks.length === 0 ? PREFERENCE_PRIORITY.neutral : Math.min(...ranks);
-}
-
 /**
  * Each member's own preference, strongest first, with no merging: the plan ranks a place by
  * its best preference, so this is where a member who dislikes it stays visible.
  * Null when no member rated the place.
  */
 export function placePreferences(place: Pick<TripPlaceDto, "id" | "preferences">): PlacePreferencesDto | null {
-  const members = place.preferences.flatMap((entry) => (entry.level === null ? [] : [{
+  const summary = summarizeMemberPreferences(place.preferences.map((entry) => ({
     memberUserId: entry.memberUserId,
     memberName: entry.memberDisplayName || entry.memberEmail,
     level: entry.level,
-  }]));
-  if (members.length === 0) return null;
-  // A stable sort keeps roster order within one level.
-  members.sort((left, right) => PREFERENCE_PRIORITY[left.level] - PREFERENCE_PRIORITY[right.level]);
-  const levels = new Set(members.map((member) => member.level));
-  return { tripPlaceId: place.id, members, conflict: levels.has("must") && levels.has("dislike") };
+  })));
+  return summary.members.length === 0 ? null : { tripPlaceId: place.id, ...summary };
 }
 
 export interface StayPoint extends GeoPoint {

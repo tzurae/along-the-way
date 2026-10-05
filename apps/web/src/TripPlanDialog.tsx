@@ -16,7 +16,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useI18n } from "./i18n";
-import { loadLabel, PreferenceSummary, reasonLabel, span, TimetableRow } from "./TimetableView";
+import { PreferenceSummary } from "./PreferenceSummary";
+import { loadLabel, reasonLabel, span, TimetableRow } from "./TimetableView";
 
 type JsonRequest = <T>(url: string, options?: RequestInit & { parse?: (value: unknown) => unknown }) => Promise<T>;
 
