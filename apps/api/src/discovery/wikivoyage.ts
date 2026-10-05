@@ -1,3 +1,4 @@
+import { boundedBytes } from "./official-pages";
 import { placeNamesMatch } from "./place-names";
 
 /** A guide entry: a listing template ({{see|name=…}}, {{listing|…}}, …) or a bolded '''name'''. */
@@ -117,20 +118,32 @@ export function listsPlace(
 interface WikivoyageOptions {
   fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   timeoutMs?: number;
+  /** Time one research run may spend on Wikivoyage in total; later requests count as no source. */
+  totalMs?: number;
+  /** Largest API response read; a larger one counts as no source. */
+  maxBytes?: number;
+  now?: () => number;
 }
 
 /**
  * Checks whether a Wikivoyage guide (in the given language editions) lists a place.
- * One instance serves one research run, so guide pages shared by many places load once.
+ * One instance serves one research run, so guide pages shared by many places load once,
+ * and its time budget starts when the run creates it.
  */
 export class WikivoyageVerifier {
   private readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   private readonly timeoutMs: number;
+  private readonly maxBytes: number;
+  private readonly now: () => number;
+  private readonly deadline: number;
   private readonly pages = new Map<string, Promise<WikivoyageListing[] | null>>();
 
   constructor(options: WikivoyageOptions = {}) {
     this.fetch = options.fetch ?? ((input, init) => fetch(input, init));
     this.timeoutMs = options.timeoutMs ?? 4_000;
+    this.maxBytes = options.maxBytes ?? 1_000_000;
+    this.now = options.now ?? (() => Date.now());
+    this.deadline = this.now() + (options.totalMs ?? 30_000);
   }
 
   async verify(place: {
@@ -160,15 +173,21 @@ export class WikivoyageVerifier {
     for (const [key, value] of Object.entries({ ...parameters, format: "json", formatversion: "2" })) {
       url.searchParams.set(key, value);
     }
+    const remaining = this.deadline - this.now();
+    if (remaining <= 0) return null;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), Math.min(this.timeoutMs, remaining));
     try {
+      // The host is fixed; a redirect could only lead somewhere else, so it counts as no source.
       const response = await this.fetch(url, {
         signal: controller.signal,
+        redirect: "manual",
         headers: { Accept: "application/json", "User-Agent": USER_AGENT, "Api-User-Agent": USER_AGENT },
       });
-      if (!response.ok) return null;
-      const value: unknown = await response.json();
+      if (!response.ok || !/^application\/json\b/i.test(response.headers.get("content-type") ?? "")) return null;
+      const bytes = await boundedBytes(response, this.maxBytes + 1);
+      if (bytes.byteLength > this.maxBytes) return null;
+      const value: unknown = JSON.parse(new TextDecoder().decode(bytes));
       return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
     } catch {
       return null;

@@ -353,7 +353,10 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       database,
       tokenIssuer,
       now,
-      randomSessionToken: () => "discovery-session-token",
+      randomSessionToken: (() => {
+        let sessions = 0;
+        return () => `discovery-session-token-${sessions += 1}`;
+      })(),
     });
     worker = new PostgresEmailWorker({
       database,
@@ -389,19 +392,19 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     await database.destroy();
   });
 
-  async function login() {
+  async function login(address = "owner@example.test") {
     const requested = await app.request("/api/auth/magic-links", {
       method: "POST",
       headers: {
         "content-type": "application/json",
         origin: "https://app.example.test",
-        "x-forwarded-for": "owner@example.test",
+        "x-forwarded-for": address,
       },
-      body: json({ email: "owner@example.test" }),
+      body: json({ email: address }),
     });
     expect(requested.status).toBe(202);
     await worker.runOnce();
-    const link = email.magicLinks[0]?.url;
+    const link = email.magicLinks.at(-1)?.url;
     const token = link && new URLSearchParams(new URL(link).hash.slice(1)).get("magicToken");
     if (!token) throw new Error("Magic link missing");
     const consumed = await app.request("/api/auth/magic-links/consume", {
@@ -413,17 +416,17 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     return sessionCookie(consumed);
   }
 
-  async function createTrip(cookie: string) {
+  async function createTrip(cookie: string, name = "Kyoto week") {
     const response = await app.request("/api/trips", {
       method: "POST",
       headers: {
         cookie,
         "content-type": "application/json",
-        "idempotency-key": "create-discovery-trip",
+        "idempotency-key": `create-discovery-trip-${name}`,
         origin: "https://app.example.test",
       },
       body: json({
-        name: "Kyoto week",
+        name,
         startDate: "2026-10-21",
         endDate: "2026-10-27",
         countryCodes: ["JP"],
@@ -672,6 +675,66 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
         or facts::text ilike '%countryCode%' or facts::text ilike '%"KR"%'
     `.execute(database);
     expect(stored.rows[0]?.count).toBe("0");
+  });
+
+  it("runs one research per trip at a time and caps research per trip and per member each hour", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    await database.insertInto("users").values({
+      email: "second@example.test", display_name: "second", status: "active", created_at: now(), updated_at: now(),
+    }).execute();
+    const secondCookie = await login("second@example.test");
+    const second = await database.selectFrom("users").select("id").where("email", "=", "second@example.test").executeTakeFirstOrThrow();
+    await database.insertInto("trip_members").values({ trip_id: trip.id, user_id: second.id, role: "editor", removed_at: null }).execute();
+    provider.known.set("Shoren Garden", {});
+    model.researchedPlaces = ["Shoren Garden"];
+    const saveBrief = async (tripId: string) => expect((await discoveryRequest(cookie, `/api/trips/${tripId}/discovery/brief`, `limit-brief-${tripId}`, {
+      originalText: "Quiet gardens.",
+      expectedVersion: null,
+    })).status).toBe(200);
+    const generate = (who: string, key: string, tripId = trip.id) =>
+      discoveryRequest(who, `/api/trips/${tripId}/discovery/generate`, key, { expectedBriefVersion: 1 });
+    await saveBrief(trip.id);
+
+    // The owner's research is still running when the second member asks: no second paid run.
+    const first = generate(cookie, "limit-run-1");
+    await model.planStarted;
+    const blocked = await generate(secondCookie, "limit-second");
+    expect(blocked.status).toBe(409);
+    expect(await blocked.json()).toMatchObject({ error: { code: "research_in_progress" } });
+    // The same trip spelled in capitals is still the same trip.
+    const blockedUpper = await generate(secondCookie, "limit-second-upper", trip.id.toUpperCase());
+    expect(blockedUpper.status).toBe(409);
+    model.releasePlan();
+    expect((await first).status).toBe(200);
+    expect(model.planCalls).toBe(1);
+    // Once it finished, the same request goes through.
+    expect((await generate(secondCookie, "limit-second")).status).toBe(200);
+
+    // Six runs on the trip within the hour: the seventh is refused before any model call.
+    for (const key of ["limit-run-3", "limit-run-4", "limit-run-5", "limit-run-6"]) {
+      expect((await generate(cookie, key)).status).toBe(200);
+    }
+    const plansAtTripLimit = model.planCalls;
+    const seventh = await generate(cookie, "limit-run-7");
+    expect(seventh.status).toBe(429);
+    expect(seventh.headers.get("retry-after")).toMatch(/^\d+$/);
+    expect(await seventh.json()).toMatchObject({ error: { code: "research_limit_reached" } });
+    expect(model.planCalls).toBe(plansAtTripLimit);
+    // A retry of a finished request is answered from what it already returned.
+    expect((await generate(cookie, "limit-run-3")).status).toBe(200);
+    expect(model.planCalls).toBe(plansAtTripLimit);
+
+    // The owner started five of those; five more on another trip reach the per-member cap of ten.
+    const other = await createTrip(cookie, "Osaka week");
+    await saveBrief(other.id);
+    for (const key of ["other-run-1", "other-run-2", "other-run-3", "other-run-4", "other-run-5"]) {
+      expect((await generate(cookie, key, other.id)).status).toBe(200);
+    }
+    const eleventh = await generate(cookie, "other-run-6", other.id);
+    expect(eleventh.status).toBe(429);
+    expect(await eleventh.json()).toMatchObject({ error: { code: "research_limit_reached" } });
+    expect(model.planCalls).toBe(plansAtTripLimit + 5);
   });
 
   it("keeps shortlists from before the quality checks readable", async () => {

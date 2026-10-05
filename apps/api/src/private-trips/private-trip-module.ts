@@ -90,6 +90,8 @@ export class AppError extends Error {
       | "discovery_feedback_not_found"
       | "model_unavailable"
       | "provider_unavailable"
+      | "research_in_progress"
+      | "research_limit_reached"
       | "invite_not_found"
       | "conflict"
       | "invalid_magic_link"

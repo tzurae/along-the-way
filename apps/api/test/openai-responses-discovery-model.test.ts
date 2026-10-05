@@ -150,6 +150,7 @@ describe("OpenAI Responses discovery model", () => {
     const body = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body));
     expect(body.tools).toEqual([{ type: "web_search", search_context_size: "low" }]);
     expect(body.include).toEqual(["web_search_call.action.sources"]);
+    expect(body.max_tool_calls).toBe(20);
     const item = body.text.format.schema.properties.candidates.items.properties;
     expect(item.category.anyOf[0].enum).toEqual(["Temples", "Local food"]);
     expect(item.namedPlace.anyOf[0].enum).toEqual(["Saihoji"]);
