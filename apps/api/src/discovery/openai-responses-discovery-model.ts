@@ -16,6 +16,8 @@ import { normalizePlaceName } from "./place-names";
 /** Used when the model returns no kinds at all; normally it localizes these itself. */
 const DEFAULT_CATEGORIES = ["Must-see sights", "Local food", "Seasonal highlights"];
 const MAX_RESEARCHED = 20;
+/** Web searches the model may run in one research request. */
+export const MAX_WEB_SEARCHES = 20;
 /** candidate_proposals.category is varchar(80). */
 const MAX_CATEGORY_LENGTH = 80;
 const SOURCE_TYPES: readonly WebSourceType[] = ["government", "tourism_board", "wikivoyage", "place_official", "other"];
@@ -346,6 +348,8 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
       if (options.webSearch) {
         body.tools = [{ type: "web_search", search_context_size: "low" }];
         body.include = ["web_search_call.action.sources"];
+        // Each web search is billed; this bounds one research run's searches.
+        body.max_tool_calls = MAX_WEB_SEARCHES;
       }
       const response = await this.fetch(`${this.baseUrl}/responses`, {
         method: "POST",

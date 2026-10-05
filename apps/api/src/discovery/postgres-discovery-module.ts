@@ -65,6 +65,12 @@ const SHORTFALL_CODES: readonly DiscoveryShortfallDto["code"][] = [
   "permanently_closed", "temporarily_closed", "outside_trip", "no_location",
 ];
 
+/** Research runs one trip may start per hour; each run costs model and Google calls. */
+const RESEARCH_PER_TRIP_PER_HOUR = 6;
+/** Research runs one member may start per hour, across all trips. */
+const RESEARCH_PER_ACCOUNT_PER_HOUR = 10;
+const GENERATE_OPERATION_PREFIX = "discovery:generate:";
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EMPTY_PLAN: DiscoverySearchPlan = {
   queries: [],
@@ -251,7 +257,9 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     uuid(tripId, "tripId");
     const key = requireIdempotencyKey(rawKey);
     const version = expectedVersion(input.expectedBriefVersion);
-    const operation = `discovery:generate:${tripId}`;
+    // Lowercase: the path accepts the UUID in any case, and the research lock and limits are
+    // keyed on this string, so another spelling must not count as another trip.
+    const operation = `${GENERATE_OPERATION_PREFIX}${tripId.toLowerCase()}`;
     await this.requireMember(this.database, userId, tripId);
     const earlyReplay = await replayed(this.database, userId, operation, key);
     if (earlyReplay) return aiRequestReplay(earlyReplay);
@@ -274,6 +282,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       await lockMutation(transaction, userId, operation, key);
       const existing = await replayed(transaction, userId, operation, key);
       if (existing) return existing;
+      await this.claimResearchSlot(transaction, userId, tripId, operation);
       await remember(transaction, userId, operation, key, {
         type: AI_REQUEST_STATE,
         state: "in-progress",
@@ -822,6 +831,60 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       .where("removed_at", "is", null)
       .executeTakeFirst();
     if (!member) throw new AppError("trip_not_found", "Trip not found", 404);
+  }
+
+  /**
+   * Research costs money, so every member's research on a trip, and one member's research
+   * across trips, queue on locks here: one research per trip at a time, and a cap on research
+   * started per hour. A research counts once claimed, whatever its outcome; a replay of the
+   * same request never gets here.
+   */
+  private async claimResearchSlot(
+    transaction: Transaction<AlongTheWayDatabase>,
+    userId: string,
+    tripId: string,
+    operation: string,
+  ) {
+    for (const lock of [`${GENERATE_OPERATION_PREFIX}account:${userId}`, operation]) {
+      await sql`select pg_advisory_xact_lock(hashtextextended(${lock}, 0))`.execute(transaction);
+    }
+    // Both arms lead with actor_id, the primary key's first column: the trip's claims can
+    // only come from its members, removed ones included. The database clock stamps created_at.
+    const recent = await transaction.selectFrom("mutation_requests")
+      .select([
+        "operation",
+        "actor_id",
+        sql<string | null>`response->>'type'`.as("claim_type"),
+        sql<string | null>`response->>'state'`.as("claim_state"),
+        sql<boolean>`created_at > now() - interval '10 minutes'`.as("started_recently"),
+        sql<number>`ceil(extract(epoch from (created_at + interval '1 hour' - now())))::int`.as("seconds_left"),
+      ])
+      .where("operation", "like", `${GENERATE_OPERATION_PREFIX}%`)
+      .where("created_at", ">", sql<Date>`now() - interval '1 hour'`)
+      .where((where) => where.or([
+        where.and([
+          where("actor_id", "in", where.selectFrom("trip_members").select("user_id").where("trip_id", "=", tripId)),
+          where("operation", "=", operation),
+        ]),
+        where("actor_id", "=", userId),
+      ]))
+      .execute();
+    const forTrip = recent.filter((row) => row.operation === operation);
+    // Still marked running after ten minutes means the process running it died.
+    if (forTrip.some((row) => row.started_recently && row.claim_type === AI_REQUEST_STATE && row.claim_state === "in-progress")) {
+      throw new AppError("research_in_progress", "Research for this trip is already running", 409);
+    }
+    const byAccount = recent.filter((row) => row.actor_id === userId);
+    for (const [rows, limit] of [[forTrip, RESEARCH_PER_TRIP_PER_HOUR], [byAccount, RESEARCH_PER_ACCOUNT_PER_HOUR]] as const) {
+      if (rows.length >= limit) {
+        throw new AppError(
+          "research_limit_reached",
+          "The research limit for this hour is reached",
+          429,
+          Math.max(1, Math.min(...rows.map((row) => row.seconds_left))),
+        );
+      }
+    }
   }
 
   private async tripFacts(userId: string, tripId: string): Promise<DiscoveryTripFacts> {

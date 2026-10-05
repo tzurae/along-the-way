@@ -21,6 +21,8 @@ export const errors = {
     discovery_feedback_not_found: "找不到 AI 研究回饋。",
     model_unavailable: "AI 模型目前無法使用，請稍後再試。",
     provider_unavailable: "服務供應商目前無法使用，請稍後再試。",
+    research_in_progress: "這趟旅程已經有研究在進行中，請稍後重新整理查看結果。",
+    research_limit_reached: "這一小時的 AI 研究次數已達上限，請稍後再試。",
     invite_not_found: "找不到邀請。",
     conflict: "資料已變更，無法完成操作。",
     invalid_magic_link: "這個登入連結無效。",

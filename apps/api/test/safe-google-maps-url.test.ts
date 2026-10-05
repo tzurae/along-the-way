@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   GoogleMapsUrlError,
   googleMapsSearchText,
+  isPublicAddress,
   resolveGoogleMapsUrl,
   type GoogleMapsUrlResolverDependencies,
 } from "../src/trip-places/safe-google-maps-url";
@@ -231,5 +232,17 @@ describe("safe Google Maps URL resolution", () => {
         totalTimeoutMs: 5,
       }),
     ).rejects.toMatchObject({ code: "timeout" });
+  });
+
+  it("treats IPv6 that embeds or translates to IPv4, and site-local IPv6, as not public", () => {
+    for (const address of ["fec0::1", "2002:7f00:1::1", "64:ff9b::7f00:1", "64:ff9b:1::1", "::7f00:1"]) {
+      expect(isPublicAddress(address)).toBe(false);
+    }
+  });
+
+  it("still treats ordinary public addresses as public", () => {
+    for (const address of ["2001:4860:4860::8888", "2404:6800:4004:80a::200e", "8.8.8.8"]) {
+      expect(isPublicAddress(address)).toBe(true);
+    }
   });
 });

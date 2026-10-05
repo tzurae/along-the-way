@@ -107,7 +107,8 @@ async function publicHost(host: string, dependencies: PublicPageDependencies, si
   }
 }
 
-async function boundedBytes(response: Response, maximum: number) {
+/** At most `maximum` bytes of the body; the rest is never read. */
+export async function boundedBytes(response: Response, maximum: number) {
   if (!response.body) return new Uint8Array();
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];

@@ -173,7 +173,14 @@ function privateIpv6(address: string) {
     (groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1) ||
     (first & 0xfe00) === 0xfc00 ||
     (first & 0xffc0) === 0xfe80 ||
-    (first & 0xff00) === 0xff00
+    (first & 0xff00) === 0xff00 ||
+    // These embed or translate to IPv4 (or are deprecated site-local), so they can reach a
+    // private IPv4 network: site-local fec0::/10, 6to4 2002::/16, NAT64 64:ff9b::/96 and
+    // 64:ff9b:1::/48, and IPv4-compatible ::a.b.c.d.
+    (first & 0xffc0) === 0xfec0 ||
+    first === 0x2002 ||
+    (first === 0x0064 && groups[1] === 0xff9b) ||
+    groups.slice(0, 6).every((group) => group === 0)
   ) return true;
   const mapped =
     groups.slice(0, 5).every((group) => group === 0) &&
