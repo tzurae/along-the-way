@@ -14,9 +14,12 @@ function dependencies(
     "maps.app.goo.gl": ["142.250.72.238"],
     "www.google.com": ["142.250.72.228"],
   },
-): GoogleMapsUrlResolverDependencies {
+): GoogleMapsUrlResolverDependencies & { fetched: string[] } {
+  const fetched: string[] = [];
   return {
-    fetch: async () => {
+    fetched,
+    fetch: async (input) => {
+      fetched.push(String(input));
       const response = responses.shift();
       if (!response) throw new Error("Unexpected fetch");
       return response;
@@ -106,17 +109,34 @@ describe("safe Google Maps URL resolution", () => {
     "fc00::1",
     "::ffff:127.0.0.1",
     "::ffff:7f00:1",
+    "fec0::1",
+    "2002:7f00:1::1",
+    "64:ff9b::7f00:1",
+    "::7f00:1",
   ])(
     "rejects private, link-local, or loopback address %s",
     async (address) => {
+      // The redirect target is public, so only the tested address can stop the resolution.
       const deps = dependencies([redirect("https://www.google.com/maps")], {
         "maps.app.goo.gl": [address],
+        "www.google.com": ["142.250.72.228"],
       });
       await expect(
         resolveGoogleMapsUrl("https://maps.app.goo.gl/private", deps),
       ).rejects.toMatchObject({ code: "address_not_public" });
+      // Nothing was sent to the private address.
+      expect(deps.fetched).toEqual([]);
     },
   );
+
+  it("resolves the same short link when its address is public", async () => {
+    const deps = dependencies([redirect("https://www.google.com/maps")], {
+      "maps.app.goo.gl": ["142.250.72.238"],
+      "www.google.com": ["142.250.72.228"],
+    });
+    await expect(resolveGoogleMapsUrl("https://maps.app.goo.gl/private", deps))
+      .resolves.toMatchObject({ resolvedUrl: "https://www.google.com/maps" });
+  });
 
   it("caps redirect depth", async () => {
     const deps = dependencies([
