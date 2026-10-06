@@ -71,8 +71,11 @@ describe("public page fetching", () => {
   });
 
   it("refuses plain HTTP and hosts that resolve to private addresses", async () => {
-    const pages = { "https://intranet.example.test/": html("東福寺") };
-    expect(await fetchPublicPageText("http://kyoto.travel/", dependencies(pages))).toBeNull();
+    // Both pages exist, so only the scheme and the address checks can refuse them.
+    const pages = { "http://kyoto.travel/": html("東福寺"), "https://intranet.example.test/": html("東福寺") };
+    const plain = dependencies(pages);
+    expect(await fetchPublicPageText("http://kyoto.travel/", plain)).toBeNull();
+    expect(plain.requested).toEqual([]);
     const privateHost = dependencies(pages, { "intranet.example.test": ["10.0.0.5"] });
     expect(await fetchPublicPageText("https://intranet.example.test/", privateHost)).toBeNull();
     expect(privateHost.requested).toEqual([]);
