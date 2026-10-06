@@ -10,6 +10,7 @@ import { tripPlaces } from "./trip-places";
 import { tripPlan } from "./trip-plan";
 import { tripSkeleton } from "./trip-skeleton";
 import { travel } from "./travel";
+import { today } from "./today";
 
 /** Traditional Chinese (Taiwan): the site's first language and the shape every other follows. */
 export const zhTW = {
@@ -25,4 +26,5 @@ export const zhTW = {
   tripPlan,
   tripSkeleton,
   travel,
+  today,
 };
