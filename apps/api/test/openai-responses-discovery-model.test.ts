@@ -54,7 +54,6 @@ function researched(overrides: Record<string, unknown>) {
     matchedNeeds: ["temples"],
     tradeoffs: [],
     unknowns: [],
-    confidence: "high",
     sources: [],
     ...overrides,
   };
@@ -184,6 +183,7 @@ describe("OpenAI Responses discovery model", () => {
       tradeoffSentences: [{ text: "Crowds can build around noon.", sourceUrls: [official.url] }],
       sources: [{ url: official.url, type: "tourism_board" }],
     })]);
+    expect(result.candidates[0]).not.toHaveProperty("confidence");
     expect(result.sources).toEqual([official]);
     const body = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body));
     expect(body.tools).toEqual([{ type: "web_search", search_context_size: "low" }]);
@@ -195,6 +195,7 @@ describe("OpenAI Responses discovery model", () => {
     const item = body.text.format.schema.properties.candidates.items.properties;
     expect(item.category.anyOf[0].enum).toEqual(["Temples", "Local food"]);
     expect(item.namedPlace.anyOf[0].enum).toEqual(["Saihoji"]);
+    expect(item).not.toHaveProperty("confidence");
   });
 
   it("drops a candidate when stripping citations leaves no recommendation sentence", async () => {

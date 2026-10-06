@@ -223,7 +223,6 @@ class ControlledDiscoveryModel implements DiscoveryModel {
           matchedNeeds: ["gardens"],
           tradeoffSentences: [],
           unknowns: [],
-          confidence: "medium" as const,
           recommendationSentences: [{
             text: `${name} is a quiet garden.`,
             sourceUrls: ["https://kyoto.example.test/gardens"],
@@ -238,7 +237,6 @@ class ControlledDiscoveryModel implements DiscoveryModel {
       matchedNeeds: ["food markets"],
       tradeoffSentences: [],
       unknowns: ["holiday opening hours"],
-      confidence: "medium" as const,
     };
     return {
       modelId: this.modelId,
@@ -501,7 +499,9 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     model.releasePlan();
     const generatedResponse = await firstGeneration;
     expect(generatedResponse.status).toBe(200);
-    const generated = parseDiscoveryWorkspaceResponse(await generatedResponse.json()).discovery;
+    const generatedJson = await generatedResponse.json();
+    expect(generatedJson.discovery.proposals[0]).not.toHaveProperty("confidence");
+    const generated = parseDiscoveryWorkspaceResponse(generatedJson).discovery;
     expect(model.planCalls).toBe(1);
     expect(model.researchCalls).toBe(1);
     expect(generated.brief?.structured?.interests).toContain("food markets");
@@ -1586,6 +1586,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       recommendationSentences: null,
       tradeoffSentences: null,
     })]);
+    expect(workspace.proposals[0]).not.toHaveProperty("confidence");
   });
 
   it("replays a response stored before the quality checks instead of failing", async () => {
@@ -1655,6 +1656,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       tradeoffSentences: null,
       evidence: [expect.objectContaining({ isStale: false })],
     });
+    expect(workspace.proposals[0]).not.toHaveProperty("confidence");
     expect(workspace.brief?.questionAnswers).toEqual([]);
     expect(workspace.feedback[0]).toMatchObject({
       proposalName: null,

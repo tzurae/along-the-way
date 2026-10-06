@@ -262,7 +262,6 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
           matchedNeeds: stringArray(12),
           tradeoffs: claimArraySchema,
           unknowns: stringArray(12),
-          confidence: { type: "string", enum: ["high", "medium", "low"] },
           sources: {
             type: "array",
             maxItems: 8,
@@ -309,10 +308,6 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
       const name = asString(item.name, "AI discovery omitted a place name").trim();
       const category = asNullableString(item.category, "AI discovery returned an invalid category");
       const namedPlace = asNullableString(item.namedPlace, "AI discovery returned an invalid named place");
-      const confidence = asString(item.confidence, "AI discovery omitted candidate confidence");
-      if (confidence !== "high" && confidence !== "medium" && confidence !== "low") {
-        throw new DiscoveryModelResponseError("AI discovery returned invalid candidate confidence");
-      }
       if (!Array.isArray(item.sources)) throw new DiscoveryModelResponseError("AI discovery returned invalid sources");
       // A place the model repeats, or files under a kind or named place the request does not
       // have, is dropped rather than failing the whole run.
@@ -351,7 +346,6 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
         matchedNeeds: asStrings(item.matchedNeeds, 12, "AI discovery returned invalid matched needs"),
         tradeoffSentences,
         unknowns: asStrings(item.unknowns, 12, "AI discovery returned invalid unknowns"),
-        confidence,
         sources: [...sources].map(([url, type]) => ({ url, type })),
       });
     }

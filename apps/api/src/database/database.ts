@@ -253,7 +253,8 @@ export interface CandidateProposalTable {
   matched_needs: unknown;
   tradeoffs: unknown;
   unknowns: unknown;
-  confidence: "high" | "medium" | "low";
+  /** Retained for rollback compatibility; current releases omit it and the column defaults to medium. */
+  confidence: Generated<"high" | "medium" | "low">;
   status: "pending" | "accepting" | "accepted" | "rejected";
   accepted_trip_place_id: string | null;
   decided_by: string | null;

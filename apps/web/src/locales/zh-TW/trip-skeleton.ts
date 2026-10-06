@@ -146,7 +146,7 @@ export const tripSkeleton = {
     "discovery.questions_answered": "回答了 AI 的提問",
     "discovery.generated": "完成了一次 AI 研究",
     "discovery.proposal_accepted": "接受了 AI 推薦的地點",
-    "discovery.proposal_rejected": "略過了 AI 推薦的地點",
+    "discovery.proposal_rejected": "把 AI 推薦的地點設為不要再推薦",
     "discovery.proposal_reopened": "讓移出想去清單的 AI 候選重新開放選擇",
     "discovery.proposal_preference_updated": "對 AI 推薦的地點表態",
     "discovery.feedback_interpreted": "AI 整理了回饋",

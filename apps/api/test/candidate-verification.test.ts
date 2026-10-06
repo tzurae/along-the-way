@@ -21,7 +21,7 @@ function researched(overrides: Partial<ResearchedCandidate>): ResearchedCandidat
   return {
     name: "伊根舟屋", localName: null, englishName: null, area: "伊根町", category: "Scenery", namedPlace: null,
     recommendationSentences: [{ text: "Boathouses over the bay.", sourceUrls: [] }],
-    matchedNeeds: [], tradeoffSentences: [], unknowns: [], confidence: "high", sources: [], ...overrides,
+    matchedNeeds: [], tradeoffSentences: [], unknowns: [], sources: [], ...overrides,
   };
 }
 

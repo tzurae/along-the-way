@@ -1,5 +1,3 @@
-import type { DiscoveryConfidence } from "@along-the-way/contracts/discovery";
-
 export interface DiscoveryTripFacts {
   name: string;
   startDate: string;
@@ -89,7 +87,6 @@ export interface ResearchedCandidate {
   matchedNeeds: string[];
   tradeoffSentences: DiscoveryClaimSentence[];
   unknowns: string[];
-  confidence: DiscoveryConfidence;
   /** Only URLs web search actually returned. */
   sources: Array<{ url: string; type: WebSourceType }>;
 }

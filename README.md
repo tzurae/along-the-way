@@ -186,6 +186,26 @@ while skipped questions remain unknown and must not be guessed or asked again.
 Migration `014_discovery_feedback_answers` stores these answer records and the
 edited-interpretation marker.
 
+## AI proposal confidence and rejection wording (Issue #78)
+
+New discovery research no longer asks the model for a confidence label, stores
+one, or returns one in `CandidateProposalDto`. Existing database rows and
+idempotent replies that contain `confidence` remain readable, but the field is
+ignored and is not exposed by the API or candidate cards. The proposal action
+is labelled 「不要再推薦」; rejected cards and the prior-decisions list use
+「已設為不要再推薦」. The action still excludes the same place from later
+research runs.
+
+Migration `018_drop_confidence_writes` keeps the `candidate_proposals.confidence`
+column, its value check and `NOT NULL`, and gives it a `medium` default so the new
+release can stop writing it while every row stays readable by the previous
+release after a rollback. The default value carries no meaning and is never
+shown. Down migration only drops the default; a later contract migration can drop
+the column. Known rollback limit: idempotent discovery replies stored by this
+release omit `confidence`, so after a rollback the previous release cannot
+replay them; retrying such a request with the same `Idempotency-Key` fails,
+while new requests work. Earlier field removals (#73, #76) share this limit.
+
 ## Activity participants (Issue #21)
 
 This slice of [Issue #21](https://github.com/tzurae/along-the-way/issues/21)

@@ -2765,6 +2765,41 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       await migrationDatabase?.destroy();
     });
 
+    it("lets new proposals omit confidence in 018 while every row stays readable by the previous release", async () => {
+      const cookie = await login();
+      const trip = await createTrip(cookie);
+      const ownerId = trip.members[0]!.userId;
+      const run = await sql<{ id: string }>`
+        insert into discovery_runs (trip_id, brief_version, policy_version, model_id, status, search_plan, created_by)
+        values (${trip.id}, 1, 'confidence-free', 'test', 'completed', '{}'::jsonb, ${ownerId})
+        returning id
+      `.execute(database);
+      const proposal = await sql<{ id: string; confidence: string | null }>`
+        insert into candidate_proposals (
+          trip_id, run_id, provider_place_id, name, place_type, recommendation,
+          matched_needs, tradeoffs, unknowns
+        ) values (
+          ${trip.id}, ${run.rows[0]!.id}, 'confidence-free-place', 'Confidence-free place',
+          'activity', 'Recommendation', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb
+        ) returning id, confidence
+      `.execute(database);
+      // The previous release still parses high/medium/low, so omitted writes must not be null.
+      expect(proposal.rows[0]?.confidence).toBe("medium");
+      const columnDefault = () => sql<{ column_default: string | null }>`
+        select column_default from information_schema.columns
+        where table_schema = 'public' and table_name = 'candidate_proposals' and column_name = 'confidence'
+      `.execute(database);
+      try {
+        const downgraded = await migrator.migrateTo("017_wishlist_simplify");
+        if (downgraded.error) throw downgraded.error;
+        expect((await columnDefault()).rows[0]?.column_default).toBeNull();
+      } finally {
+        const restored = await migrator.migrateToLatest();
+        if (restored.error) throw restored.error;
+      }
+      expect((await columnDefault()).rows[0]?.column_default).toContain("medium");
+    });
+
     it("backfills notes consistently and reopens removed accepted proposals in 017 without restoring data on down", async () => {
       const historicalTime = new Date("2026-09-28T12:00:00.000Z");
       const cookie = await login();
@@ -3242,6 +3277,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         { migrationName: "015_member_votes", direction: "Up", status: "NotExecuted" },
         { migrationName: "016_travel_places", direction: "Up", status: "NotExecuted" },
         { migrationName: "017_wishlist_simplify", direction: "Up", status: "NotExecuted" },
+        { migrationName: "018_drop_confidence_writes", direction: "Up", status: "NotExecuted" },
       ]);
       await database.deleteFrom("mutation_requests")
         .where("actor_id", "=", owner.userId).where("operation", "=", "create_trip")
