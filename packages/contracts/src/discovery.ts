@@ -1,7 +1,6 @@
 import { parseMemberVote, type MemberVoteDto } from "./trip-places";
 import { isRecord } from "./type-guards";
 import type { PlaceType } from "./trip-skeleton";
-export type DiscoveryConfidence = "high" | "medium" | "low";
 export type DiscoveryProposalStatus = "pending" | "accepting" | "accepted" | "rejected";
 export type DiscoveryFeedbackStatus = "pending" | "confirmed" | "rejected";
 /** Independent kinds of source that can vouch for a recommendation. */
@@ -111,7 +110,6 @@ export interface CandidateProposalDto {
   /** Sentence-level tradeoff attribution; null for proposals created before this contract. */
   tradeoffSentences: DiscoveryClaimSentenceDto[] | null;
   unknowns: string[];
-  confidence: DiscoveryConfidence;
   status: DiscoveryProposalStatus;
   evidence: DiscoveryEvidenceDto[];
   voters: MemberVoteDto[];
@@ -371,7 +369,6 @@ function evidence(value: unknown): DiscoveryEvidenceDto {
 
 function proposal(value: unknown): CandidateProposalDto {
   const item = record(value);
-  if (!["high", "medium", "low"].includes(String(item.confidence))) invalid();
   if (!["pending", "accepting", "accepted", "rejected"].includes(String(item.status))) invalid();
   return {
     id: text(item.id),
@@ -389,7 +386,6 @@ function proposal(value: unknown): CandidateProposalDto {
     tradeoffs: strings(item.tradeoffs),
     tradeoffSentences: nullableClaimSentences(item.tradeoffSentences),
     unknowns: strings(item.unknowns),
-    confidence: item.confidence as DiscoveryConfidence,
     status: item.status as DiscoveryProposalStatus,
     evidence: Array.isArray(item.evidence) ? item.evidence.map(evidence) : invalid(),
     voters: Array.isArray(item.voters) ? item.voters.map(parseMemberVote) : invalid(),

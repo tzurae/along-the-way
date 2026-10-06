@@ -176,6 +176,7 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   await expect(page.getByRole("region", { name: "研究意見" }).getByLabel("意見", { exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "研究意見" }).getByText("針對：Nishiki Market", { exact: true })).toBeVisible();
   await expect(proposal.getByText("A compact food-market stop matching the trip focus.")).toBeVisible();
+  await expect(proposal.getByText("信心程度", { exact: false })).toHaveCount(0);
   await expect(proposal.getByRole("link", { name: "Official Nishiki Market guide" })).toHaveAttribute("href", "https://kyoto.example.test/nishiki");
   // A run from before the quality checks still reads, and its card links to the place's own Google Maps page.
   await expect(proposal.getByRole("link", { name: "在 Google Maps 看照片" }))
@@ -210,7 +211,7 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   await expect(wishlist.getByRole("heading", { name: "Nishiki Market" })).toHaveCount(0);
   await openTab(page, "AI 找地點");
   await expect(proposal.getByRole("button", { name: "加入想去清單" })).toBeVisible();
-  await expect(proposal.getByRole("button", { name: "不適合這趟旅程" })).toBeVisible();
+  await expect(proposal.getByRole("button", { name: "不要再推薦" })).toBeVisible();
   await expect(proposal.getByRole("button", { name: "已投票", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(proposal.getByText("已加入想去清單", { exact: true })).toHaveCount(0);
   await proposal.getByRole("button", { name: "加入想去清單" }).click();

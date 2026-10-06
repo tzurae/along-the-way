@@ -644,7 +644,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
             matched_needs: JSON.stringify(researched.matchedNeeds),
             tradeoffs: JSON.stringify(tradeoffSentences.map((sentence) => sentence.text)),
             unknowns: JSON.stringify(researched.unknowns),
-            confidence: researched.confidence,
             status: "pending",
             accepted_trip_place_id: null,
             decided_by: null,
@@ -824,7 +823,18 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       const existingReplay = await replayed(transaction, userId, operation, key);
       if (existingReplay) return null;
       const row = await transaction.selectFrom("candidate_proposals")
-        .selectAll()
+        .select([
+          "provider_place_id",
+          "name",
+          "place_type",
+          "address",
+          "latitude",
+          "longitude",
+          "source_url",
+          "created_at",
+          "status",
+          "version",
+        ])
         .where("id", "=", proposalId)
         .where("trip_id", "=", tripId)
         .forUpdate()
@@ -992,7 +1002,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         eventType: "discovery.proposal_rejected",
         targetType: "candidate_proposal",
         targetId: proposalId,
-        summary: "Rejected an AI place proposal",
+        summary: "Marked an AI place proposal as not recommended",
       });
       const response = await this.readWorkspace(transaction, tripId, userId);
       await remember(transaction, userId, operation, key, response);
@@ -1265,7 +1275,28 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       .executeTakeFirst();
     const proposalRows = run
       ? await executor.selectFrom("candidate_proposals")
-        .selectAll("candidate_proposals")
+        .select([
+          "id",
+          "run_id",
+          "provider_place_id",
+          "name",
+          "place_type",
+          "address",
+          "latitude",
+          "longitude",
+          "source_url",
+          "recommendation",
+          "recommendation_sentences",
+          "matched_needs",
+          "tradeoffs",
+          "tradeoff_sentences",
+          "unknowns",
+          "status",
+          "accepted_trip_place_id",
+          "version",
+          "category",
+          "endorsements",
+        ])
         .where("trip_id", "=", tripId)
         .where((expression) => expression.or([
           expression("run_id", "=", run.id),
@@ -1424,7 +1455,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           tradeoffs: jsonStrings(proposal.tradeoffs),
           tradeoffSentences: jsonClaimSentences(proposal.tradeoff_sentences),
           unknowns: jsonStrings(proposal.unknowns),
-          confidence: proposal.confidence,
           status: proposal.status,
           evidence: evidenceByProposal.get(proposal.id) ?? [],
           voters,
