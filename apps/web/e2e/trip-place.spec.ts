@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { isRecord } from "@along-the-way/contracts/private-trips";
+import { fillTripFlights } from "./travel-support";
 
 const execFileAsync = promisify(execFile);
 const MAILPIT_API_URL = process.env.MAILPIT_API_URL ?? "http://127.0.0.1:8025";
@@ -95,6 +96,7 @@ async function createTrip(page: Page, name: string) {
   const country = dialog.getByLabel("新增國家");
   await country.fill("Japan");
   await page.getByRole("option", { name: /\(JP\)/ }).dispatchEvent("click");
+  await fillTripFlights(dialog, "2026-11-03", "2026-11-09");
   await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
   await expect(page.getByRole("heading", { name })).toBeVisible();
 }
@@ -105,7 +107,7 @@ async function openTab(page: Page, name: "想去清單" | "行程") {
 
 async function addManualPlace(
   page: Page,
-  input: { name: string; address?: string; note: string },
+  input: { name: string; address?: string; note: string; sourceUrl?: string },
 ) {
   await openTab(page, "想去清單");
   await page.getByRole("button", { name: "新增想去地點" }).click();
@@ -114,7 +116,8 @@ async function addManualPlace(
   await dialog.getByLabel("地點名稱").fill(input.name);
   await dialog.getByLabel("地點類型").selectOption("restaurant");
   if (input.address) await dialog.getByLabel("地址（若知道）").fill(input.address);
-  await dialog.getByLabel("你的原始備註").fill(input.note);
+  await dialog.getByLabel("地點備註").fill(input.note);
+  if (input.sourceUrl) await dialog.getByLabel("來源連結（若有）").fill(input.sourceUrl);
   await dialog.getByRole("button", { name: "手動新增地點" }).click();
   await expect(dialog).toHaveCount(0);
 }
@@ -160,10 +163,10 @@ async function addTimedActivity(
   await expect(dialog).toHaveCount(0);
 }
 
-async function setPreference(page: Page, placeName: string, value: string) {
-  const card = page.locator("article").filter({ has: page.getByRole("heading", { name: placeName }) });
-  await card.getByLabel("你的偏好").selectOption(value);
-  await expect(card.getByLabel("你的偏好")).toHaveValue(value);
+async function setVote(page: Page, placeName: string) {
+  const card = page.locator("article").filter({ has: page.getByRole("heading", { name: placeName, exact: true }) });
+  await card.getByRole("button", { name: "投票", exact: true }).click();
+  await expect(card.getByRole("button", { name: "已投票", exact: true })).toHaveAttribute("aria-pressed", "true");
 }
 
 async function cleanup() {
@@ -178,7 +181,7 @@ async function cleanup() {
 test.beforeEach(() => executeDatabase("truncate table rate_limit_windows"));
 test.afterAll(cleanup);
 
-test("members keep independent wishlist contributions and preferences on desktop", async ({ browser, request }) => {
+test("members vote on shared wishlist places and can remove another member's scheduled place", async ({ browser, request }) => {
   test.setTimeout(240_000);
   await request.delete(`${MAILPIT_API_URL}/api/v1/messages`);
   const suffix = Date.now();
@@ -191,8 +194,8 @@ test("members keep independent wishlist contributions and preferences on desktop
   const ownerPage = await ownerContext.newPage();
   await signIn(ownerPage, request, ownerEmail);
   await createTrip(ownerPage, tripName);
-  await addManualPlace(ownerPage, { name: "Family Cafe", address: "Kyoto north gate", note: "Owner wants breakfast" });
-  await setPreference(ownerPage, "Family Cafe", "must");
+  await addManualPlace(ownerPage, { name: "Family Cafe", address: "Kyoto north gate", note: "Owner wants breakfast", sourceUrl: "https://example.test/family-cafe" });
+  await expect(ownerPage.getByRole("button", { name: "投票", exact: true })).toHaveCount(0);
 
   await executeDatabase(`
     insert into users (email, display_name, status) values
@@ -207,27 +210,40 @@ test("members keep independent wishlist contributions and preferences on desktop
     on conflict (trip_id, user_id) do nothing;
   `);
 
-  for (const [index, preference] of ["dislike", "want", "optional"].entries()) {
+  for (const memberEmail of memberEmails) {
     const context = await browser.newContext({ viewport: { width: 1024, height: 900 } });
     const page = await context.newPage();
-    await signIn(page, request, memberEmails[index]!);
+    await signIn(page, request, memberEmail);
     await page.getByRole("button", { name: new RegExp(tripName) }).click();
     await openTab(page, "想去清單");
     await expect(page.getByRole("heading", { name: "共享地點想去清單" })).toBeVisible();
-    await setPreference(page, "Family Cafe", preference!);
+    await setVote(page, "Family Cafe");
     await context.close();
   }
 
   await ownerPage.reload();
   await openTab(ownerPage, "想去清單");
   const card = ownerPage.locator("article").filter({ has: ownerPage.getByRole("heading", { name: "Family Cafe" }) });
-  await expect(card.getByText("偏好衝突：")).toBeVisible();
-  const preferenceList = card.getByRole("list").first();
-  await expect(preferenceList.getByText("必去", { exact: true })).toBeVisible();
-  await expect(preferenceList.getByText("不想去", { exact: true })).toBeVisible();
-  await expect(preferenceList.getByText("想去", { exact: true })).toBeVisible();
-  await expect(preferenceList.getByText("可有可無", { exact: true })).toBeVisible();
-  await expect(card.getByText("Owner wants breakfast")).toBeVisible();
+  await setVote(ownerPage, "Family Cafe");
+  await expect(card.getByText("4 票", { exact: true })).toBeVisible();
+  for (const name of ["Wishlist owner", "Member two", "Member three", "Member four"]) {
+    await expect(card.getByText(/^投票成員：/)).toContainText(name);
+  }
+  // The note is shown on the card itself (the planning form below also holds it).
+  await expect(card.getByRole("paragraph").filter({ hasText: "Owner wants breakfast" })).toBeVisible();
+  await expect(card.getByRole("link", { name: "開啟原始來源" })).toHaveAttribute("href", "https://example.test/family-cafe");
+  await expect(card.getByText("新增者與原始備註", { exact: true })).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "撤回我的紀錄" })).toHaveCount(0);
+  await addManualPlace(ownerPage, { name: "One-vote cafe", address: "Kyoto east gate", note: "One vote" });
+  await setVote(ownerPage, "One-vote cafe");
+  await addManualPlace(ownerPage, { name: "Zero-vote cafe", address: "Kyoto west gate", note: "No votes" });
+  const wishlistCards = ownerPage.getByRole("region", { name: "共享地點想去清單" }).getByRole("article");
+  await expect(wishlistCards.nth(0).getByRole("heading", { name: "Family Cafe", exact: true })).toBeVisible();
+  await expect(wishlistCards.nth(1).getByRole("heading", { name: "One-vote cafe", exact: true })).toBeVisible();
+  await expect(wishlistCards.nth(2).getByRole("heading", { name: "Zero-vote cafe", exact: true })).toBeVisible();
+  const colors = await wishlistCards.evaluateAll((cards) => cards.map((entry) => getComputedStyle(entry).backgroundColor));
+  expect(colors[0]).not.toBe(colors[1]);
+  expect(colors[1]).not.toBe(colors[2]);
 
   await addManualPlace(ownerPage, { name: "Family Cafe", address: "Kyoto south gate", note: "Different branch" });
   const comparison = ownerPage.getByRole("region", { name: "可能重複的地點比較" });
@@ -318,7 +334,8 @@ test("members keep independent wishlist contributions and preferences on desktop
   await expect(firstDay.getByRole("article", {
     name: "已規劃的想去清單地點：Cross-surface Cafe",
   })).toBeVisible();
-  await expect(firstDay.getByText(/1 個已規劃項目・¥1,200/)).toBeVisible();
+  // The required outbound flight lands on the first day, so the day also lists it.
+  await expect(firstDay.getByText(/2 個已規劃項目・¥1,200/)).toBeVisible();
   await openTab(ownerPage, "想去清單");
   await expect(mergedCard.getByText("已排在 2026-11-03")).toBeVisible();
   await openTab(ownerPage, "行程");
@@ -396,16 +413,36 @@ test("members keep independent wishlist contributions and preferences on desktop
   await expect(secondDay.getByText(/1 個已規劃項目・沒有已知費用・1 筆費用未知/))
     .toBeVisible();
 
+  const removingContext = await browser.newContext({ viewport: { width: 1024, height: 900 } });
+  const removingPage = await removingContext.newPage();
+  await signIn(removingPage, request, memberEmails[0]!);
+  await removingPage.getByRole("button", { name: new RegExp(tripName) }).click();
+  await openTab(removingPage, "想去清單");
+  const scheduledCard = removingPage.getByRole("article", { name: "Cross-surface Cafe，地址：Cross-surface merged updated" });
+  removingPage.once("dialog", async (dialog) => {
+    expect(dialog.message()).toBe("確定要把「Cross-surface Cafe」移出想去清單嗎？票和天數安排會一起清除。");
+    await dialog.dismiss();
+  });
+  await scheduledCard.getByRole("button", { name: "從想去清單移除" }).click();
+  await expect(scheduledCard).toBeVisible();
+  removingPage.once("dialog", (dialog) => dialog.accept());
+  await scheduledCard.getByRole("button", { name: "從想去清單移除" }).click();
+  await expect(scheduledCard).toHaveCount(0);
+  await openTab(removingPage, "行程");
+  await expect(removingPage.getByRole("heading", { name: "Cross-surface timed visit" })).toBeVisible();
+  await expect(removingPage.getByRole("button", { name: "編輯「Cross-surface Cafe」" })).toHaveCount(1);
+  await removingContext.close();
+
   await openTab(ownerPage, "想去清單");
   await ownerPage.getByRole("button", { name: "新增想去地點" }).click();
   const searchDialog = ownerPage.getByRole("dialog", { name: "新增地點" });
   await searchDialog.getByRole("tab", { name: "搜尋" }).click();
   await searchDialog.getByLabel("搜尋 Google Maps").fill("Kiyomizu-dera");
-  await searchDialog.getByLabel("你的原始備註").fill("Keep this text during provider failure");
+  await searchDialog.getByLabel("地點備註").fill("Keep this text during provider failure");
   await searchDialog.getByRole("button", { name: "搜尋地點" }).click();
   await expect(searchDialog.getByRole("alert")).toContainText("服務供應商目前無法使用，請稍後再試。");
   await expect(searchDialog.getByLabel("搜尋 Google Maps")).toHaveValue("Kiyomizu-dera");
-  await expect(searchDialog.getByLabel("你的原始備註")).toHaveValue("Keep this text during provider failure");
+  await expect(searchDialog.getByLabel("地點備註")).toHaveValue("Keep this text during provider failure");
   await searchDialog.getByRole("button", { name: "關閉" }).click();
 
   await ownerContext.close();
@@ -447,7 +484,7 @@ test("manual wishlist intake remains usable on a mobile viewport", async ({ brow
   await retryDialog.getByRole("tab", { name: "手動輸入" }).click();
   await retryDialog.getByLabel("地點名稱").fill("Retry-safe place");
   await retryDialog.getByLabel("地點類型").selectOption("restaurant");
-  await retryDialog.getByLabel("你的原始備註").fill("Retry without duplicate contribution");
+  await retryDialog.getByLabel("地點備註").fill("Retry without duplicate place");
   await retryDialog.getByRole("button", { name: "手動新增地點" }).click();
   await expect(retryDialog.getByRole("alert")).toBeVisible();
   await expect(retryDialog.getByLabel("地點名稱")).toHaveValue("Retry-safe place");
@@ -459,55 +496,53 @@ test("manual wishlist intake remains usable on a mobile viewport", async ({ brow
   await page.unroute(tripPlaceRoute);
 
   const retryCard = page.getByRole("article", { name: "Retry-safe place，地址：地址未知" });
-  const preferenceRoute = /\/api\/trips\/[^/]+\/trip-places\/[^/]+\/preference$/;
-  const preferenceKeys: string[] = [];
-  let preferenceInterrupted = false;
-  await page.route(preferenceRoute, async (route) => {
-    preferenceKeys.push(route.request().headers()["idempotency-key"] ?? "");
-    if (!preferenceInterrupted) {
-      preferenceInterrupted = true;
-      await route.fulfill({
-        status: 409,
-        contentType: "application/json",
-        body: JSON.stringify({
-          error: {
-            code: "conflict",
-            message: "Version conflict",
-            currentVersion: 2,
-          },
-        }),
-      });
+  await expect(retryCard.getByRole("button", { name: "投票", exact: true })).toHaveCount(0);
+  await executeDatabase(`
+    insert into users (email, display_name, status) values ('wishlist-mobile-member-${suffix}@example.test', 'Mobile member', 'active');
+    insert into trip_members (trip_id, user_id, role)
+      select trip.id, member.id, 'editor' from trips trip cross join users member
+      where trip.name = '${tripName}' and member.email = 'wishlist-mobile-member-${suffix}@example.test';
+  `);
+  await page.reload();
+  await openTab(page, "想去清單");
+  const voteRoute = /\/api\/trips\/[^/]+\/trip-places\/[^/]+\/vote$/;
+  const voteKeys: string[] = [];
+  let voteInterrupted = false;
+  await page.route(voteRoute, async (route) => {
+    voteKeys.push(route.request().headers()["idempotency-key"] ?? "");
+    if (!voteInterrupted) {
+      voteInterrupted = true;
+      await route.fetch();
+      await route.abort("connectionreset");
       return;
     }
     await route.continue();
   });
-  await retryCard.getByLabel("你的偏好").selectOption("want");
-  await expect(page.getByRole("alert")).toContainText("資料已變更，無法完成操作。");
-  await expect(retryCard.getByLabel("你的偏好")).toHaveValue("want");
-  await retryCard.getByRole("button", { name: "重試偏好設定" }).click();
-  await expect(retryCard.getByRole("button", { name: "重試偏好設定" })).toHaveCount(0);
-  expect(preferenceKeys).toHaveLength(2);
-  expect(preferenceKeys[1]).toBe(preferenceKeys[0]);
-  await page.unroute(preferenceRoute);
-  let releasePreference!: () => void;
-  const preferenceGate = new Promise<void>((resolve) => {
-    releasePreference = resolve;
-  });
-  await page.route(preferenceRoute, async (route) => {
-    await preferenceGate;
+  await retryCard.getByRole("button", { name: "投票", exact: true }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await retryCard.getByRole("button", { name: "重試投票" }).click();
+  await expect(retryCard.getByRole("button", { name: "重試投票" })).toHaveCount(0);
+  await expect(retryCard.getByText("1 票", { exact: true })).toBeVisible();
+  expect(voteKeys).toHaveLength(2);
+  expect(voteKeys[1]).toBe(voteKeys[0]);
+  await page.unroute(voteRoute);
+  let releaseVote!: () => void;
+  const voteGate = new Promise<void>((resolve) => { releaseVote = resolve; });
+  await page.route(voteRoute, async (route) => {
+    await voteGate;
     await route.continue();
   });
-  const preferenceSelect = retryCard.getByLabel("你的偏好");
-  await preferenceSelect.selectOption("optional");
-  await expect(preferenceSelect).toBeDisabled();
-  releasePreference();
-  await expect(preferenceSelect).toBeEnabled();
-  await expect(preferenceSelect).toHaveValue("optional");
-  await page.unroute(preferenceRoute);
+  const voteButton = retryCard.getByRole("button", { name: "已投票", exact: true });
+  await voteButton.click();
+  await expect(voteButton).toBeDisabled();
+  releaseVote();
+  await expect(retryCard.getByRole("button", { name: "投票", exact: true })).toHaveAttribute("aria-pressed", "false");
+  await expect(retryCard.getByText("0 票", { exact: true })).toBeVisible();
+  await page.unroute(voteRoute);
   await addManualPlace(page, { name: "Private meeting point", note: "Ask host for exact pin" });
   const card = page.locator("article").filter({ has: page.getByRole("heading", { name: "Private meeting point" }) });
   await expect(card.getByText("需要地點資訊", { exact: true })).toBeVisible();
-  await expect(card.getByText("Ask host for exact pin")).toBeVisible();
+  await expect(card.getByRole("paragraph").filter({ hasText: "Ask host for exact pin" })).toBeVisible();
 
   // Enough wrapped two-line addresses to exceed the picker's capped height.
   for (const [index, address] of [

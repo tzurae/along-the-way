@@ -1,7 +1,5 @@
 export const itemDialog = {
   itemTypes: {
-    flight: "航班",
-    lodging: "住宿",
     transport: "交通",
     reservation: "訂位",
     meal: "用餐",
@@ -31,7 +29,6 @@ export const itemDialog = {
   timeZonePlaceholder: "Asia/Tokyo",
   timeZoneDescription: "優先使用地點的時區，其次使用停留國家的時區。若兩者皆未知，請在此確認 IANA 時區。",
   outsideRouteTimeZoneDescription: "這一端不在這趟的國家，請填當地的 IANA 時區，例如 Asia/Taipei。",
-  lodgingEndDescription: "住宿退房使用與入住相同的地點和時區。",
   utcOffset: "當地時間重複時的 UTC 時差",
   utcOffsetPlaceholder: "-08:00",
   utcOffsetDescription: "一般情況請留白。若日光節約時間切換造成時間重複，請輸入預定時間的 UTC 時差。",
@@ -47,11 +44,7 @@ export const itemDialog = {
   participantsDescription: "僅選擇已確認的參與成員。全部不選則表示參與狀態待確認。",
   removedMember: "已不是旅程成員",
   tripMember: "旅程成員",
-  carrier: "航空公司",
-  flightNumber: "航班號碼",
-  confirmationNotes: "確認資訊",
   bookedBy: "預訂者",
-  confirmationCode: "確認碼",
   transportMode: "交通方式",
   ticketDetails: "票券資訊",
   durationMinutes: "期間（分鐘）",

@@ -14,7 +14,8 @@ import {
   parseTripListResponse,
   parseTripResponse,
 } from "@along-the-way/contracts/private-trips";
-import { parseTripSkeletonResponse } from "@along-the-way/contracts/trip-skeleton";
+import { parseItineraryItemResponse, parseTripSkeletonResponse, type ItineraryItemDto } from "@along-the-way/contracts/trip-skeleton";
+import { fillTripFlights } from "./travel-support";
 const execFileAsync = promisify(execFile);
 const MAILPIT_API_URL = process.env.MAILPIT_API_URL ?? "http://127.0.0.1:8025";
 
@@ -103,9 +104,12 @@ async function executeDatabase(command: string) {
   ]);
 }
 
+const SKELETON_TRIP_NAMES = ["大阪京都家庭旅行 %", "US Japan pilot %", "Travel separation %", "DST travel %"];
+
 async function cleanupSkeletonTrips() {
+  const trips = SKELETON_TRIP_NAMES.map((pattern) => `name like '${pattern}'`).join(" or ");
   await executeDatabase(
-    "delete from itinerary_items where trip_id in (select id from trips where name like '大阪京都家庭旅行 %' or name like 'US Japan pilot %'); delete from trips where name like '大阪京都家庭旅行 %' or name like 'US Japan pilot %';",
+    `delete from itinerary_items where trip_id in (select id from trips where ${trips}); delete from trips where ${trips};`,
   );
 }
 
@@ -207,6 +211,7 @@ async function createTrip(
     startDate: string;
     endDate: string;
     countries: Array<{ query: string; code: string }>;
+    flights?: (dialog: Locator) => Promise<void>;
   },
 ) {
   await page.getByRole("button", { name: "建立旅程" }).click();
@@ -230,12 +235,14 @@ async function createTrip(
     await option.dispatchEvent("click");
     await expect(dialog.locator('section[aria-labelledby="country-route-heading"] li')).toHaveCount(index + 1);
   }
+  await fillTripFlights(dialog, input.startDate, input.endDate);
+  await input.flights?.(dialog);
   await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
   await expect(page.getByRole("heading", { name: input.name })).toBeVisible();
   await openTab(page, "行程");
 }
 
-async function openTab(page: Page, name: "總覽" | "行程" | "最近變更") {
+async function openTab(page: Page, name: "總覽" | "住宿" | "行程" | "最近變更") {
   await page.getByRole("tab", { name, exact: true }).click();
 }
 
@@ -281,61 +288,75 @@ interface EndpointSpec {
   zone: string;
 }
 
+async function travelConstraint(page: Page, item: ItineraryItemDto, type: string, status: string, minimumBufferMinutes: number | null) {
+  // Constraints remain an itinerary API concern; the travel forms deliberately edit only travel fields.
+  const result = await page.evaluate(async ({ item, type, status, minimumBufferMinutes }) => {
+    const response = await fetch(`/api/trips/${item.tripId}/items/${item.id}/constraints`, {
+      method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ expectedItemVersion: item.version, type, status, minimumBufferMinutes }),
+    });
+    const trip = await fetch(`/api/trips/${item.tripId}`).then((reply) => reply.json());
+    return { status: response.status, tripName: trip.trip.name as string };
+  }, { item, type, status, minimumBufferMinutes });
+  expect(result.status).toBe(201);
+  // A reload selects the first listed trip, so reopen the trip under test.
+  await page.reload();
+  await openTrip(page, result.tripName);
+}
+
 async function addFlight(
   page: Page,
   input: {
-    title: string;
     start: EndpointSpec;
     end: EndpointSpec;
     serviceNumber: string;
     constraintType?: "fixed_time" | "minimum_buffer";
     bufferMinutes?: string;
-    currency: string;
   },
 ) {
-  await openTab(page, "行程");
-  await page.getByRole("button", { name: "新增固定行程" }).click();
-  const dialog = page.getByRole("dialog", { name: "新增固定行程" });
-  await dialog.getByLabel("類型").selectOption("flight");
-  await dialog.getByLabel("標題").fill(input.title);
-  await chooseEndpoint(dialog, "Start", input.start);
-  await chooseEndpoint(dialog, "End", input.end);
-  await dialog.getByLabel("航空公司").fill("JAL");
-  await dialog.getByLabel("航班號碼").fill(input.serviceNumber);
-  await dialog.getByLabel("最小貨幣單位金額").fill("90000");
-  await dialog.getByLabel("幣別").fill(input.currency);
-  await dialog.getByLabel("限制").selectOption(input.constraintType ?? "fixed_time");
-  await dialog.locator("#constraint-status").selectOption("confirmed");
-  if (input.constraintType === "minimum_buffer") {
-    await dialog.getByLabel("緩衝分鐘數").fill(input.bufferMinutes ?? "180");
-  }
-  await dialog.getByRole("button", { name: "儲存固定行程" }).click();
+  await openTab(page, "總覽");
+  const fixture = page.locator("#trip-panel-overview [data-travel-item-id]").filter({ hasText: "FIXTURE-" }).first();
+  await fixture.getByRole("button", { name: /^修改 / }).click();
+  const dialog = page.getByRole("dialog", { name: "修改航班" });
+  await dialog.getByLabel("航班號碼", { exact: true }).fill(input.serviceNumber);
+  await dialog.getByLabel("航空公司（選填）").fill("JAL");
+  await dialog.getByLabel("出發機場", { exact: true }).fill(input.start.place);
+  await dialog.getByLabel("抵達機場", { exact: true }).fill(input.end.place);
+  await dialog.getByLabel("出發機場 IANA 時區").fill(input.start.zone);
+  await dialog.getByLabel("抵達機場 IANA 時區").fill(input.end.zone);
+  await dialog.getByLabel("起飛時間（當地）").fill(input.start.local);
+  await dialog.getByLabel("抵達時間（當地）").fill(input.end.local);
+  const saved = page.waitForResponse((response) => response.request().method() === "PATCH" && /\/flights\//.test(response.url()));
+  await dialog.getByRole("button", { name: "儲存", exact: true }).click();
+  const response = await saved;
+  expect(response.status()).toBe(200);
+  const item = parseItineraryItemResponse(await response.json()).item;
   await expect(dialog).toHaveCount(0);
+  await travelConstraint(page, item, input.constraintType ?? "fixed_time", "confirmed",
+    input.constraintType === "minimum_buffer" ? Number(input.bufferMinutes ?? "180") : null);
 }
 
 async function addLodging(
   page: Page,
-  input: { title: string; place: string; start: string; end: string; confirmation: string },
+  input: { place: string; start: string; end: string },
 ) {
-  await openTab(page, "行程");
-  await page.getByRole("button", { name: "新增固定行程" }).click();
-  const dialog = page.getByRole("dialog", { name: "新增固定行程" });
-  await dialog.getByLabel("類型").selectOption("lodging");
-  await dialog.getByLabel("標題").fill(input.title);
-  await chooseEndpoint(dialog, "Start", { stop: "2、JP", place: input.place, local: input.start, zone: "Asia/Tokyo" });
-  const end = dialog.getByRole("group", { name: "結束（當地時間）" });
-  await expect(end.getByLabel("停留國家")).toBeDisabled();
-  await expect(end.getByLabel("地點")).toBeDisabled();
-  await expect(end.getByLabel("地點").locator("option:checked")).toHaveText(input.place);
-  await expect(end.getByLabel("IANA 時區")).toBeDisabled();
-  await expect(end.getByLabel("IANA 時區")).toHaveValue("Asia/Tokyo");
-  await end.getByLabel("當地日期與時間").fill(input.end);
-  await dialog.getByLabel("預訂者").fill("Family");
-  await dialog.getByLabel("確認碼").fill(input.confirmation);
-  await dialog.getByLabel("限制").selectOption("immovable");
-  await dialog.locator("#constraint-status").selectOption("unknown");
-  await dialog.getByRole("button", { name: "儲存固定行程" }).click();
+  await openTab(page, "住宿");
+  await page.getByRole("button", { name: "新增住宿", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "新增住宿" });
+  const countryStop = dialog.getByLabel("國家停留點");
+  const countryStopId = await countryStop.locator("option").nth(2).getAttribute("value");
+  await countryStop.selectOption(countryStopId!);
+  await dialog.getByLabel("飯店名稱", { exact: true }).fill(input.place);
+  await dialog.getByLabel("飯店 IANA 時區").fill("Asia/Tokyo");
+  await dialog.getByLabel("入住時間（當地）").fill(input.start);
+  await dialog.getByLabel("退房時間（當地）").fill(input.end);
+  const saved = page.waitForResponse((response) => response.request().method() === "POST" && /\/lodgings$/.test(response.url()));
+  await dialog.getByRole("button", { name: "儲存", exact: true }).click();
+  const response = await saved;
+  expect(response.status()).toBe(201);
+  const item = parseItineraryItemResponse(await response.json()).item;
   await expect(dialog).toHaveCount(0);
+  await travelConstraint(page, item, "immovable", "unknown", null);
 }
 
 async function addTransport(
@@ -543,10 +564,6 @@ test("the seven-day Osaka Kyoto pilot works on desktop and mobile", async ({ bro
   await invalidPlaceDialog.press("Escape");
   await expect(invalidPlaceDialog).toHaveCount(0);
 
-  await createPlace(page, { name: "Taoyuan Airport", type: "airport", address: "TPE", latitude: "25.0797", longitude: "121.2342", timeZone: "Asia/Taipei" });
-  await createPlace(page, { name: "Kansai Airport", type: "airport", address: "KIX", latitude: "34.4347", longitude: "135.2440", timeZone: "Asia/Tokyo" });
-  await createPlace(page, { name: "Osaka Hotel", type: "lodging", address: "Namba", latitude: "34.6654", longitude: "135.5013", timeZone: "Asia/Tokyo" });
-  await createPlace(page, { name: "Kyoto Hotel", type: "lodging", address: "Higashiyama", latitude: "35.0116", longitude: "135.7681", timeZone: "Asia/Tokyo" });
   await createPlace(page, { name: "Osaka Station", type: "station", address: "Umeda", latitude: "34.7025", longitude: "135.4959", timeZone: "Asia/Tokyo" });
   await createPlace(page, { name: "Kyoto Station", type: "station", address: "Kyoto", latitude: "34.9858", longitude: "135.7588", timeZone: "Asia/Tokyo" });
   await createPlace(page, { name: "Kyoto Restaurant", type: "restaurant", address: "Gion", latitude: "35.0037", longitude: "135.7788", timeZone: "Asia/Tokyo" });
@@ -555,23 +572,19 @@ test("the seven-day Osaka Kyoto pilot works on desktop and mobile", async ({ bro
   await expect(incompletePlace).toContainText("位置資訊不完整");
 
   await addFlight(page, {
-    title: "Taipei to Osaka",
     start: { stop: "1、TW", place: "Taoyuan Airport", local: "2026-10-21T08:00", zone: "Asia/Taipei" },
     end: { stop: "2、JP", place: "Kansai Airport", local: "2026-10-21T11:30", zone: "Asia/Tokyo" },
     serviceNumber: "JL814",
-    currency: "TWD",
   });
   await addFlight(page, {
-    title: "Osaka to Taipei",
     start: { stop: "2、JP", place: "Kansai Airport", local: "2026-10-27T10:00", zone: "Asia/Tokyo" },
     end: { stop: "3、TW", place: "Taoyuan Airport", local: "2026-10-27T12:15", zone: "Asia/Taipei" },
     serviceNumber: "JL813",
     constraintType: "minimum_buffer",
     bufferMinutes: "180",
-    currency: "TWD",
   });
-  await addLodging(page, { title: "大阪住宿", place: "Osaka Hotel", start: "2026-10-21T15:00", end: "2026-10-24T09:00", confirmation: "OSAKA-ROOM" });
-  await addLodging(page, { title: "京都住宿", place: "Kyoto Hotel", start: "2026-10-24T15:00", end: "2026-10-27T07:30", confirmation: "KYOTO-ROOM" });
+  await addLodging(page, { place: "Osaka Hotel", start: "2026-10-21T15:00", end: "2026-10-24T09:00" });
+  await addLodging(page, { place: "Kyoto Hotel", start: "2026-10-24T15:00", end: "2026-10-27T07:30" });
   await addTransport(page, {
     title: "大阪到京都",
     start: { stop: "2、JP", place: "Osaka Station", local: "2026-10-24T10:00", zone: "Asia/Tokyo" },
@@ -601,19 +614,19 @@ test("the seven-day Osaka Kyoto pilot works on desktop and mobile", async ({ bro
   await expect(days.first()).toHaveAttribute("data-date", "2026-10-21");
   await expect(days.last()).toHaveAttribute("data-date", "2026-10-27");
   const arrivalPriorities = page.getByTestId("arrival-priorities");
-  await expect(arrivalPriorities).toContainText("Taipei to Osaka");
+  await expect(arrivalPriorities).toContainText("JL814");
   await expect(arrivalPriorities).toContainText("Kansai Airport");
-  await expect(arrivalPriorities).toContainText("大阪住宿");
+  await expect(arrivalPriorities).toContainText("Osaka Hotel");
   const departurePriorities = page.getByTestId("departure-priorities");
-  await expect(departurePriorities).toContainText("京都住宿");
-  await expect(departurePriorities).toContainText("Osaka to Taipei");
+  await expect(departurePriorities).toContainText("Kyoto Hotel");
+  await expect(departurePriorities).toContainText("JL813");
   await expect(departurePriorities).toContainText("至少 180 分鐘");
   await expect(departurePriorities).toContainText("240 分鐘・未確認");
   const tripInformation = page.getByRole("region", { name: "旅程資訊", exact: true });
-  await expect(tripInformation.getByRole("heading", { name: "Taipei to Osaka" })).toBeVisible();
-  await expect(tripInformation.getByRole("heading", { name: "Osaka to Taipei" })).toBeVisible();
-  await expect(tripInformation.getByRole("heading", { name: "大阪住宿" })).toBeVisible();
-  await expect(tripInformation.getByRole("heading", { name: "京都住宿", exact: true })).toBeVisible();
+  await expect(tripInformation.getByRole("heading", { name: "JL814" })).toBeVisible();
+  await expect(tripInformation.getByRole("heading", { name: "JL813" })).toBeVisible();
+  await expect(tripInformation.getByRole("heading", { name: "Osaka Hotel" })).toBeVisible();
+  await expect(tripInformation.getByRole("heading", { name: "Kyoto Hotel", exact: true })).toBeVisible();
   await expect(tripInformation.getByRole("heading", { name: "大阪到京都" })).toBeVisible();
   await page.reload();
   await openTrip(page, name);
@@ -682,20 +695,15 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
     ],
   });
 
-  await createPlace(page, { name: "San Francisco Airport", type: "airport", address: "SFO", latitude: "37.6213", longitude: "-122.379", timeZone: "America/Los_Angeles" });
-  await createPlace(page, { name: "Haneda Airport", type: "airport", address: "HND", latitude: "35.5494", longitude: "139.7798", timeZone: "Asia/Tokyo" });
-  await createPlace(page, { name: "Osaka Hotel", type: "lodging", address: "Osaka", latitude: "34.6937", longitude: "135.5023", timeZone: "Asia/Tokyo" });
   await createPlace(page, { name: "Kyoto Station", type: "station", address: "Kyoto", latitude: "34.9858", longitude: "135.7588", timeZone: "Asia/Tokyo" });
   await createPlace(page, { name: "Kyoto Restaurant", type: "restaurant", address: "Gion", latitude: "35.0037", longitude: "135.7788", timeZone: "Asia/Tokyo" });
 
   await addFlight(page, {
-    title: "SFO to Haneda",
     start: { stop: "1、US", place: "San Francisco Airport", local: "2027-11-01T10:00", zone: "America/Los_Angeles" },
     end: { stop: "2、JP", place: "Haneda Airport", local: "2027-11-02T14:00", zone: "Asia/Tokyo" },
     serviceNumber: "JL001",
-    currency: "USD",
   });
-  await addLodging(page, { title: "大阪・京都 stay", place: "Osaka Hotel", start: "2027-11-02T16:00", end: "2027-11-05T08:00", confirmation: "OSAKA-21" });
+  await addLodging(page, { place: "Osaka Hotel", start: "2027-11-02T16:00", end: "2027-11-05T08:00" });
   await addTransport(page, {
     title: "Airport to Kyoto train",
     start: { stop: "2、JP", place: "Haneda Airport", local: "2027-11-02T15:00", zone: "Asia/Tokyo" },
@@ -707,7 +715,7 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   });
 
   const timeline = page.getByRole("region", { name: "每日行程", exact: true });
-  await expect(timeline.getByText("SFO to Haneda").first()).toBeVisible();
+  await expect(timeline.getByText("JL001").first()).toBeVisible();
   await expect(timeline.getByText(/2027-11-01 10:00 · America\/Los_Angeles \(.+, -07:00\)/).first()).toBeVisible();
   await expect(timeline.getByText(/2027-11-02 14:00 · Asia\/Tokyo \(.+, \+09:00\)/).first()).toBeVisible();
   const arrivalContext = page.getByTestId("arrival-priorities");
@@ -715,13 +723,13 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   await expect(arrivalContext).toContainText("尚未設定住宿入住時間。");
   const arrivalContinuation = timeline
     .locator('.day-column[data-date="2027-11-02"] .itinerary-card')
-    .filter({ hasText: "SFO to Haneda" });
+    .filter({ hasText: "JL001" });
   await expect(arrivalContinuation).toContainText("Haneda Airport");
-  await expect(page.getByTestId("departure-priorities")).toContainText("大阪・京都 stay");
+  await expect(page.getByTestId("departure-priorities")).toContainText("Osaka Hotel");
   await expect(page.getByText("不可移動・未確認").first()).toBeVisible();
   await expect(page.getByText("不可移動・有衝突").first()).toBeVisible();
 
-  const flightCard = timeline.locator(".itinerary-card").filter({ hasText: "SFO to Haneda" }).first();
+  const flightCard = timeline.locator(".itinerary-card").filter({ hasText: "JL001" }).first();
   await flightCard.getByRole("button", { name: "鎖定" }).click();
   await expect(flightCard.getByText("已鎖定", { exact: true })).toBeVisible();
   await expect(flightCard.getByRole("button", { name: /編輯/ })).toHaveCount(0);
@@ -729,40 +737,41 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   const hanedaPlace = page.locator(".place-card").filter({ hasText: "Haneda Airport" });
   await expect(hanedaPlace).toContainText("請先解鎖引用此地點的固定行程，才能編輯地點。");
   await expect(hanedaPlace.getByRole("button", { name: "編輯「Haneda Airport」" })).toHaveCount(0);
+  await openTab(page, "總覽");
+  await expect(page.getByRole("button", { name: "修改 JL001", exact: true })).toBeDisabled();
+  await openTab(page, "行程");
   await flightCard.getByRole("button", { name: "解鎖" }).click();
-  const unlockDialog = page.getByRole("dialog", { name: "要解鎖「SFO to Haneda」嗎？" });
+  const unlockDialog = page.getByRole("dialog", { name: "要解鎖「JL001」嗎？" });
   await expect(unlockDialog).toContainText("未來的排程流程");
   await unlockDialog.getByRole("button", { name: "解鎖固定行程" }).click();
-  await expect(flightCard.getByRole("button", { name: "編輯「SFO to Haneda」" })).toBeVisible();
+  await expect(flightCard.getByRole("button", { name: "到總覽修改航班" })).toBeVisible();
+  await flightCard.getByRole("button", { name: "未確認", exact: true }).click();
+  await expect(flightCard).toContainText("固定時間・未確認");
 
   const tripInformationFlight = page
     .getByRole("region", { name: "旅程資訊", exact: true })
     .locator(".itinerary-card")
-    .filter({ hasText: "SFO to Haneda" });
-  await tripInformationFlight.getByRole("button", { name: "編輯「SFO to Haneda」" }).click();
-  let samePageEdit = page.getByRole("dialog", { name: "編輯固定行程" });
-  await expect(
-    samePageEdit.getByRole("group", { name: "開始（當地時間）" }).getByLabel("當地日期與時間"),
-  ).toHaveValue("2027-11-01T10:00");
+    .filter({ hasText: "JL001" });
+  await tripInformationFlight.getByRole("button", { name: "到總覽修改航班" }).click();
+  await page.getByRole("button", { name: "修改 JL001", exact: true }).click();
+  let samePageEdit = page.getByRole("dialog", { name: "修改航班" });
+  await expect(samePageEdit.getByLabel("起飛時間（當地）")).toHaveValue("2027-11-01T10:00");
   await samePageEdit.press("Escape");
   await expect(samePageEdit).toHaveCount(0);
 
-  await flightCard.getByRole("button", { name: "編輯「SFO to Haneda」" }).click();
-  samePageEdit = page.getByRole("dialog", { name: "編輯固定行程" });
-  await samePageEdit
-    .getByRole("group", { name: "開始（當地時間）" })
-    .getByLabel("當地日期與時間")
-    .fill("2027-11-01T11:00");
-  await samePageEdit.getByRole("button", { name: "儲存固定行程" }).click();
+  await openTab(page, "行程");
+  await flightCard.getByRole("button", { name: "到總覽修改航班" }).click();
+  await page.getByRole("button", { name: "修改 JL001", exact: true }).click();
+  samePageEdit = page.getByRole("dialog", { name: "修改航班" });
+  await samePageEdit.getByLabel("起飛時間（當地）").fill("2027-11-01T11:00");
+  await samePageEdit.getByRole("button", { name: "儲存", exact: true }).click();
   await expect(samePageEdit).toHaveCount(0);
 
-  await tripInformationFlight.getByRole("button", { name: "編輯「SFO to Haneda」" }).click();
-  samePageEdit = page.getByRole("dialog", { name: "編輯固定行程" });
-  await expect(
-    samePageEdit.getByRole("group", { name: "開始（當地時間）" }).getByLabel("當地日期與時間"),
-  ).toHaveValue("2027-11-01T11:00");
-  await samePageEdit.getByLabel("備註", { exact: true }).fill("Retain the refreshed departure time");
-  await samePageEdit.getByRole("button", { name: "儲存固定行程" }).click();
+  await page.getByRole("button", { name: "修改 JL001", exact: true }).click();
+  samePageEdit = page.getByRole("dialog", { name: "修改航班" });
+  await expect(samePageEdit.getByLabel("起飛時間（當地）")).toHaveValue("2027-11-01T11:00");
+  await samePageEdit.getByLabel("航空公司（選填）").fill("Updated airline");
+  await samePageEdit.getByRole("button", { name: "儲存", exact: true }).click();
   await expect(samePageEdit).toHaveCount(0);
 
   const secondContext = await browser.newContext({
@@ -774,25 +783,27 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   await secondPage.goto("/");
   await openTrip(secondPage, name);
   const secondTimeline = secondPage.getByRole("region", { name: "每日行程", exact: true });
-  const secondFlight = secondTimeline.locator(".itinerary-card").filter({ hasText: "SFO to Haneda" }).first();
+  const secondFlight = secondTimeline.locator(".itinerary-card").filter({ hasText: "JL001" }).first();
 
-  await flightCard.getByRole("button", { name: "編輯「SFO to Haneda」" }).click();
-  await secondFlight.getByRole("button", { name: "編輯「SFO to Haneda」" }).click();
-  const firstEdit = page.getByRole("dialog", { name: "編輯固定行程" });
-  const secondEdit = secondPage.getByRole("dialog", { name: "編輯固定行程" });
-  await firstEdit.getByLabel("標題").fill("SFO to Haneda · family confirmed");
-  await secondEdit.getByLabel("標題").fill("SFO to Haneda · stale overwrite");
-  await firstEdit.getByRole("button", { name: "儲存固定行程" }).click();
+  await page.getByRole("button", { name: "修改 JL001", exact: true }).click();
+  await secondFlight.getByRole("button", { name: "到總覽修改航班" }).click();
+  await secondPage.getByRole("button", { name: "修改 JL001", exact: true }).click();
+  const firstEdit = page.getByRole("dialog", { name: "修改航班" });
+  const secondEdit = secondPage.getByRole("dialog", { name: "修改航班" });
+  await firstEdit.getByLabel("航班號碼", { exact: true }).fill("JL002");
+  await secondEdit.getByLabel("航班號碼", { exact: true }).fill("JL003");
+  await firstEdit.getByRole("button", { name: "儲存", exact: true }).click();
   await expect(firstEdit).toHaveCount(0);
-  await secondEdit.getByRole("button", { name: "儲存固定行程" }).click();
+  await secondEdit.getByRole("button", { name: "儲存", exact: true }).click();
   await expect(secondEdit.getByRole("alert")).toContainText("資料已變更，無法完成操作。");
   await expect(secondEdit.getByRole("alert")).toContainText("目前版本：");
-  await expect(secondEdit.getByLabel("標題")).toHaveValue("SFO to Haneda · stale overwrite");
+  await expect(secondEdit.getByLabel("航班號碼", { exact: true })).toHaveValue("JL003");
 
   await page.reload();
   await openTrip(page, name);
-  await expect(page.getByText("SFO to Haneda · family confirmed").first()).toBeVisible();
-  await expect(page.getByText("SFO to Haneda · stale overwrite")).toHaveCount(0);
+  // The hidden overview panel also lists the flight, so look inside the visible timeline.
+  await expect(page.getByRole("region", { name: "每日行程", exact: true }).getByText("JL002").first()).toBeVisible();
+  await expect(page.getByText("JL003")).toHaveCount(0);
   await openTab(page, "最近變更");
   await expect(page.getByText("修改了固定行程").first()).toBeVisible();
 
@@ -804,9 +815,11 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   const mobilePage = await mobileContext.newPage();
   await mobilePage.goto("/");
   await openTrip(mobilePage, name);
-  await expect(mobilePage.getByText("SFO to Haneda · family confirmed").first()).toBeVisible();
-  await expect(mobilePage.getByText(/2027-11-01 11:00 · America\/Los_Angeles \(.+, -07:00\)/).first()).toBeVisible();
-  await expect(mobilePage.getByText(/2027-11-02 14:00 · Asia\/Tokyo \(.+, \+09:00\)/).first()).toBeVisible();
+  // The hidden overview panel also lists the flight, so look inside the visible itinerary panel.
+  const mobileItinerary = mobilePage.locator("#trip-panel-itinerary");
+  await expect(mobileItinerary.getByText("JL002").first()).toBeVisible();
+  await expect(mobileItinerary.getByText(/2027-11-01 11:00 · America\/Los_Angeles \(.+, -07:00\)/).first()).toBeVisible();
+  await expect(mobileItinerary.getByText(/2027-11-02 14:00 · Asia\/Tokyo \(.+, \+09:00\)/).first()).toBeVisible();
   const shellBox = await mobilePage.locator("#trip-panel-itinerary .trip-skeleton-shell").boundingBox();
   expect(shellBox?.x).toBeGreaterThanOrEqual(0);
   expect(shellBox ? shellBox.x + shellBox.width : Number.POSITIVE_INFINITY).toBeLessThanOrEqual(390);
@@ -1111,4 +1124,127 @@ test("activity participants persist exact subsets, history, times, and concurren
     ownerContext.close(),
     ...editorContexts.map((context) => context.close()),
   ]);
+});
+
+test("travel editors keep airports and hotels out of the wishlist and old flightless trips remain usable", async ({ page, request }) => {
+  test.setTimeout(180_000);
+  await signIn(page, request, "owner@example.test");
+  const name = `Travel separation ${Date.now()}`;
+  await createTrip(page, {
+    name, startDate: "2026-10-21", endDate: "2026-10-27",
+    countries: [{ query: "Japan", code: "JP" }],
+  });
+  await page.getByRole("button", { name: "新增固定行程" }).click();
+  const itineraryDialog = page.getByRole("dialog", { name: "新增固定行程" });
+  const options = await itineraryDialog.getByLabel("類型", { exact: true }).locator("option").evaluateAll((entries) =>
+    entries.map((entry) => (entry as HTMLOptionElement).value));
+  expect(options).not.toContain("flight");
+  expect(options).not.toContain("lodging");
+  expect(options).toContain("activity");
+  await itineraryDialog.press("Escape");
+  await openTab(page, "總覽");
+  const overview = page.locator("#trip-panel-overview");
+  await expect(overview.getByRole("heading", { name: "去程 · FIXTURE-OUT" })).toBeVisible();
+  await expect(overview.getByRole("heading", { name: "回程 · FIXTURE-RETURN" })).toBeVisible();
+  for (const flight of ["FIXTURE-OUT", "FIXTURE-RETURN"]) {
+    page.once("dialog", (dialog) => void dialog.accept());
+    await overview.getByRole("button", { name: `刪除 ${flight}`, exact: true }).click();
+    await expect(overview.getByRole("button", { name: `修改 ${flight}`, exact: true })).toHaveCount(0);
+  }
+  await expect(overview.getByText("尚未填寫航班", { exact: true })).toBeVisible();
+  // The nonblocking prompt must not stop lodging work in another mounted panel.
+  await openTab(page, "住宿");
+  await page.getByRole("button", { name: "新增住宿", exact: true }).click();
+  let editor = page.getByRole("dialog", { name: "新增住宿" });
+  await expect(editor.getByLabel("飯店 IANA 時區")).toHaveValue("Asia/Tokyo");
+  await editor.getByLabel("飯店名稱", { exact: true }).fill("Only travel hotel");
+  await editor.getByLabel("入住時間（當地）").fill("2026-10-21T15:00");
+  await editor.getByLabel("退房時間（當地）").fill("2026-10-27T10:00");
+  await editor.getByRole("button", { name: "儲存", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  await page.getByRole("button", { name: "修改 Only travel hotel", exact: true }).click();
+  editor = page.getByRole("dialog", { name: "修改住宿" });
+  await editor.getByLabel("退房時間（當地）").fill("2026-10-26T11:00");
+  await editor.getByRole("button", { name: "儲存", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  await page.reload();
+  await openTrip(page, name);
+  await openTab(page, "住宿");
+  await expect(page.locator("#trip-panel-lodging")).toContainText("2026-10-26 11:00");
+  await page.getByRole("tab", { name: "想去清單", exact: true }).click();
+  await expect(page.locator("#trip-panel-wishlist")).not.toContainText("Only travel hotel");
+  await expect(page.locator("#trip-panel-wishlist")).not.toContainText("Fixture home airport");
+  await openTab(page, "住宿");
+  page.once("dialog", (dialog) => void dialog.accept());
+  await page.getByRole("button", { name: "刪除 Only travel hotel", exact: true }).click();
+  await expect(page.getByRole("button", { name: "修改 Only travel hotel", exact: true })).toHaveCount(0);
+  await openTab(page, "行程");
+  await expect(page.getByRole("region", { name: "旅程資訊", exact: true }).getByRole("heading", { name: "Only travel hotel" })).toHaveCount(0);
+
+  await openTab(page, "總覽");
+  await overview.getByRole("button", { name: "新增航班", exact: true }).click();
+  editor = page.getByRole("dialog", { name: "新增航班" });
+  await editor.getByLabel("航班號碼", { exact: true }).fill("RESTORED-OUT");
+  await editor.getByLabel("出發機場", { exact: true }).fill("Home airport");
+  await editor.getByLabel("抵達機場", { exact: true }).fill("Japan airport");
+  await editor.getByLabel("出發機場 IANA 時區").fill("Asia/Tokyo");
+  await editor.getByLabel("抵達機場 IANA 時區").fill("Asia/Tokyo");
+  await editor.getByLabel("起飛時間（當地）").fill("2026-10-21T05:00");
+  await editor.getByLabel("抵達時間（當地）").fill("2026-10-21T06:00");
+  await editor.getByRole("button", { name: "儲存", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  await expect(overview.getByRole("heading", { name: "去程 · RESTORED-OUT" })).toBeVisible();
+  await expect(overview.getByText("尚未填寫航班", { exact: true })).toBeVisible();
+  await page.reload();
+  await openTrip(page, name);
+  await openTab(page, "總覽");
+  await expect(overview.getByRole("heading", { name: "去程 · RESTORED-OUT" })).toBeVisible();
+});
+
+test("travel forms preserve the chosen occurrence of a repeated local hour", async ({ page, request }) => {
+  test.setTimeout(180_000);
+  await signIn(page, request, "owner@example.test");
+  const name = `DST travel ${Date.now()}`;
+  await createTrip(page, {
+    name, startDate: "2026-11-01", endDate: "2026-11-02", countries: [{ query: "United States", code: "US" }],
+    flights: async (dialog) => {
+      const outbound = dialog.getByRole("group", { name: "去程", exact: true });
+      await outbound.getByLabel("出發機場 IANA 時區").fill("America/New_York");
+      await outbound.getByLabel("抵達機場 IANA 時區").fill("America/New_York");
+      await outbound.getByLabel("起飛時間（當地）").fill("2026-11-01T01:30");
+      await outbound.getByLabel("抵達時間（當地）").fill("2026-11-01T01:45");
+      await outbound.getByLabel("起飛時間的 UTC 時差（選填）").fill("-04:00");
+      await outbound.getByLabel("抵達時間的 UTC 時差（選填）").fill("-05:00");
+    },
+  });
+  await openTab(page, "總覽");
+  await page.getByRole("button", { name: "修改 FIXTURE-OUT", exact: true }).click();
+  let editor = page.getByRole("dialog", { name: "修改航班" });
+  await expect(editor.getByLabel("起飛時間的 UTC 時差（選填）")).toHaveValue("-04:00");
+  await expect(editor.getByLabel("抵達時間的 UTC 時差（選填）")).toHaveValue("-05:00");
+  await editor.getByLabel("航空公司（選填）").fill("DST carrier");
+  const savedFlight = page.waitForResponse((response) => response.request().method() === "PATCH" && /\/flights\/[^/]+$/.test(response.url()));
+  await editor.getByRole("button", { name: "儲存", exact: true }).click();
+  const flightResponse = await savedFlight;
+  expect(flightResponse.status()).toBe(200);
+  const flight = parseItineraryItemResponse(await flightResponse.json()).item;
+  expect(flight.endpoints.find((endpoint) => endpoint.role === "start")?.instant).toBe("2026-11-01T05:30:00.000Z");
+  await expect(editor).toHaveCount(0);
+  await openTab(page, "住宿");
+  await page.getByRole("button", { name: "新增住宿", exact: true }).click();
+  editor = page.getByRole("dialog", { name: "新增住宿" });
+  await editor.getByLabel("飯店名稱", { exact: true }).fill("Repeated hour hotel");
+  await editor.getByLabel("飯店 IANA 時區").fill("America/New_York");
+  await editor.getByLabel("入住時間（當地）").fill("2026-11-01T01:15");
+  await editor.getByLabel("退房時間（當地）").fill("2026-11-01T01:45");
+  await editor.getByLabel("入住時間的 UTC 時差（選填）").fill("-04:00");
+  await editor.getByLabel("退房時間的 UTC 時差（選填）").fill("-05:00");
+  const savedStay = page.waitForResponse((response) => response.request().method() === "POST" && /\/lodgings$/.test(response.url()));
+  await editor.getByRole("button", { name: "儲存", exact: true }).click();
+  const stayResponse = await savedStay;
+  expect(stayResponse.status()).toBe(201);
+  const lodging = parseItineraryItemResponse(await stayResponse.json()).item;
+  expect(lodging.endpoints.find((endpoint) => endpoint.role === "start")?.instant).toBe("2026-11-01T05:15:00.000Z");
+  expect(lodging.endpoints.find((endpoint) => endpoint.role === "end")?.instant).toBe("2026-11-01T06:45:00.000Z");
+  await expect(editor).toHaveCount(0);
 });

@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 
 import { expect, test, type APIRequestContext, type Page, type Route } from "@playwright/test";
 import { isRecord } from "@along-the-way/contracts/private-trips";
+import { fillTripFlights } from "./travel-support";
 
 const execFileAsync = promisify(execFile);
 const MAILPIT_API_URL = process.env.MAILPIT_API_URL ?? "http://127.0.0.1:8025";
@@ -94,6 +95,7 @@ async function createTrip(page: Page, name: string) {
   await page.locator(`[data-day="${label(9)}"]`).click();
   await dialog.getByLabel("新增國家").fill("Japan");
   await page.getByRole("option", { name: /\(JP\)/ }).dispatchEvent("click");
+  await fillTripFlights(dialog, "2026-11-03", "2026-11-09");
   await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
   await expect(page.getByRole("heading", { name })).toBeVisible();
 }
@@ -103,7 +105,8 @@ async function openTab(page: Page, name: "AI 找地點" | "想去清單") {
 }
 
 async function cleanup() {
-  await executeDatabase("delete from trips where name like 'Discovery browser %'; delete from users where email like 'discovery-%@example.test';");
+  // Trips now start with flight endpoints, whose country-stop references block a direct trip delete.
+  await executeDatabase("delete from itinerary_items where trip_id in (select id from trips where name like 'Discovery browser %'); delete from trips where name like 'Discovery browser %'; delete from users where email like 'discovery-%@example.test';");
 }
 
 test.beforeEach(() => executeDatabase("truncate table rate_limit_windows"));
@@ -157,17 +160,38 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
       from trips trip where trip.name = '${tripName}';
     insert into candidate_proposal_evidence (proposal_id, evidence_id) values
       ('${proposalId}', '${googleEvidenceId}'), ('${proposalId}', '${webEvidenceId}');
+    insert into discovery_feedback (trip_id, proposal_id, actor_id, original_text, interpretation, status, decided_at)
+      select trip.id, '${proposalId}', member.user_id, 'Historical market feedback',
+        '{"interests":[],"exclusions":["crowds"],"pace":null,"budget":null,"summary":"Visit at a quieter time."}'::jsonb,
+        'confirmed', now()
+      from trips trip join trip_members member on member.trip_id = trip.id and member.role = 'owner'
+      where trip.name = '${tripName}';
   `);
 
   await page.reload();
   await openTab(page, "AI 找地點");
   const proposal = page.getByRole("article", { name: "AI 推薦：Nishiki Market" });
   await expect(proposal).toBeVisible();
+  await expect(proposal.getByRole("textbox")).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "研究意見" }).getByLabel("意見", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "研究意見" }).getByText("針對：Nishiki Market", { exact: true })).toBeVisible();
   await expect(proposal.getByText("A compact food-market stop matching the trip focus.")).toBeVisible();
   await expect(proposal.getByRole("link", { name: "Official Nishiki Market guide" })).toHaveAttribute("href", "https://kyoto.example.test/nishiki");
   // A run from before the quality checks still reads, and its card links to the place's own Google Maps page.
   await expect(proposal.getByRole("link", { name: "在 Google Maps 看照片" }))
     .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
+  await expect(proposal.getByRole("button", { name: "投票", exact: true })).toHaveCount(0);
+  await executeDatabase(`
+    insert into users (email, display_name, status) values ('discovery-member-${suffix}@example.test', 'Discovery member', 'active');
+    insert into trip_members (trip_id, user_id, role)
+      select trip.id, member.id, 'editor' from trips trip cross join users member
+      where trip.name = '${tripName}' and member.email = 'discovery-member-${suffix}@example.test';
+  `);
+  await page.reload();
+  await openTab(page, "AI 找地點");
+  await proposal.getByRole("button", { name: "投票", exact: true }).click();
+  await expect(proposal.getByRole("button", { name: "已投票", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(proposal.getByText("1 票", { exact: true })).toBeVisible();
   await proposal.getByRole("button", { name: "加入想去清單" }).click();
   await expect(proposal.getByText("已加入想去清單")).toBeVisible();
   await openTab(page, "想去清單");
@@ -177,6 +201,23 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   await expect(wishlist.getByText("AI 推薦", { exact: false })).toBeVisible();
   await expect(wishlist.getByRole("link", { name: "在 Google Maps 看照片" }))
     .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
+  await expect(wishlist.getByText("1 票", { exact: true })).toBeVisible();
+  await expect(wishlist.getByRole("button", { name: "已投票", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(wishlist.getByRole("link", { name: "開啟原始來源" }))
+    .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
+  page.once("dialog", (dialog) => dialog.accept());
+  await wishlist.getByRole("button", { name: "從想去清單移除" }).click();
+  await expect(wishlist.getByRole("heading", { name: "Nishiki Market" })).toHaveCount(0);
+  await openTab(page, "AI 找地點");
+  await expect(proposal.getByRole("button", { name: "加入想去清單" })).toBeVisible();
+  await expect(proposal.getByRole("button", { name: "不適合這趟旅程" })).toBeVisible();
+  await expect(proposal.getByRole("button", { name: "已投票", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(proposal.getByText("已加入想去清單", { exact: true })).toHaveCount(0);
+  await proposal.getByRole("button", { name: "加入想去清單" }).click();
+  await expect(proposal.getByText("已加入想去清單", { exact: true })).toBeVisible();
+  await openTab(page, "想去清單");
+  await expect(wishlist.getByRole("heading", { name: "Nishiki Market" })).toHaveCount(1);
+  await expect(wishlist.getByText("1 票", { exact: true })).toBeVisible();
 });
 
 test("research and feedback explain missing AI configuration without sending anything", async ({ page, request }) => {

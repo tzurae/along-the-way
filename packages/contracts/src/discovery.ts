@@ -1,6 +1,6 @@
+import { parseMemberVote, type MemberVoteDto } from "./trip-places";
 import { isRecord } from "./type-guards";
 import type { PlaceType } from "./trip-skeleton";
-
 export type DiscoveryConfidence = "high" | "medium" | "low";
 export type DiscoveryProposalStatus = "pending" | "accepting" | "accepted" | "rejected";
 export type DiscoveryFeedbackStatus = "pending" | "confirmed" | "rejected";
@@ -32,11 +32,18 @@ export interface StructuredDiscoveryBriefDto {
   exclusions: string[];
   areas: string[];
 }
+export interface DiscoveryQuestionAnswerDto {
+  question: string;
+  /** Null means the traveler explicitly skipped this question and it remains unknown. */
+  answer: string | null;
+}
+
 
 export interface DiscoveryBriefDto {
   originalText: string;
   structured: StructuredDiscoveryBriefDto | null;
   unresolvedQuestions: string[];
+  questionAnswers: DiscoveryQuestionAnswerDto[];
   version: number;
   updatedAt: string;
 }
@@ -68,6 +75,11 @@ export interface DiscoveryShortfallDto {
   count: number | null;
 }
 
+export interface DiscoveryClaimSentenceDto {
+  text: string;
+  evidenceIds: string[];
+}
+
 export interface DiscoveryEvidenceDto {
   id: string;
   kind: "google-place" | "web-source";
@@ -77,7 +89,9 @@ export interface DiscoveryEvidenceDto {
   attribution: string;
   observedAt: string;
   expiresAt: string | null;
+  isStale: boolean;
 }
+
 
 export interface CandidateProposalDto {
   id: string;
@@ -90,12 +104,20 @@ export interface CandidateProposalDto {
   longitude: number | null;
   sourceUrl: string | null;
   recommendation: string;
+  /** Sentence-level recommendation attribution; null for proposals created before this contract. */
+  recommendationSentences: DiscoveryClaimSentenceDto[] | null;
   matchedNeeds: string[];
   tradeoffs: string[];
+  /** Sentence-level tradeoff attribution; null for proposals created before this contract. */
+  tradeoffSentences: DiscoveryClaimSentenceDto[] | null;
   unknowns: string[];
   confidence: DiscoveryConfidence;
   status: DiscoveryProposalStatus;
   evidence: DiscoveryEvidenceDto[];
+  voters: MemberVoteDto[];
+  voteCount: number;
+  ownVote: boolean;
+  votingAvailable: boolean;
   acceptedTripPlaceId: string | null;
   version: number;
   /** Kind of place it answers; null for proposals from before kinds were recorded. */
@@ -125,17 +147,22 @@ export interface DiscoveryRunDto {
   shortfalls: DiscoveryShortfallDto[];
 }
 
+export interface DiscoveryFeedbackInterpretationDto {
+  interests: string[];
+  exclusions: string[];
+  pace: string | null;
+  budget: string | null;
+  summary: string;
+}
+
 export interface DiscoveryFeedbackDto {
   id: string;
   proposalId: string | null;
+  proposalName: string | null;
   originalText: string;
-  interpretation: {
-    interests: string[];
-    exclusions: string[];
-    pace: string | null;
-    budget: string | null;
-    summary: string;
-  };
+  interpretation: DiscoveryFeedbackInterpretationDto;
+  interpretationEdited: boolean;
+  isOwn: boolean;
   status: DiscoveryFeedbackStatus;
   version: number;
   createdAt: string;
@@ -163,6 +190,11 @@ export interface SaveDiscoveryBriefInput {
   originalText: string;
   expectedVersion?: number | null;
 }
+export interface SaveDiscoveryQuestionAnswersInput {
+  expectedVersion: number;
+  answers: DiscoveryQuestionAnswerDto[];
+}
+
 
 export interface GenerateDiscoveryInput {
   expectedBriefVersion: number;
@@ -171,15 +203,19 @@ export interface GenerateDiscoveryInput {
 export interface DecideCandidateProposalInput {
   expectedVersion: number;
 }
+export interface UpdateCandidateProposalVoteInput {
+  voted: boolean;
+}
+
 
 export interface CreateDiscoveryFeedbackInput {
   originalText: string;
-  proposalId?: string | null;
 }
 
 export interface DecideDiscoveryFeedbackInput {
   expectedVersion: number;
   decision: "confirm" | "reject";
+  interpretation?: DiscoveryFeedbackInterpretationDto;
 }
 
 function invalid(): never {
@@ -213,11 +249,31 @@ function strings(value: unknown) {
   return Array.isArray(value) ? value.map(text) : invalid();
 }
 
+function questionAnswer(value: unknown): DiscoveryQuestionAnswerDto {
+  const item = record(value);
+  return {
+    question: text(item.question),
+    answer: nullableText(item.answer),
+  };
+}
+
+function feedbackInterpretation(value: unknown): DiscoveryFeedbackInterpretationDto {
+  const item = record(value);
+  return {
+    interests: strings(item.interests),
+    exclusions: strings(item.exclusions),
+    pace: nullableText(item.pace),
+    budget: nullableText(item.budget),
+    summary: text(item.summary),
+  };
+}
+
 function endorsements(value: unknown): DiscoveryEndorsement[] {
   return strings(value).map((entry) =>
     entry === "google_reviews" || entry === "wikivoyage" || entry === "official_tourism" ? entry : invalid()
   );
 }
+
 
 const SHORTFALL_CODES: readonly DiscoveryShortfallCode[] = [
   "not_researched", "not_found", "name_mismatch", "single_source", "category_short", "in_wishlist", "rejected",
@@ -281,6 +337,22 @@ function searchPlan(value: unknown): DiscoverySearchPlanDto {
   };
 }
 
+function claimSentence(value: unknown): DiscoveryClaimSentenceDto {
+  const item = record(value);
+  return {
+    text: text(item.text),
+    evidenceIds: strings(item.evidenceIds),
+  };
+}
+
+function nullableClaimSentences(value: unknown) {
+  return value === null
+    ? null
+    : Array.isArray(value)
+      ? value.map(claimSentence)
+      : invalid();
+}
+
 function evidence(value: unknown): DiscoveryEvidenceDto {
   const item = record(value);
   if (item.kind !== "google-place" && item.kind !== "web-source") invalid();
@@ -293,6 +365,7 @@ function evidence(value: unknown): DiscoveryEvidenceDto {
     attribution: text(item.attribution),
     observedAt: text(item.observedAt),
     expiresAt: nullableText(item.expiresAt),
+    isStale: typeof item.isStale === "boolean" ? item.isStale : invalid(),
   };
 }
 
@@ -311,12 +384,18 @@ function proposal(value: unknown): CandidateProposalDto {
     longitude: nullableNumber(item.longitude, -180, 180),
     sourceUrl: nullableText(item.sourceUrl),
     recommendation: text(item.recommendation),
+    recommendationSentences: nullableClaimSentences(item.recommendationSentences),
     matchedNeeds: strings(item.matchedNeeds),
     tradeoffs: strings(item.tradeoffs),
+    tradeoffSentences: nullableClaimSentences(item.tradeoffSentences),
     unknowns: strings(item.unknowns),
     confidence: item.confidence as DiscoveryConfidence,
     status: item.status as DiscoveryProposalStatus,
     evidence: Array.isArray(item.evidence) ? item.evidence.map(evidence) : invalid(),
+    voters: Array.isArray(item.voters) ? item.voters.map(parseMemberVote) : invalid(),
+    voteCount: integer(item.voteCount),
+    ownVote: typeof item.ownVote === "boolean" ? item.ownVote : invalid(),
+    votingAvailable: typeof item.votingAvailable === "boolean" ? item.votingAvailable : invalid(),
     acceptedTripPlaceId: nullableText(item.acceptedTripPlaceId),
     version: integer(item.version),
     category: nullableText(item.category),
@@ -326,19 +405,15 @@ function proposal(value: unknown): CandidateProposalDto {
 
 function feedback(value: unknown): DiscoveryFeedbackDto {
   const item = record(value);
-  const interpretation = record(item.interpretation);
   if (!["pending", "confirmed", "rejected"].includes(String(item.status))) invalid();
   return {
     id: text(item.id),
     proposalId: nullableText(item.proposalId),
+    proposalName: nullableText(item.proposalName),
     originalText: text(item.originalText),
-    interpretation: {
-      interests: strings(interpretation.interests),
-      exclusions: strings(interpretation.exclusions),
-      pace: nullableText(interpretation.pace),
-      budget: nullableText(interpretation.budget),
-      summary: text(interpretation.summary),
-    },
+    interpretation: feedbackInterpretation(item.interpretation),
+    interpretationEdited: typeof item.interpretationEdited === "boolean" ? item.interpretationEdited : invalid(),
+    isOwn: typeof item.isOwn === "boolean" ? item.isOwn : invalid(),
     status: item.status as DiscoveryFeedbackStatus,
     version: integer(item.version),
     createdAt: text(item.createdAt),
@@ -356,6 +431,9 @@ export function parseDiscoveryWorkspaceResponse(value: unknown): DiscoveryWorksp
       originalText: text(item.originalText),
       structured: item.structured === null ? null : structuredBrief(item.structured),
       unresolvedQuestions: strings(item.unresolvedQuestions),
+      questionAnswers: Array.isArray(item.questionAnswers)
+        ? item.questionAnswers.map(questionAnswer)
+        : invalid(),
       version: integer(item.version),
       updatedAt: text(item.updatedAt),
     };

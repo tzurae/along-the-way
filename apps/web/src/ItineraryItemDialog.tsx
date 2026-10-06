@@ -7,7 +7,6 @@ import type {
   CreateItineraryItemInput,
   EndpointRole,
   ItineraryItemDto,
-  ItineraryItemType,
   PlaceDto,
   UpdateItineraryItemInput,
   ZonedEndpointInput,
@@ -29,11 +28,14 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "./i18n";
 
+type EditableItem = Exclude<ItineraryItemDto, { type: "flight" | "lodging" }>;
+type EditableItemType = EditableItem["type"];
+
 interface ItineraryItemDialogProps {
   countryStops: CountryStopDto[];
   members: TripMemberDto[];
   places: PlaceDto[];
-  item?: ItineraryItemDto;
+  item?: EditableItem;
   save(input: CreateItineraryItemInput | UpdateItineraryItemInput): Promise<void>;
 }
 
@@ -48,9 +50,7 @@ interface EndpointDraft {
 
 const OUTSIDE_ROUTE = "outside-route";
 
-const itemTypes: ItineraryItemType[] = [
-  "flight",
-  "lodging",
+const itemTypes: EditableItemType[] = [
   "transport",
   "reservation",
   "meal",
@@ -79,14 +79,6 @@ function draftEndpoint(item: ItineraryItemDto | undefined, role: EndpointRole): 
     : { ...blankEndpoint };
 }
 
-function hasEndEndpoint(type: ItineraryItemType) {
-  return type === "flight" || type === "lodging" || type === "transport";
-}
-
-/** Only flights and transport may start or end outside the trip's countries. */
-function mayLeaveRoute(type: ItineraryItemType) {
-  return type === "flight" || type === "transport";
-}
 
 function endpointInput(role: EndpointRole, draft: EndpointDraft): ZonedEndpointInput {
   return {
@@ -105,14 +97,12 @@ function EndpointEditor({
   countryStops,
   places,
   onChange,
-  locationLocked = false,
   allowOutsideRoute = false,
 }: {
   role: EndpointRole;
   draft: EndpointDraft;
   countryStops: CountryStopDto[];
   places: PlaceDto[];
-  locationLocked?: boolean;
   allowOutsideRoute?: boolean;
   onChange(value: EndpointDraft): void;
 }) {
@@ -131,8 +121,7 @@ function EndpointEditor({
             id={`${id}-country`}
             className="min-h-10 rounded-lg border border-input bg-transparent px-3"
             required
-            disabled={locationLocked}
-            // A leftover "outside" choice from a flight reads as unchosen for other item types.
+            // A leftover outside-route choice from transport is unchosen for other types.
             value={allowOutsideRoute || draft.countryStopId !== OUTSIDE_ROUTE ? draft.countryStopId : ""}
             onChange={(event) => {
               const stop = countryStops.find((candidate) => candidate.id === event.target.value);
@@ -159,7 +148,6 @@ function EndpointEditor({
             id={`${id}-place`}
             className="min-h-10 rounded-lg border border-input bg-transparent px-3"
             required
-            disabled={locationLocked}
             value={draft.placeId}
             onChange={(event) => {
               const place = places.find((candidate) => candidate.id === event.target.value);
@@ -192,21 +180,15 @@ function EndpointEditor({
           <Input
             id={`${id}-zone`}
             required
-            disabled={locationLocked}
             placeholder={t.itemDialog.timeZonePlaceholder}
             value={draft.timeZone}
             onChange={(event) => onChange({ ...draft, timeZone: event.target.value })}
           />
-          {!locationLocked ? (
-            <FieldDescription>
-              {outsideRoute ? t.itemDialog.outsideRouteTimeZoneDescription : t.itemDialog.timeZoneDescription}
-            </FieldDescription>
-          ) : null}
+          <FieldDescription>
+            {outsideRoute ? t.itemDialog.outsideRouteTimeZoneDescription : t.itemDialog.timeZoneDescription}
+          </FieldDescription>
         </Field>
       </div>
-      {locationLocked ? (
-        <FieldDescription>{t.itemDialog.lodgingEndDescription}</FieldDescription>
-      ) : null}
       <Field>
         <FieldLabel htmlFor={`${id}-offset`}>{t.itemDialog.utcOffset}</FieldLabel>
         <Input
@@ -222,9 +204,9 @@ function EndpointEditor({
   );
 }
 
-function itemDraft(item?: ItineraryItemDto) {
+function itemDraft(item?: EditableItem) {
   return {
-    type: item?.type ?? "activity" as ItineraryItemType,
+    type: item?.type ?? "activity" as EditableItemType,
     title: item?.title ?? "",
     notes: item?.notes ?? "",
     sourceUrl: item?.sourceUrl ?? "",
@@ -232,13 +214,9 @@ function itemDraft(item?: ItineraryItemDto) {
     currency: item?.money?.currency ?? "",
     start: draftEndpoint(item, "start"),
     end: draftEndpoint(item, "end"),
-    carrier: item?.type === "flight" ? item.details.carrier ?? "" : "",
-    serviceNumber: item?.type === "flight" ? item.details.serviceNumber : "",
-    confirmationNotes: item?.type === "flight" ? item.details.confirmationNotes ?? "" : "",
-    bookedBy: item && (item.type === "lodging" || item.type === "reservation" || item.type === "meal" || item.type === "activity")
+    bookedBy: item && (item.type === "reservation" || item.type === "meal" || item.type === "activity")
       ? item.details.bookedBy ?? ""
       : "",
-    confirmationCode: item?.type === "lodging" ? item.details.confirmationCode ?? "" : "",
     mode: item?.type === "transport" ? item.details.mode : "",
     ticketInfo: item?.type === "transport" ? item.details.ticketInfo ?? "" : "",
     durationMinutes: item && (item.type === "reservation" || item.type === "meal" || item.type === "activity" || item.type === "free-time")
@@ -256,7 +234,7 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const initialDraft = itemDraft(item);
-  const [type, setType] = useState<ItineraryItemType>(initialDraft.type);
+  const [type, setType] = useState<EditableItemType>(initialDraft.type);
   const [title, setTitle] = useState(initialDraft.title);
   const [notes, setNotes] = useState(initialDraft.notes);
   const [sourceUrl, setSourceUrl] = useState(initialDraft.sourceUrl);
@@ -264,11 +242,7 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
   const [currency, setCurrency] = useState(initialDraft.currency);
   const [start, setStart] = useState(initialDraft.start);
   const [end, setEnd] = useState(initialDraft.end);
-  const [carrier, setCarrier] = useState(initialDraft.carrier);
-  const [serviceNumber, setServiceNumber] = useState(initialDraft.serviceNumber);
-  const [confirmationNotes, setConfirmationNotes] = useState(initialDraft.confirmationNotes);
   const [bookedBy, setBookedBy] = useState(initialDraft.bookedBy);
-  const [confirmationCode, setConfirmationCode] = useState(initialDraft.confirmationCode);
   const [mode, setMode] = useState(initialDraft.mode);
   const [ticketInfo, setTicketInfo] = useState(initialDraft.ticketInfo);
   const [durationMinutes, setDurationMinutes] = useState(initialDraft.durationMinutes);
@@ -295,11 +269,7 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
     setCurrency(latest.currency);
     setStart(latest.start);
     setEnd(latest.end);
-    setCarrier(latest.carrier);
-    setServiceNumber(latest.serviceNumber);
-    setConfirmationNotes(latest.confirmationNotes);
     setBookedBy(latest.bookedBy);
-    setConfirmationCode(latest.confirmationCode);
     setMode(latest.mode);
     setTicketInfo(latest.ticketInfo);
     setDurationMinutes(latest.durationMinutes);
@@ -316,21 +286,9 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
     if (nextOpen && !open) resetDraft();
     setOpen(nextOpen);
   }
-  const effectiveEnd = type === "lodging"
-    ? {
-        ...end,
-        countryStopId: start.countryStopId,
-        placeId: start.placeId,
-        timeZone: start.timeZone,
-      }
-    : end;
 
   const details = useMemo<CreateItineraryItemInput["details"]>(() => {
     switch (type) {
-      case "flight":
-        return { carrier: carrier || null, serviceNumber, confirmationNotes: confirmationNotes || null };
-      case "lodging":
-        return { bookedBy: bookedBy || null, confirmationCode: confirmationCode || null };
       case "transport":
         return { mode, ticketInfo: ticketInfo || null };
       case "reservation":
@@ -344,7 +302,7 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
       case "free-time":
         return { durationMinutes: Number(durationMinutes) };
     }
-  }, [bookedBy, carrier, confirmationCode, confirmationNotes, confirmationStatus, durationMinutes, mode, serviceNumber, ticketInfo, type]);
+  }, [bookedBy, confirmationStatus, durationMinutes, mode, ticketInfo, type]);
   const participantChoices = useMemo(() => {
     const activeIds = new Set(members.map((member) => member.id));
     return [
@@ -375,7 +333,7 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
       money: type === "free-time" || amountMinor === ""
         ? null
         : { amountMinor: Number(amountMinor), currency },
-      endpoints: [endpointInput("start", start), ...(hasEndEndpoint(type) ? [endpointInput("end", effectiveEnd)] : [])],
+      endpoints: [endpointInput("start", start), ...(type === "transport" ? [endpointInput("end", end)] : [])],
       details,
       constraints,
     };
@@ -423,7 +381,7 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
                 id={`item-type-${item?.id ?? "new"}`}
                 className="min-h-10 rounded-lg border border-input bg-transparent px-3"
                 value={type}
-                onChange={(event) => setType(event.target.value as ItineraryItemType)}
+                onChange={(event) => setType(event.target.value as EditableItemType)}
               >
                 {itemTypes.map((itemType) => <option key={itemType} value={itemType}>{t.itemDialog.itemTypes[itemType]}</option>)}
               </select>
@@ -477,34 +435,20 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
             draft={start}
             countryStops={countryStops}
             places={places}
-            allowOutsideRoute={mayLeaveRoute(type)}
+            allowOutsideRoute={type === "transport"}
             onChange={setStart}
           />
-          {hasEndEndpoint(type) ? (
+          {type === "transport" ? (
             <EndpointEditor
               role="end"
-              draft={effectiveEnd}
+              draft={end}
               countryStops={countryStops}
               places={places}
-              locationLocked={type === "lodging"}
-              allowOutsideRoute={mayLeaveRoute(type)}
+              allowOutsideRoute
               onChange={setEnd}
             />
           ) : null}
 
-          {type === "flight" ? (
-            <div className="grid gap-4 sm:grid-cols-3">
-              <Field><FieldLabel htmlFor="flight-carrier">{t.itemDialog.carrier}</FieldLabel><Input id="flight-carrier" value={carrier} onChange={(event) => setCarrier(event.target.value)} /></Field>
-              <Field><FieldLabel htmlFor="flight-number">{t.itemDialog.flightNumber}</FieldLabel><Input id="flight-number" required value={serviceNumber} onChange={(event) => setServiceNumber(event.target.value)} /></Field>
-              <Field><FieldLabel htmlFor="flight-confirmation">{t.itemDialog.confirmationNotes}</FieldLabel><Input id="flight-confirmation" value={confirmationNotes} onChange={(event) => setConfirmationNotes(event.target.value)} /></Field>
-            </div>
-          ) : null}
-          {type === "lodging" ? (
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field><FieldLabel htmlFor="lodging-booked-by">{t.itemDialog.bookedBy}</FieldLabel><Input id="lodging-booked-by" value={bookedBy} onChange={(event) => setBookedBy(event.target.value)} /></Field>
-              <Field><FieldLabel htmlFor="lodging-confirmation">{t.itemDialog.confirmationCode}</FieldLabel><Input id="lodging-confirmation" value={confirmationCode} onChange={(event) => setConfirmationCode(event.target.value)} /></Field>
-            </div>
-          ) : null}
           {type === "transport" ? (
             <div className="grid gap-4 sm:grid-cols-2">
               <Field><FieldLabel htmlFor="transport-mode">{t.itemDialog.transportMode}</FieldLabel><Input id="transport-mode" required value={mode} onChange={(event) => setMode(event.target.value)} /></Field>

@@ -16,6 +16,12 @@ export interface StructuredDiscoveryBrief {
   exclusions: string[];
   areas: string[];
 }
+export interface DiscoveryQuestionAnswer {
+  question: string;
+  /** Null means explicitly skipped: keep this unknown and do not infer an answer. */
+  answer: string | null;
+}
+
 
 /** What the traveler asked for, as the model understood it. */
 export interface DiscoveryRequest {
@@ -61,6 +67,12 @@ export interface DiscoveryWebSource {
 /** What the research model says a cited page is; checked against the host before it counts. */
 export type WebSourceType = "government" | "tourism_board" | "wikivoyage" | "place_official" | "other";
 
+export interface DiscoveryClaimSentence {
+  text: string;
+  /** Only URLs returned by web search during this research request. */
+  sourceUrls: string[];
+}
+
 export interface ResearchedCandidate {
   /** Name in the output language. */
   name: string;
@@ -73,9 +85,9 @@ export interface ResearchedCandidate {
   category: string | null;
   /** The traveler-named place this answers, exactly as in the request, or null. */
   namedPlace: string | null;
-  recommendation: string;
+  recommendationSentences: DiscoveryClaimSentence[];
   matchedNeeds: string[];
-  tradeoffs: string[];
+  tradeoffSentences: DiscoveryClaimSentence[];
   unknowns: string[];
   confidence: DiscoveryConfidence;
   /** Only URLs web search actually returned. */
@@ -104,12 +116,14 @@ export interface DiscoveryModel {
     brief: string;
     trip: DiscoveryTripFacts;
     confirmedFeedback: string[];
+    questionAnswers: DiscoveryQuestionAnswer[];
   }): Promise<DiscoveryPlanResult>;
   research(input: {
     brief: StructuredDiscoveryBrief;
     request: DiscoveryRequest;
     trip: DiscoveryTripFacts;
     confirmedFeedback: string[];
+    questionAnswers: DiscoveryQuestionAnswer[];
     /** Names of places the traveler already rejected. */
     rejectedPlaces: string[];
     outputLanguage: string;

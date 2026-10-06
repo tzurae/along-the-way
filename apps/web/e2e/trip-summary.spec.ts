@@ -13,6 +13,7 @@ import {
   isRecord,
   parseTripListResponse,
 } from "@along-the-way/contracts/private-trips";
+import { fillTripFlights } from "./travel-support";
 
 const execFileAsync = promisify(execFile);
 
@@ -166,6 +167,7 @@ async function createTrip(
     ).toHaveCount(index + 1);
   }
   await beforeSubmit?.(dialog);
+  await fillTripFlights(dialog, input.startDate, input.endDate);
   await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
   await expect(page.getByRole("heading", { name: input.name })).toBeVisible();
   await openTab(page, "總覽");
@@ -334,6 +336,9 @@ test("private trips work across four identities, viewports, and rejection paths"
   }
 
   await page.reload();
+  // A reload selects the first listed trip; other specs' trips may be listed before this one.
+  await page.getByRole("button", { name: /^大阪京都家庭旅行 \d+ 位成員/ }).click();
+  await expect(page.getByRole("heading", { name: "大阪京都家庭旅行", exact: true })).toBeVisible();
   await openTab(page, "總覽");
   await expect(page.getByText("wife@example.test")).toBeVisible();
   await expect(page.getByText("mother@example.test")).toBeVisible();

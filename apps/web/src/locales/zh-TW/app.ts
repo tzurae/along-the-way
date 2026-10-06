@@ -44,6 +44,7 @@ export const app = {
     overview: "總覽",
     discovery: "AI 找地點",
     wishlist: "想去清單",
+    lodging: "住宿",
     itinerary: "行程",
     recent: "最近變更",
   },

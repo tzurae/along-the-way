@@ -12,12 +12,13 @@ import type {
   UpdateItineraryItemInput,
   UpdatePlaceInput,
   ZonedEndpointInput,
+  TripLodgingInput,
 } from "@along-the-way/contracts/trip-skeleton";
+import type { TripFlightInput } from "@along-the-way/contracts/private-trips";
 import type {
   CreateTripPlaceInput,
   MergeTripPlacesInput,
-  PreferenceLevel,
-  UpdateMemberPreferenceInput,
+  UpdateMemberVoteInput,
   UpdateTripPlaceDayAssignmentsInput,
   UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
@@ -184,6 +185,28 @@ function stringArrayField(body: Record<string, unknown>, name: string) {
   }
   return values as string[];
 }
+function feedbackInterpretationField(body: Record<string, unknown>) {
+  if (body.interpretation === undefined) return undefined;
+  const interpretation = objectBody(body.interpretation);
+  return {
+    interests: stringArrayField(interpretation, "interests"),
+    exclusions: stringArrayField(interpretation, "exclusions"),
+    pace: nullableStringField(interpretation, "pace"),
+    budget: nullableStringField(interpretation, "budget"),
+    summary: stringField(interpretation, "summary"),
+  };
+}
+
+function discoveryQuestionAnswersField(body: Record<string, unknown>) {
+  return arrayField(body, "answers").map((value) => {
+    const answer = objectBody(value);
+    return {
+      question: stringField(answer, "question"),
+      answer: nullableStringField(answer, "answer"),
+    };
+  });
+}
+
 
 function tripPlaceInput(body: Record<string, unknown>): CreateTripPlaceInput {
   const method = stringField(body, "method");
@@ -240,13 +263,11 @@ function dayAssignmentsInput(
   };
 }
 
-function preferenceInput(
-  body: Record<string, unknown>,
-): UpdateMemberPreferenceInput {
-  return {
-    level: stringField(body, "level") as PreferenceLevel,
-    expectedVersion: optionalNumberField(body, "expectedVersion"),
-  };
+function voteInput(body: Record<string, unknown>): UpdateMemberVoteInput {
+  if (typeof body.voted !== "boolean") {
+    throw new AppError("validation_error", "voted must be a boolean");
+  }
+  return { voted: body.voted };
 }
 
 function mergeInput(body: Record<string, unknown>): MergeTripPlacesInput {
@@ -435,6 +456,8 @@ export function createApp({
       startDate: stringField(body, "startDate"),
       endDate: stringField(body, "endDate"),
       countryCodes,
+      // The workspace validates this after replaying historical create_trip responses.
+      flights: body.flights as CreateTripInput["flights"],
     };
     const trip = await tripWorkspace.createTrip(
       user.id,
@@ -488,6 +511,23 @@ export function createApp({
       ),
     });
   });
+  app.put("/api/trips/:tripId/discovery/brief/questions", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json({
+      discovery: await discovery.saveQuestionAnswers(
+        user.id,
+        uuidParam(context, "tripId"),
+        idempotencyKey(context),
+        {
+          expectedVersion: numberField(body, "expectedVersion"),
+          answers: discoveryQuestionAnswersField(body),
+        },
+      ),
+    });
+  });
+
 
   app.post("/api/trips/:tripId/discovery/generate", async (context) => {
     const { user } = await authenticated(context);
@@ -499,6 +539,21 @@ export function createApp({
         uuidParam(context, "tripId"),
         idempotencyKey(context),
         { expectedBriefVersion: numberField(body, "expectedBriefVersion") },
+      ),
+    });
+  });
+
+  app.put("/api/trips/:tripId/discovery/proposals/:proposalId/vote", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json({
+      discovery: await discovery.setProposalVote(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "proposalId"),
+        idempotencyKey(context),
+        voteInput(body),
       ),
     });
   });
@@ -537,6 +592,9 @@ export function createApp({
     const { user } = await authenticated(context);
     await rateLimiter.consume("trip_content", clientIp(context), user.id);
     const body = await jsonBody(context);
+    if ("proposalId" in body) {
+      throw new AppError("validation_error", "Feedback must apply to the whole trip");
+    }
     return context.json({
       discovery: await discovery.createFeedback(
         user.id,
@@ -544,7 +602,6 @@ export function createApp({
         idempotencyKey(context),
         {
           originalText: stringField(body, "originalText"),
-          proposalId: optionalStringField(body, "proposalId"),
         },
       ),
     });
@@ -567,6 +624,7 @@ export function createApp({
         {
           expectedVersion: numberField(body, "expectedVersion"),
           decision,
+          interpretation: feedbackInterpretationField(body),
         },
       ),
     });
@@ -734,17 +792,17 @@ export function createApp({
   );
 
   app.put(
-    "/api/trips/:tripId/trip-places/:tripPlaceId/preference",
+    "/api/trips/:tripId/trip-places/:tripPlaceId/vote",
     async (context) => {
       const { user } = await authenticated(context);
       await rateLimiter.consume("trip_content", clientIp(context), user.id);
       const body = await jsonBody(context);
-      const tripPlace = await tripPlaces.setOwnPreference(
+      const tripPlace = await tripPlaces.setOwnVote(
         user.id,
         uuidParam(context, "tripId"),
         uuidParam(context, "tripPlaceId"),
         idempotencyKey(context),
-        preferenceInput(body),
+        voteInput(body),
       );
       return context.json({ tripPlace });
     },
@@ -783,18 +841,19 @@ export function createApp({
   );
 
   app.post(
-    "/api/trips/:tripId/trip-places/:tripPlaceId/contributions/:contributionId/withdraw",
+    "/api/trips/:tripId/trip-places/:tripPlaceId/remove",
     async (context) => {
       const { user } = await authenticated(context);
       await rateLimiter.consume("trip_content", clientIp(context), user.id);
-      const tripPlace = await tripPlaces.withdrawContribution(
+      const body = await jsonBody(context);
+      await tripPlaces.remove(
         user.id,
         uuidParam(context, "tripId"),
         uuidParam(context, "tripPlaceId"),
-        uuidParam(context, "contributionId"),
         idempotencyKey(context),
+        { expectedVersion: numberField(body, "expectedVersion") },
       );
-      return context.json({ tripPlace });
+      return context.body(null, 204);
     },
   );
 
@@ -841,6 +900,42 @@ export function createApp({
       numberField(body, "expectedVersion"),
     );
     return context.body(null, 204);
+  });
+
+  app.post("/api/trips/:tripId/flights", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const item = await tripSkeleton.createFlight(user.id, uuidParam(context, "tripId"), idempotencyKey(context),
+      numberField(body, "expectedTripVersion"), body as unknown as TripFlightInput);
+    return context.json({ item }, 201);
+  });
+
+  app.patch("/api/trips/:tripId/flights/:itemId", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const item = await tripSkeleton.updateFlight(user.id, uuidParam(context, "tripId"), uuidParam(context, "itemId"),
+      idempotencyKey(context), numberField(body, "expectedVersion"), body as unknown as TripFlightInput);
+    return context.json({ item });
+  });
+
+  app.post("/api/trips/:tripId/lodgings", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const item = await tripSkeleton.createLodging(user.id, uuidParam(context, "tripId"), idempotencyKey(context),
+      numberField(body, "expectedTripVersion"), body as unknown as TripLodgingInput);
+    return context.json({ item }, 201);
+  });
+
+  app.patch("/api/trips/:tripId/lodgings/:itemId", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const item = await tripSkeleton.updateLodging(user.id, uuidParam(context, "tripId"), uuidParam(context, "itemId"),
+      idempotencyKey(context), numberField(body, "expectedVersion"), body as unknown as TripLodgingInput);
+    return context.json({ item });
   });
 
   app.post("/api/trips/:tripId/items", async (context) => {

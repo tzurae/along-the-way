@@ -1,3 +1,4 @@
+import type { TripFlightInput } from "@along-the-way/contracts/private-trips";
 import type {
   ConstraintInput,
   CreateItineraryItemInput,
@@ -5,12 +6,17 @@ import type {
   ItineraryItemDto,
   PlaceDto,
   TripSkeletonDto,
+  TripLodgingInput,
   UpdateItineraryItemInput,
   UpdatePlaceInput,
 } from "@along-the-way/contracts/trip-skeleton";
 
 export interface TripSkeletonModule {
   getSkeleton(userId: string, tripId: string): Promise<TripSkeletonDto>;
+  createFlight(userId: string, tripId: string, idempotencyKey: string, expectedTripVersion: number, input: TripFlightInput): Promise<ItineraryItemDto>;
+  updateFlight(userId: string, tripId: string, itemId: string, idempotencyKey: string, expectedVersion: number, input: TripFlightInput): Promise<ItineraryItemDto>;
+  createLodging(userId: string, tripId: string, idempotencyKey: string, expectedTripVersion: number, input: TripLodgingInput): Promise<ItineraryItemDto>;
+  updateLodging(userId: string, tripId: string, itemId: string, idempotencyKey: string, expectedVersion: number, input: TripLodgingInput): Promise<ItineraryItemDto>;
   createPlace(
     userId: string,
     tripId: string,

@@ -1,3 +1,4 @@
+import { isRecord, type TripFlightInput } from "@along-the-way/contracts/private-trips";
 import {
   parseItineraryItemResponse,
   parsePlaceResponse,
@@ -14,6 +15,7 @@ import {
   type PlaceLocationStatus,
   type TimelineDayDto,
   type TripSkeletonDto,
+  type TripLodgingInput,
   type UpdateItineraryItemInput,
   type UpdatePlaceInput,
   type ZonedEndpointDto,
@@ -21,6 +23,7 @@ import {
 import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { AlongTheWayDatabase } from "../database/database";
+import { reopenRemovedProposals } from "../discovery/reopen-removed-proposals";
 import { AppError } from "../private-trips/private-trip-module";
 import {
   dateOnly,
@@ -48,6 +51,26 @@ interface ModuleOptions {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_CURRENCIES = new Set(Intl.supportedValuesOf("currency"));
+
+function retainedTravelOffset(current: ItineraryItemDto | undefined, role: "start" | "end", localDateTime: string, timeZone: string, supplied?: string | null) {
+  if (supplied !== undefined) {
+    if (supplied !== null && typeof supplied !== "string") throw new AppError("validation_error", "UTC offset must be a string or null");
+    return supplied;
+  }
+  const endpoint = current?.endpoints.find((entry) => entry.role === role);
+  // A service/hotel-only edit must not lose the selected occurrence of a repeated local time.
+  return endpoint?.localDateTime === localDateTime && endpoint.timeZone === canonicalNamedTimeZone(timeZone)
+    ? endpoint.utcOffset : undefined;
+}
+
+const AIRPORT_FIELDS = ["name", "timeZone"];
+const HOTEL_FIELDS = ["name", "timeZone", "address", "latitude", "longitude", "sourceUrl"];
+
+function requireDeclaredFields(input: Record<string, unknown>, fields: readonly string[]) {
+  for (const field of Object.keys(input)) {
+    if (!fields.includes(field)) throw new AppError("validation_error", `Unknown travel place field: ${field}`);
+  }
+}
 
 function requiredText(value: string, name: string, maxLength: number) {
   const normalized = value.trim();
@@ -418,10 +441,24 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedPlace(replay);
       await this.incrementTripVersion(transaction, tripId, expectedTripVersion);
+      const response = await this.createPlaceInTransaction(transaction, userId, tripId, place, false);
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
+  private async createPlaceInTransaction(
+    transaction: Transaction<AlongTheWayDatabase>,
+    userId: string,
+    tripId: string,
+    place: Required<CreatePlaceInput>,
+    travelOnly: boolean,
+  ) {
       const created = await transaction
         .insertInto("places")
         .values({
           trip_id: tripId,
+          travel_only: travelOnly,
           name: place.name,
           place_type: place.type,
           address: place.address,
@@ -434,6 +471,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         })
         .returning(["id", "version"])
         .executeTakeFirstOrThrow();
+      if (!travelOnly) {
       await transaction.insertInto("place_identities").values({
         id: created.id,
         provider: "manual",
@@ -485,6 +523,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         created.id,
         place,
       );
+      }
       const response = await this.readPlace(transaction, tripId, created.id);
       await recordEvent(transaction, {
         tripId,
@@ -494,6 +533,228 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         targetId: response.id,
         summary: "Created a place",
       });
+    return response;
+  }
+
+  private async travelPlace(
+    transaction: Transaction<AlongTheWayDatabase>,
+    userId: string,
+    tripId: string,
+    input: CreatePlaceInput,
+    currentEndpoint?: ZonedEndpointDto,
+  ): Promise<{ id: string }> {
+    const place = validatePlace(input);
+    if (!place.timeZone) throw new AppError("validation_error", "Travel places require a time zone");
+    const places = transaction.selectFrom("places")
+      .select(["id", "name", "time_zone", "address", "latitude", "longitude", "source_url", "version"])
+      .where("trip_id", "=", tripId);
+    const sameFacts = (row: { address: string | null; latitude: number | null; longitude: number | null; source_url: string | null }) =>
+      (input.address === undefined || row.address === place.address)
+      && (input.latitude === undefined || row.latitude === place.latitude)
+      && (input.longitude === undefined || row.longitude === place.longitude)
+      && (input.sourceUrl === undefined || row.source_url === place.sourceUrl);
+    if (currentEndpoint) {
+      const current = await places.where("id", "=", currentEndpoint.placeId).executeTakeFirst();
+      // A time/service-only edit must not replace an unchanged legacy mixed-use endpoint.
+      if (current && current.name.trim().toLowerCase() === place.name.toLowerCase()
+        && canonicalNamedTimeZone(currentEndpoint.timeZone) === place.timeZone && sameFacts(current)) return current;
+    }
+    // The trip lock serializes reuse and fact updates; a later non-travel reference also
+    // protects a previously travel-only place from being changed through this editor.
+    const existing = await places.where("travel_only", "=", true)
+      .where(sql<boolean>`lower(trim(name)) = lower(${place.name})`)
+      .where("time_zone", "=", place.timeZone)
+      .where(sql<boolean>`not exists (
+        select 1 from itinerary_endpoints as endpoint
+        join itinerary_items as item on item.id = endpoint.itinerary_item_id and item.trip_id = endpoint.trip_id
+        where endpoint.place_id = places.id and endpoint.trip_id = places.trip_id
+          and item.item_type not in ('flight', 'lodging')
+      )`)
+      .orderBy("created_at").orderBy("id").forUpdate().executeTakeFirst();
+    if (!existing) return this.createPlaceInTransaction(transaction, userId, tripId, place, true);
+    if (sameFacts(existing)) return existing;
+    const lockedReference = await transaction.selectFrom("itinerary_endpoints as endpoint")
+      .innerJoin("itinerary_items as item", "item.id", "endpoint.itinerary_item_id")
+      .select("item.id").where("endpoint.trip_id", "=", tripId).where("endpoint.place_id", "=", existing.id)
+      .where("item.locked_at", "is not", null).executeTakeFirst();
+    if (lockedReference) throw new AppError("item_locked", "Unlock every item that references this Place before editing it", 409);
+    const updated = await transaction.updateTable("places").set({
+      address: input.address === undefined ? existing.address : place.address,
+      latitude: input.latitude === undefined ? existing.latitude : place.latitude,
+      longitude: input.longitude === undefined ? existing.longitude : place.longitude,
+      source_url: input.sourceUrl === undefined ? existing.source_url : place.sourceUrl,
+      version: sql`version + 1`, updated_at: this.now(),
+    }).where("trip_id", "=", tripId).where("id", "=", existing.id).where("version", "=", existing.version)
+      .returning("id").executeTakeFirst();
+    if (!updated) await this.throwPlaceConflict(transaction, tripId, existing.id);
+    await recordEvent(transaction, { tripId, actorId: userId, eventType: "place.updated",
+      targetType: "place", targetId: existing.id, summary: "Updated a travel place" });
+    return { id: existing.id };
+  }
+
+  async flightInputInTransaction(
+    transaction: Transaction<AlongTheWayDatabase>,
+    userId: string,
+    tripId: string,
+    rawInput: TripFlightInput,
+    stops: { departure: string | null; arrival: string | null },
+    current?: Extract<ItineraryItemDto, { type: "flight" }>,
+  ): Promise<CreateItineraryItemInput> {
+    if (!isRecord(rawInput) || !isRecord(rawInput.departureAirport) || !isRecord(rawInput.arrivalAirport)) {
+      throw new AppError("validation_error", "Both airports are required for each flight");
+    }
+    requireDeclaredFields(rawInput.departureAirport, AIRPORT_FIELDS);
+    requireDeclaredFields(rawInput.arrivalAirport, AIRPORT_FIELDS);
+    const input = rawInput;
+    for (const value of [input.serviceNumber, input.departureLocalDateTime, input.arrivalLocalDateTime,
+      input.departureAirport.name, input.departureAirport.timeZone, input.arrivalAirport.name, input.arrivalAirport.timeZone]) {
+      if (typeof value !== "string" || !value.trim()) throw new AppError("validation_error", "All flight fields except carrier are required");
+    }
+    if (input.carrier != null && typeof input.carrier !== "string") throw new AppError("validation_error", "carrier must be a string or null");
+    const departure = await this.travelPlace(transaction, userId, tripId,
+      { name: input.departureAirport.name, timeZone: input.departureAirport.timeZone, type: "airport" },
+      current?.endpoints.find((endpoint) => endpoint.role === "start"));
+    const arrival = await this.travelPlace(transaction, userId, tripId,
+      { name: input.arrivalAirport.name, timeZone: input.arrivalAirport.timeZone, type: "airport" },
+      current?.endpoints.find((endpoint) => endpoint.role === "end"));
+    const endpoints = [
+      resolveEndpoint({ role: "start", placeId: departure.id, countryStopId: stops.departure,
+        localDateTime: input.departureLocalDateTime, timeZone: input.departureAirport.timeZone,
+        utcOffset: retainedTravelOffset(current, "start", input.departureLocalDateTime, input.departureAirport.timeZone, input.departureUtcOffset) }),
+      resolveEndpoint({ role: "end", placeId: arrival.id, countryStopId: stops.arrival,
+        localDateTime: input.arrivalLocalDateTime, timeZone: input.arrivalAirport.timeZone,
+        utcOffset: retainedTravelOffset(current, "end", input.arrivalLocalDateTime, input.arrivalAirport.timeZone, input.arrivalUtcOffset) }),
+    ];
+    if (endpoints[1]!.instant <= endpoints[0]!.instant) throw new AppError("validation_error", "Flight arrival must be after departure");
+    const members = current ? null : await transaction.selectFrom("trip_members").select("id")
+      .where("trip_id", "=", tripId).where("removed_at", "is", null).execute();
+    return {
+      type: "flight", title: input.serviceNumber,
+      notes: current?.notes, sourceUrl: current?.sourceUrl, money: current?.money,
+      participantMemberIds: current ? current.participants?.map((member) => member.memberId) ?? null : members!.map((member) => member.id),
+      details: { serviceNumber: input.serviceNumber, carrier: input.carrier ?? null, confirmationNotes: current?.details.confirmationNotes ?? null },
+      endpoints,
+    };
+  }
+
+  private async lodgingInputInTransaction(
+    transaction: Transaction<AlongTheWayDatabase>,
+    userId: string,
+    tripId: string,
+    input: TripLodgingInput,
+    current?: Extract<ItineraryItemDto, { type: "lodging" }>,
+  ): Promise<CreateItineraryItemInput> {
+    if (!isRecord(input) || !isRecord(input.hotel)) throw new AppError("validation_error", "hotel is required");
+    requireDeclaredFields(input.hotel, HOTEL_FIELDS);
+    for (const value of [input.hotel.name, input.hotel.timeZone, input.countryStopId, input.checkInLocalDateTime, input.checkOutLocalDateTime]) {
+      if (typeof value !== "string" || !value.trim()) throw new AppError("validation_error", "Hotel, country stop, check-in and checkout are required");
+    }
+    for (const value of [input.hotel.address, input.hotel.sourceUrl]) {
+      if (value != null && typeof value !== "string") throw new AppError("validation_error", "Hotel address and source URL must be strings or null");
+    }
+    // Omitted means unchanged, so a one-sided coordinate would split a stored pair.
+    if ((input.hotel.latitude === undefined) !== (input.hotel.longitude === undefined)) {
+      throw new AppError("validation_error", "Hotel latitude and longitude must be supplied together");
+    }
+    const hotel = await this.travelPlace(transaction, userId, tripId, {
+      name: input.hotel.name, timeZone: input.hotel.timeZone, address: input.hotel.address,
+      latitude: input.hotel.latitude, longitude: input.hotel.longitude, sourceUrl: input.hotel.sourceUrl, type: "lodging",
+    }, current?.endpoints.find((endpoint) => endpoint.role === "start"));
+    const members = current ? null : await transaction.selectFrom("trip_members").select("id")
+      .where("trip_id", "=", tripId).where("removed_at", "is", null).execute();
+    return {
+      type: "lodging", title: current?.title ?? input.hotel.name,
+      notes: current?.notes, sourceUrl: current?.sourceUrl, money: current?.money,
+      participantMemberIds: current ? current.participants?.map((member) => member.memberId) ?? null : members!.map((member) => member.id),
+      details: current?.details ?? { bookedBy: null, confirmationCode: null },
+      endpoints: [
+        { role: "start", placeId: hotel.id, countryStopId: input.countryStopId, timeZone: input.hotel.timeZone,
+          localDateTime: input.checkInLocalDateTime, utcOffset: retainedTravelOffset(current, "start", input.checkInLocalDateTime, input.hotel.timeZone, input.checkInUtcOffset) },
+        { role: "end", placeId: hotel.id, countryStopId: input.countryStopId, timeZone: input.hotel.timeZone,
+          localDateTime: input.checkOutLocalDateTime, utcOffset: retainedTravelOffset(current, "end", input.checkOutLocalDateTime, input.hotel.timeZone, input.checkOutUtcOffset) },
+      ],
+    };
+  }
+
+  async createFlight(userId: string, tripId: string, rawKey: string, expectedTripVersion: number, input: TripFlightInput) {
+    return this.saveTravelItem(userId, tripId, rawKey, expectedTripVersion, { type: "flight", input });
+  }
+
+  async updateFlight(userId: string, tripId: string, itemId: string, rawKey: string, expectedVersion: number, input: TripFlightInput) {
+    return this.saveTravelItem(userId, tripId, rawKey, expectedVersion, { type: "flight", input }, itemId);
+  }
+
+  async createLodging(userId: string, tripId: string, rawKey: string, expectedTripVersion: number, input: TripLodgingInput) {
+    return this.saveTravelItem(userId, tripId, rawKey, expectedTripVersion, { type: "lodging", input });
+  }
+
+  async updateLodging(userId: string, tripId: string, itemId: string, rawKey: string, expectedVersion: number, input: TripLodgingInput) {
+    return this.saveTravelItem(userId, tripId, rawKey, expectedVersion, { type: "lodging", input }, itemId);
+  }
+
+  private async saveTravelItem(
+    userId: string, tripId: string, rawKey: string, expectedVersion: number,
+    travel: { type: "flight"; input: TripFlightInput } | { type: "lodging"; input: TripLodgingInput },
+    itemId?: string,
+  ) {
+    const key = requireIdempotencyKey(rawKey);
+    // Item-scoped keys must fit mutation_requests.operation's 80-character contract.
+    const operation = itemId
+      ? `${travel.type === "flight" ? "fu" : "lu"}:${tripId}:${itemId}`
+      : `create_${travel.type}:${tripId}`;
+    return this.database.transaction().execute(async (transaction) => {
+      await this.requireMemberForMutation(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return replayedItem(replay);
+      const current = itemId ? await this.readItem(transaction, tripId, itemId) : undefined;
+      if (current) {
+        this.requireExpectedVersion(current.version, expectedVersion);
+        this.requireUnlocked(current.lockedAt);
+        if (current.type !== travel.type) throw new AppError("validation_error", "Item type does not match this route");
+      } else {
+        await this.incrementTripVersion(transaction, tripId, expectedVersion);
+      }
+      let input: CreateItineraryItemInput;
+      if (travel.type === "flight") {
+        const route = await transaction.selectFrom("trip_country_stops").select("id")
+          .where("trip_id", "=", tripId).orderBy("position").execute();
+        const firstFlight = await transaction.selectFrom("itinerary_items as item")
+          .innerJoin("itinerary_endpoints as endpoint", "endpoint.itinerary_item_id", "item.id")
+          .select("endpoint.instant").where("item.trip_id", "=", tripId).where("item.item_type", "=", "flight")
+          .where("endpoint.endpoint_role", "=", "start").orderBy("endpoint.instant").executeTakeFirst();
+        const existing = current?.type === "flight" ? current : undefined;
+        // Existing route endpoints are retained, including old multi-leg flights.
+        input = await this.flightInputInTransaction(transaction, userId, tripId, travel.input,
+          existing ? { departure: existing.endpoints.find((endpoint) => endpoint.role === "start")!.countryStopId,
+            arrival: existing.endpoints.find((endpoint) => endpoint.role === "end")!.countryStopId }
+            : { departure: null, arrival: route[0]?.id ?? null }, existing);
+        if (!existing && firstFlight &&
+            new Date(resolveEndpoint(input.endpoints[0]!).instant).valueOf() >= new Date(firstFlight.instant).valueOf()) {
+          input.endpoints[0]!.countryStopId = route.at(-1)?.id ?? null;
+          input.endpoints[1]!.countryStopId = null;
+        }
+      } else {
+        input = await this.lodgingInputInTransaction(transaction, userId, tripId, travel.input, current?.type === "lodging" ? current : undefined);
+      }
+      let response: ItineraryItemDto;
+      if (current) {
+        const validated = await this.validateItem(transaction, tripId, input, current.id);
+        // Deliberately leave every non-travel field and participant/constraint row unchanged.
+        await transaction.updateTable("itinerary_items").set({
+          title: current.type === "flight" ? validated.title : current.title,
+          details: current.type === "flight" && "serviceNumber" in validated.details
+            ? { ...current.details, serviceNumber: validated.details.serviceNumber, carrier: validated.details.carrier }
+            : current.details,
+          version: sql`version + 1`, updated_at: this.now(),
+        }).where("id", "=", current.id).execute();
+        await this.replaceEndpoints(transaction, tripId, current.id, validated.endpoints);
+        await recordEvent(transaction, { tripId, actorId: userId, eventType: "itinerary_item.updated",
+          targetType: "itinerary_item", targetId: current.id, summary: `Updated a ${travel.type} itinerary item` });
+        response = await this.readItem(transaction, tripId, current.id);
+      } else {
+        response = await this.createItemInTransaction(transaction, userId, tripId, input);
+      }
       await remember(transaction, userId, operation, key, response);
       return response;
     });
@@ -629,39 +890,6 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         .where("trip_id", "=", tripId)
         .where("legacy_place_id", "=", placeId)
         .executeTakeFirst();
-      if (tripPlace) {
-        const [retainedByAnotherMember, activeContributions, activePreference] = await Promise.all([
-          transaction.selectFrom("trip_place_contributions")
-            .select("id")
-            .where("trip_place_id", "=", tripPlace.id)
-            .where("member_user_id", "!=", userId)
-            .where("withdrawn_at", "is", null)
-            .executeTakeFirst(),
-          transaction.selectFrom("trip_place_contributions")
-            .select((builder) => builder.fn.countAll().as("count"))
-            .where("trip_place_id", "=", tripPlace.id)
-            .where("withdrawn_at", "is", null)
-            .executeTakeFirstOrThrow(),
-          transaction.selectFrom("member_place_preferences as preference")
-            .innerJoin("trip_members as member", "member.user_id", "preference.member_user_id")
-            .select("preference.member_user_id")
-            .where("preference.trip_place_id", "=", tripPlace.id)
-            .where("member.trip_id", "=", tripId)
-            .where("member.removed_at", "is", null)
-            .executeTakeFirst(),
-        ]);
-        if (
-          retainedByAnotherMember ||
-          Number(activeContributions.count) > 1 ||
-          activePreference
-        ) {
-          throw new AppError(
-            "place_in_use",
-            "A member still retains this place",
-            409,
-          );
-        }
-      }
       const referenced = await transaction
         .selectFrom("itinerary_endpoints")
         .select((builder) => builder.fn.countAll().as("count"))
@@ -670,6 +898,9 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         .executeTakeFirstOrThrow();
       if (Number(referenced.count) > 0) {
         throw new AppError("place_in_use", "A referenced place cannot be deleted", 409);
+      }
+      if (tripPlace) {
+        await reopenRemovedProposals(transaction, tripId, this.now(), userId, tripPlace.id);
       }
       await transaction
         .deleteFrom("places")
@@ -703,6 +934,18 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedItem(replay);
       await this.incrementTripVersion(transaction, tripId, expectedTripVersion);
+      const response = await this.createItemInTransaction(transaction, userId, tripId, input);
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
+  async createItemInTransaction(
+    transaction: Transaction<AlongTheWayDatabase>,
+    userId: string,
+    tripId: string,
+    input: CreateItineraryItemInput,
+  ) {
       const validated = await this.validateItem(transaction, tripId, input);
       const created = await transaction
         .insertInto("itinerary_items")
@@ -744,9 +987,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         targetId: created.id,
         summary: `Created a ${validated.type} itinerary item`,
       });
-      await remember(transaction, userId, operation, key, response);
-      return response;
-    });
+    return response;
   }
 
   async updateItem(

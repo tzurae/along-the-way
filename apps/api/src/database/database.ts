@@ -84,6 +84,7 @@ export interface PlaceTable {
   trip_id: string;
   name: string;
   place_type: "airport" | "station" | "lodging" | "restaurant" | "activity" | "other";
+  travel_only: Generated<boolean>;
   address: string | null;
   latitude: number | null;
   longitude: number | null;
@@ -160,14 +161,11 @@ export interface TripPlaceContributionTable {
   created_at: Timestamp;
 }
 
-export interface MemberPlacePreferenceTable {
+export interface TripPlaceVoteTable {
   trip_id: string;
   trip_place_id: string;
   member_user_id: string;
-  preference: "must" | "want" | "optional" | "neutral" | "dislike";
-  version: Generated<number>;
   created_at: Timestamp;
-  updated_at: Timestamp;
 }
 
 export interface TripPlaceDayTable {
@@ -203,6 +201,7 @@ export interface DiscoveryBriefTable {
   original_text: string;
   structured_brief: unknown | null;
   unresolved_questions: unknown;
+  question_answers: Generated<unknown>;
   version: Generated<number>;
   updated_by: string;
   created_at: Timestamp;
@@ -259,13 +258,26 @@ export interface CandidateProposalTable {
   accepted_trip_place_id: string | null;
   decided_by: string | null;
   decided_at: Timestamp | null;
+  /** Marks previously decided candidates that remain actionable across research runs. */
+  reopened_at: Timestamp | null;
   version: Generated<number>;
   created_at: Timestamp;
   updated_at: Timestamp;
   category: string | null;
   /** DiscoveryEndorsement[]; empty for proposals from before endorsements were recorded. */
   endorsements: Generated<unknown>;
+  /** DiscoveryClaimSentenceDto[]; null for proposals created before sentence attribution. */
+  recommendation_sentences: Generated<unknown | null>;
+  /** DiscoveryClaimSentenceDto[]; null for proposals created before sentence attribution. */
+  tradeoff_sentences: Generated<unknown | null>;
 }
+export interface DiscoveryProposalVoteTable {
+  trip_id: string;
+  proposal_id: string;
+  member_user_id: string;
+  created_at: Timestamp;
+}
+
 
 export interface CandidateProposalEvidenceTable {
   proposal_id: string;
@@ -279,6 +291,7 @@ export interface DiscoveryFeedbackTable {
   actor_id: string;
   original_text: string;
   interpretation: unknown;
+  interpretation_edited: Generated<boolean>;
   status: "pending" | "confirmed" | "rejected";
   version: Generated<number>;
   decided_at: Timestamp | null;
@@ -421,7 +434,7 @@ export interface AlongTheWayDatabase {
   place_identities: PlaceIdentityTable;
   trip_places: TripPlaceTable;
   trip_place_contributions: TripPlaceContributionTable;
-  member_place_preferences: MemberPlacePreferenceTable;
+  trip_place_votes: TripPlaceVoteTable;
   trip_place_desired_days: TripPlaceDayTable;
   trip_place_excluded_days: TripPlaceDayTable;
   trip_place_day_assignments: TripPlaceDayAssignmentTable;
@@ -431,6 +444,7 @@ export interface AlongTheWayDatabase {
   discovery_evidence: DiscoveryEvidenceTable;
   candidate_proposals: CandidateProposalTable;
   candidate_proposal_evidence: CandidateProposalEvidenceTable;
+  discovery_proposal_votes: DiscoveryProposalVoteTable;
   discovery_feedback: DiscoveryFeedbackTable;
   itinerary_items: ItineraryItemTable;
   itinerary_item_participants: ItineraryItemParticipantTable;

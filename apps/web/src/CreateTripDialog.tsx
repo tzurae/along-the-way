@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { DateRange } from "react-day-picker";
 import { format } from "date-fns";
 import { CalendarIcon, ChevronDown, ChevronUp, Plus, Trash2 } from "lucide-react";
@@ -33,6 +33,7 @@ import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useI18n } from "./i18n";
+import { emptyFlight, FlightFields, flightComplete } from "./FlightFields";
 
 interface CreateTripDialogProps {
   createTrip(input: CreateTripInput): Promise<void>;
@@ -68,6 +69,21 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
   const [selectedCountry, setSelectedCountry] = useState<CountryOption | null>(null);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [outbound, setOutbound] = useState(() => emptyFlight(Intl.DateTimeFormat().resolvedOptions().timeZone));
+  const [returnFlight, setReturnFlight] = useState(() => emptyFlight("", Intl.DateTimeFormat().resolvedOptions().timeZone));
+  const firstZone = countriesByCode.get(countryStops[0]?.countryCode ?? "")?.timeZones;
+  const lastZone = countriesByCode.get(countryStops.at(-1)?.countryCode ?? "")?.timeZones;
+  const arrivalDefault = firstZone?.length === 1 ? firstZone[0]! : "";
+  const departureDefault = lastZone?.length === 1 ? lastZone[0]! : "";
+  const previousDefaults = useRef({ arrival: "", departure: "" });
+  useEffect(() => {
+    const previous = previousDefaults.current;
+    setOutbound((flight) => flight.arrivalAirport.timeZone === previous.arrival
+      ? { ...flight, arrivalAirport: { ...flight.arrivalAirport, timeZone: arrivalDefault } } : flight);
+    setReturnFlight((flight) => flight.departureAirport.timeZone === previous.departure
+      ? { ...flight, departureAirport: { ...flight.departureAirport, timeZone: departureDefault } } : flight);
+    previousDefaults.current = { arrival: arrivalDefault, departure: departureDefault };
+  }, [arrivalDefault, departureDefault]);
 
   const filteredCountries = useMemo(
     () => filterCountryOptions(availableCountries, countryQuery),
@@ -130,6 +146,8 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
     setCountryStops([]);
     setCountryQuery("");
     setSelectedCountry(null);
+    setOutbound(emptyFlight(Intl.DateTimeFormat().resolvedOptions().timeZone));
+    setReturnFlight(emptyFlight("", Intl.DateTimeFormat().resolvedOptions().timeZone));
     setError("");
   }
 
@@ -142,6 +160,10 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
       setError(t.createTrip.addAtLeastOneCountry);
       return;
     }
+    if (!flightComplete(outbound) || !flightComplete(returnFlight)) {
+      setError(t.travel.completeFlights);
+      return;
+    }
 
     setSubmitting(true);
     setError("");
@@ -151,6 +173,7 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
         startDate: format(dateRange.from, "yyyy-MM-dd"),
         endDate: format(dateRange.to, "yyyy-MM-dd"),
         countryCodes: countryStops.map((stop) => stop.countryCode),
+        flights: { outbound, return: returnFlight },
       });
       reset();
       setOpen(false);
@@ -320,6 +343,12 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
               </ol>
             )}
           </section>
+          <FlightFields legend={t.travel.outbound} value={outbound} onChange={setOutbound}
+            startDate={dateRange?.from ? format(dateRange.from, "yyyy-MM-dd") : undefined}
+            endDate={dateRange?.to ? format(dateRange.to, "yyyy-MM-dd") : undefined} />
+          <FlightFields legend={t.travel.return} value={returnFlight} onChange={setReturnFlight}
+            startDate={dateRange?.from ? format(dateRange.from, "yyyy-MM-dd") : undefined}
+            endDate={dateRange?.to ? format(dateRange.to, "yyyy-MM-dd") : undefined} />
 
           {error ? (
             <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive">
@@ -328,7 +357,7 @@ export function CreateTripDialog({ createTrip }: CreateTripDialogProps) {
           ) : null}
 
           <DialogFooter>
-            <Button type="button" disabled={submitting} onClick={() => void submit()}>
+            <Button type="button" disabled={submitting || !name.trim() || !dateRange?.to || countryStops.length === 0 || !flightComplete(outbound) || !flightComplete(returnFlight)} onClick={() => void submit()}>
               <Plus />
               {submitting ? t.createTrip.creating : t.createTrip.createTrip}
             </Button>

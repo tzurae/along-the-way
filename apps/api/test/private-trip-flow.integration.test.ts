@@ -29,6 +29,7 @@ import { GooglePlacesProvider } from "../src/trip-places/google-places-provider"
 import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
 import { unrelatedDayPlanModule } from "./day-plan-test-support";
 import { unrelatedDiscoveryModule } from "./discovery-test-support";
+import { tripFlights } from "./travel-test-support";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required");
@@ -94,7 +95,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         trip_place_duplicate_suggestions,
         trip_place_excluded_days,
         trip_place_desired_days,
-        member_place_preferences,
+        trip_place_votes,
         trip_place_contributions,
         trip_places,
         place_identities,
@@ -214,6 +215,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         startDate: "2026-10-21",
         endDate: "2026-10-27",
         countryCodes: ["JP", "KR", "JP"],
+        flights: tripFlights(),
       }),
     });
     expect(response.status).toBe(201);
@@ -468,6 +470,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
           { length: MAX_TRIP_COUNTRY_STOPS + 1 },
           (_, index) => (index % 2 === 0 ? "JP" : "KR"),
         ),
+        flights: tripFlights("2027-01-01", "2027-01-02"),
       }),
     });
     expect(tooManyStops.status).toBe(400);
@@ -490,6 +493,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         startDate: "2027-01-01",
         endDate: "2027-01-02",
         countryCodes: ["JP", "JP"],
+        flights: tripFlights("2027-01-01", "2027-01-02"),
       }),
     });
     expect(adjacentCountries.status).toBe(400);
@@ -535,6 +539,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         startDate: "2027-03-05",
         endDate: "2027-03-07",
         countryCodes: ["JP"],
+        flights: tripFlights("2027-03-05", "2027-03-07"),
       }),
     });
     expect(second.status).toBe(201);
@@ -557,6 +562,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         startDate: "2027-04-10",
         endDate: "2027-04-11",
         countryCodes: ["US"],
+        flights: tripFlights("2027-04-10", "2027-04-11", "America/Los_Angeles"),
       }),
     });
     expect(ambiguousTimeZone.status).toBe(201);

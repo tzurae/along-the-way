@@ -7,6 +7,7 @@ import {
   parseTripPlaceListResponse,
   parseTripPlaceResponse,
   type ProviderPlaceCandidateDto,
+  type TripPlaceDto,
 } from "@along-the-way/contracts/trip-places";
 import {
   parseDayTimetableResponse,
@@ -54,6 +55,7 @@ import {
 } from "../src/trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
 import { unrelatedDiscoveryModule } from "./discovery-test-support";
+import { tripFlights } from "./travel-test-support";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required");
@@ -223,7 +225,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         trip_place_day_assignments,
         trip_place_excluded_days,
         trip_place_desired_days,
-        member_place_preferences,
+        trip_place_votes,
         trip_place_contributions,
         itinerary_constraints,
         itinerary_endpoints,
@@ -363,6 +365,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         startDate: "2026-10-21",
         endDate: "2026-10-27",
         countryCodes: ["JP"],
+        flights: tripFlights(),
       }),
     });
     expect(response.status).toBe(201);
@@ -383,6 +386,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     tripId: string,
     key: string,
     note: string,
+    method: "search" | "google-maps-url" = "search",
   ) {
     return app.request(`/api/trips/${tripId}/trip-places`, {
       method: "POST",
@@ -393,7 +397,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         origin: "https://app.example.test",
       },
       body: json({
-        method: "search",
+        method,
         providerPlaceId: provider.kyoto.providerPlaceId,
         sourceUrl: provider.kyoto.sourceUrl,
         originalNote: note,
@@ -438,16 +442,15 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     return parseTripPlaceListResponse(await response.json()).tripPlaces;
   }
 
-  async function setPreference(
+  async function setVote(
     cookie: string,
     tripId: string,
     tripPlaceId: string,
-    level: string,
-    expectedVersion: number | null,
+    voted: boolean,
     key: string,
   ) {
     return app.request(
-      `/api/trips/${tripId}/trip-places/${tripPlaceId}/preference`,
+      `/api/trips/${tripId}/trip-places/${tripPlaceId}/vote`,
       {
         method: "PUT",
         headers: {
@@ -456,12 +459,88 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
           "idempotency-key": key,
           origin: "https://app.example.test",
         },
-        body: json({ level, expectedVersion }),
+        body: json({ voted }),
       },
     );
   }
 
-  it("deduplicates provider identity while preserving every member contribution and preference", async () => {
+  function removePlace(cookie: string, tripId: string, place: TripPlaceDto, key: string) {
+    return app.request(`/api/trips/${tripId}/trip-places/${place.id}/remove`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json", "idempotency-key": key, origin: "https://app.example.test" },
+      body: json({ expectedVersion: place.version }),
+    });
+  }
+
+  it("refuses re-adding an archived travel-only identity without restoring its wishlist row", async () => {
+    const owner = await login("owner@example.test");
+    const trip = await createTrip(owner.cookie, "Archived travel place");
+    const created = await addProvider(owner.cookie, trip.id, "travel-original", "Original contribution");
+    expect(created.status).toBe(201);
+    const place = parseTripPlaceResponse(await created.json()).tripPlace;
+    const row = await database.selectFrom("trip_places").select("legacy_place_id")
+      .where("id", "=", place.id).executeTakeFirstOrThrow();
+    // A retained provider identity can be archived by migration 016; it remains addressable
+    // by a later search result, but explicit intake must not unarchive its travel-only row.
+    await database.updateTable("places").set({ travel_only: true }).where("id", "=", row.legacy_place_id).execute();
+    await database.updateTable("trip_places").set({ archived_at: new Date("2026-10-01T00:00:00Z") })
+      .where("id", "=", place.id).execute();
+    const before = await database.selectFrom("trip_place_contributions").selectAll()
+      .where("trip_place_id", "=", place.id).execute();
+    const rejected = await addProvider(owner.cookie, trip.id, "travel-readd", "Must not be saved");
+    expect(rejected.status).toBe(409);
+    expect(await rejected.json()).toMatchObject({ error: { code: "travel_place" } });
+    expect(await list(owner.cookie, trip.id)).toEqual([]);
+    expect(await database.selectFrom("trip_place_contributions").selectAll()
+      .where("trip_place_id", "=", place.id).execute()).toEqual(before);
+    const skeleton = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    expect(parseTripSkeletonResponse(await skeleton.json()).skeleton.places.find((entry) => entry.id === row.legacy_place_id)?.name).toBe(place.name);
+  });
+
+  it("normalizes active travel mirrors from a retained release without deleting contributions or formal content", async () => {
+    const owner = await login("owner@example.test");
+    const trip = await createTrip(owner.cookie, "Travel mirror after redeploy");
+    // Votes need two active members.
+    const second = await login("second@example.test");
+    await addMember(trip.id, second.user.id);
+    const skeletonResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    const before = parseTripSkeletonResponse(await skeletonResponse.json()).skeleton;
+    const airport = before.places.find((place) => place.type === "airport")!;
+    // Simulate a retained release, whose reconciliation does not know about the flag.
+    await database.updateTable("places").set({ travel_only: false }).where("id", "=", airport.id).execute();
+    const mirrored = (await list(owner.cookie, trip.id)).find((place) => place.name === airport.name)!;
+    const ordinaryResponse = await addProvider(owner.cookie, trip.id, "ordinary-redeploy", "Keep this wishlist place");
+    const ordinary = parseTripPlaceResponse(await ordinaryResponse.json()).tripPlace;
+    for (const place of [mirrored, ordinary]) {
+      expect((await setVote(owner.cookie, trip.id, place.id, true, `redeploy-vote-${place.id}`)).status).toBe(200);
+      await database.insertInto("trip_place_desired_days").values({
+        trip_id: trip.id, trip_place_id: place.id, trip_day_id: trip.days[0]!.id,
+      }).execute();
+      await database.insertInto("trip_place_excluded_days").values({
+        trip_id: trip.id, trip_place_id: place.id, trip_day_id: trip.days[1]!.id,
+      }).execute();
+    }
+    const contributions = await database.selectFrom("trip_place_contributions").selectAll()
+      .where("trip_place_id", "=", mirrored.id).execute();
+    await database.updateTable("places").set({ travel_only: true }).where("id", "=", airport.id).execute();
+    expect((await list(owner.cookie, trip.id)).map((place) => place.id)).toEqual([ordinary.id]);
+    for (const table of ["trip_place_desired_days", "trip_place_excluded_days", "trip_place_day_assignments", "trip_place_votes"] as const) {
+      expect(await database.selectFrom(table).selectAll().where("trip_place_id", "=", mirrored.id).execute(), table).toEqual([]);
+      expect(await database.selectFrom(table).select("trip_place_id").where("trip_place_id", "=", ordinary.id).execute(), table)
+        .toEqual([{ trip_place_id: ordinary.id }]);
+    }
+    expect(await database.selectFrom("trip_place_contributions").selectAll().where("trip_place_id", "=", mirrored.id).execute()).toEqual(contributions);
+    const archived = await database.selectFrom("trip_places").selectAll().where("id", "=", mirrored.id).executeTakeFirstOrThrow();
+    expect(archived.archived_at).not.toBeNull();
+    expect((await list(owner.cookie, trip.id)).map((place) => place.id)).toEqual([ordinary.id]);
+    expect(await database.selectFrom("trip_places").selectAll().where("id", "=", mirrored.id).executeTakeFirstOrThrow()).toEqual(archived);
+    const afterResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    const after = parseTripSkeletonResponse(await afterResponse.json()).skeleton;
+    expect(after.items).toEqual(before.items);
+    expect(after.places).toContainEqual(airport);
+  });
+
+  it.each(["search", "google-maps-url"] as const)("refuses duplicate %s intake without another contribution and allows re-add after removal", async (method) => {
     const owner = await login("owner@example.test");
     const second = await login("second@example.test");
     const third = await login("third@example.test");
@@ -476,6 +555,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       trip.id,
       "owner-add-kiyomizu",
       "Sunset if possible",
+      method,
     );
     expect(firstResponse.status).toBe(201);
     const first = parseTripPlaceResponse(await firstResponse.json()).tripPlace;
@@ -488,59 +568,176 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     );
     expect(parseTripPlaceResponse(await replay.json()).tripPlace.id).toBe(first.id);
 
-
-    provider.kyoto.address = "Updated Kiyomizu address";
-    provider.kyoto.latitude = 34.995;
-    provider.kyoto.longitude = 135.786;
-    provider.kyoto.observedAt = "2026-09-29T12:00:00.000Z";
-    provider.kyoto.expiresAt = "2026-10-29T12:00:00.000Z";
+    expect(first).toMatchObject({ notes: "Sunset if possible", sourceUrl: provider.kyoto.sourceUrl });
+    const contributions = await database.selectFrom("trip_place_contributions").selectAll()
+      .where("trip_place_id", "=", first.id).execute();
     const secondResponse = await addProvider(
-      second.cookie,
-      trip.id,
-      "second-add-kiyomizu",
-      "Need an easy taxi drop-off",
+      second.cookie, trip.id, "second-add-kiyomizu", "Must not replace the note", method,
     );
-    expect(secondResponse.status).toBe(201);
-    const afterBoth = parseTripPlaceResponse(await secondResponse.json()).tripPlace;
-    expect(afterBoth.id).toBe(first.id);
-    expect(afterBoth.contributions.map((entry) => entry.originalNote)).toEqual([
-      "Sunset if possible",
-      "Need an easy taxi drop-off",
-    ]);
-    expect(afterBoth).toMatchObject({
-      address: "Updated Kiyomizu address",
-      latitude: 34.995,
-      longitude: 135.786,
-      providerObservedAt: "2026-09-29T12:00:00.000Z",
-    });
+    expect(secondResponse.status).toBe(409);
+    expect(await secondResponse.json()).toMatchObject({ error: { code: "already_in_wishlist" } });
+    expect(await database.selectFrom("trip_place_contributions").selectAll()
+      .where("trip_place_id", "=", first.id).execute()).toEqual(contributions);
+    expect(await list(owner.cookie, trip.id)).toEqual([first]);
     expect(await list(owner.cookie, trip.id)).toHaveLength(1);
 
-    for (const [actor, level, key] of [
-      [owner, "must", "owner-must"],
-      [second, "dislike", "second-dislike"],
-      [third, "want", "third-want"],
-      [fourth, "optional", "fourth-optional"],
-    ] as const) {
-      const response = await setPreference(
-        actor.cookie,
-        trip.id,
-        first.id,
-        level,
-        null,
-        key,
-      );
+    for (const actor of [owner, second, third, fourth]) {
+      const response = await setVote(actor.cookie, trip.id, first.id, true, `vote-${actor.user.id}`);
       expect(response.status).toBe(200);
     }
     const read = (await list(owner.cookie, trip.id))[0]!;
-    expect(read.preferences).toHaveLength(4);
-    expect(read.preferences.map((entry) => entry.level)).toEqual([
-      "must",
-      "dislike",
-      "want",
-      "optional",
+    expect(read.voteCount).toBe(4);
+    expect(read.voters.map((entry) => entry.memberUserId)).toEqual([
+      owner.user.id, second.user.id, third.user.id, fourth.user.id,
     ]);
-    expect(read.preferenceConflict).toBe(true);
+    expect(read.ownVote).toBe(true);
+    expect((await removePlace(second.cookie, trip.id, read, "remove-duplicate")).status).toBe(204);
+    const readded = await addProvider(second.cookie, trip.id, "readd-kiyomizu", "Easy taxi drop-off", method);
+    expect(readded.status).toBe(201);
+    const restored = parseTripPlaceResponse(await readded.json()).tripPlace;
+    expect(restored).toMatchObject({ id: first.id, notes: "Easy taxi drop-off", voteCount: 0, assignedDayId: null });
+    expect((await list(owner.cookie, trip.id))[0]?.notes).toBe("Easy taxi drop-off");
+    const skeleton = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    expect(parseTripSkeletonResponse(await skeleton.json()).skeleton.places.find((place) => place.name === first.name)?.notes)
+      .toBe("Easy taxi drop-off");
   });
+
+  it("serializes competing provider additions into one wishlist row and contribution", async () => {
+    const owner = await login("owner@example.test");
+    const second = await login("second@example.test");
+    const trip = await createTrip(owner.cookie, "Concurrent provider intake");
+    await addMember(trip.id, second.user.id);
+    const results = await Promise.all([
+      addProvider(owner.cookie, trip.id, "concurrent-owner", "Owner note"),
+      addProvider(second.cookie, trip.id, "concurrent-second", "Second note", "google-maps-url"),
+    ]);
+    expect(results.map((response) => response.status).sort()).toEqual([201, 409]);
+    const winner = parseTripPlaceResponse(await results.find((response) => response.status === 201)!.json()).tripPlace;
+    expect(await results.find((response) => response.status === 409)!.json())
+      .toMatchObject({ error: { code: "already_in_wishlist" } });
+    expect((await list(owner.cookie, trip.id)).map((place) => place.id)).toEqual([winner.id]);
+    expect(await database.selectFrom("trip_place_contributions").select(["trip_place_id", "original_note"])
+      .where("trip_id", "=", trip.id).execute()).toEqual([{ trip_place_id: winner.id, original_note: winner.notes }]);
+  });
+
+  it("orders active votes descending, ignores removed members, and disables voting for one member", async () => {
+    const owner = await login("owner@example.test");
+    const second = await login("second@example.test");
+    const third = await login("third@example.test");
+    const trip = await createTrip(owner.cookie, "Vote ordering trip");
+    await addMember(trip.id, second.user.id);
+    await addMember(trip.id, third.user.id);
+    const places = [];
+    for (const name of ["Zero", "One", "Two", "Tie"]) {
+      places.push(parseTripPlaceResponse(await (await addManual(owner.cookie, trip.id, `add-${name}`, name, name)).json()).tripPlace);
+    }
+    const [zero, one, two, tie] = places as [TripPlaceDto, TripPlaceDto, TripPlaceDto, TripPlaceDto];
+    // Establish a deterministic creation order independently of clock precision.
+    for (const [index, place] of places.entries()) {
+      await database.updateTable("trip_places").set({ created_at: new Date(now().getTime() + index) }).where("id", "=", place.id).execute();
+    }
+    for (const [actor, place] of [[owner, one], [owner, two], [second, two], [owner, tie], [third, zero]] as const) {
+      expect((await setVote(actor.cookie, trip.id, place.id, true, `${actor.user.id}-${place.id}`)).status).toBe(200);
+    }
+    const remove = (memberId: string) => app.request(`/api/trips/${trip.id}/members/${memberId}`, {
+      method: "DELETE",
+      headers: { cookie: owner.cookie, "idempotency-key": `remove-${memberId}`, origin: "https://app.example.test" },
+    });
+    expect((await remove(third.user.id)).status).toBe(204);
+    expect((await list(owner.cookie, trip.id)).map((place) => [place.id, place.voteCount]))
+      .toEqual([[two.id, 2], [one.id, 1], [tie.id, 1], [zero.id, 0]]);
+    const impersonated = await app.request(`/api/trips/${trip.id}/trip-places/${one.id}/vote`, {
+      method: "PUT",
+      headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": "cannot-vote-for-another", origin: "https://app.example.test" },
+      body: json({ voted: true, memberUserId: second.user.id }),
+    });
+    expect(impersonated.status).toBe(200);
+    expect(parseTripPlaceResponse(await impersonated.json()).tripPlace.voters.map((member) => member.memberUserId)).toEqual([owner.user.id]);
+    expect((await setVote(owner.cookie, trip.id, one.id, true, "repeat-set")).status).toBe(200);
+    expect((await setVote(owner.cookie, trip.id, one.id, false, "remove-vote")).status).toBe(200);
+    expect((await setVote(owner.cookie, trip.id, one.id, false, "repeat-remove")).status).toBe(200);
+    expect((await list(owner.cookie, trip.id)).find((place) => place.id === one.id)).toMatchObject({ voteCount: 0, ownVote: false });
+    expect((await remove(second.user.id)).status).toBe(204);
+    for (const voted of [true, false]) {
+      const refused = await setVote(owner.cookie, trip.id, two.id, voted, `single-${voted}`);
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toMatchObject({ error: { code: "voting_unavailable" } });
+    }
+    // A retry of a vote stored before the trip dropped to one member replays its success.
+    expect((await setVote(owner.cookie, trip.id, two.id, true, `${owner.user.id}-${two.id}`)).status).toBe(200);
+    const solo = await list(owner.cookie, trip.id);
+    expect(solo.map((place) => place.id)).toEqual([zero.id, one.id, two.id, tie.id]);
+    expect(solo.every((place) => !place.votingAvailable)).toBe(true);
+    expect(solo.find((place) => place.id === two.id)?.voteCount).toBe(1);
+  });
+
+  it("merges the union of votes without duplicating a member", async () => {
+    const owner = await login("owner@example.test");
+    const second = await login("second@example.test");
+    const trip = await createTrip(owner.cookie, "Vote merge trip");
+    await addMember(trip.id, second.user.id);
+    const source = parseTripPlaceResponse(await (await addManual(owner.cookie, trip.id, "union-source", "Cafe", "North")).json()).tripPlace;
+    const target = parseTripPlaceResponse(await (await addManual(owner.cookie, trip.id, "union-target", "Cafe", "South")).json()).tripPlace;
+    for (const [actor, place] of [[owner, source], [second, source], [owner, target]] as const) {
+      expect((await setVote(actor.cookie, trip.id, place.id, true, `union-${actor.user.id}-${place.id}`)).status).toBe(200);
+    }
+    const current = await list(owner.cookie, trip.id);
+    const merged = await app.request(`/api/trips/${trip.id}/trip-places/${source.id}/merge`, {
+      method: "POST",
+      headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": "union-merge", origin: "https://app.example.test" },
+      body: json({
+        targetTripPlaceId: target.id,
+        expectedSourceVersion: current.find((place) => place.id === source.id)!.version,
+        expectedTargetVersion: current.find((place) => place.id === target.id)!.version,
+      }),
+    });
+    expect(merged.status).toBe(200);
+    const place = parseTripPlaceResponse(await merged.json()).tripPlace;
+    expect(place.voteCount).toBe(2);
+    expect(place.voters.map((member) => member.memberUserId)).toEqual([owner.user.id, second.user.id]);
+    expect(await database.selectFrom("trip_place_votes").selectAll().where("trip_place_id", "=", source.id).execute()).toEqual([]);
+  });
+
+  it("replays old stored wishlist responses with source URLs and empty vote defaults", async () => {
+    const owner = await login("owner@example.test");
+    const trip = await createTrip(owner.cookie, "Old vote reply trip");
+    const first = await addManual(owner.cookie, trip.id, "old-add", "Old cafe", "Kyoto");
+    expect(first.status).toBe(201);
+    const place = parseTripPlaceResponse(await first.json()).tripPlace;
+    await sql`
+      update mutation_requests
+      set response = (response - 'sourceUrl' - 'voters' - 'voteCount' - 'ownVote' - 'votingAvailable')
+        || '{"preferences":[],"preferenceConflict":false,"contributions":[{"sourceUrl":"https://example.test/original"}]}'::jsonb
+      where actor_id = ${owner.user.id} and operation = ${`tp:add:${trip.id}`} and idempotency_key = 'old-add'
+    `.execute(database);
+    const replay = await addManual(owner.cookie, trip.id, "old-add", "Old cafe", "Kyoto");
+    expect(replay.status).toBe(201);
+    expect(parseTripPlaceResponse(await replay.json()).tripPlace).toMatchObject({
+      id: place.id, voters: [], voteCount: 0, ownVote: false, votingAvailable: false,
+      sourceUrl: "https://example.test/original",
+    });
+    const assignments = { assignments: [{ tripPlaceId: place.id, tripDayId: trip.days[0]!.id, expectedVersion: place.version }] };
+    const request = {
+      method: "PUT",
+      headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": "old-assignment", origin: "https://app.example.test" },
+      body: json(assignments),
+    };
+    expect((await app.request(`/api/trips/${trip.id}/trip-place-day-assignments`, request)).status).toBe(200);
+    await sql`
+      update mutation_requests set response = jsonb_set(response, '{tripPlaces}', (
+        select jsonb_agg(entry - 'sourceUrl' - 'voters' - 'voteCount' - 'ownVote' - 'votingAvailable')
+        from jsonb_array_elements(response -> 'tripPlaces') entry
+      ))
+      where actor_id = ${owner.user.id} and operation = ${`tp:day-assignments:${trip.id}`} and idempotency_key = 'old-assignment'
+    `.execute(database);
+    const replayList = await app.request(`/api/trips/${trip.id}/trip-place-day-assignments`, request);
+    expect(replayList.status).toBe(200);
+    expect(parseTripPlaceListResponse(await replayList.json()).tripPlaces[0]).toMatchObject({
+      id: place.id, assignedDayId: trip.days[0]!.id, voters: [], voteCount: 0, ownVote: false, votingAvailable: false,
+      sourceUrl: null,
+    });
+  });
+
 
   it("presents retained Place edits as member facts without falsifying provider freshness", async () => {
     const owner = await login("owner@example.test");
@@ -634,9 +831,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     ).tripPlace;
     expect(first.placeId).toBe(second.placeId);
     expect(first.id).not.toBe(second.id);
-    expect((await list(owner.cookie, firstTrip.id))[0]?.contributions
-      .find((entry) => entry.originalNote === "First trip note")).toBeDefined();
-    expect((await list(owner.cookie, secondTrip.id))[0]?.contributions[0]?.originalNote).toBe("Second trip note");
+    expect((await list(owner.cookie, firstTrip.id))[0]?.notes).toBe("First trip note");
+    expect((await list(owner.cookie, secondTrip.id))[0]?.notes).toBe("Second trip note");
   });
 
   it("keeps legacy day data during migration and absorbs rollback-era preferred-day writes", async () => {
@@ -1018,7 +1214,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     );
     expect(merged.status).toBe(200);
     const mergedPlace = parseTripPlaceResponse(await merged.json()).tripPlace;
-    expect(mergedPlace.contributions).toHaveLength(2);
+    expect(await database.selectFrom("trip_place_contributions").select("id")
+      .where("trip_place_id", "=", mergedPlace.id).execute()).toHaveLength(2);
     expect(mergedPlace.notes).toBe("Target planning note\n\nSource planning note");
     expect(mergedPlace.assignedDayId).toBe(trip.days[1]!.id);
     expect(await list(owner.cookie, trip.id)).toHaveLength(1);
@@ -1470,21 +1667,16 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       expect(response.status).toBe(200);
       return parseTripPlanResponse(await response.json()).plan;
     };
-    // Two members disagree: Kiyomizu-dera is one's must and the other's dislike; Hidden cafe is a
-    // want against a dislike. The plan ranks places as before but keeps each member's view.
+    // Active members' votes prioritize Kiyomizu; fixed items and day placement stay unchanged.
     const second = await login("second@example.test");
     await addMember(trip.id, second.user.id);
-    for (const [cookie, place, level, key] of [
-      [owner.cookie, kiyomizu, "must", "plan-owner-kiyomizu"],
-      [second.cookie, kiyomizu, "dislike", "plan-second-kiyomizu"],
-      [second.cookie, hidden, "dislike", "plan-second-hidden"],
-      [owner.cookie, hidden, "want", "plan-owner-hidden"],
+    for (const [cookie, place, key] of [
+      [owner.cookie, kiyomizu, "plan-owner-kiyomizu"],
+      [second.cookie, kiyomizu, "plan-second-kiyomizu"],
+      [owner.cookie, hidden, "plan-owner-hidden"],
     ] as const) {
-      expect((await setPreference(cookie, trip.id, place.id, level, null, key)).status).toBe(200);
+      expect((await setVote(cookie, trip.id, place.id, true, key)).status).toBe(200);
     }
-    // The owner has no display name, so the email stands in.
-    const owners = (level: string) => ({ memberUserId: owner.user.id, memberName: "owner@example.test", level });
-    const seconds = (level: string) => ({ memberUserId: second.user.id, memberName: "second", level });
     const before = await skeleton();
     const plan = await draft();
     const byDate = new Map(plan.days.map((day) => [day.timetable.date, day]));
@@ -1513,14 +1705,6 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     });
     expect(byDate.get("2026-10-24")).toMatchObject({ addedTripPlaceIds: [ine.id] });
     expect(plan.unplaced).toEqual([{ tripPlaceId: hidden.id, name: "Hidden cafe", reason: "no_location", date: null }]);
-    expect(byDate.get("2026-10-22")!.timetable.preferences).toEqual([
-      { tripPlaceId: kiyomizu.id, members: [owners("must"), seconds("dislike")], conflict: true },
-    ]);
-    // Unrated places are left out rather than listed as neutral.
-    expect(byDate.get("2026-10-23")!.timetable.preferences).toEqual([]);
-    expect(plan.preferences).toEqual([
-      { tripPlaceId: hidden.id, members: [owners("want"), seconds("dislike")], conflict: false },
-    ]);
     expect(await draft()).toEqual(plan);
     expect(await skeleton()).toMatchObject({ tripVersion: before.tripVersion, items: before.items });
 
@@ -1576,13 +1760,11 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     // A retry with the same key answers again without writing twice.
     expect((await apply("plan-use", fresh)).status).toBe(200);
     expect(await placement()).toEqual(afterUse);
-    // The day plan shows the same disagreement once the place is on its day.
+    // The day plan retains its places and formal itinerary items.
     const dayDraft = await send("POST", `/api/trips/${trip.id}/days/${dayOf("2026-10-22")}/timetable`, null, {
       order: "current",
     });
-    expect(parseDayTimetableResponse(await dayDraft.json()).timetable.preferences).toEqual([
-      { tripPlaceId: kiyomizu.id, members: [owners("must"), seconds("dislike")], conflict: true },
-    ]);
+    expect(parseDayTimetableResponse(await dayDraft.json()).timetable.orderedTripPlaceIds).toEqual([kiyomizu.id]);
     // Nothing is left to add except the place without a location.
     expect(await draft()).toMatchObject({ days: [], unplaced: [{ tripPlaceId: hidden.id, reason: "no_location" }] });
   });
@@ -1601,6 +1783,13 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         },
         body: payload === undefined ? undefined : json(payload),
       });
+    // This scenario supplies its own arrival/departure pair and measured airport routes;
+    // do not leave the general creation fixture as extra fixed blocks on its arrival day.
+    const initial = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    for (const flight of parseTripSkeletonResponse(await initial.json()).skeleton.items) {
+      expect((await send("DELETE", `/api/trips/${trip.id}/items/${flight.id}`, `remove-${flight.id}`,
+        { expectedVersion: flight.version })).status).toBe(204);
+    }
     const tripVersion = async () => {
       const response = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
       return parseTripSkeletonResponse(await response.json()).skeleton.tripVersion;
@@ -2050,22 +2239,24 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     }
   });
 
-  it("serializes preference events with merge before locking a candidate", async () => {
+  it("serializes vote events with merge before locking a candidate", async () => {
     const owner = await login("owner@example.test");
-    const trip = await createTrip(owner.cookie, "Concurrent preference trip");
+    const trip = await createTrip(owner.cookie, "Concurrent vote trip");
+    const member = await login("voter@example.test");
+    await addMember(trip.id, member.user.id);
     const firstResponse = await addManual(
       owner.cookie,
       trip.id,
-      "preference-first",
-      "Preference Cafe",
-      "Preference north",
+      "vote-first",
+      "Vote Cafe",
+      "Vote north",
     );
     const secondResponse = await addManual(
       owner.cookie,
       trip.id,
-      "preference-second",
-      "Preference Cafe",
-      "Preference south",
+      "vote-second",
+      "Vote Cafe",
+      "Vote south",
     );
     const first = parseTripPlaceResponse(await firstResponse.json()).tripPlace;
     const second = parseTripPlaceResponse(await secondResponse.json()).tripPlace;
@@ -2074,7 +2265,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     const target = current.find((place) => place.id === second.id)!;
 
     await sql`
-      create or replace function issue22_block_preference_event()
+      create or replace function issue22_block_vote_event()
       returns trigger
       language plpgsql
       as $$
@@ -2085,9 +2276,9 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       $$
     `.execute(database);
     await sql`
-      create trigger issue22_block_preference_event
+      create trigger issue22_block_vote_event
       before insert on change_events
-      for each row execute function issue22_block_preference_event()
+      for each row execute function issue22_block_vote_event()
     `.execute(database);
 
     const gatePool = new Pool({ connectionString: databaseUrl });
@@ -2097,14 +2288,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     try {
       await gate.query("begin");
       await gate.query("select pg_advisory_xact_lock(220023)");
-      const preferencePromise = setPreference(
-        owner.cookie,
-        trip.id,
-        target.id,
-        "must",
-        null,
-        "concurrent-preference",
-      );
+      const votePromise = setVote(owner.cookie, trip.id, target.id, true, "concurrent-vote");
       await waitForDatabaseLock(gatePool, "advisory");
       const mergePromise = app.request(
         `/api/trips/${trip.id}/trip-places/${source.id}/merge`,
@@ -2113,7 +2297,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
           headers: {
             cookie: owner.cookie,
             "content-type": "application/json",
-            "idempotency-key": "preference-concurrent-merge",
+            "idempotency-key": "vote-concurrent-merge",
             origin: "https://app.example.test",
           },
           body: json({
@@ -2126,29 +2310,31 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       await waitForDatabaseLock(gatePool, "row");
       await gate.query("commit");
       gateOpen = true;
-      const [preference, merge] = await Promise.all([
-        preferencePromise,
+      const [vote, merge] = await Promise.all([
+        votePromise,
         mergePromise,
       ]);
-      expect(preference.status).toBe(200);
+      expect(vote.status).toBe(200);
       expect(merge.status).toBe(409);
     } finally {
       if (!gateOpen) await gate.query("rollback");
       gate.release();
       await gatePool.end();
       await sql`
-        drop trigger if exists issue22_block_preference_event
+        drop trigger if exists issue22_block_vote_event
         on change_events
       `.execute(database);
       await sql`
-        drop function if exists issue22_block_preference_event()
+        drop function if exists issue22_block_vote_event()
       `.execute(database);
     }
   });
 
-  it("serializes retained Place edits before preference membership checks", async () => {
+  it("serializes retained Place edits before vote membership checks", async () => {
     const owner = await login("owner@example.test");
     const trip = await createTrip(owner.cookie, "Concurrent membership trip");
+    const member = await login("voter@example.test");
+    await addMember(trip.id, member.user.id);
     const placeResponse = await addManual(
       owner.cookie,
       trip.id,
@@ -2162,10 +2348,10 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     });
     const legacy = parseTripSkeletonResponse(
       await skeletonResponse.json(),
-    ).skeleton.places[0]!;
+    ).skeleton.places.find((candidate) => candidate.name === place.name)!;
 
     await sql`
-      create or replace function issue22_block_preference_insert()
+      create or replace function issue22_block_vote_insert()
       returns trigger
       language plpgsql
       as $$
@@ -2176,9 +2362,9 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       $$
     `.execute(database);
     await sql`
-      create trigger issue22_block_preference_insert
-      before insert on member_place_preferences
-      for each row execute function issue22_block_preference_insert()
+      create trigger issue22_block_vote_insert
+      before insert on trip_place_votes
+      for each row execute function issue22_block_vote_insert()
     `.execute(database);
 
     const gatePool = new Pool({ connectionString: databaseUrl });
@@ -2187,14 +2373,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     try {
       await gate.query("begin");
       await gate.query("select pg_advisory_xact_lock(220024)");
-      const preferencePromise = setPreference(
-        owner.cookie,
-        trip.id,
-        place.id,
-        "must",
-        null,
-        "membership-preference",
-      );
+      const votePromise = setVote(owner.cookie, trip.id, place.id, true, "membership-vote");
       await waitForDatabaseLock(gatePool, "advisory");
       const editPromise = app.request(
         `/api/trips/${trip.id}/places/${legacy.id}`,
@@ -2222,22 +2401,22 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       await waitForDatabaseLock(gatePool, "row");
       await gate.query("commit");
       gateOpen = true;
-      const [preference, edit] = await Promise.all([
-        preferencePromise,
+      const [vote, edit] = await Promise.all([
+        votePromise,
         editPromise,
       ]);
-      expect(preference.status).toBe(200);
+      expect(vote.status).toBe(200);
       expect(edit.status).toBe(200);
     } finally {
       if (!gateOpen) await gate.query("rollback");
       gate.release();
       await gatePool.end();
       await sql`
-        drop trigger if exists issue22_block_preference_insert
-        on member_place_preferences
+        drop trigger if exists issue22_block_vote_insert
+        on trip_place_votes
       `.execute(database);
       await sql`
-        drop function if exists issue22_block_preference_insert()
+        drop function if exists issue22_block_vote_insert()
       `.execute(database);
     }
   });
@@ -2366,10 +2545,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       address: "Updated address",
       notes: "Updated shared note",
       factsSource: "member",
-      contributions: [{
-        originalNote: "Original rollback note",
-        sourceUrl: "https://example.test/original",
-      }],
+      sourceUrl: "https://example.test/original",
     });
 
     await database.updateTable("places").set({
@@ -2413,71 +2589,33 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect(await list(owner.cookie, trip.id)).toEqual([]);
   });
 
-  it("rejects retained-release deletion when another member retains the candidate", async () => {
+  it("allows itinerary deletion despite another member's contribution and votes", async () => {
     const owner = await login("owner@example.test");
     const second = await login("second@example.test");
-    const trip = await createTrip(owner.cookie, "Protected rollback deletion trip");
+    const trip = await createTrip(owner.cookie, "Voted deletion trip");
     await addMember(trip.id, second.user.id);
-    const shared = parseTripPlaceResponse(
-      await (await addProvider(owner.cookie, trip.id, "protected-owner", "Owner source")).json(),
+    const place = parseTripPlaceResponse(
+      await (await addProvider(owner.cookie, trip.id, "delete-owner", "Owner source")).json(),
     ).tripPlace;
-    await addProvider(second.cookie, trip.id, "protected-second", "Second source");
-    const sharedLegacy = await database.selectFrom("trip_places")
-      .select("legacy_place_id")
-      .where("id", "=", shared.id)
-      .executeTakeFirstOrThrow();
-    await expect(
-      database.deleteFrom("places").where("id", "=", sharedLegacy.legacy_place_id).execute(),
-    ).rejects.toMatchObject({ code: "23503" });
-    expect((await list(owner.cookie, trip.id))[0]?.contributions).toHaveLength(2);
-
-    const manualResponse = await app.request(`/api/trips/${trip.id}/trip-places`, {
-      method: "POST",
-      headers: {
-        cookie: owner.cookie,
-        "content-type": "application/json",
-        "idempotency-key": "protected-preference-place",
-        origin: "https://app.example.test",
-      },
-      body: json({
-        method: "manual",
-        name: "Preference-protected place",
-        type: "other",
-        address: null,
-        latitude: null,
-        longitude: null,
-        timeZone: null,
-        sourceUrl: null,
-        originalNote: "Owner only contribution",
-      }),
-    });
-    const preferred = parseTripPlaceResponse(await manualResponse.json()).tripPlace;
-    expect((await setPreference(
-      second.cookie,
-      trip.id,
-      preferred.id,
-      "want",
-      null,
-      "protect-before-rollback-delete",
-    )).status).toBe(200);
-    const preferredLegacy = await database.selectFrom("trip_places")
-      .select("legacy_place_id")
-      .where("id", "=", preferred.id)
-      .executeTakeFirstOrThrow();
-    await expect(
-      database.deleteFrom("places").where("id", "=", preferredLegacy.legacy_place_id).execute(),
-    ).rejects.toMatchObject({ code: "23503" });
-    expect((await list(owner.cookie, trip.id)).find((place) => place.id === preferred.id))
-      .toMatchObject({
-        preferences: expect.arrayContaining([
-          expect.objectContaining({ memberUserId: second.user.id, level: "want" }),
-        ]),
+    expect((await setVote(owner.cookie, trip.id, place.id, true, "delete-own-vote")).status).toBe(200);
+    // Historical contributions remain internal, but no longer veto another member's deletion.
+    await database.insertInto("trip_place_contributions").values({
+      trip_id: trip.id, trip_place_id: place.id, member_user_id: second.user.id,
+      intake_method: "search", original_note: "Second member's historical source",
+      source_url: provider.kyoto.sourceUrl, provider_observed_at: now(), withdrawn_at: null,
+    }).execute();
+    const deletePlace = async (key: string) => {
+      const response = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+      const legacy = parseTripSkeletonResponse(await response.json()).skeleton.places.find((candidate) => candidate.name === place.name)!;
+      return app.request(`/api/trips/${trip.id}/places/${legacy.id}`, {
+        method: "DELETE",
+        headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": key, origin: "https://app.example.test" },
+        body: json({ expectedVersion: legacy.version }),
       });
-    await expect(
-      database.deleteFrom("trips").where("id", "=", trip.id).execute(),
-    ).resolves.toBeDefined();
-    expect(await database.selectFrom("places").select("id")
-      .where("trip_id", "=", trip.id).execute()).toEqual([]);
+    };
+    expect((await deletePlace("delete-voted")).status).toBe(204);
+    expect(await list(owner.cookie, trip.id)).toEqual([]);
+    expect(await database.selectFrom("trip_place_votes").selectAll().where("trip_place_id", "=", place.id).execute()).toEqual([]);
   });
 
   it("flags possible duplicates added through the retained skeleton Place surface", async () => {
@@ -2531,18 +2669,19 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect(duplicates.every((entry) => entry.status === "possible-duplicate")).toBe(true);
     const archivedCandidate = [...duplicates].sort((left, right) => left.id.localeCompare(right.id))[0]!;
     const archived = await app.request(
-      `/api/trips/${trip.id}/trip-places/${archivedCandidate.id}/contributions/${archivedCandidate.contributions[0]!.id}/withdraw`,
+      `/api/trips/${trip.id}/trip-places/${archivedCandidate.id}/remove`,
       {
         method: "POST",
         headers: {
           cookie: owner.cookie,
+          "content-type": "application/json",
           "idempotency-key": "archive-lower-duplicate",
           origin: "https://app.example.test",
         },
+        body: json({ expectedVersion: archivedCandidate.version }),
       },
     );
-    expect(archived.status).toBe(200);
-    expect(await archived.json()).toEqual({ tripPlace: null });
+    expect(archived.status).toBe(204);
     const survivor = await list(owner.cookie, trip.id);
     expect(survivor).toHaveLength(1);
     expect(survivor[0]).toMatchObject({
@@ -2552,75 +2691,85 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
   });
 
 
-  it("retains a place after its last contribution is withdrawn when an active member has a preference", async () => {
+  it("lets another member remove a scheduled place without changing any formal itinerary content", async () => {
     const owner = await login("owner@example.test");
     const second = await login("second@example.test");
-    const trip = await createTrip(owner.cookie, "Preference retention trip");
+    const outsider = await login("outsider@example.test");
+    const trip = await createTrip(owner.cookie, "Remove scheduled wishlist place");
     await addMember(trip.id, second.user.id);
-    const added = await app.request(`/api/trips/${trip.id}/trip-places`, {
+    const place = parseTripPlaceResponse(
+      await (await addManual(owner.cookie, trip.id, "remove-place", "Voted cafe", "Kyoto")).json(),
+    ).tripPlace;
+    expect((await setVote(owner.cookie, trip.id, place.id, true, "owner-vote-before-remove")).status).toBe(200);
+    expect((await setVote(second.cookie, trip.id, place.id, true, "second-vote-before-remove")).status).toBe(200);
+    const skeletonResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    const skeleton = parseTripSkeletonResponse(await skeletonResponse.json()).skeleton;
+    const legacy = skeleton.places.find((entry) => entry.name === place.name)!;
+    const activity = await app.request(`/api/trips/${trip.id}/items`, {
       method: "POST",
-      headers: {
-        cookie: owner.cookie,
-        "content-type": "application/json",
-        "idempotency-key": "preference-retention-place",
-        origin: "https://app.example.test",
-      },
+      headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": "activity-before-remove", origin: "https://app.example.test" },
       body: json({
-        method: "manual",
-        name: "Preference-only cafe",
-        type: "restaurant",
-        address: "Kyoto",
-        latitude: null,
-        longitude: null,
-        timeZone: null,
-        sourceUrl: null,
-        originalNote: "Owner contribution",
+        expectedTripVersion: skeleton.tripVersion, type: "activity", title: "Keep my booking",
+        notes: "Booking stays", sourceUrl: null, money: null, participantMemberIds: null,
+        endpoints: [{ role: "start", countryStopId: trip.countryStops[0]!.id, placeId: legacy.id,
+          localDateTime: "2026-10-21T10:00", timeZone: "Asia/Tokyo" }],
+        details: { durationMinutes: 60, bookedBy: null, confirmationStatus: "unknown" }, constraints: [],
       }),
     });
-    const place = parseTripPlaceResponse(await added.json()).tripPlace;
-    const preference = await setPreference(
-      second.cookie,
-      trip.id,
-      place.id,
-      "want",
-      null,
-      "preference-before-withdrawal",
-    );
-    expect(preference.status).toBe(200);
-
-    const withdrawn = await app.request(
-      `/api/trips/${trip.id}/trip-places/${place.id}/contributions/${place.contributions[0]!.id}/withdraw`,
-      {
-        method: "POST",
-        headers: {
-          cookie: owner.cookie,
-          "idempotency-key": "withdraw-last-but-preferred",
-          origin: "https://app.example.test",
-        },
-      },
-    );
-    expect(withdrawn.status).toBe(200);
-    expect(parseTripPlaceResponse(await withdrawn.json()).tripPlace).toMatchObject({
-      id: place.id,
-      preferences: expect.arrayContaining([
-        expect.objectContaining({
-          memberUserId: second.user.id,
-          level: "want",
-        }),
-      ]),
+    expect(activity.status).toBe(201);
+    // A timed place cannot be assigned through the API, so seed legacy day rows directly
+    // (migration 007's trigger derives an assignment) to prove removal clears all of them.
+    await database.insertInto("trip_place_desired_days").values({
+      trip_id: trip.id, trip_place_id: place.id, trip_day_id: trip.days[0]!.id,
+    }).execute();
+    await database.insertInto("trip_place_excluded_days").values({
+      trip_id: trip.id, trip_place_id: place.id, trip_day_id: trip.days[1]!.id,
+    }).execute();
+    const beforeResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    const before = parseTripSkeletonResponse(await beforeResponse.json()).skeleton;
+    const current = (await list(owner.cookie, trip.id))[0]!;
+    expect(current.scheduled).toBe(true);
+    const missingKey = await app.request(`/api/trips/${trip.id}/trip-places/${place.id}/remove`, {
+      method: "POST",
+      headers: { cookie: second.cookie, "content-type": "application/json", origin: "https://app.example.test" },
+      body: json({ expectedVersion: current.version }),
     });
-    expect(await list(owner.cookie, trip.id)).toHaveLength(1);
+    expect(missingKey.status).toBe(400);
+    expect((await removePlace(outsider.cookie, trip.id, current, "outsider-remove")).status).toBe(404);
+    const stale = await removePlace(second.cookie, trip.id, place, "stale-remove");
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ error: { code: "conflict", currentVersion: current.version } });
+    const endpointRefused = await app.request(`/api/trips/${trip.id}/places/${legacy.id}`, {
+      method: "DELETE",
+      headers: { cookie: second.cookie, "content-type": "application/json", "idempotency-key": "delete-in-use", origin: "https://app.example.test" },
+      body: json({ expectedVersion: legacy.version }),
+    });
+    expect(endpointRefused.status).toBe(409);
+    expect(await endpointRefused.json()).toMatchObject({ error: { code: "place_in_use" } });
+    expect((await removePlace(second.cookie, trip.id, current, "remove-scheduled")).status).toBe(204);
+    expect((await removePlace(second.cookie, trip.id, current, "remove-scheduled")).status).toBe(204);
+    expect(await list(owner.cookie, trip.id)).toEqual([]);
+    for (const table of ["trip_place_votes", "trip_place_day_assignments", "trip_place_desired_days", "trip_place_excluded_days"] as const) {
+      expect(await database.selectFrom(table).selectAll().where("trip_place_id", "=", place.id).execute()).toEqual([]);
+    }
+    const archived = await database.selectFrom("trip_places").select("archived_at").where("id", "=", place.id).executeTakeFirstOrThrow();
+    expect(archived.archived_at).not.toBeNull();
+    const afterResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    const after = parseTripSkeletonResponse(await afterResponse.json()).skeleton;
+    expect(after.places).toEqual(before.places);
+    expect(after.items).toEqual(before.items);
+    expect(after.days).toEqual(before.days);
+    expect(await database.selectFrom("change_events").select("actor_id")
+      .where("target_id", "=", place.id).where("event_type", "=", "trip_place.removed").execute())
+      .toEqual([{ actor_id: second.user.id }]);
   });
-  it("keeps the list and manual intake available during provider failure and preserves another member on withdrawal", async () => {
+  it("keeps manual intake and removal available during provider failure", async () => {
     const owner = await login("owner@example.test");
     const second = await login("second@example.test");
     const trip = await createTrip(owner.cookie, "Provider outage trip");
     await addMember(trip.id, second.user.id);
     const first = parseTripPlaceResponse(
       await (await addProvider(owner.cookie, trip.id, "outage-owner", "Owner note")).json(),
-    ).tripPlace;
-    const secondAdd = parseTripPlaceResponse(
-      await (await addProvider(second.cookie, trip.id, "outage-second", "Second note")).json(),
     ).tripPlace;
     provider.unavailable = true;
     const gatePool = new Pool({ connectionString: databaseUrl });
@@ -2683,43 +2832,11 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     const manualPlace = parseTripPlaceResponse(await manual.json()).tripPlace;
     expect(manualPlace.status).toBe("needs-location");
 
-    const ownerContribution = secondAdd.contributions.find((entry) => entry.memberUserId === owner.user.id)!;
-    const withdrawn = await app.request(
-      `/api/trips/${trip.id}/trip-places/${first.id}/contributions/${ownerContribution.id}/withdraw`,
-      {
-        method: "POST",
-        headers: {
-          cookie: owner.cookie,
-          "idempotency-key": "withdraw-owner",
-          origin: "https://app.example.test",
-        },
-      },
-    );
-    expect(withdrawn.status).toBe(200);
-    const retained = parseTripPlaceResponse(await withdrawn.json()).tripPlace;
-    expect(retained.contributions.filter((entry) => entry.withdrawnAt === null)).toHaveLength(1);
-    expect(retained.contributions.find((entry) => entry.memberUserId === second.user.id)?.originalNote).toBe("Second note");
-
-    const onlyContribution = manualPlace.contributions[0]!;
-    const archiveRequest = {
-      method: "POST",
-      headers: {
-        cookie: owner.cookie,
-        "idempotency-key": "withdraw-and-archive-manual",
-        origin: "https://app.example.test",
-      },
-    };
-    const archived = await app.request(
-      `/api/trips/${trip.id}/trip-places/${manualPlace.id}/contributions/${onlyContribution.id}/withdraw`,
-      archiveRequest,
-    );
-    expect(archived.status).toBe(200);
-    expect(await archived.json()).toEqual({ tripPlace: null });
-    const archiveReplay = await app.request(
-      `/api/trips/${trip.id}/trip-places/${manualPlace.id}/contributions/${onlyContribution.id}/withdraw`,
-      archiveRequest,
-    );
-    expect(archiveReplay.status).toBe(200);
-    expect(await archiveReplay.json()).toEqual({ tripPlace: null });
+    const current = (await list(owner.cookie, trip.id)).find((entry) => entry.id === first.id)!;
+    expect((await removePlace(second.cookie, trip.id, current, "remove-during-outage")).status).toBe(204);
+    expect((await list(owner.cookie, trip.id)).map((entry) => entry.id)).toEqual([manualPlace.id]);
+    expect((await removePlace(second.cookie, trip.id, manualPlace, "remove-manual")).status).toBe(204);
+    expect((await removePlace(second.cookie, trip.id, manualPlace, "remove-manual")).status).toBe(204);
+    expect(await list(owner.cookie, trip.id)).toEqual([]);
   });
 });

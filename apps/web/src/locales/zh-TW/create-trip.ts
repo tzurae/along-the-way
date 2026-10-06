@@ -8,7 +8,7 @@ export const createTrip = {
   couldNotCreate: "無法建立旅程。",
   createTrip: "建立旅程",
   title: "建立旅程",
-  description: "設定整趟旅程的日期與依序排列的國家路線。只有在路線明確時，系統才會推定時區與預設幣別。",
+  description: "設定日期、國家路線與全體共用的去程及回程航班。所有起飛與抵達的當地日期都必須在旅程日期內；時區可自行調整。",
   tripName: "旅程名稱",
   tripDates: "旅程日期",
   chooseEndDate: "選擇結束日期",

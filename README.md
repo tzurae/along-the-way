@@ -44,6 +44,148 @@ bun run build
 Staging setup, HTTPS deployment, persistent data, and rollback are documented in
 [`docs/operations/staging.md`](docs/operations/staging.md).
 
+## Shared flights and lodging (Issue #74)
+
+`POST /api/trips` requires `name`, `startDate`, `endDate`, ordered `countryCodes`
+and `flights: { outbound, return }`. Each flight is:
+
+```ts
+{
+  serviceNumber: string;
+  carrier: string | null;
+  departureAirport: { name: string; timeZone: string };
+  arrivalAirport: { name: string; timeZone: string };
+  departureLocalDateTime: string; // YYYY-MM-DDTHH:mm
+  arrivalLocalDateTime: string;   // YYYY-MM-DDTHH:mm
+  departureUtcOffset?: string | null; // e.g. "-04:00" for a repeated local hour
+  arrivalUtcOffset?: string | null;
+}
+```
+
+All endpoint local dates must lie within the trip dates, even outside the route.
+Named IANA zones and existing DST validation apply. Each arrival must be strictly
+after departure; the return must depart after the outbound arrival. Creation
+persists the trip, stops, days, owner, airports and both flights in one transaction:
+any error rolls everything back. Historical `create_trip` responses replay before
+the new flight requirement is checked. The outbound arrival uses the first stop;
+the return departure uses the last; the other two endpoints are outside the route
+(`countryStopId: null`). Flight titles are service numbers. New travel items select
+all active members explicitly at save time, not the `null` pending-confirmation party.
+For repeated DST hours, supply the chosen UTC offset. Omitting an offset on PATCH
+retains the current occurrence only when its local time and timezone are unchanged;
+explicit `null` clears that choice and normal endpoint validation applies.
+
+Trip members use these idempotent, versioned travel routes:
+
+| Route | Body additions to the travel input | Result |
+| --- | --- | --- |
+| `POST /api/trips/:tripId/flights` | `expectedTripVersion` | `{ item }`, 201 |
+| `PATCH /api/trips/:tripId/flights/:itemId` | `expectedVersion` | `{ item }`, 200 |
+| `POST /api/trips/:tripId/lodgings` | `expectedTripVersion` | `{ item }`, 201 |
+| `PATCH /api/trips/:tripId/lodgings/:itemId` | `expectedVersion` | `{ item }`, 200 |
+
+Every mutation requires `Idempotency-Key`. Lodging input is
+`{ hotel: { name, address?, latitude?, longitude?, timeZone, sourceUrl? }, countryStopId,
+checkInLocalDateTime, checkOutLocalDateTime, checkInUtcOffset?, checkOutUtcOffset? }`;
+hotel name, country stop and named timezone are required. Address, coordinates and
+source URL are optional: omitted facts remain unchanged on reuse/PATCH, while an
+explicit `null` clears them. Supply both coordinates when changing or clearing them.
+New places default omitted facts to null. The optional offsets use the same repeated-hour rules as
+flights. Checkout cannot precede check-in. Both endpoints use the same hotel, stop
+and timezone. Undeclared nested airport/hotel fields are rejected with 400.
+Google hotel search reuses `POST /api/trips/:tripId/trip-places/search` for candidates
+only; selecting one does not add it to the wishlist. Manual hotel entry is supported.
+Travel PATCH changes only the service/hotel name, carrier where applicable,
+airports/hotel and endpoint times; notes, source URL, money, booking/confirmation
+details, participants, constraints and locks are retained. Locked items still
+require unlocking. Delete uses `DELETE /api/trips/:tripId/items/:itemId` with
+`expectedVersion`; existing lock/unlock routes continue to apply.
+
+The overview lists every stored flight by departure instant: first 去程, last 回程,
+intermediate flights 其他航班. Fewer than two produces a nonblocking 尚未填寫航班
+prompt and add form. Old flights are neither migrated nor deleted. The 住宿 tab,
+between wishlist and itinerary, manages stays in check-in order. 行程 no longer
+offers flights or lodging in its item dialog; its existing cards link to the
+overview/lodging editors. Mounted skeleton, wishlist and travel panels reload via
+the revision mechanism; skeleton/planning APIs keep returning every travel item.
+Itinerary lock/unlock and constraint edits also broadcast that revision. An editor
+already open keeps its original optimistic version rather than silently rebasing.
+Already-open planner drafts are not automatically regenerated (which would make
+paid route calls); their existing plan-basis check refuses stale application.
+
+Travel endpoints use legacy `places` rows marked `travel_only = true`, never
+wishlist rows. Within a trip, a travel place with the same trimmed case-insensitive
+name and timezone is reused. Submitted hotel address, coordinates and source URL
+update that travel-only place and its version, unless any referencing item is
+locked. A place referenced by a non-travel item is never changed this way.
+The lodging editor compares facts with its opening snapshot and omits untouched
+ones, so a time-only save cannot overwrite another stay's shared-hotel enrichment.
+PATCH retains an unchanged existing airport/hotel endpoint, including mixed-use
+legacy places and their routing facts. Eager wishlist mirroring skips travel
+places; reconciliation also archives active travel mirrors introduced by a retained
+release and clears their votes/assignments/legacy day rows, retaining contributions.
+Explicit intake cannot unarchive a travel-only identity: it returns
+`409 travel_place` and preserves its archived row and contributions.
+Discovery excludes provider identities backed by travel-only places even when
+archived; ordinary removed wishlist identities remain eligible for recommendation.
+
+Migration `016_travel_places` adds the non-null flag (default false), marks places
+used by at least one flight/lodging endpoint and no other item type, and archives
+their linked wishlist rows. It clears votes, day assignments and legacy
+desired/excluded-day rows, but retains contributions, legacy places, all formal
+items and endpoints. Mixed-use places remain unchanged. **Down only drops the
+flag; it does not unarchive wishlist rows or restore cleared votes/assignments.**
+The #74 implementation and added regression coverage are UNVERIFIED until the
+coordinator runs the API, migration and browser checks.
+
+## AI discovery claim sources (Issue #65)
+
+Each `CandidateProposalDto` from a new research run contains
+`recommendationSentences` and `tradeoffSentences`: ordered `{ text,
+evidenceIds }` entries. `text` is plain text with markdown links and citation
+markers removed. `evidenceIds` reference entries in that proposal's `evidence`
+and may only point to URLs the run's own web search returned; an empty list
+means the sentence is model inference and is shown as unverified. Cited pages
+are stored as `web-source` evidence of that run, expiring 30 days after they
+were observed. Proposals created before migration `013_discovery_claims` keep
+`null` sentence lists and show their original `recommendation` and `tradeoffs`;
+no sources are invented for them.
+
+Every evidence entry reports `isStale`: true once its `expiresAt` has passed,
+or, for web sources stored without an expiry, 30 days after `observedAt`.
+Stale evidence is labelled for re-checking and is never refreshed automatically.
+
+## AI discovery feedback and questions (Issue #66)
+
+Discovery mutations require an `Idempotency-Key` and the current version:
+
+- `POST /api/trips/:tripId/discovery/feedback` accepts only whole-trip
+  `originalText`; a `proposalId` field is rejected with `400 validation_error`.
+  Candidate cards no longer offer a targeted feedback form. Historical targeted
+  records still display 「針對：X」 and reach the model labelled with that place.
+  Feedback responses retain `proposalId`, `proposalName`, `interpretationEdited`,
+  and `isOwn`; clients only offer pending-feedback actions when `isOwn` is true.
+- `POST /api/trips/:tripId/discovery/feedback/:feedbackId/decision` accepts
+  `expectedVersion`, `decision` (`confirm` or `reject`), and, when confirming,
+  an optional complete `interpretation` containing `interests`, `exclusions`,
+  nullable `pace` and `budget`, and `summary`. Supplying it replaces only the
+  structured interpretation, marks it edited, and makes that member-corrected
+  interpretation authoritative over conflicting original wording in later
+  planning and research; `originalText` is immutable. Only the feedback author
+  may confirm, edit, or reject it.
+- `PUT /api/trips/:tripId/discovery/brief/questions` accepts
+  `expectedVersion` and ordered `answers` entries `{ question, answer }`.
+  `answer: null` explicitly means skipped and unknown. Saving answers increments
+  the brief version even though its text is unchanged, so the next generation
+  and its idempotent replay use one consistent answer set. Changing the brief
+  text clears all earlier question answers.
+
+`DiscoveryBriefDto.questionAnswers` reloads saved answers and skips. Planning
+and research receive both forms: answered questions constrain the request,
+while skipped questions remain unknown and must not be guessed or asked again.
+Migration `014_discovery_feedback_answers` stores these answer records and the
+edited-interpretation marker.
+
 ## Activity participants (Issue #21)
 
 This slice of [Issue #21](https://github.com/tzurae/along-the-way/issues/21)
@@ -55,7 +197,8 @@ the personal current/next and offline features of Issue #28.
   identity used for authorization and membership removal; the two are not aliases.
 - Create and update item requests require `participantMemberIds`: `null` means
   pending confirmation; an explicit collection must be nonempty, duplicate-free,
-  and contain membership IDs from this Trip. Nothing defaults to the whole roster.
+  and contain membership IDs from this Trip. Generic item routes do not default
+  to the whole roster; the dedicated travel routes explicitly select active members.
 - Responses expose `participants`, either `null` or enriched entries containing
   `memberId`, `displayName`, `email`, and `removed`. Adding another participant
   updates the existing item and preserves its stable ID.
@@ -203,6 +346,116 @@ HTTP with real magic-link sessions plus Chromium in `Pacific/Honolulu`):
 
 Not verified: an untouched data-bearing 008 down/up round trip (the repository
 supports migration-free rollback only).
+
+## Member votes (Issue #73, replacing #67's five preference levels)
+
+Each active member has one vote per wishlist place and per pending AI proposal:
+voted or not. Voting exists only while the trip has at least two active members
+(`trip_members.removed_at is null`); with fewer, the vote endpoints return
+`409 voting_unavailable` and neither the wishlist nor plan drafts use vote
+order. Removed members' votes never count.
+
+- `PUT /api/trips/:tripId/trip-places/:tripPlaceId/vote` returns `{ tripPlace }`.
+- `PUT /api/trips/:tripId/discovery/proposals/:proposalId/vote` returns
+  `{ discovery }`; only `pending` proposals accept votes.
+
+Both require an `Idempotency-Key` and a body of `{ "voted": true }` or
+`{ "voted": false }` (set-state, no `expectedVersion`). They always change the
+signed-in member's own vote; a member ID in the body is ignored. A retry of a
+stored request replays its original result.
+
+Place and proposal DTOs carry `voters` (`memberUserId`, `memberEmail`,
+`memberDisplayName`), `voteCount`, `ownVote` and `votingAvailable`. The
+wishlist is ordered by vote count, ties keeping creation order; voted cards are
+tinted and the top-voted cards (at least two votes) slightly more. AI proposal
+order is unchanged. Accepting a proposal copies active members' votes to the
+wishlist place without duplicates; merging places keeps the union of votes.
+Day and whole-trip plan drafts prioritize places by vote count and no longer
+show preferences or conflicts. Formal itinerary items are never changed.
+
+Votes and historical contributions never block removing a wishlist place or
+deleting a legacy place. Itinerary-tab deletion is refused with `place_in_use`
+only when a formal itinerary endpoint references the place. Wishlist removal
+works even in that case and leaves the legacy place and formal items intact.
+Accepted AI proposals return to `pending` when their wishlist place is removed
+or deleted, retaining proposal votes so members can accept them again.
+
+Migration `015_member_votes` clears the retired five-level choices but keeps
+the `member_place_preferences` table so a rolled-back previous release still
+runs (a later contract migration removes it). It drops migration 005's shared
+delete trigger and function, adds both vote tables with composite foreign keys,
+and lets an accepted proposal keep a null accepted place. `down` restores the
+trigger, function and original proposal check, and refuses to run while an
+accepted proposal's place has been deleted. Stored idempotent replies from
+before 015 are read with empty vote defaults; zh-TW labels of historical
+preference events are kept.
+
+## Simplified wishlist (Issue #76)
+
+Explicit Google search and Maps-URL intake refuses an already-active provider
+identity in the same trip with `409 already_in_wishlist` (「這個地點已在想去清單。」).
+No additional wishlist row or contribution is written. Removing and re-adding an
+ordinary identity unarchives its existing row; travel-only identities still
+return `409 travel_place`. Manual intake and the possible-duplicate/merge flow
+are unchanged. AI acceptance continues to reuse an existing wishlist identity.
+
+`TripPlaceDto` exposes `notes` and `sourceUrl: string | null`, not contributions.
+The source is the earliest contribution's URL, falling back to the legacy
+place's URL. Contributions remain internal intake/merge history. Intake notes
+are the shared place notes on both `trip_places` and `places`, with their
+existing version/sync watermark maintained. Cards show notes and
+「開啟原始來源」 directly. Stored replies from older releases still parse:
+without `sourceUrl`, the old contributions supply it, otherwise it is null.
+
+`POST /api/trips/:tripId/trip-places/:tripPlaceId/remove` requires an
+`Idempotency-Key` and `{ "expectedVersion": number }`. Any active member can
+remove a place after confirming 「從想去清單移除」. Success and replay return
+204; stale active-place versions return 409. Removal archives only the wishlist
+row and deletes its votes, day assignment, and legacy desired/excluded-day
+sources. It never changes legacy places, formal items or endpoints. The event
+is `trip_place.removed` (「把地點移出想去清單」). The contribution-withdraw
+route and UI are gone; historical event labels remain readable.
+
+Removal, itinerary deletion, and discovery/read-time repair of an archived or
+missing accepted place reopen all its accepted proposals to `pending`, clear
+`decided_by`, `decided_at`, and `accepted_trip_place_id`, increment the proposal
+version, and record `discovery.proposal_reopened`. The canonical proposal for a
+provider identity is the newest proposal in the trip in **any status** (run
+creation time and ID, then proposal creation time and ID). Only when that
+canonical proposal is itself being reopened does it receive `reopened_at`;
+all older reopened acceptances remain hidden, superseded pending rows. Newer
+rejections and acceptances on active wishlist places remain authoritative.
+Active members' votes are unioned without duplicates only onto a reopened
+canonical proposal or a canonical pending proposal in the latest run, never
+onto an accepted or rejected proposal. The `reopened_at` marker keeps a reopened
+canonical candidate's original ID and evidence actionable across earlier
+research runs until the next successful research run.
+That run supersedes every earlier pending reopened candidate. If it recommends
+the same provider identity, its new candidate inherits active members' votes
+without duplicates; otherwise the old candidate disappears. Accepting or
+rejecting again also clears the marker. Unrelated superseded candidates stay
+hidden. Only active members' votes count and carry into an accepted wishlist place.
+Discovery GET repairs stale accepted proposals only when needed, in a separate
+transaction locking the trip before proposals. Mutation response projections
+are read-only; wishlist reconciliation already holds that same trip lock.
+Research excludes active wishlist identities, rejected places and travel
+identities, not ordinarily removed wishlist places.
+
+Migration `017_wishlist_simplify` first fills null wishlist notes from existing
+non-null legacy notes, including pre-upgrade intake rows whose versions already
+match. Only where both notes are null does it backfill both from distinct
+non-empty contribution notes in creation order, separated by a blank line and
+capped at 10,000 characters. Neither path advances either place version or the
+reconciliation watermark. Non-null legacy notes are never overwritten, and
+outstanding legacy edits still reconcile on the next wishlist read. The migration
+adds `reopened_at` and reopens historical accepted proposals with missing/archived
+wishlist places using the same canonical-card and active-vote-union rules,
+and records an event for each reopened proposal.
+**Down only drops `reopened_at`: the note backfill is a safe no-op on downgrade;
+prior notes and proposal decisions are not restored, and reopening events stay.**
+
+Implementation and added API, migration, contract and browser regressions are
+UNVERIFIED until the coordinator runs validation, including the real UI at 25080.
 
 The existing static site remains available at
 <https://tzurae.github.io/along-the-way/>.

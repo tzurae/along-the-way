@@ -7,7 +7,9 @@ async function unexpectedDiscoveryCall(): Promise<never> {
 export const unrelatedDiscoveryModule = {
   getWorkspace: unexpectedDiscoveryCall,
   saveBrief: unexpectedDiscoveryCall,
+  saveQuestionAnswers: unexpectedDiscoveryCall,
   generate: unexpectedDiscoveryCall,
+  setProposalVote: unexpectedDiscoveryCall,
   acceptProposal: unexpectedDiscoveryCall,
   rejectProposal: unexpectedDiscoveryCall,
   createFeedback: unexpectedDiscoveryCall,

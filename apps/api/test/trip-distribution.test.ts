@@ -1,11 +1,8 @@
-import type { MemberPlacePreferenceDto, PreferenceLevel } from "@along-the-way/contracts/trip-places";
 import { describe, expect, it } from "vitest";
 
 import type { DayHours } from "../src/planning/opening-hours";
 import {
   distributePlaces,
-  placePreferences,
-  preferencePriority,
   type DistributionCandidate,
   type DistributionDay,
 } from "../src/planning/trip-distribution";
@@ -43,7 +40,7 @@ function candidate(
     latitude,
     longitude,
     stayMinutes: 60,
-    priority: 3,
+    voteCount: 0,
     hours: (dayId) => (closedOn.includes(dayId) ? closed : open),
     ...rest,
   };
@@ -79,15 +76,19 @@ describe("distributing wishlist places over days", () => {
     expect(result.unplaced).toEqual([{ id: "museum", reason: "closed_all_trip_days" }]);
   });
 
-  it("plans a must before a disliked place listed earlier, within the 70% load limit", async () => {
+  it("plans the most-voted place first within the 70% load limit", async () => {
     const days = [day("d21", "2026-10-21", { windowMinutes: 100 })];
     const result = distributePlaces(days, [
-      candidate("disliked", 34.98, 135.75, { priority: 4 }),
-      candidate("must", 34.98, 135.75, { priority: 0, stayMinutes: 70 }),
+      candidate("zero", 34.98, 135.75),
+      candidate("one", 34.98, 135.75, { voteCount: 1 }),
+      candidate("two", 34.98, 135.75, { voteCount: 2, stayMinutes: 70 }),
     ]);
 
-    expect(result.added.get("d21")).toEqual(["must"]);
-    expect(result.unplaced).toEqual([{ id: "disliked", reason: "no_day_fits" }]);
+    expect(result.added.get("d21")).toEqual(["two"]);
+    expect(result.unplaced).toEqual([
+      { id: "one", reason: "no_day_fits" },
+      { id: "zero", reason: "no_day_fits" },
+    ]);
     expect(distributePlaces(days, [candidate("long", 34.98, 135.75, { stayMinutes: 71 })]).unplaced)
       .toEqual([{ id: "long", reason: "no_day_fits" }]);
   });
@@ -118,40 +119,12 @@ describe("distributing wishlist places over days", () => {
       .toEqual([{ id: "komyoin", reason: "no_day_fits" }]);
   });
 
-  it("ranks a place by the best preference any member gave it, unrated as neutral", async () => {
-    expect(preferencePriority([])).toBe(3);
-    expect(preferencePriority([null])).toBe(3);
-    expect(preferencePriority(["dislike"])).toBe(4);
-    expect(preferencePriority(["dislike", "must"])).toBe(0);
-    expect(preferencePriority(["optional", null, "want"])).toBe(1);
-  });
-
-  it("keeps every member's preference apart and flags a must next to a dislike", async () => {
-    const member = (id: string, level: PreferenceLevel | null, displayName: string | null = id): MemberPlacePreferenceDto => ({
-      memberUserId: id,
-      memberEmail: `${id}@example.test`,
-      memberDisplayName: displayName,
-      level,
-      version: level === null ? null : 1,
-      updatedAt: null,
-      isOwn: false,
-    });
-    // Roster order: dad, mum, kid, gran.
-    expect(placePreferences({
-      id: "kiyomizu",
-      preferences: [member("dad", "dislike"), member("mum", "must", null), member("kid", null), member("gran", "dislike")],
-    })).toEqual({
-      tripPlaceId: "kiyomizu",
-      members: [
-        // Without a display name the email stands in; two dislikes keep roster order.
-        { memberUserId: "mum", memberName: "mum@example.test", level: "must" },
-        { memberUserId: "dad", memberName: "dad", level: "dislike" },
-        { memberUserId: "gran", memberName: "gran", level: "dislike" },
-      ],
-      conflict: true,
-    });
-    expect(placePreferences({ id: "cafe", preferences: [member("dad", "dislike"), member("mum", "want")] }))
-      .toMatchObject({ conflict: false });
-    expect(placePreferences({ id: "cafe", preferences: [member("dad", null)] })).toBeNull();
+  it("keeps the original list order when vote counts tie", () => {
+    const result = distributePlaces([day("d21", "2026-10-21", { windowMinutes: 100 })], [
+      candidate("first", 34.98, 135.75, { voteCount: 1 }),
+      candidate("second", 34.98, 135.75, { voteCount: 1 }),
+    ]);
+    expect(result.added.get("d21")).toEqual(["first"]);
+    expect(result.unplaced).toEqual([{ id: "second", reason: "no_day_fits" }]);
   });
 });

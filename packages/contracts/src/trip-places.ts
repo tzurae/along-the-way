@@ -1,12 +1,6 @@
 import { isRecord } from "./type-guards";
 import type { PlaceType } from "./trip-skeleton";
 
-export type PreferenceLevel =
-  | "must"
-  | "want"
-  | "optional"
-  | "neutral"
-  | "dislike";
 export type TripPlaceStatus =
   | "ready"
   | "needs-location"
@@ -30,27 +24,10 @@ export interface ProviderPlaceCandidateDto {
   expiresAt: string;
 }
 
-export interface TripPlaceContributionDto {
-  id: string;
+export interface MemberVoteDto {
   memberUserId: string;
   memberEmail: string;
   memberDisplayName: string | null;
-  intakeMethod: IntakeMethod;
-  sourceUrl: string | null;
-  originalNote: string | null;
-  createdAt: string;
-  withdrawnAt: string | null;
-  isOwn: boolean;
-}
-
-export interface MemberPlacePreferenceDto {
-  memberUserId: string;
-  memberEmail: string;
-  memberDisplayName: string | null;
-  level: PreferenceLevel | null;
-  version: number | null;
-  updatedAt: string | null;
-  isOwn: boolean;
 }
 
 export interface DuplicateSuggestionDto {
@@ -87,9 +64,11 @@ export interface TripPlaceDto {
   budgetAmountMinor: number | null;
   budgetCurrency: string | null;
   notes: string | null;
-  preferenceConflict: boolean;
-  contributions: TripPlaceContributionDto[];
-  preferences: MemberPlacePreferenceDto[];
+  sourceUrl: string | null;
+  voters: MemberVoteDto[];
+  voteCount: number;
+  ownVote: boolean;
+  votingAvailable: boolean;
   duplicateSuggestions: DuplicateSuggestionDto[];
   version: number;
 }
@@ -139,6 +118,10 @@ export interface UpdateTripPlacePlanningInput {
   notes?: string | null;
 }
 
+export interface RemoveTripPlaceInput {
+  expectedVersion: number;
+}
+
 export interface TripPlaceDayAssignmentInput {
   tripPlaceId: string;
   tripDayId: string | null;
@@ -149,9 +132,8 @@ export interface UpdateTripPlaceDayAssignmentsInput {
   assignments: TripPlaceDayAssignmentInput[];
 }
 
-export interface UpdateMemberPreferenceInput {
-  level: PreferenceLevel;
-  expectedVersion?: number | null;
+export interface UpdateMemberVoteInput {
+  voted: boolean;
 }
 
 export interface MergeTripPlacesInput {
@@ -204,16 +186,6 @@ function placeType(value: unknown): PlaceType {
   return invalid();
 }
 
-function preferenceLevel(value: unknown): PreferenceLevel {
-  if (
-    value === "must" ||
-    value === "want" ||
-    value === "optional" ||
-    value === "neutral" ||
-    value === "dislike"
-  ) return value;
-  return invalid();
-}
 
 function candidate(value: unknown): ProviderPlaceCandidateDto {
   const row = record(value);
@@ -234,34 +206,12 @@ function candidate(value: unknown): ProviderPlaceCandidateDto {
   };
 }
 
-function contribution(value: unknown): TripPlaceContributionDto {
-  const row = record(value);
-  const intakeMethod = row.intakeMethod;
-  if (intakeMethod !== "google-maps-url" && intakeMethod !== "search" && intakeMethod !== "manual") return invalid();
-  return {
-    id: text(row.id),
-    memberUserId: text(row.memberUserId),
-    memberEmail: text(row.memberEmail),
-    memberDisplayName: nullableText(row.memberDisplayName),
-    intakeMethod,
-    sourceUrl: nullableText(row.sourceUrl),
-    originalNote: nullableText(row.originalNote),
-    createdAt: text(row.createdAt),
-    withdrawnAt: nullableText(row.withdrawnAt),
-    isOwn: boolean(row.isOwn),
-  };
-}
-
-function preference(value: unknown): MemberPlacePreferenceDto {
+export function parseMemberVote(value: unknown): MemberVoteDto {
   const row = record(value);
   return {
     memberUserId: text(row.memberUserId),
     memberEmail: text(row.memberEmail),
     memberDisplayName: nullableText(row.memberDisplayName),
-    level: row.level === null ? null : preferenceLevel(row.level),
-    version: row.version === null ? null : integer(row.version),
-    updatedAt: nullableText(row.updatedAt),
-    isOwn: boolean(row.isOwn),
   };
 }
 
@@ -314,9 +264,16 @@ function tripPlace(value: unknown): TripPlaceDto {
     budgetAmountMinor: nullableInteger(row.budgetAmountMinor),
     budgetCurrency: nullableText(row.budgetCurrency),
     notes: nullableText(row.notes),
-    preferenceConflict: boolean(row.preferenceConflict),
-    contributions: Array.isArray(row.contributions) ? row.contributions.map(contribution) : invalid(),
-    preferences: Array.isArray(row.preferences) ? row.preferences.map(preference) : invalid(),
+    // Stored idempotent replies predate sourceUrl; their contributions were ordered oldest first.
+    sourceUrl: row.sourceUrl === undefined
+      ? Array.isArray(row.contributions) && isRecord(row.contributions[0])
+        ? nullableText(row.contributions[0].sourceUrl ?? null)
+        : null
+      : nullableText(row.sourceUrl),
+    voters: Array.isArray(row.voters) ? row.voters.map(parseMemberVote) : invalid(),
+    voteCount: integer(row.voteCount),
+    ownVote: boolean(row.ownVote),
+    votingAvailable: boolean(row.votingAvailable),
     duplicateSuggestions: Array.isArray(row.duplicateSuggestions)
       ? row.duplicateSuggestions.map(duplicate)
       : invalid(),

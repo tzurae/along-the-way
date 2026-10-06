@@ -4,20 +4,24 @@ import { Bot, Check, ExternalLink, Images, RefreshCw, Search, X } from "lucide-r
 import {
   parseDiscoveryWorkspaceResponse,
   type CandidateProposalDto,
+  type DiscoveryClaimSentenceDto,
   type DiscoveryEndorsement,
+  type DiscoveryFeedbackDto,
+  type DiscoveryQuestionAnswerDto,
   type DiscoveryShortfallDto,
   type DiscoveryWorkspaceDto,
 } from "@along-the-way/contracts/discovery";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
-
 import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
+import { VoteControl } from "./VoteControl";
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
 
 interface DiscoveryWorkspaceProps {
   trip: TripDto;
   request: Request;
+  placesRevision: number;
   onPlacesChanged(): void;
 }
 
@@ -46,7 +50,7 @@ function shouldStartFreshRequest(error: unknown) {
 }
 
 // Where an outcome is reported: next to the control that caused it, or at the top.
-type NoticeArea = "general" | "find" | "again" | "feedback";
+type NoticeArea = "general" | "find" | "again" | "feedback" | "questions";
 
 function missingServices(
   workspace: DiscoveryWorkspaceDto,
@@ -102,22 +106,111 @@ function shortfallText(shortfall: DiscoveryShortfallDto, t: Messages["discovery"
   }
 }
 
+function ClaimSentenceList({
+  sentences,
+  evidence,
+  t,
+}: {
+  sentences: DiscoveryClaimSentenceDto[];
+  evidence: CandidateProposalDto["evidence"];
+  t: Messages["discovery"];
+}) {
+  const numberedEvidence = new Map(
+    evidence.map((item, index) => [item.id, { item, number: index + 1 }]),
+  );
+  return (
+    <ul className="grid list-disc gap-2 pl-5 text-sm">
+      {sentences.map((sentence, sentenceIndex) => {
+        const cited = sentence.evidenceIds.flatMap((id) => {
+          const numbered = numberedEvidence.get(id);
+          return numbered ? [numbered] : [];
+        });
+        return (
+          <li key={`${sentenceIndex}:${sentence.text}`}>
+            <span>{sentence.text}</span>
+            {cited.length ? (
+              <span className="ml-1 inline-flex flex-wrap items-baseline gap-1">
+                {cited.map(({ item, number }) => (
+                  <a
+                    key={item.id}
+                    className="text-xs font-bold text-accent-strong underline"
+                    href={item.sourceUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label={t.proposal.citationLabel(number, item.title)}
+                  >
+                    [{number}]
+                  </a>
+                ))}
+                {cited.some(({ item }) => item.isStale)
+                  ? <span className="text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span>
+                  : null}
+              </span>
+            ) : <span className="ml-2 text-xs text-muted-foreground">{t.proposal.inference}</span>}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
 
-export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: DiscoveryWorkspaceProps) {
+
+interface QuestionDraft {
+  answer: string;
+  skipped: boolean;
+}
+
+interface FeedbackEditDraft {
+  interests: string;
+  exclusions: string;
+  pace: string;
+  budget: string;
+  summary: string;
+}
+
+function resolvedQuestionAnswers(drafts: Record<string, QuestionDraft>): DiscoveryQuestionAnswerDto[] {
+  return Object.entries(drafts).flatMap(([question, draft]): DiscoveryQuestionAnswerDto[] => {
+    if (draft.skipped) return [{ question, answer: null }];
+    const answer = draft.answer.trim();
+    return answer ? [{ question, answer }] : [];
+  });
+}
+
+
+export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChanged }: DiscoveryWorkspaceProps) {
   const { locale, t: { discovery: t } } = useI18n();
   const [workspace, setWorkspace] = useState<DiscoveryWorkspaceDto | null>(null);
   const [briefDraft, setBriefDraft] = useState("");
   const [feedbackDraft, setFeedbackDraft] = useState("");
+  const [questionDrafts, setQuestionDrafts] = useState<Record<string, QuestionDraft>>({});
+  const [editingFeedbackId, setEditingFeedbackId] = useState<string | null>(null);
+  const [feedbackEditDraft, setFeedbackEditDraft] = useState<FeedbackEditDraft | null>(null);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ area: NoticeArea; text: string } | null>(null);
   const retryKeys = useRef<RetryKeys>(new Map());
   const researchLabel = (idle: string) =>
-    pending === "save-brief" ? t.progress.saving : pending === "generate" ? t.progress.researching : idle;
+    pending === "save-brief" || pending === "save-questions"
+      ? t.progress.saving
+      : pending === "generate" ? t.progress.researching : idle;
   const apply = useCallback((value: unknown) => {
     const next = parseDiscoveryWorkspaceResponse(value).discovery;
     setWorkspace(next);
     setBriefDraft(next.brief?.originalText ?? "");
+    const savedAnswers = Object.fromEntries(
+      (next.brief?.questionAnswers ?? []).map((entry) => [entry.question, entry.answer]),
+    );
+    const questions = [
+      ...(next.brief?.questionAnswers.map((entry) => entry.question) ?? []),
+      ...(next.brief?.unresolvedQuestions ?? []),
+    ].filter((question, index, all) => all.indexOf(question) === index);
+    setQuestionDrafts(Object.fromEntries(questions.map((question) => [
+      question,
+      {
+        answer: typeof savedAnswers[question] === "string" ? savedAnswers[question] : "",
+        skipped: savedAnswers[question] === null,
+      },
+    ])));
     return next;
   }, []);
 
@@ -137,19 +230,32 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
     void load();
   }, [load]);
 
+  // Wishlist and member changes made in other tabs only refresh the projection; unsaved brief
+  // and question drafts typed here must survive them.
+  const refreshSignal = `${placesRevision}:${trip.members.length}`;
+  const lastRefreshSignal = useRef(refreshSignal);
+  useEffect(() => {
+    if (lastRefreshSignal.current === refreshSignal) return;
+    lastRefreshSignal.current = refreshSignal;
+    void request(`/api/trips/${trip.id}/discovery`)
+      .then((value) => setWorkspace(parseDiscoveryWorkspaceResponse(value).discovery))
+      .catch((error: unknown) => setNotice({ area: "general", text: errorMessage(error, t.errors.failed) }));
+  }, [refreshSignal, request, t.errors.failed, trip.id]);
+
   async function mutate(
     operation: string,
     path: string,
     payload: unknown,
     area: NoticeArea,
     after?: () => void,
+    method?: "POST" | "PUT",
   ) {
     if (pending) return;
     setPending(operation);
     setNotice(null);
     try {
       const next = apply(await request(path, {
-        method: operation === "save-brief" ? "PUT" : "POST",
+        method: method ?? (operation === "save-brief" || operation === "save-questions" ? "PUT" : "POST"),
         headers: {
           "Content-Type": "application/json",
           "Idempotency-Key": retryKey(retryKeys.current, operation, payload),
@@ -167,8 +273,8 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
     }
   }
 
-  // One action: explain a missing server configuration without sending anything,
-  // otherwise store the current brief text when it changed, then research it.
+  // One action: explain missing server configuration, persist changed brief text or
+  // clarification answers, then research the exact resulting brief version.
   async function research(area: "find" | "again") {
     if (pending || !workspace) return;
     const missing = missingServices(workspace, true, t);
@@ -187,6 +293,18 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
       }, area);
       if (!saved?.brief) return;
       brief = saved.brief;
+    } else {
+      const answers = resolvedQuestionAnswers(questionDrafts);
+      if (JSON.stringify(answers) !== JSON.stringify(brief.questionAnswers)) {
+        const saved = await mutate(
+          "save-questions",
+          `/api/trips/${trip.id}/discovery/brief/questions`,
+          { expectedVersion: brief.version, answers },
+          area,
+        );
+        if (!saved?.brief) return;
+        brief = saved.brief;
+      }
     }
     await mutate("generate", `/api/trips/${trip.id}/discovery/generate`, {
       expectedBriefVersion: brief.version,
@@ -202,30 +320,83 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
       decision === "accept" ? onPlacesChanged : undefined,
     );
   }
+  async function setProposalVote(proposal: CandidateProposalDto, voted: boolean) {
+    await mutate(
+      `vote:${proposal.id}`,
+      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/vote`,
+      { voted },
+      "general",
+      undefined,
+      "PUT",
+    );
+  }
+
 
   async function createFeedback() {
     const text = feedbackDraft.trim();
     if (!text || pending || !workspace) return;
     const missing = missingServices(workspace, false, t);
+    const area: NoticeArea = "feedback";
     if (missing.length > 0) {
       setNotice({
-        area: "feedback",
+        area,
         text: t.errors.feedbackUnavailable(missing.join(t.services.separator)),
       });
       return;
     }
-    await mutate("feedback", `/api/trips/${trip.id}/discovery/feedback`, {
+    const operation = "feedback:overall";
+    await mutate(operation, `/api/trips/${trip.id}/discovery/feedback`, {
       originalText: text,
-      proposalId: null,
-    }, "feedback", () => setFeedbackDraft(""));
+    }, area, () => {
+      setFeedbackDraft("");
+    });
   }
 
-  async function decideFeedback(feedbackId: string, version: number, decision: "confirm" | "reject") {
+  function editFeedback(feedback: DiscoveryFeedbackDto) {
+    setEditingFeedbackId(feedback.id);
+    setFeedbackEditDraft({
+      interests: feedback.interpretation.interests.join("\n"),
+      exclusions: feedback.interpretation.exclusions.join("\n"),
+      pace: feedback.interpretation.pace ?? "",
+      budget: feedback.interpretation.budget ?? "",
+      summary: feedback.interpretation.summary,
+    });
+  }
+
+  async function decideFeedback(feedback: DiscoveryFeedbackDto, decision: "confirm" | "reject") {
+    const edited = editingFeedbackId === feedback.id ? feedbackEditDraft : null;
     await mutate(
-      `feedback-${decision}:${feedbackId}`,
-      `/api/trips/${trip.id}/discovery/feedback/${feedbackId}/decision`,
-      { expectedVersion: version, decision },
+      `feedback-${decision}:${feedback.id}`,
+      `/api/trips/${trip.id}/discovery/feedback/${feedback.id}/decision`,
+      {
+        expectedVersion: feedback.version,
+        decision,
+        ...(decision === "confirm" && edited ? {
+          interpretation: {
+            interests: edited.interests.split("\n").map((entry) => entry.trim()).filter(Boolean),
+            exclusions: edited.exclusions.split("\n").map((entry) => entry.trim()).filter(Boolean),
+            pace: edited.pace.trim() || null,
+            budget: edited.budget.trim() || null,
+            summary: edited.summary,
+          },
+        } : {}),
+      },
       "general",
+      () => {
+        setEditingFeedbackId(null);
+        setFeedbackEditDraft(null);
+      },
+    );
+  }
+
+  async function saveQuestionAnswers() {
+    if (!workspace?.brief) return;
+    const answers = resolvedQuestionAnswers(questionDrafts);
+    await mutate(
+      "save-questions",
+      `/api/trips/${trip.id}/discovery/brief/questions`,
+      { expectedVersion: workspace.brief.version, answers },
+      "questions",
     );
   }
 
@@ -273,7 +444,49 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
                 <div><dt className="font-bold">{t.brief.budget}</dt><dd>{workspace.brief.structured.budget ?? t.brief.unknown}</dd></div>
                 <div className="sm:col-span-2"><dt className="font-bold">{t.brief.avoid}</dt><dd>{workspace.brief.structured.exclusions.join("、") || t.brief.nothingConfirmed}</dd></div>
               </dl>
-              {workspace.brief.unresolvedQuestions.length ? <div className="mt-4"><strong>{t.brief.questions}</strong><ul className="mt-1 list-disc pl-5">{workspace.brief.unresolvedQuestions.map((question) => <li key={question}>{question}</li>)}</ul></div> : null}
+              {Object.keys(questionDrafts).length ? (
+                <div className="mt-4">
+                  <strong>{t.brief.questions}</strong>
+                  <ul className="mt-2 grid gap-3">
+                    {Object.entries(questionDrafts).map(([question, draft]) => (
+                      <li key={question} className="rounded-xl bg-surface-subtle p-3">
+                        <label className="grid gap-2 font-bold">
+                          {question}
+                          <input
+                            className="min-h-10 rounded-lg border bg-surface px-3 font-normal"
+                            value={draft.answer}
+                            disabled={draft.skipped}
+                            onChange={(event) => setQuestionDrafts((drafts) => ({
+                              ...drafts,
+                              [question]: { answer: event.target.value, skipped: false },
+                            }))}
+                            placeholder={t.brief.answerPlaceholder}
+                          />
+                        </label>
+                        <button
+                          className="mt-2 min-h-10 rounded-lg border px-3 font-bold"
+                          type="button"
+                          onClick={() => setQuestionDrafts((drafts) => ({
+                            ...drafts,
+                            [question]: { answer: "", skipped: !draft.skipped },
+                          }))}
+                        >
+                          {draft.skipped ? t.brief.answerInstead : t.brief.skipQuestion}
+                        </button>
+                        {draft.skipped ? <span className="ml-2 text-sm font-bold text-muted-foreground">{t.brief.skippedUnknown}</span> : null}
+                      </li>
+                    ))}
+                  </ul>
+                  <button
+                    className="mt-3 min-h-11 rounded-xl border px-4 font-bold"
+                    disabled={pending !== null || !Object.values(questionDrafts).some((draft) => draft.skipped || draft.answer.trim())}
+                    onClick={() => void saveQuestionAnswers()}
+                  >
+                    {pending === "save-questions" ? t.progress.saving : t.brief.saveAnswers}
+                  </button>
+                  {notice?.area === "questions" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
+                </div>
+              ) : null}
             </section>
           ) : null}
 
@@ -297,10 +510,46 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
                   <article key={proposal.id} className="grid content-start gap-4 rounded-panel border border-ink/10 bg-surface-subtle p-4" aria-label={t.proposal.ariaLabel(proposal.name)}>
                     <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{proposal.category ?? t.placeType[proposal.type]}・{t.proposal.confidence(t.confidence[proposal.confidence])}</p><h4 className="font-display text-2xl">{proposal.name}</h4><p className="text-sm text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</p></div><span className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{t.status[proposal.status]}</span></div>
                     {proposal.endorsements.length ? <div aria-label={t.proposal.recommendedByFor(proposal.name)}><strong>{t.proposal.recommendedBy}</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabel(endorsement, t)}</li>)}</ul></div> : null}
-                    <p>{proposal.recommendation}</p>
+                    {proposal.recommendationSentences !== null
+                      ? <ClaimSentenceList sentences={proposal.recommendationSentences} evidence={proposal.evidence} t={t} />
+                      : <p>{proposal.recommendation}</p>}
                     <a className="inline-flex min-h-10 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(proposal.name, proposal.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.proposal.viewPhotos}</a>
-                    <div className="grid gap-3 sm:grid-cols-3"><div><strong>{t.proposal.matches}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.matchedNeeds.map((item) => <li key={item}>{item}</li>)}</ul></div><div><strong>{t.proposal.tradeoffs}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul></div><div><strong>{t.proposal.unknowns}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.unknowns.map((item) => <li key={item}>{item}</li>)}</ul></div></div>
-                    <div><strong>{t.proposal.evidence}</strong><ul className="mt-1 grid gap-1">{proposal.evidence.map((item) => <li key={item.id}><a className="inline-flex items-center gap-1 break-all font-bold text-accent-strong underline" href={item.sourceUrl} target="_blank" rel="noreferrer">{item.title}<ExternalLink aria-hidden="true" className="size-3" /></a><span className="ml-2 text-xs text-muted-foreground">{item.attribution}・{t.proposal.observedAt(new Date(item.observedAt).toLocaleString(locale))}</span></li>)}</ul></div>
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <div><strong>{t.proposal.matches}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.matchedNeeds.map((item) => <li key={item}>{item}</li>)}</ul></div>
+                      <div>
+                        <strong>{t.proposal.tradeoffs}</strong>
+                        {proposal.tradeoffSentences !== null
+                          ? <ClaimSentenceList sentences={proposal.tradeoffSentences} evidence={proposal.evidence} t={t} />
+                          : <ul className="mt-1 list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul>}
+                      </div>
+                      <div><strong>{t.proposal.unknowns}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.unknowns.map((item) => <li key={item}>{item}</li>)}</ul></div>
+                    </div>
+                    <div>
+                      <strong>{t.proposal.evidence}</strong>
+                      <ul className="mt-1 grid gap-1">
+                        {proposal.evidence.map((item, evidenceIndex) => {
+                          const number = evidenceIndex + 1;
+                          return (
+                            <li key={item.id}>
+                              <a
+                                className="inline-flex items-center gap-1 break-all font-bold text-accent-strong underline"
+                                href={item.sourceUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                aria-label={t.proposal.citationLabel(number, item.title)}
+                              >
+                                [{number}] {item.title}<ExternalLink aria-hidden="true" className="size-3" />
+                              </a>
+                              <span className="ml-2 text-xs text-muted-foreground">{item.attribution}・{t.proposal.observedAt(new Date(item.observedAt).toLocaleString(locale))}</span>
+                              {item.isStale ? <span className="ml-2 text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span> : null}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                    {proposal.status === "pending" ? (
+                      <VoteControl name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable={proposal.votingAvailable} disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} />
+                    ) : null}
                     {proposal.status === "pending" ? <div className="flex flex-wrap gap-2"><button className="flex min-h-10 items-center gap-2 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "accept")}><Check aria-hidden="true" className="size-4" />{t.proposal.accept}</button><button className="flex min-h-10 items-center gap-2 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "reject")}><X aria-hidden="true" className="size-4" />{t.proposal.decline}</button></div> : null}
                   </article>
                 ))}
@@ -327,9 +576,46 @@ export function DiscoveryWorkspace({ trip, request, onPlacesChanged }: Discovery
           <section className="rounded-panel bg-surface-subtle p-4" aria-label={t.feedback.areaLabel}>
             <h3 className="font-display text-2xl">{t.feedback.title}</h3>
             <label className="mt-3 grid gap-2 font-bold">{t.feedback.label}<textarea className="min-h-24 rounded-xl border bg-surface p-3 font-normal" value={feedbackDraft} onChange={(event) => setFeedbackDraft(event.target.value)} placeholder={t.feedback.placeholder} /></label>
-            <button className="mt-3 min-h-11 rounded-xl border px-4 font-bold" disabled={pending !== null || !feedbackDraft.trim()} onClick={() => void createFeedback()}>{pending === "feedback" ? t.feedback.interpreting : t.feedback.interpret}</button>
+            <button className="mt-3 min-h-11 rounded-xl border px-4 font-bold" disabled={pending !== null || !feedbackDraft.trim()} onClick={() => void createFeedback()}>{pending === "feedback:overall" ? t.feedback.interpreting : t.feedback.interpret}</button>
             {notice?.area === "feedback" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
-            <div className="mt-4 grid gap-3">{workspace?.feedback.map((feedback) => <article key={feedback.id} className="rounded-xl bg-surface p-3"><p className="whitespace-pre-wrap">「{feedback.originalText}」</p><p className="mt-2"><strong>{t.feedback.interpretation}</strong> {feedback.interpretation.summary}</p><p className="mt-1 text-sm text-muted-foreground">{t.feedback.interests}：{feedback.interpretation.interests.join("、") || t.feedback.none}・{t.feedback.avoid}：{feedback.interpretation.exclusions.join("、") || t.feedback.none}・{t.feedback.pace}：{feedback.interpretation.pace ?? t.feedback.unchanged}・{t.feedback.budget}：{feedback.interpretation.budget ?? t.feedback.unchanged}</p>{feedback.status === "pending" ? <div className="mt-3 flex gap-2"><button className="min-h-10 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null} onClick={() => void decideFeedback(feedback.id, feedback.version, "confirm")}>{t.feedback.confirm}</button><button className="min-h-10 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideFeedback(feedback.id, feedback.version, "reject")}>{t.feedback.reject}</button></div> : <span className="mt-2 inline-block text-sm font-bold">{t.feedbackStatus[feedback.status]}</span>}</article>)}</div>
+            <div className="mt-4 grid gap-3">
+              {workspace?.feedback.map((feedback) => {
+                const edit = feedback.status === "pending" && feedback.isOwn && editingFeedbackId === feedback.id
+                  ? feedbackEditDraft
+                  : null;
+                return (
+                  <article key={feedback.id} className="rounded-xl bg-surface p-3">
+                    {feedback.proposalName ? <p className="text-sm font-bold text-accent-strong">{t.feedback.target(feedback.proposalName)}</p> : <p className="text-sm font-bold text-muted-foreground">{t.feedback.overallTarget}</p>}
+                    <p className="whitespace-pre-wrap">「{feedback.originalText}」</p>
+                    {edit ? (
+                      <div className="mt-3 grid gap-3 rounded-xl border p-3">
+                        <label className="grid gap-1 font-bold">{t.feedback.summary}<textarea className="min-h-20 rounded-lg border p-2 font-normal" value={edit.summary} onChange={(event) => setFeedbackEditDraft({ ...edit, summary: event.target.value })} /></label>
+                        <label className="grid gap-1 font-bold">{t.feedback.interests}<textarea className="min-h-20 rounded-lg border p-2 font-normal" value={edit.interests} onChange={(event) => setFeedbackEditDraft({ ...edit, interests: event.target.value })} placeholder={t.feedback.onePerLine} /></label>
+                        <label className="grid gap-1 font-bold">{t.feedback.avoid}<textarea className="min-h-20 rounded-lg border p-2 font-normal" value={edit.exclusions} onChange={(event) => setFeedbackEditDraft({ ...edit, exclusions: event.target.value })} placeholder={t.feedback.onePerLine} /></label>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <label className="grid gap-1 font-bold">{t.feedback.pace}<input className="min-h-10 rounded-lg border px-2 font-normal" value={edit.pace} onChange={(event) => setFeedbackEditDraft({ ...edit, pace: event.target.value })} /></label>
+                          <label className="grid gap-1 font-bold">{t.feedback.budget}<input className="min-h-10 rounded-lg border px-2 font-normal" value={edit.budget} onChange={(event) => setFeedbackEditDraft({ ...edit, budget: event.target.value })} /></label>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <p className="mt-2"><strong>{t.feedback.interpretation}</strong> {feedback.interpretation.summary}{feedback.interpretationEdited ? <span className="ml-2 rounded-full border px-2 py-1 text-xs font-bold">{t.feedback.edited}</span> : null}</p>
+                        <p className="mt-1 text-sm text-muted-foreground">{t.feedback.interests}：{feedback.interpretation.interests.join("、") || t.feedback.none}・{t.feedback.avoid}：{feedback.interpretation.exclusions.join("、") || t.feedback.none}・{t.feedback.pace}：{feedback.interpretation.pace ?? t.feedback.unchanged}・{t.feedback.budget}：{feedback.interpretation.budget ?? t.feedback.unchanged}</p>
+                      </>
+                    )}
+                    {feedback.status === "pending" && feedback.isOwn ? (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button className="min-h-10 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null || Boolean(edit && !edit.summary.trim())} onClick={() => void decideFeedback(feedback, "confirm")}>{edit ? t.feedback.confirmEdited : t.feedback.confirm}</button>
+                        {edit
+                          ? <button className="min-h-10 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => { setEditingFeedbackId(null); setFeedbackEditDraft(null); }}>{t.feedback.cancelEdit}</button>
+                          : <button className="min-h-10 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => editFeedback(feedback)}>{t.feedback.edit}</button>}
+                        <button className="min-h-10 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideFeedback(feedback, "reject")}>{t.feedback.reject}</button>
+                      </div>
+                    ) : <span className="mt-2 inline-block text-sm font-bold">{t.feedbackStatus[feedback.status]}</span>}
+                  </article>
+                );
+              })}
+            </div>
           </section>
         </div>
       ) : null}
