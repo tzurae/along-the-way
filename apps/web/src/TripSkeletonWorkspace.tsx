@@ -1,5 +1,4 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { Temporal } from "@js-temporal/polyfill";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import {
@@ -21,7 +20,7 @@ import {
   type UpdatePlaceInput,
   type ZonedEndpointDto,
 } from "@along-the-way/contracts/trip-skeleton";
-import { CalendarDays, Clock3, Lock, MapPin, Plane, Trash2, Unlock } from "lucide-react";
+import { CalendarDays, Lock, MapPin, Plane, Trash2, Unlock } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -37,10 +36,13 @@ import { ItineraryItemDialog } from "./ItineraryItemDialog";
 import { PlaceDialog } from "./PlaceDialog";
 import { TripPlanDialog } from "./TripPlanDialog";
 import { useI18n, type Messages } from "./i18n";
+import { ApiRequestError } from "./api-error";
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
 }
+
+type CreateAttempt = { input: string; key: string; version: number };
 
 type JsonRequest = <T>(url: string, options?: RequestOptions) => Promise<T>;
 
@@ -50,7 +52,6 @@ interface TripSkeletonWorkspaceProps {
   onTripChanged(): Promise<void>;
   placesRevision: number;
   onPlacesChanged(): void;
-  recentChangesContainer: HTMLElement | null;
   onTravelEdit(type: "flight" | "lodging"): void;
 }
 
@@ -265,7 +266,6 @@ export function TripSkeletonWorkspace({
   onTripChanged,
   placesRevision,
   onPlacesChanged,
-  recentChangesContainer,
   onTravelEdit,
 }: TripSkeletonWorkspaceProps) {
   const { t, locale } = useI18n();
@@ -276,9 +276,20 @@ export function TripSkeletonWorkspace({
   const [unlockingItem, setUnlockingItem] = useState<ItineraryItemDto | null>(null);
   const [planningDay, setPlanningDay] = useState<PlannedDay | null>(null);
   const [planningTrip, setPlanningTrip] = useState(false);
-  const placeCreateKey = useRef<string | null>(null);
-  const itemCreateKey = useRef<string | null>(null);
+  const placeCreateAttempt = useRef<CreateAttempt | null>(null);
+  const itemCreateAttempt = useRef<CreateAttempt | null>(null);
   const actionKeys = useRef(new Map<string, string>());
+  const editorOpen = useRef(false);
+  const latestSkeleton = useRef<TripSkeletonDto | null>(null);
+  const editingChanged = useCallback((open: boolean) => {
+    editorOpen.current = open;
+    if (!open && latestSkeleton.current) setSkeleton(latestSkeleton.current);
+  }, []);
+  async function readForConflict() {
+    const latest = parseTripSkeletonResponse(await request(`/api/trips/${trip.id}/skeleton`)).skeleton;
+    latestSkeleton.current = latest;
+    return latest;
+  }
 
   function actionKey(identity: string) {
     const existing = actionKeys.current.get(identity);
@@ -300,7 +311,9 @@ export function TripSkeletonWorkspace({
           { parse: parseTripPlaceListResponse },
         ),
       ]);
-      setSkeleton(skeletonResponse.skeleton);
+      latestSkeleton.current = skeletonResponse.skeleton;
+      // Keep an open editor mounted if another member moves, locks or deletes its row.
+      if (!editorOpen.current) setSkeleton(skeletonResponse.skeleton);
       setTripPlaces(tripPlaceResponse.tripPlaces);
       setError("");
     } catch (reason) {
@@ -335,10 +348,14 @@ export function TripSkeletonWorkspace({
     [skeleton?.items],
   );
 
-  async function savePlace(input: CreatePlaceInput | UpdatePlaceInput, place?: PlaceDto) {
+  async function savePlace(input: CreatePlaceInput | UpdatePlaceInput, place?: PlaceDto, conflictBase?: number) {
     if (!skeleton) throw new Error(t.tripSkeleton.loadingError);
+    const serializedInput = JSON.stringify(input);
+    if (!place && placeCreateAttempt.current?.input !== serializedInput) {
+      placeCreateAttempt.current = { input: serializedInput, key: crypto.randomUUID(), version: Math.max(trip.version, (latestSkeleton.current ?? skeleton).tripVersion) };
+    }
     const updateIdentity = place
-      ? `update-place:${place.id}:${(input as UpdatePlaceInput).expectedVersion}`
+      ? `update-place:${place.id}:${serializedInput}`
       : null;
     await request(
       place ? `/api/trips/${trip.id}/places/${place.id}` : `/api/trips/${trip.id}/places`,
@@ -347,17 +364,24 @@ export function TripSkeletonWorkspace({
         headers: {
           "Idempotency-Key": updateIdentity
             ? actionKey(updateIdentity)
-            : placeCreateKey.current ??= crypto.randomUUID(),
+            : placeCreateAttempt.current!.key,
+          ...(conflictBase ? { "Conflict-Base-Version": String(conflictBase) } : {}),
         },
-        body: JSON.stringify(place ? input : { ...input, expectedTripVersion: skeleton.tripVersion }),
+        body: JSON.stringify(place ? input : { ...input, expectedTripVersion: placeCreateAttempt.current!.version }),
         parse: parsePlaceResponse,
       },
-    );
+    ).catch(async (reason: unknown) => {
+      if (!place && reason instanceof ApiRequestError && reason.code === "conflict" && reason.currentVersion !== undefined) {
+        placeCreateAttempt.current = null;
+        await readForConflict();
+      }
+      throw reason;
+    });
     if (updateIdentity) actionKeys.current.delete(updateIdentity);
     await load();
     onPlacesChanged();
     if (!place) {
-      placeCreateKey.current = null;
+      placeCreateAttempt.current = null;
       await onTripChanged();
     }
   }
@@ -382,10 +406,14 @@ export function TripSkeletonWorkspace({
     }
   }
 
-  async function saveItem(input: CreateItineraryItemInput | UpdateItineraryItemInput, item?: ItineraryItemDto) {
+  async function saveItem(input: CreateItineraryItemInput | UpdateItineraryItemInput, item?: ItineraryItemDto, conflictBase?: number) {
     if (!skeleton) throw new Error(t.tripSkeleton.loadingError);
+    const serializedInput = JSON.stringify(input);
+    if (!item && itemCreateAttempt.current?.input !== serializedInput) {
+      itemCreateAttempt.current = { input: serializedInput, key: crypto.randomUUID(), version: Math.max(trip.version, (latestSkeleton.current ?? skeleton).tripVersion) };
+    }
     const updateIdentity = item
-      ? `update-item:${item.id}:${(input as UpdateItineraryItemInput).expectedVersion}`
+      ? `update-item:${item.id}:${serializedInput}`
       : null;
     await request(
       item ? `/api/trips/${trip.id}/items/${item.id}` : `/api/trips/${trip.id}/items`,
@@ -394,17 +422,24 @@ export function TripSkeletonWorkspace({
         headers: {
           "Idempotency-Key": updateIdentity
             ? actionKey(updateIdentity)
-            : itemCreateKey.current ??= crypto.randomUUID(),
+            : itemCreateAttempt.current!.key,
+          ...(conflictBase ? { "Conflict-Base-Version": String(conflictBase) } : {}),
         },
-        body: JSON.stringify(item ? input : { ...input, expectedTripVersion: skeleton.tripVersion }),
+        body: JSON.stringify(item ? input : { ...input, expectedTripVersion: itemCreateAttempt.current!.version }),
         parse: parseItineraryItemResponse,
       },
-    );
+    ).catch(async (reason: unknown) => {
+      if (!item && reason instanceof ApiRequestError && reason.code === "conflict" && reason.currentVersion !== undefined) {
+        itemCreateAttempt.current = null;
+        await readForConflict();
+      }
+      throw reason;
+    });
     if (updateIdentity) actionKeys.current.delete(updateIdentity);
     await load();
     onPlacesChanged();
     if (!item) {
-      itemCreateKey.current = null;
+      itemCreateAttempt.current = null;
       await onTripChanged();
     }
   }
@@ -550,7 +585,9 @@ export function TripSkeletonWorkspace({
                     <Button size="sm" variant="outline" onClick={() => onTravelEdit(item.type as "flight" | "lodging")}>
                       {item.type === "flight" ? t.travel.editInOverview : t.travel.editInLodging}
                     </Button>
-                  ) : <ItineraryItemDialog countryStops={trip.countryStops} members={trip.members} places={skeleton?.places ?? []} item={item} save={(input) => saveItem(input, item)} />}
+                  ) : <ItineraryItemDialog countryStops={trip.countryStops} members={trip.members} places={skeleton?.places ?? []} item={item} editingChanged={editingChanged}
+                    load={async () => (await readForConflict()).items.find((entry) => entry.id === item.id) ?? null}
+                    save={(input, conflictBase) => saveItem(input, item, conflictBase)} />}
                   <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => void itemAction(item, "lock")}><Lock /> {t.tripSkeleton.lock}</Button>
                   <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => void itemAction(item, "delete")}><Trash2 /> {t.tripSkeleton.delete}</Button>
                 </>
@@ -572,12 +609,7 @@ export function TripSkeletonWorkspace({
 
   if (!skeleton) {
     const status = <section className="trip-skeleton-shell"><p role={error ? "alert" : "status"}>{error || t.tripSkeleton.loadingItinerary}</p></section>;
-    return (
-      <>
-        {status}
-        {recentChangesContainer ? createPortal(status, recentChangesContainer) : null}
-      </>
-    );
+    return status;
   }
 
   const tripInformationItems = skeleton.tripInformationItemIds
@@ -633,22 +665,6 @@ export function TripSkeletonWorkspace({
     (constraint) => constraint.status !== "confirmed",
   );
 
-  // Keep one skeleton request/state owner while placing its live event list in the sibling tab panel.
-  const recentChanges = (
-    <section className="trip-skeleton-shell" aria-labelledby="activity-heading">
-      <h3 id="activity-heading" className="section-heading"><Clock3 /> {t.tripSkeleton.recentChanges}</h3>
-      {skeleton.events.length === 0 ? <p className="empty-state">{t.tripSkeleton.noRecentChanges}</p> : (
-        <ol className="activity-list">
-          {skeleton.events.map((event) => (
-            <li key={event.id}>
-              <p className="font-semibold">{t.tripSkeleton.events[event.eventType] ?? event.summary}</p>
-              <p className="text-xs text-muted-foreground">{new Date(event.createdAt).toLocaleString(locale)}</p>
-            </li>
-          ))}
-        </ol>
-      )}
-    </section>
-  );
 
   return (
     <>
@@ -660,8 +676,8 @@ export function TripSkeletonWorkspace({
           <p className="mt-2 max-w-3xl text-muted-foreground">{t.tripSkeleton.introduction}</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <PlaceDialog save={(input) => savePlace(input)} />
-          <ItineraryItemDialog countryStops={trip.countryStops} members={trip.members} places={skeleton.places} save={(input) => saveItem(input)} />
+          <PlaceDialog editingChanged={editingChanged} save={(input) => savePlace(input)} />
+          <ItineraryItemDialog editingChanged={editingChanged} countryStops={trip.countryStops} members={trip.members} places={skeleton.places} save={(input) => saveItem(input)} />
         </div>
       </div>
 
@@ -688,7 +704,9 @@ export function TripSkeletonWorkspace({
                       <Lock className="size-4" /> {t.tripSkeleton.lockedPlace}
                     </p>
                   ) : (
-                    <PlaceDialog place={place} save={(input) => savePlace(input, place)} />
+                    <PlaceDialog place={place} editingChanged={editingChanged}
+                      load={async () => (await readForConflict()).places.find((entry) => entry.id === place.id) ?? null}
+                      save={(input, conflictBase) => savePlace(input, place, conflictBase)} />
                   )}
                   <Button
                     size="sm"
@@ -921,7 +939,6 @@ export function TripSkeletonWorkspace({
         }}
       />
       </section>
-      {recentChangesContainer ? createPortal(recentChanges, recentChangesContainer) : null}
     </>
   );
 }

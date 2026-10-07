@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { streamSSE } from "hono/streaming";
+import type { PostgresCollaborationModule } from "./private-trips/postgres-collaboration-module";
+import { conflictResolutionContext } from "./private-trips/postgres-private-trip-store";
 import type {
   ConstraintInput,
   CreateItineraryItemInput,
@@ -42,6 +45,7 @@ const SESSION_COOKIE = "along_the_way_session";
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
 interface AppDependencies {
+  collaboration: PostgresCollaborationModule;
   dayPlans: DayPlanModule;
   discovery: DiscoveryModule;
   identityAccess: IdentityAccessModule;
@@ -317,6 +321,7 @@ async function jsonBody(context: Context) {
 }
 
 export function createApp({
+  collaboration,
   dayPlans,
   discovery,
   identityAccess,
@@ -355,12 +360,16 @@ export function createApp({
 
   app.use("/api/*", async (context, next) => {
     if (!["GET", "HEAD", "OPTIONS"].includes(context.req.method)) {
+      const baseVersion = context.req.header("Conflict-Base-Version");
+      if (baseVersion !== undefined && (!/^[1-9][0-9]*$/.test(baseVersion) || !Number.isSafeInteger(Number(baseVersion)) || Number(baseVersion) > 2_147_483_647)) {
+        throw new AppError("validation_error", "Conflict-Base-Version must be a positive integer");
+      }
       const origin = context.req.header("Origin");
       if (origin !== expectedOrigin) {
         throw new AppError("forbidden", "Same-origin mutation required", 403);
       }
     }
-    await next();
+    await conflictResolutionContext.run(context.req.header("Conflict-Base-Version"), next);
   });
 
   app.get("/health", (context) => context.json({ status: "ok" }));
@@ -471,6 +480,60 @@ export function createApp({
     const { user } = await authenticated(context);
     const trip = await tripWorkspace.getTrip(user.id, uuidParam(context, "tripId"));
     return context.json({ trip });
+  });
+
+  app.get("/api/trips/:tripId/version", async (context) => {
+    const { user } = await authenticated(context);
+    context.header("Cache-Control", "no-store");
+    return context.json(await collaboration.version(user.id, uuidParam(context, "tripId")));
+  });
+
+  app.get("/api/trips/:tripId/history", async (context) => {
+    const { user } = await authenticated(context);
+    context.header("Cache-Control", "no-store");
+    return context.json(await collaboration.history(
+      user.id, uuidParam(context, "tripId"), context.req.query("before") ?? null,
+      Number(context.req.query("limit") ?? 30),
+    ));
+  });
+
+  app.get("/api/trips/:tripId/events", async (context) => {
+    const { user, token } = await authenticated(context);
+    const tripId = uuidParam(context, "tripId");
+    const cursor = context.req.header("Last-Event-ID") ?? context.req.query("after") ?? null;
+    let order = await collaboration.cursor(user.id, tripId, cursor);
+    context.header("Cache-Control", "no-store");
+    context.header("X-Accel-Buffering", "no");
+    return streamSSE(context, async (stream) => {
+      async function authorized() {
+        if (!await identityAccess.authenticate(token)) throw new AppError("unauthenticated", "Sign in to continue", 401);
+        await collaboration.authorize(user.id, tripId);
+      }
+      try {
+        await authorized();
+        await stream.write(": connected\n\n");
+        let heartbeatAt = Date.now();
+        while (!stream.aborted && !context.req.raw.signal.aborted) {
+          await authorized();
+          const events = await collaboration.after(user.id, tripId, order);
+          for (const event of events) {
+            await authorized();
+            await stream.writeSSE({ id: event.notification.id, event: "change", data: JSON.stringify(event.notification) });
+            order = event.order;
+          }
+          if (Date.now() - heartbeatAt >= 15_000) {
+            await authorized();
+            await stream.write(": heartbeat\n\n");
+            heartbeatAt = Date.now();
+          }
+          if (events.length < 100) await stream.sleep(1_000);
+        }
+      } catch (error) {
+        if (!(error instanceof AppError) && !stream.aborted) {
+          console.error(JSON.stringify({ event: "trip_stream_failed", tripId, actorId: user.id, correlationId: randomUUID() }));
+        }
+      }
+    });
   });
 
   app.get("/api/trips/:tripId/skeleton", async (context) => {
@@ -729,6 +792,7 @@ export function createApp({
             return {
               tripDayId: stringField(day, "tripDayId"),
               orderedTripPlaceIds: stringArrayField(day, "orderedTripPlaceIds"),
+              expectedVersion: numberField(day, "expectedVersion"),
             };
           }),
         },
@@ -753,6 +817,12 @@ export function createApp({
     },
   );
 
+  app.get("/api/trips/:tripId/days/:dayId/window", async (context) => {
+    const { user } = await authenticated(context);
+    context.header("Cache-Control", "no-store");
+    return context.json({ window: await dayPlans.getWindow(user.id, uuidParam(context, "tripId"), uuidParam(context, "dayId")) });
+  });
+
   app.put(
     "/api/trips/:tripId/days/:dayId/window",
     async (context) => {
@@ -764,7 +834,7 @@ export function createApp({
         uuidParam(context, "tripId"),
         uuidParam(context, "dayId"),
         idempotencyKey(context),
-        { startMinute: numberField(body, "startMinute"), endMinute: numberField(body, "endMinute") },
+        { startMinute: numberField(body, "startMinute"), endMinute: numberField(body, "endMinute"), expectedVersion: numberField(body, "expectedVersion") },
       );
       return context.json({ window });
     },
@@ -782,6 +852,7 @@ export function createApp({
         uuidParam(context, "dayId"),
         idempotencyKey(context),
         {
+          expectedVersion: numberField(body, "expectedVersion"),
           orderedTripPlaceIds: arrayField(body, "orderedTripPlaceIds").map((value) =>
             typeof value === "string" ? value : "",
           ),
@@ -1113,10 +1184,23 @@ export function createApp({
     return context.body(null, 204);
   });
 
-  app.onError((error, context) => {
+  app.onError(async (error, context) => {
     if (error instanceof AppError) {
       if (error.retryAfterSeconds) {
         context.header("Retry-After", String(error.retryAfterSeconds));
+      }
+      let latestChange;
+      if (error.code === "conflict" && error.currentVersion !== undefined && context.req.param("tripId")) {
+        const user = await identityAccess.authenticate(getCookie(context, SESSION_COOKIE) ?? "");
+        if (!user) return context.json({ error: { code: "unauthenticated", message: "Sign in to continue" } }, 401);
+        const targetIds = ["constraintId", "itemId", "placeId", "tripPlaceId", "proposalId", "feedbackId", "dayId"]
+          .map((name) => context.req.param(name)).filter((id): id is string => Boolean(id));
+        try {
+          latestChange = await collaboration.latestChange(user.id, context.req.param("tripId")!, error.conflictTargetId ? [error.conflictTargetId] : targetIds.length ? targetIds : [context.req.param("tripId")!]);
+        } catch (reason) {
+          if (reason instanceof AppError) return context.json({ error: { code: reason.code, message: reason.message } }, reason.status);
+          throw reason;
+        }
       }
       return context.json(
         {
@@ -1126,6 +1210,7 @@ export function createApp({
             ...(error.currentVersion === undefined
               ? {}
               : { currentVersion: error.currentVersion }),
+            ...(latestChange === undefined ? {} : { latestChange }),
           },
         },
         error.status,
@@ -1136,8 +1221,7 @@ export function createApp({
       JSON.stringify({
         event: "request_failed",
         correlationId,
-        method: context.req.method,
-        path: new URL(context.req.url).pathname,
+        result: "failed",
       }),
     );
     return context.json(

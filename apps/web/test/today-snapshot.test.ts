@@ -47,13 +47,13 @@ describe("account-scoped read-only Today snapshots", () => {
   });
   it("persists only the allowlisted Today read model, not private API metadata or drafts", () => {
     const trip: TripDto = { id: "trip", name: "Trip", startDate: "2026-10-21", endDate: "2026-10-21", defaultCurrency: "JPY", countryStops: [{ id: "stop", countryCode: "JP", position: 0, timeZone: "Asia/Tokyo" }], days: [{ id: "day", date: "2026-10-21", title: null }], members: [{ id: "member", userId: "account", email: "private@example.test", displayName: "甲", role: "owner" }], invites: [{ id: "invite", email: "invite@example.test", role: "editor", status: "pending", expiresAt: "2026-12-01" }], memberCount: 1, dayCount: 1, role: "owner", version: 7 };
-    const skeleton: TripSkeletonDto = { tripVersion: 7, places: [], days: [{ id: "day", date: "2026-10-21", entries: [] }], items: [], tripInformationItemIds: [], events: [{ id: "event", actorId: "account", eventType: "created", targetType: "trip", targetId: "trip", summary: "private history", createdAt: "2026-10-21T01:00Z" }] };
+    const skeleton: TripSkeletonDto = { tripVersion: 7, places: [], days: [{ id: "day", date: "2026-10-21", entries: [] }], items: [], tripInformationItemIds: [] };
     const enriched = Object.assign(skeleton, { draft: "unaccepted suggestion", token: "session secret", providerKey: "key", healthNotes: "private health" });
     const readModel = createTodayModel(trip, enriched, [], "account");
     const store = new TodaySnapshotStore(localStorage);
     store.save("account", readModel);
     const raw = localStorage.getItem(key)!;
-    for (const forbidden of ["private@example", "invite@example", "private history", "draft", "token", "providerKey", "healthNotes", "unsaved", "members", "invites"]) expect(raw).not.toContain(forbidden);
+    for (const forbidden of ["private@example", "invite@example", "draft", "token", "providerKey", "healthNotes", "unsaved", "members", "invites"]) expect(raw).not.toContain(forbidden);
     expect(JSON.parse(raw).model.days[0].timeZone).toBe("Asia/Tokyo");
     expect(store.save("account", Object.assign({}, readModel, { token: "not allowed" }))).toBeNull();
   });

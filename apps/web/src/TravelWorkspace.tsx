@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { countryStopLabel } from "./country-stop-label";
 import { emptyFlight, FlightFields, flightComplete } from "./FlightFields";
 import { useI18n } from "./i18n";
+import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./ConflictPanel";
 
 interface TravelWorkspaceProps {
   trip: TripDto;
@@ -16,6 +17,26 @@ interface TravelWorkspaceProps {
   request<T>(url: string, options?: RequestInit & { parse?: (value: unknown) => unknown }): Promise<T>;
   revision: number;
   onChanged(): Promise<void>;
+}
+
+function travelValues(item: ItineraryItemDto, skeleton: TripSkeletonDto): TripFlightInput | TripLodgingInput {
+  const start = item.endpoints.find((endpoint) => endpoint.role === "start")!;
+  const end = item.endpoints.find((endpoint) => endpoint.role === "end")!;
+  const startPlace = skeleton.places.find((place) => place.id === start.placeId)!;
+  const endPlace = skeleton.places.find((place) => place.id === end.placeId)!;
+  if (item.type === "flight") return {
+    serviceNumber: item.details.serviceNumber, carrier: item.details.carrier,
+    departureAirport: { name: startPlace.name, timeZone: start.timeZone },
+    arrivalAirport: { name: endPlace.name, timeZone: end.timeZone },
+    departureLocalDateTime: start.localDateTime, arrivalLocalDateTime: end.localDateTime,
+    departureUtcOffset: start.utcOffset, arrivalUtcOffset: end.utcOffset,
+  };
+  return {
+    hotel: { name: startPlace.name, timeZone: start.timeZone, address: startPlace.address, latitude: startPlace.latitude, longitude: startPlace.longitude, sourceUrl: startPlace.sourceUrl },
+    countryStopId: start.countryStopId!,
+    checkInLocalDateTime: start.localDateTime, checkOutLocalDateTime: end.localDateTime,
+    checkInUtcOffset: start.utcOffset, checkOutUtcOffset: end.utcOffset,
+  };
 }
 
 function TravelEditor({ trip, type, item, skeleton, request, saved, close }: TravelWorkspaceProps & {
@@ -50,7 +71,10 @@ function TravelEditor({ trip, type, item, skeleton, request, saved, close }: Tra
   // Compare against the editor's original facts, not a later shared-place refresh.
   const [loadedHotel] = useState(lodging.hotel);
   // Freeze the version displayed when the editor opens; background refresh must not mask a conflict.
-  const [expectedVersion] = useState(item?.version ?? skeleton.tripVersion);
+  const [expectedVersion, setExpectedVersion] = useState(item?.version ?? skeleton.tripVersion);
+  const [base, setBase] = useState<EditSnapshot<TripFlightInput | TripLodgingInput>>({ input: type === "flight" ? flight : lodging, version: expectedVersion });
+  const resolution = useVersionConflict<TripFlightInput | TripLodgingInput>();
+  const [rebased, setRebased] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
@@ -75,7 +99,7 @@ function TravelEditor({ trip, type, item, skeleton, request, saved, close }: Tra
     } finally { setSearching(false); }
   }
 
-  async function save() {
+  async function save(reapplied?: TripFlightInput | TripLodgingInput, version = expectedVersion, conflictBase = resolution.conflictBaseVersion) {
     let input: TripFlightInput | TripLodgingInput = flight;
     if (type === "lodging") {
       const current = lodging.hotel;
@@ -89,19 +113,29 @@ function TravelEditor({ trip, type, item, skeleton, request, saved, close }: Tra
       }
       input = { ...lodging, hotel };
     }
-    const payload = JSON.stringify({ ...input, [item ? "expectedVersion" : "expectedTripVersion"]: expectedVersion });
+    if (reapplied || rebased) input = reapplied ?? (type === "flight" ? flight : lodging);
+    const attempted = reapplied ?? (type === "flight" ? flight : lodging);
+    const payload = JSON.stringify({ ...input, [item ? "expectedVersion" : "expectedTripVersion"]: version });
     if (retry.current?.payload !== payload) retry.current = { payload, key: crypto.randomUUID() };
     setBusy(true);
     setError("");
     try {
       await request(`/api/trips/${trip.id}/${type === "flight" ? "flights" : "lodgings"}${item ? `/${item.id}` : ""}`, {
-        method: item ? "PATCH" : "POST", headers: { "Idempotency-Key": retry.current.key }, body: payload,
+        method: item ? "PATCH" : "POST", headers: { "Idempotency-Key": retry.current.key, ...(conflictBase ? { "Conflict-Base-Version": String(conflictBase) } : {}) }, body: payload,
         parse: parseItineraryItemResponse,
       });
       close();
       await saved();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : t.travel.saveError);
+      try {
+        if (await resolution.capture(reason, base, attempted, async () => {
+          const latest = parseTripSkeletonResponse(await request(`/api/trips/${trip.id}/skeleton`)).skeleton;
+          if (!item) return { input: attempted, version: latest.tripVersion };
+          const current = latest.items.find((entry) => entry.id === item.id);
+          return current ? { input: travelValues(current, latest), version: current.version } : null;
+        })) return;
+        setError(reason instanceof Error ? reason.message : t.travel.saveError);
+      } catch (failure) { setError(failure instanceof Error ? failure.message : t.collaboration.loadError); }
     } finally { setBusy(false); }
   }
 
@@ -109,7 +143,14 @@ function TravelEditor({ trip, type, item, skeleton, request, saved, close }: Tra
     <DialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] overflow-y-auto sm:max-w-3xl">
       <DialogHeader><DialogTitle>{title}</DialogTitle>
         <DialogDescription>{type === "flight" ? t.travel.sharedFlights : t.travel.lodgingDescription}</DialogDescription></DialogHeader>
-      <form className="grid gap-5" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+      {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={busy}
+        formatValue={(path, value) => path === "countryStopId" ? trip.countryStops.find((stop) => stop.id === value)?.countryCode : undefined}
+        onAccept={() => { resolution.clear(); close(); void saved(); }}
+        onReapply={() => void save(resolution.conflict!.attempted, resolution.conflict!.current!.version, resolution.conflict!.base.version)}
+        onEdit={() => { setBase(resolution.conflict!.current!); setExpectedVersion(resolution.conflict!.current!.version); setRebased(true); resolution.resume(); setError(""); }}
+      /> : null}
+      {resolution.conflict && error ? <p role="alert" className="text-destructive">{error}</p> : null}
+      <form hidden={Boolean(resolution.conflict)} className="grid gap-5" onSubmit={(event) => { event.preventDefault(); void save(); }}>
         {type === "flight" ? <FlightFields value={flight} onChange={setFlight} legend={t.travel.flights} startDate={trip.startDate} endDate={trip.endDate} /> : <>
           <Field><FieldLabel htmlFor={`${id}-stop`}>{t.travel.countryStop}</FieldLabel>
             <select id={`${id}-stop`} required className="min-h-10 rounded-lg border border-input bg-transparent px-3" value={lodging.countryStopId} onChange={(event) => {

@@ -6,6 +6,8 @@ import {
   type DayTimetableOrder,
   type DayTimetableResponse,
   type DayWindowResponse,
+  type DayWindowDto,
+  type DayPlaceOrderResponse,
 } from "@along-the-way/contracts/day-plans";
 
 import { Button } from "@/components/ui/button";
@@ -18,6 +20,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useI18n } from "./i18n";
+import { ApiRequestError } from "./api-error";
+import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./ConflictPanel";
 import {
   clock,
   describeStartAndEnd,
@@ -62,6 +66,9 @@ export function DayPlanDialog({
   const [busy, setBusy] = useState<"planning" | "saving" | null>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [base, setBase] = useState<EditSnapshot<DayWindowDto> | null>(null);
+  const [orderStale, setOrderStale] = useState(false);
+  const resolution = useVersionConflict<DayWindowDto>();
   // A retried save reuses its key; a successful one forgets it so a later identical change is new.
   const keys = useRef(new Map<string, string>());
   const keyFor = (identity: string) => {
@@ -89,6 +96,9 @@ export function DayPlanDialog({
       setOrder(nextOrder);
       setStart(clock(response.timetable.window.startMinute));
       setEnd(clock(response.timetable.window.endMinute));
+      const { version, startMinute, endMinute } = response.timetable.window;
+      setBase({ input: { startMinute, endMinute }, version });
+      setOrderStale(false);
     } catch (reason) {
       if (ticket !== latestRequest.current) return;
       setError(reason instanceof Error ? reason.message : t.dayPlan.couldNotPlan);
@@ -104,12 +114,50 @@ export function DayPlanDialog({
     setBusy(null);
     setNotice("");
     setError("");
+    setBase(null);
+    resolution.clear();
     if (day) void plan(day.id, "current");
   }, [day, plan]);
 
+  async function saveWindow(input: DayWindowDto, expectedVersion: number, conflictBase = resolution.conflictBaseVersion) {
+    if (!day || !base) return;
+    const identity = `window:${day.id}:${expectedVersion}:${JSON.stringify(input)}`;
+    setBusy("saving");
+    setError("");
+    try {
+      await request<DayWindowResponse>(`/api/trips/${tripId}/days/${day.id}/window`, {
+        method: "PUT",
+        headers: { "Idempotency-Key": keyFor(identity), ...(conflictBase ? { "Conflict-Base-Version": String(conflictBase) } : {}) },
+        body: JSON.stringify({ ...input, expectedVersion }),
+        parse: parseDayWindowResponse,
+      });
+      keys.current.delete(identity);
+      resolution.clear();
+      await plan(day.id, order);
+      await onOrderSaved();
+    } catch (reason) {
+      try {
+        if (await resolution.capture(reason, base, input, async () => {
+          try {
+            const { window } = await request<DayWindowResponse>(`/api/trips/${tripId}/days/${day.id}/window`, { parse: parseDayWindowResponse });
+            return { input: { startMinute: window.startMinute, endMinute: window.endMinute }, version: window.version };
+          } catch (loadError) {
+            if (loadError instanceof ApiRequestError && loadError.status === 404) return null;
+            throw loadError;
+          }
+        })) return;
+        setError(reason instanceof Error ? reason.message : t.dayPlan.couldNotSaveHours);
+      } catch {
+        setError(t.collaboration.loadError);
+      }
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function replan(event: FormEvent) {
     event.preventDefault();
-    if (!day || !timetable) return;
+    if (!day || !base) return;
     const startMinute = minuteOf(start);
     const endMinute = minuteOf(end);
     if (startMinute === null || endMinute === null || startMinute >= endMinute) {
@@ -117,47 +165,35 @@ export function DayPlanDialog({
       return;
     }
     setNotice("");
-    if (startMinute !== timetable.window.startMinute || endMinute !== timetable.window.endMinute) {
-      const identity = `window:${day.id}:${startMinute}-${endMinute}`;
-      setBusy("saving");
-      setError("");
-      try {
-        await request<DayWindowResponse>(`/api/trips/${tripId}/days/${day.id}/window`, {
-          method: "PUT",
-          headers: { "Idempotency-Key": keyFor(identity) },
-          body: JSON.stringify({ startMinute, endMinute }),
-          parse: parseDayWindowResponse,
-        });
-        keys.current.delete(identity);
-      } catch (reason) {
-        setError(reason instanceof Error ? reason.message : t.dayPlan.couldNotSaveHours);
-        setBusy(null);
-        return;
-      }
-    }
-    await plan(day.id, order);
+    if (startMinute !== base.input.startMinute || endMinute !== base.input.endMinute) {
+      await saveWindow({ startMinute, endMinute }, base.version);
+    } else await plan(day.id, order);
   }
 
   async function saveOrder() {
     if (!day || !timetable) return;
     const orderedTripPlaceIds = timetable.orderedTripPlaceIds;
-    const identity = `order:${day.id}:${orderedTripPlaceIds.join(",")}`;
+    const identity = `order:${day.id}:${timetable.window.version}:${orderedTripPlaceIds.join(",")}`;
     setBusy("saving");
     setError("");
     try {
-      await request(`/api/trips/${tripId}/days/${day.id}/place-order`, {
+      const saved = await request<DayPlaceOrderResponse>(`/api/trips/${tripId}/days/${day.id}/place-order`, {
         method: "PUT",
         headers: { "Idempotency-Key": keyFor(identity) },
-        body: JSON.stringify({ orderedTripPlaceIds }),
+        body: JSON.stringify({ orderedTripPlaceIds, expectedVersion: timetable.window.version }),
       });
       keys.current.delete(identity);
       // The draft already uses this order, which is now the day's own.
       setOrder("current");
-      setTimetable({ ...timetable, order: "current" });
+      setTimetable({ ...timetable, order: "current", window: { ...timetable.window, version: saved.version } });
+      if (base) setBase({ ...base, version: saved.version });
       setNotice(t.dayPlan.orderSaved);
       await onOrderSaved();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : t.dayPlan.couldNotSaveOrder);
+      if (reason instanceof ApiRequestError && reason.code === "conflict") {
+        setOrderStale(true);
+        setError(t.collaboration.replanDay);
+      } else setError(reason instanceof Error ? reason.message : t.dayPlan.couldNotSaveOrder);
     } finally {
       setBusy(null);
     }
@@ -177,7 +213,13 @@ export function DayPlanDialog({
           <DialogDescription>{t.dayPlan.draftNotice}</DialogDescription>
         </DialogHeader>
 
-        <form className="flex flex-wrap items-end gap-3" onSubmit={(event) => void replan(event)}>
+        {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={busy !== null}
+          formatValue={(_path, value) => typeof value === "number" ? clock(value) : undefined}
+          onAccept={() => { resolution.clear(); if (day && resolution.conflict?.current) void plan(day.id, order); else onClose(); }}
+          onReapply={() => { const conflict = resolution.conflict; if (conflict?.current) void saveWindow(conflict.attempted, conflict.current.version, conflict.base.version); }}
+          onEdit={() => { if (resolution.conflict?.current) setBase(resolution.conflict.current); resolution.resume(); }}
+        /> : null}
+        <form hidden={Boolean(resolution.conflict)} className="flex flex-wrap items-end gap-3" onSubmit={(event) => void replan(event)}>
           <label className="grid gap-1 text-sm font-semibold">
             {t.dayPlan.start}
             <input className="min-h-10 rounded-lg border px-2" type="time" value={start} required onChange={(event) => setStart(event.target.value)} />
@@ -241,7 +283,7 @@ export function DayPlanDialog({
           </div>
         ) : null}
 
-        <DialogFooter>
+        <DialogFooter hidden={Boolean(resolution.conflict)}>
           {order === "suggested" ? (
             <>
               <Button variant="outline" size="lg" disabled={busy !== null || !day} onClick={() => day && void plan(day.id, "current")}>
@@ -249,7 +291,7 @@ export function DayPlanDialog({
               </Button>
               <Button
                 size="lg"
-                disabled={busy !== null || !timetable || timetable.orderedTripPlaceIds.length === 0}
+                disabled={busy !== null || orderStale || !timetable || timetable.orderedTripPlaceIds.length === 0}
                 onClick={() => void saveOrder()}
               >
                 {busy === "saving" ? t.dayPlan.saving : t.dayPlan.useThisOrder}

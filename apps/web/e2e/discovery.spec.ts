@@ -283,11 +283,17 @@ test("one Find candidates action saves changed text, researches the saved versio
     await route.fulfill({ response, json: body });
   };
   await page.route(/\/api\/trips\/[^/]+\/discovery$/, withServices);
-  let failSave = true;
+  let createConcurrentBrief = true;
   await page.route(/\/discovery\/brief$/, async (route) => {
-    if (!failSave) return withServices(route);
-    failSave = false;
-    await route.fulfill({ status: 409, json: { error: { code: "conflict", message: "Version conflict; current version is 1", currentVersion: 1 } } });
+    if (createConcurrentBrief) {
+      createConcurrentBrief = false;
+      const concurrent = await route.fetch({
+        headers: { ...route.request().headers(), "idempotency-key": crypto.randomUUID() },
+        postData: { ...route.request().postDataJSON(), originalText: "Architecture and temples." },
+      });
+      expect(concurrent.status()).toBe(200);
+    }
+    return withServices(route);
   });
   const generateBodies: unknown[] = [];
   await page.route(/\/discovery\/generate$/, async (route) => {
@@ -307,18 +313,22 @@ test("one Find candidates action saves changed text, researches the saved versio
   const find = brief.getByRole("button", { name: "尋找候選地點" });
   await text.fill("Food markets and gardens.");
 
-  // A failed save stops before research and keeps the text.
+  // A real concurrent save stops this stale request before research. Returning
+  // to edit keeps the attempted text but adopts the freshly read brief version.
   await find.click();
-  await expect(brief.getByRole("alert")).toContainText("資料已變更，無法完成操作。");
-  await expect(text).toHaveValue("Food markets and gardens.");
+  const conflict = page.locator("[data-conflict-panel]");
+  await expect(conflict).toContainText("Architecture and temples.");
+  await expect(conflict).toContainText("Food markets and gardens.");
   expect(writes).toEqual(["brief"]);
+  await conflict.getByRole("button", { name: "返回編輯", exact: true }).click();
+  await expect(text).toHaveValue("Food markets and gardens.");
 
   // A successful save is followed by research of the saved version; its failure stays beside the button.
   await find.click();
   await expect(brief.getByRole("alert")).toContainText("AI 模型目前無法使用，請稍後再試。");
   await expect(text).toHaveValue("Food markets and gardens.");
   expect(writes).toEqual(["brief", "brief", "generate"]);
-  expect(generateBodies).toEqual([{ expectedBriefVersion: 1 }]);
+  expect(generateBodies).toEqual([{ expectedBriefVersion: 2 }]);
 
   // Unchanged saved text is researched without saving again.
   await find.click();
@@ -353,4 +363,201 @@ test("one Find candidates action saves changed text, researches the saved versio
   await expect(research.getByRole("alert").first()).toContainText("AI 服務金鑰與模型");
   await expect(brief.getByRole("alert")).toHaveCount(0);
   expect(writes).toHaveLength(4);
+});
+
+async function prepareConflictDiscovery(page: Page, request: APIRequestContext, kind: string) {
+  const suffix = `${Date.now()}-${kind}`;
+  const name = `Discovery browser review ${suffix}`;
+  const email = `discovery-review-${suffix}@example.test`;
+  await executeDatabase(`insert into users (email, display_name, status) values ('${email}', 'Review editor', 'active');`);
+  await signIn(page, request, email);
+  await createTrip(page, name);
+  const trips = await (await page.request.get("/api/trips")).json();
+  const tripId = trips.trips.find((trip: { name: string }) => trip.name === name).id as string;
+  await executeDatabase(`
+    insert into discovery_briefs (trip_id, original_text, structured_brief, unresolved_questions, updated_by)
+      select trip.id, 'Original garden brief',
+        '{"interests":["gardens"],"pace":null,"budget":null,"exclusions":[],"areas":["Kyoto"]}'::jsonb,
+        '["Preferred walking pace?"]'::jsonb, member.user_id
+      from trips trip join trip_members member on member.trip_id = trip.id and member.role = 'owner'
+      where trip.id = '${tripId}';
+  `);
+  await page.route(/\/api\/trips\/[^/]+\/discovery$/, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    Object.assign(body.discovery, { modelAvailable: true, placeProviderAvailable: true });
+    await route.fulfill({ response, json: body });
+  });
+  await page.reload();
+  await page.getByRole("button", { name: new RegExp(name) }).click();
+  await openTab(page, "AI 找地點");
+  return { tripId, headers: { origin: new URL(page.url()).origin, "idempotency-key": crypto.randomUUID() } };
+}
+
+async function conflictQuestionAnswer(page: Page, request: APIRequestContext, kind: string) {
+  const fixture = await prepareConflictDiscovery(page, request, kind);
+  let replaceBrief = true;
+  await page.route(/\/discovery\/brief\/questions$/, async (route) => {
+    if (replaceBrief) {
+      replaceBrief = false;
+      const response = await page.request.put(`/api/trips/${fixture.tripId}/discovery/brief`, {
+        headers: fixture.headers, data: { originalText: "Another member's new food brief", expectedVersion: 1 },
+      });
+      expect(response.status()).toBe(200);
+    }
+    await route.continue();
+  });
+  await page.getByLabel("Preferred walking pace?").fill("Keep my slow walking answer");
+  await page.getByRole("button", { name: "儲存答案", exact: true }).click();
+  const conflict = page.locator("[data-conflict-panel]");
+  await expect(conflict).toContainText("Keep my slow walking answer");
+  return { ...fixture, conflict };
+}
+
+test("question conflict return does not rebase and overwrite the unrelated brief", async ({ page, request }) => {
+  const { tripId, conflict } = await conflictQuestionAnswer(page, request, "question-return");
+  await conflict.getByRole("button", { name: "返回編輯", exact: true }).click();
+  await expect(page.getByLabel("AI 規劃時該考量什麼？")).toHaveValue("Original garden brief");
+  const attempted = page.waitForResponse((response) => response.url().includes("/discovery/") && response.request().method() !== "GET");
+  await page.getByRole("button", { name: "尋找候選地點", exact: true }).click();
+  await attempted;
+  const saved = await (await page.request.get(`/api/trips/${tripId}/discovery`)).json();
+  expect(saved.discovery.brief.originalText).toBe("Another member's new food brief");
+});
+
+test("a refused question reapply explains the domain error beside the conflict panel", async ({ page, request }) => {
+  const { conflict } = await conflictQuestionAnswer(page, request, "question-reapply");
+  const refused = page.waitForResponse((response) => response.url().endsWith("/brief/questions") && response.status() === 400);
+  await conflict.getByRole("button", { name: "重新套用我的修改", exact: true }).click();
+  await refused;
+  await expect(conflict).toBeVisible();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("question");
+  await expect(conflict).toContainText("Keep my slow walking answer");
+});
+
+for (const previousEdit of [false, true]) {
+  test(`direct feedback confirmation compares its own target after prior edit=${previousEdit}`, async ({ page, request }) => {
+    const { tripId, headers } = await prepareConflictDiscovery(page, request, `feedback-${previousEdit}`);
+    const first = crypto.randomUUID();
+    const second = crypto.randomUUID();
+    for (const [id, marker] of [[first, "Unrelated first feedback"], [second, "Target second feedback"]]) {
+      await executeDatabase(`
+        insert into discovery_feedback (id, trip_id, actor_id, original_text, interpretation, status)
+          select '${id}', trip.id, member.user_id, '${marker}',
+            '{"interests":[],"exclusions":[],"pace":null,"budget":null,"summary":"${marker} interpretation"}'::jsonb, 'pending'
+          from trips trip join trip_members member on member.trip_id = trip.id and member.role = 'owner'
+          where trip.id = '${tripId}';
+      `);
+    }
+    await page.reload();
+    await openTab(page, "AI 找地點");
+    if (previousEdit) {
+      const unrelated = page.getByRole("article").filter({ hasText: "Unrelated first feedback" });
+      await unrelated.getByRole("button", { name: "修改解讀", exact: true }).click();
+      await unrelated.getByRole("button", { name: "取消修改", exact: true }).click();
+    }
+    let confirmElsewhere = true;
+    await page.route(`**/discovery/feedback/${second}/decision`, async (route) => {
+      if (!confirmElsewhere) { await route.continue(); return; }
+      confirmElsewhere = false;
+      expect((await page.request.post(`/api/trips/${tripId}/discovery/feedback/${second}/decision`, {
+        headers, data: { expectedVersion: 1, decision: "confirm", interpretation: {
+          interests: [], exclusions: [], pace: null, budget: null, summary: "Updated target second feedback interpretation",
+        } },
+      })).status()).toBe(200);
+      await route.continue();
+    });
+    await page.getByRole("article").filter({ hasText: "Target second feedback" }).getByRole("button", { name: "確認解讀", exact: true }).click();
+    const conflict = page.locator("[data-conflict-panel]");
+    await expect(conflict.getByRole("button", { name: "重新套用我的修改", exact: true })).toBeEnabled();
+    await expect(conflict).toContainText("Target second feedback interpretation");
+    await expect(conflict).toContainText("Updated target second feedback interpretation");
+    await expect(conflict).not.toContainText("Unrelated first feedback");
+  });
+}
+
+test("research after saving answers uses the saved aggregate version without another save", async ({ page, request }) => {
+  const { tripId } = await prepareConflictDiscovery(page, request, "saved-answer-generation");
+  // Only expose the controls: saves and generation still run against the real API.
+  // With no model credentials, a valid generation reaches the model-unavailable
+  // boundary instead of being rejected as a stale edit.
+  await page.route(/\/discovery\/brief\/questions$/, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    if (isRecord(body) && isRecord(body.discovery)) {
+      Object.assign(body.discovery, { modelAvailable: true, placeProviderAvailable: true });
+    }
+    await route.fulfill({ response, json: body });
+  });
+  await page.getByLabel("Preferred walking pace?").fill("Slow walking");
+  const savedAnswers = page.waitForResponse((response) => response.url().endsWith("/brief/questions") && response.request().method() === "PUT");
+  await page.getByRole("button", { name: "儲存答案", exact: true }).click();
+  const saved = await savedAnswers;
+  expect(saved.status()).toBe(200);
+  expect((await saved.json()).discovery.brief.version).toBe(2);
+
+  const writes: string[] = [];
+  page.on("request", (sent) => {
+    if (sent.url().includes("/discovery/") && sent.method() !== "GET") writes.push(new URL(sent.url()).pathname.split("/").at(-1)!);
+  });
+  const generated = page.waitForResponse((response) => response.url().endsWith("/discovery/generate"));
+  await page.getByRole("button", { name: "尋找候選地點", exact: true }).click();
+  const response = await generated;
+  expect(response.status(), await response.text()).toBe(503);
+  expect((await response.json()).error.code).toBe("model_unavailable");
+  expect(response.request().postDataJSON()).toEqual({ expectedBriefVersion: 2 });
+  expect(writes).toEqual(["generate"]);
+  await expect(page.getByRole("region", { name: "旅程研究需求" }).getByRole("alert")).toContainText("AI 模型目前無法使用");
+  const current = (await (await page.request.get(`/api/trips/${tripId}/discovery`)).json()).discovery.brief;
+  expect(current.originalText).toBe("Original garden brief");
+  expect(current.questionAnswers).toEqual([{ question: "Preferred walking pace?", answer: "Slow walking" }]);
+});
+
+test("accepting a brief conflict preserves an unrelated feedback edit until it is saved", async ({ page, request }) => {
+  const { tripId, headers } = await prepareConflictDiscovery(page, request, "accept-brief-keep-feedback");
+  const feedbackId = crypto.randomUUID();
+  await executeDatabase(`
+    insert into discovery_feedback (id, trip_id, actor_id, original_text, interpretation, status)
+      select '${feedbackId}', trip.id, member.user_id, 'Independent feedback',
+        '{"interests":[],"exclusions":[],"pace":null,"budget":null,"summary":"Saved feedback summary"}'::jsonb, 'pending'
+      from trips trip join trip_members member on member.trip_id = trip.id and member.role = 'owner'
+      where trip.id = '${tripId}';
+  `);
+  await page.reload();
+  await openTab(page, "AI 找地點");
+  const feedback = page.getByRole("article").filter({ hasText: "Independent feedback" });
+  await feedback.getByRole("button", { name: "修改解讀", exact: true }).click();
+  await feedback.getByLabel("摘要").fill("Unsaved feedback summary");
+  await page.getByLabel("AI 規劃時該考量什麼？").fill("My separate brief edit");
+
+  let replaceBrief = true;
+  await page.route(/\/discovery\/brief$/, async (route) => {
+    if (replaceBrief) {
+      replaceBrief = false;
+      const response = await page.request.put(`/api/trips/${tripId}/discovery/brief`, {
+        headers, data: { originalText: "Another member's accepted brief", expectedVersion: 1 },
+      });
+      expect(response.status()).toBe(200);
+    }
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "尋找候選地點", exact: true }).click();
+  const conflict = page.locator("[data-conflict-panel]");
+  await expect(conflict).toContainText("My separate brief edit");
+  await expect(conflict).toContainText("Another member's accepted brief");
+  await conflict.getByRole("button", { name: "接受目前版本", exact: true }).click();
+  await expect(page.getByLabel("AI 規劃時該考量什麼？")).toHaveValue("Another member's accepted brief");
+  // The editor may remain open; if it was closed, reopening must not reveal a lost draft.
+  const reopen = feedback.getByRole("button", { name: "修改解讀", exact: true });
+  if (await reopen.isVisible()) await reopen.click();
+  await expect(feedback.getByLabel("摘要")).toHaveValue("Unsaved feedback summary");
+
+  const confirmed = page.waitForResponse((response) => response.url().endsWith(`/feedback/${feedbackId}/decision`));
+  await feedback.getByRole("button", { name: "確認並套用修改", exact: true }).click();
+  expect((await confirmed).status()).toBe(200);
+  await expect(feedback.getByLabel("摘要")).toHaveCount(0);
+  const current = (await (await page.request.get(`/api/trips/${tripId}/discovery`)).json()).discovery;
+  expect(current.feedback.find((entry: { id: string }) => entry.id === feedbackId).interpretation.summary).toBe("Unsaved feedback summary");
+  expect(current.brief.originalText).toBe("Another member's accepted brief");
 });

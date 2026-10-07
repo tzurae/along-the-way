@@ -9,4 +9,5 @@ export const unrelatedDayPlanModule = {
   tripPlan: unexpectedDayPlanCall,
   applyOrder: unexpectedDayPlanCall,
   updateWindow: unexpectedDayPlanCall,
+  getWindow: unexpectedDayPlanCall,
 } satisfies DayPlanModule;

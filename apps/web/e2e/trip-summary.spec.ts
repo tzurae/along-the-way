@@ -340,16 +340,16 @@ test("private trips work across four identities, viewports, and rejection paths"
   await page.getByRole("button", { name: /^大阪京都家庭旅行 \d+ 位成員/ }).click();
   await expect(page.getByRole("heading", { name: "大阪京都家庭旅行", exact: true })).toBeVisible();
   await openTab(page, "總覽");
-  await expect(page.getByText("wife@example.test")).toBeVisible();
-  await expect(page.getByText("mother@example.test")).toBeVisible();
-  await expect(page.getByText("friend@example.test")).toBeVisible();
+  await expect(page.getByRole("tabpanel", { name: "總覽", exact: true }).getByText("wife@example.test", { exact: true })).toBeVisible();
+  await expect(page.getByRole("tabpanel", { name: "總覽", exact: true }).getByText("mother@example.test", { exact: true })).toBeVisible();
+  await expect(page.getByRole("tabpanel", { name: "總覽", exact: true }).getByText("friend@example.test", { exact: true })).toBeVisible();
   await expect(page.getByText("4位成員", { exact: true })).toBeVisible();
 
   const wifePage = editorPages[0]!;
   const motherPage = editorPages[1]!;
   await motherPage.reload();
   await openTab(motherPage, "總覽");
-  await expect(motherPage.getByText("friend@example.test")).toBeVisible();
+  await expect(motherPage.getByRole("tabpanel", { name: "總覽", exact: true }).getByText("friend@example.test", { exact: true })).toBeVisible();
   await expect(motherPage.getByText("4位成員", { exact: true })).toBeVisible();
 
   await createTrip(wifePage, {
@@ -369,7 +369,7 @@ test("private trips work across four identities, viewports, and rejection paths"
     .getByRole("button", { name: /大阪京都家庭旅行/ })
     .click();
   await openTab(wifePage, "總覽");
-  await expect(wifePage.getByText("friend@example.test")).toBeVisible();
+  await expect(wifePage.getByRole("tabpanel", { name: "總覽", exact: true }).getByText("friend@example.test", { exact: true })).toBeVisible();
   await expect(wifePage.getByText("4位成員", { exact: true })).toBeVisible();
 
   await expect(wifePage.getByLabel("透過電子郵件邀請編輯者")).toHaveCount(0);

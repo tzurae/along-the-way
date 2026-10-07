@@ -20,7 +20,7 @@ export function todaySkeleton(trip = todayTrip(), items: ItineraryItemDto[] = []
   return { tripVersion: trip.version,
     places: [{ id: "place", tripId: trip.id, name: "Park", type: "activity", address: null, latitude: 34, longitude: 135, timeZone: "Asia/Tokyo", sourceUrl: null, notes: null, locationStatus: "complete", version: 1 }],
     items, days: trip.days.map((day, index) => ({ id: day.id, date: day.date, entries: index === 0 ? items.map((item) => ({ itemId: item.id, projection: "full", sortInstant: item.endpoints[0]!.instant })) : [] })),
-    tripInformationItemIds: [], events: [] };
+    tripInformationItemIds: [] };
 }
 export function todayWishlist(saved = false): TripPlaceDto[] {
   return ["FIRST", "SECOND"].map((name, index) => ({ id: name, tripId: "A", placeId: name, provider: "manual", aiProposalId: null,

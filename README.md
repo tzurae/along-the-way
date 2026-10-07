@@ -486,6 +486,14 @@ tab and valid day across reloads and browser history. Automatic corrections repl
 the current history entry and wait for the destination trip's model. Other tabs
 remain mounted; a successful Today sync publishes a separate read-refresh revision
 so itinerary, lodging and recent changes update without a Today reload loop.
+With #27 enabled, SSE refreshes use that same `workspaceRevision`, while only
+local mutations advance `placesRevision` and its mutation-to-Today effect.
+An old trip's notification cannot supersede an in-flight URL/Back navigation.
+The offline shell suspends SSE and its retry timers; recovery retains #28's
+single-flight authenticated read probe. Day-window and place-order saves await
+the local itinerary load before publishing the refresh, including Today's
+offline snapshot. Recent changes use the authorized `/history` projection,
+not the removed skeleton event list.
 
 The shared `resolveDayTimeZone` contract preserves the planner's precedence:
 located lodging for the night (then the previous night), located wishlist places
@@ -579,6 +587,184 @@ The Chromium spec verifies single-column phone/desktop overlaps and offline
 reopening/recovery through the production shell. Real-device accessibility,
 actual external navigation destinations and the 2.5s 4G performance target
 remain UNVERIFIED.
+
+## Concurrent editing and live collaboration (Issue #27)
+
+Saved field edits use the edited aggregate's `expectedVersion`, not a global
+trip write lock/version supplied by the client. Two members can edit different
+wishlist places independently. A stale edit returns `409` with
+`error.code: "conflict"`, `currentVersion`, and `latestChange` (nullable;
+`eventId`, `actorId`, `actorDisplayName`, `actorEmail`, `isOwn`, `changedAt`). Related legacy/wishlist
+place identities, constraint changes to their item, and assignment changes to
+their day retain the responsible event's attribution. A rejected edit changes
+neither the aggregate nor its event history; an idempotent retry returns the
+original result without adding an event.
+Discovery brief creation uses `expectedVersion: null` to mean the aggregate was
+absent. A competing creation returns the same structured `409`, not a validation
+error or duplicate-key failure. Creation is serialized by the brief's identity,
+without imposing a shared client-side Trip version on unrelated edits.
+
+Open field editors retain their original version and unsaved input when a
+notification refreshes the surrounding read model. Pristine planning editors
+adopt newer saved values after a successful save or merge; dirty editors do not.
+The zh-TW conflict panel
+compares the original, freshly read current, and attempted values field by
+field, with the latest actor/time. Changed fields appear first; identical fields
+collapse into one count rather than repeating three values on a phone. Actor
+labels use display name, then email, including removed members' past events.
+Only typed enum fields receive translated values. Member-entered names, notes,
+briefs, feedback summaries and free-form detail fields remain verbatim, even
+when their text equals an enum key such as `walking`.
+A change by the signed-in member is identified as an update in another window
+or device. Members can accept the saved version, return to editing their preserved
+input against the newly read version, or explicitly
+reapply their **complete** input. There is no automatic field merge. Reapply
+uses a new idempotency key, the freshly read version, and
+`Conflict-Base-Version: <original version>` for audit only; normal membership,
+lock, constraint, deletion, and version checks still run. Another intervening
+edit can produce another conflict. An unavailable target cannot be reapplied.
+Discovery brief text, clarification answers and feedback keep independent edit
+bases: returning from one conflict cannot silently rebase another input.
+Direct feedback confirmation compares the submitted feedback's interpretation,
+not a previously opened editor. This comparison context stays separate from the
+mutation payload: an unedited confirmation omits `interpretation`, preserves
+`interpretationEdited: false`, and retains the original feedback in the next
+research input. Only an explicitly edited interpretation is submitted as a correction.
+Reapply validation errors stay visible beside
+the comparison panel.
+Generation uses the current saved brief version even after a standalone answer
+save; accepting a brief conflict preserves an unrelated feedback editor draft.
+
+Removed wishlist places disappear from the active read model. A dirty editor
+may retain a separate, unavailable snapshot with its unsaved input, no active
+vote/remove controls, and an explicit discard-and-close action. Pristine closed
+editors are not retained. New Place/item dialogs use the latest creation
+precondition without changing their input. A stale create refreshes that
+precondition for an explicit retry; an uncertain network result retains the
+same request/version/key so retrying cannot duplicate an already saved item.
+
+Daily hours and place order share a `TripDay` version:
+
+- `GET /api/trips/:tripId/days/:dayId/window` returns
+  `{ window: { startMinute, endMinute, version } }` for active members.
+- `PUT` on that URL requires `{ startMinute, endMinute, expectedVersion }`
+  and `Idempotency-Key`, and returns the saved window including its version.
+- `PUT /api/trips/:tripId/days/:dayId/place-order` requires
+  `{ orderedTripPlaceIds, expectedVersion }` and returns
+  `{ orderedTripPlaceIds, version }`.
+- Timetable responses include `window.version`. Whole-trip plan application
+  requires `expectedVersion` for each entry in `days`, in addition to its
+  existing `basis`; a changed basis is never automatically rebased.
+  A day draft checks its version before and after reading its inputs; an order
+  change during that read returns `409` rather than attaching a fresh version
+  to stale order data.
+- Window/order/assignment changes advance the day version. A stale window
+  uses the same conflict panel. A stale suggested order remains unsaved and
+  asks the member to regenerate and explicitly confirm the order.
+
+Votes remain the member-owned idempotent set-state operations from #73.
+Invite/accept/revoke/remove membership operations likewise remain idempotent
+state transitions, not editable field snapshots; they do not accept a version
+or silently replace another member's field edits. There is no persisted draft
+aggregate from #26 in this release: generated day/trip plans are read-time
+drafts, with optimistic day checks and the whole-trip basis checked on apply.
+
+### Authenticated notifications and history
+
+- `GET /api/trips/:tripId/version` returns `{ tripVersion, lastEventId }`.
+  Here `tripVersion` is a strictly increasing **notification watermark**,
+  not `TripDto.version` and never a mutation's `expectedVersion`.
+- `GET /api/trips/:tripId/events` is authenticated SSE. `event: change` carries
+  only `{ id, tripVersion, entityType, entityId, kind, summary }`, and the SSE
+  `id` is the change-event UUID. No notes, booking details, contact information,
+  coordinates, access tokens, or complete private objects are streamed.
+  Resume with `Last-Event-ID` or the browser's `?after=<event UUID>` fallback.
+  Cursors must belong to this trip. The server rechecks the session and active
+  membership before emitting events/heartbeats and closes revoked streams.
+- There is one subscription for the selected trip. Notifications only trigger
+  authorised read-model refetches and revision counters; mounted tab panels are
+  not replaced. Reconnect backs off from 1 to 30 seconds. While disconnected,
+  a 60-second version check plus focus/visibility/online checks recover changes.
+  Failed projection reads schedule a separate 1–30-second backoff refresh and
+  are retried on focus even when the notification watermark has not advanced.
+  A notification cursor is not treated as proof that every projection loaded.
+  Trip changes and access revocation cancel outstanding retry timers.
+  Every connection emits a comment immediately and a heartbeat every 15 seconds.
+  Bun's idle timeout is 30 seconds; Caddy flushes streaming responses immediately.
+- `GET /api/trips/:tripId/history?limit=30&before=<event UUID>` returns
+  `{ events, nextCursor }`, newest first (limit 1–100). Events include actor
+  identity/display name/email, creation time, type, target, safe summary, and nullable
+  `reappliedFromVersion`. `targetName` resolves the current place name, item title
+  or day date within this trip; removed/deleted targets show only their type, never
+  an ID fragment. Reapply labels explicitly identify the version editing started
+  from, not the current version. Emails appear only in authorized history/conflict
+  reads, never in SSE payloads. Pagination uses committed event order rather than
+  timestamps, so ties and new insertions cannot skip/duplicate older entries.
+  A removed member's past attribution remains visible to current members.
+  The old capped `TripSkeletonDto.events` projection has been removed.
+
+All these reads require an active membership and are `no-store`. Streams,
+errors and proxy configuration avoid logging private request bodies, cookies,
+or raw private paths/query strings; application diagnostics retain safe event
+types, IDs/results and correlation IDs.
+
+### Database changes and verification
+
+Expand-only migration `019_collaboration_events` adds ordered event cursors,
+optional reapply audit versions, related aggregate IDs, and supporting indexes.
+Its insert trigger locks the trip row `FOR NO KEY UPDATE` **before** allocating
+the sequence value, preventing a later committed event from overtaking an
+uncommitted earlier cursor. Sharing the trip writer's lock domain avoids the
+advisory-lock/FK inversion; the mode remains compatible with older writers'
+foreign-key `KEY SHARE` locks. Historical events are backfilled deterministically.
+Existing insert shapes still work. `down` removes the trigger, sequence,
+indexes and added metadata columns; the underlying event rows remain.
+
+Expand-only `020_trip_day_versions` adds a defaulted positive day version and
+triggers for window and assignment changes (including writes by an older
+release). Transaction-local affected-day tracking associates subsequent
+`recordEvent` entries with the changed days. `down` removes only those
+triggers/functions and the day version; saved hours, assignments and orders
+remain intact.
+
+Verified through the real Bun HTTP server on an isolated test database:
+four authenticated readers received the same metadata-only SSE event; stale
+place and day writes were rejected without overwriting saved values; explicit
+reapply was audited; history pagination and Last-Event-ID catch-up worked;
+membership removal closed/refused the stream and history; and the real
+15-second heartbeat reached the reader. API integration coverage also exercises
+independent/same-aggregate races, idempotent replay, deleted/locked targets,
+cross-trip/unauthenticated access and assignment-invalidated day orders.
+The complete Chromium browser suite passed through an isolated stack using the
+real Caddyfile after integrating #28 at `fbf46bd`: **28 passed**. It exercises all three conflict actions, mobile
+input preservation, independent place edits, day conflicts, discovery-brief
+creation conflicts, participant comparisons, focus recovery and SSE reconnect,
+plus the independent discovery bases, direct-feedback target, visible reapply
+errors, removed editor dismissal, failed-projection recovery, and create-dialog
+version/idempotency regressions. API regressions reproduce concurrent
+invite/day writes and a reorder during draft reading. A deterministic queued
+SSE test fails when per-event authorization is removed and passes with it
+restored, proving that revocation between batch read and send releases no payload.
+After the final review fixes, the tree passes typecheck, **242 unit tests**, **118 integration tests**
+and the production build in `/i27` against `along_the_way_test27`. Browser tag `27`
+also verifies standalone answer generation, unrelated feedback draft preservation,
+actor email fallback, named/deleted targets, reapply base-version wording, compact
+field comparisons, same-account updates, and Today's live day-order/offline
+snapshot refresh. Real 390px/1440px Chromium captures show the changed note first
+and three unchanged fields collapsed, without horizontal phone overflow.
+Mounted-App regressions fail before and pass after guarding pending navigation
+from an old trip's live change/revocation and retaining failed mutation errors
+during background reads. The raw SSE guard rejects an injected email and passes
+with metadata-only notifications restored.
+The final discovery and wishlist Chromium rerun passed **20 tests**, including a
+conflict whose current note is `步行` but whose attempted and reapplied note is
+`walking`. Rendered-component regressions fail before and pass after preserving
+free text while still translating typed enums. A mounted discovery UI test uses
+the real HTTP/PostgreSQL path to confirm feedback and start research: before the
+fix it stored a false member correction and dropped the original text; afterward
+`interpretationEdited` remains false and the original reaches the model input.
+Production TLS/deployment and real-device behaviour remain **UNVERIFIED**;
+these checks used only the isolated issue-27 stack.
 
 The existing static site remains available at
 <https://tzurae.github.io/along-the-way/>.

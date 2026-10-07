@@ -571,3 +571,355 @@ test("manual wishlist intake remains usable on a mobile viewport", async ({ brow
   }
   await context.close();
 });
+
+for (const recovery of ["接受目前版本", "重新套用我的修改", "返回編輯"] as const) {
+  test(`two members compare a TripPlace conflict and choose ${recovery}`, async ({ browser, request }) => {
+    test.setTimeout(180_000);
+    const suffix = `${Date.now()}-${recovery === "返回編輯" ? "mobile" : "desktop"}`;
+    const tripName = `Wishlist browser conflict ${suffix}`;
+    const ownerEmail = `wishlist-conflict-owner-${suffix}@example.test`;
+    const memberEmail = `wishlist-conflict-member-${suffix}@example.test`;
+    const ownerLabel = recovery === "重新套用我的修改" ? ownerEmail : "Conflict owner";
+    const savedNote = recovery === "重新套用我的修改" ? "步行" : "Current saved note";
+    const attemptedNote = recovery === "重新套用我的修改" ? "walking" : "My unsaved note";
+    await executeDatabase(`insert into users (email, display_name, status) values
+      ('${ownerEmail}', ${recovery === "重新套用我的修改" ? "null" : "'Conflict owner'"}, 'active'), ('${memberEmail}', 'Conflict editor', 'active');`);
+    const ownerContext = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    const memberContext = await browser.newContext({ viewport: recovery === "返回編輯" ? { width: 390, height: 844 } : { width: 1280, height: 900 } });
+    try {
+      const owner = await ownerContext.newPage();
+      const member = await memberContext.newPage();
+      await signIn(owner, request, ownerEmail);
+      await createTrip(owner, tripName);
+      await addManualPlace(owner, { name: "Conflict cafe", address: "Test district", note: "Base note" });
+      await executeDatabase(`insert into trip_members (trip_id, user_id, role)
+        select trip.id, member.id, 'editor' from trips trip cross join users member
+        where trip.name = '${tripName}' and member.email = '${memberEmail}';`);
+      await signIn(member, request, memberEmail);
+      await member.getByRole("button", { name: new RegExp(tripName) }).click();
+      await openTab(member, "想去清單");
+      await expect(member.getByText("即時更新已連線", { exact: true })).toBeVisible();
+      const ownerCard = owner.getByRole("article").filter({ has: owner.getByRole("heading", { name: "Conflict cafe", exact: true }) });
+      const memberCard = member.getByRole("article").filter({ has: member.getByRole("heading", { name: "Conflict cafe", exact: true }) });
+      for (const card of [ownerCard, memberCard]) await card.locator("summary", { hasText: "停留時間、預算和備註" }).click();
+      await memberCard.getByLabel("共享規劃備註").fill(attemptedNote);
+      await ownerCard.getByLabel("共享規劃備註").fill(savedNote);
+      await ownerCard.getByRole("button", { name: "儲存規劃資訊" }).click();
+      // The card read model refreshes live, but the open editor keeps its base and input.
+      await expect(memberCard.getByRole("paragraph").filter({ hasText: new RegExp(`^${savedNote}$`) })).toBeVisible();
+      await expect(memberCard.getByLabel("共享規劃備註")).toHaveValue(attemptedNote);
+      const rejected = member.waitForResponse((response) => response.url().endsWith("/planning") && response.status() === 409);
+      await memberCard.getByRole("button", { name: "儲存規劃資訊" }).click();
+      const conflictResponse = await rejected;
+      const originalVersion = (await conflictResponse.request().postDataJSON()).expectedVersion as number;
+      const panel = memberCard.locator("[data-conflict-panel]");
+      await expect(panel.getByRole("heading", { name: "這份內容已由其他成員更新" })).toBeFocused();
+      await expect(panel.locator("dd p")).toHaveText(["Base note", savedNote, attemptedNote]);
+      await expect.soft(panel).toContainText(ownerLabel);
+      await expect.soft(panel.locator("dt")).toHaveText(["共同備註"]);
+      await expect.soft(panel).toContainText("其他 3 個欄位沒有差異");
+      await panel.getByRole("button", { name: recovery, exact: true }).click();
+      if (recovery === "返回編輯") {
+        await expect(panel).toHaveCount(0);
+        await expect(memberCard.getByLabel("共享規劃備註")).toHaveValue(attemptedNote);
+        await memberCard.getByLabel("共享規劃備註").fill("My revised note");
+        await memberCard.getByRole("button", { name: "儲存規劃資訊" }).click();
+      }
+      const expected = recovery === "接受目前版本" ? savedNote : recovery === "返回編輯" ? "My revised note" : attemptedNote;
+      await expect(panel).toHaveCount(0);
+      await expect(memberCard.getByRole("paragraph").filter({ hasText: new RegExp(`^${expected}$`) })).toBeVisible();
+      await expect(ownerCard.getByRole("paragraph").filter({ hasText: new RegExp(`^${expected}$`) })).toBeVisible();
+      await member.getByRole("tab", { name: "最近變更", exact: true }).click();
+      const history = member.getByRole("tabpanel", { name: "最近變更", exact: true });
+      await expect.soft(history).toContainText(ownerLabel);
+      await expect.soft(history).toContainText("變更對象：想去地點 · Conflict cafe");
+      if (recovery !== "接受目前版本") {
+        await expect.soft(history).toContainText(`比較衝突後重新套用（從第 ${originalVersion} 版開始編輯）`);
+        await expect.soft(history).not.toContainText(`目前版本 ${originalVersion}`);
+      }
+    } finally { await ownerContext.close(); await memberContext.close(); }
+  });
+}
+
+test("two windows of one account identify the writer and hide deleted history target names", async ({ page, request }) => {
+  const { tripId, headers } = await prepareReviewWishlist(page, request, "same-account");
+  await addManualPlace(page, { name: "Same account cafe", note: "Original note" });
+  const other = await page.context().newPage();
+  try {
+    await other.goto(page.url());
+    await openTab(other, "想去清單");
+    const card = (window: Page) => window.getByRole("article").filter({ has: window.getByRole("heading", { name: "Same account cafe", exact: true }) });
+    for (const window of [page, other]) await card(window).locator("summary", { hasText: "停留時間、預算和備註" }).click();
+    await card(page).getByLabel("共享規劃備註").fill("Unsaved first window");
+    await card(other).getByLabel("共享規劃備註").fill("Saved other window");
+    await card(other).getByRole("button", { name: "儲存規劃資訊" }).click();
+    await expect(card(page).getByRole("paragraph").filter({ hasText: /^Saved other window$/ })).toBeVisible();
+    await card(page).getByRole("button", { name: "儲存規劃資訊" }).click();
+    const conflict = card(page).locator("[data-conflict-panel]");
+    await expect.soft(conflict.getByRole("heading")).toHaveText("你在另一個視窗或裝置更新了這份內容");
+    await expect(conflict).toContainText("Unsaved first window");
+    await conflict.getByRole("button", { name: "接受目前版本", exact: true }).click();
+    const places = (await (await page.request.get(`/api/trips/${tripId}/trip-places`)).json()).tripPlaces;
+    const place = places.find((entry: { name: string }) => entry.name === "Same account cafe");
+    expect((await page.request.post(`/api/trips/${tripId}/trip-places/${place.id}/remove`, {
+      headers, data: { expectedVersion: place.version },
+    })).status()).toBe(204);
+    await page.getByRole("tab", { name: "最近變更", exact: true }).click();
+    const history = page.getByRole("tabpanel", { name: "最近變更", exact: true });
+    await expect(history.getByText("變更對象：想去地點", { exact: true }).first()).toBeVisible();
+    await expect(history).not.toContainText("Same account cafe");
+    await expect(history).not.toContainText(place.id.slice(0, 8));
+  } finally { await other.close(); }
+});
+
+test("live refresh recovers by focus while SSE is unavailable and then reconnects", async ({ browser, request }) => {
+  test.setTimeout(180_000);
+  const suffix = Date.now();
+  const tripName = `Wishlist browser live ${suffix}`;
+  const ownerEmail = `wishlist-live-owner-${suffix}@example.test`;
+  const memberEmail = `wishlist-live-member-${suffix}@example.test`;
+  await executeDatabase(`insert into users (email, display_name, status) values
+    ('${ownerEmail}', 'Live owner', 'active'), ('${memberEmail}', 'Live member', 'active');`);
+  const first = await browser.newContext();
+  const second = await browser.newContext();
+  try {
+    const owner = await first.newPage();
+    const member = await second.newPage();
+    await signIn(owner, request, ownerEmail);
+    await createTrip(owner, tripName);
+    await executeDatabase(`insert into trip_members (trip_id, user_id, role)
+      select trip.id, member.id, 'editor' from trips trip cross join users member
+      where trip.name = '${tripName}' and member.email = '${memberEmail}';`);
+    await second.route("**/api/trips/*/events*", (route) => route.abort());
+    await signIn(member, request, memberEmail);
+    await member.getByRole("button", { name: new RegExp(tripName) }).click();
+    await openTab(member, "想去清單");
+    await addManualPlace(owner, { name: "Focus recovery cafe", note: "Saved while SSE is down" });
+    await member.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(member.getByRole("heading", { name: "Focus recovery cafe", exact: true })).toBeVisible();
+    await second.unroute("**/api/trips/*/events*");
+    await member.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(member.getByText("即時更新已連線", { exact: true })).toBeVisible();
+    await addManualPlace(owner, { name: "Reconnected cafe", note: "Saved after reconnect" });
+    await expect(member.getByRole("heading", { name: "Reconnected cafe", exact: true })).toBeVisible();
+    await expect(member.getByRole("heading", { name: "Focus recovery cafe", exact: true })).toHaveCount(1);
+  } finally { await first.close(); await second.close(); }
+});
+
+test("independent place edits converge while a stale day window requires an explicit retry", async ({ browser, request }) => {
+  test.setTimeout(180_000);
+  const suffix = Date.now();
+  const tripName = `Wishlist browser independent ${suffix}`;
+  const ownerEmail = `wishlist-independent-owner-${suffix}@example.test`;
+  const memberEmail = `wishlist-independent-member-${suffix}@example.test`;
+  await executeDatabase(`insert into users (email, display_name, status) values
+    ('${ownerEmail}', 'Day owner', 'active'), ('${memberEmail}', 'Day member', 'active');`);
+  const ownerContext = await browser.newContext();
+  const memberContext = await browser.newContext();
+  try {
+    const owner = await ownerContext.newPage();
+    const member = await memberContext.newPage();
+    await signIn(owner, request, ownerEmail);
+    await createTrip(owner, tripName);
+    await addManualPlace(owner, { name: "Independent A", note: "A base" });
+    await addManualPlace(owner, { name: "Independent B", note: "B base" });
+    await executeDatabase(`insert into trip_members (trip_id, user_id, role)
+      select trip.id, member.id, 'editor' from trips trip cross join users member
+      where trip.name = '${tripName}' and member.email = '${memberEmail}';`);
+    await signIn(member, request, memberEmail);
+    await member.getByRole("button", { name: new RegExp(tripName) }).click();
+    await openTab(member, "想去清單");
+    const card = (page: Page, name: string) => page.getByRole("article").filter({ has: page.getByRole("heading", { name, exact: true }) });
+    const ownerCard = card(owner, "Independent A");
+    const memberCard = card(member, "Independent B");
+    for (const editor of [ownerCard, memberCard]) await editor.locator("summary", { hasText: "停留時間、預算和備註" }).click();
+    await ownerCard.getByLabel("共享規劃備註").fill("A independently saved");
+    await memberCard.getByLabel("共享規劃備註").fill("B independently saved");
+    const ownerSave = owner.waitForResponse((response) => response.url().endsWith("/planning") && response.request().method() === "PATCH");
+    const memberSave = member.waitForResponse((response) => response.url().endsWith("/planning") && response.request().method() === "PATCH");
+    await Promise.all([ownerCard.getByRole("button", { name: "儲存規劃資訊" }).click(), memberCard.getByRole("button", { name: "儲存規劃資訊" }).click()]);
+    expect((await ownerSave).status()).toBe(200);
+    expect((await memberSave).status()).toBe(200);
+    for (const page of [owner, member]) {
+      await expect(card(page, "Independent A").getByRole("paragraph").filter({ hasText: /^A independently saved$/ })).toBeVisible();
+      await expect(card(page, "Independent B").getByRole("paragraph").filter({ hasText: /^B independently saved$/ })).toBeVisible();
+      await openTab(page, "行程");
+      const firstDay = page.locator("[data-date]").first();
+      if (page === owner) {
+        await firstDay.getByText("從共用想去清單新增").click();
+        await firstDay.getByRole("checkbox", { name: /Independent A/ }).check();
+        await firstDay.getByRole("button", { name: "新增所選地點（1）" }).click();
+      }
+      await expect(firstDay.getByRole("button", { name: "排這一天", exact: true })).toBeVisible();
+      await firstDay.getByRole("button", { name: "排這一天", exact: true }).click();
+      await expect(page.getByRole("dialog").getByRole("button", { name: "重新排", exact: true })).toBeEnabled();
+    }
+    const ownerDay = owner.getByRole("dialog");
+    const memberDay = member.getByRole("dialog");
+    await ownerDay.getByLabel("開始", { exact: true }).fill("08:00");
+    await memberDay.getByLabel("開始", { exact: true }).fill("10:00");
+    const windowSaved = owner.waitForResponse((response) => response.url().endsWith("/window") && response.request().method() === "PUT");
+    await ownerDay.getByRole("button", { name: "重新排", exact: true }).click();
+    expect((await windowSaved).status()).toBe(200);
+    await expect(memberDay.getByLabel("開始", { exact: true })).toHaveValue("10:00");
+    const rejected = member.waitForResponse((response) => response.url().endsWith("/window") && response.status() === 409);
+    await memberDay.getByRole("button", { name: "重新排", exact: true }).click();
+    await rejected;
+    const panel = memberDay.locator("[data-conflict-panel]");
+    await expect(panel).toContainText("09:00");
+    await expect(panel).toContainText("08:00");
+    await expect(panel).toContainText("10:00");
+    await expect(panel).toContainText("Day owner");
+    await panel.getByRole("button", { name: "返回編輯", exact: true }).click();
+    await expect(memberDay.getByLabel("開始", { exact: true })).toHaveValue("10:00");
+    await memberDay.getByLabel("開始", { exact: true }).fill("10:30");
+    const retried = member.waitForResponse((response) => response.url().endsWith("/window") && response.request().method() === "PUT");
+    await memberDay.getByRole("button", { name: "重新排", exact: true }).click();
+    expect((await retried).status()).toBe(200);
+    await expect(memberDay.getByRole("button", { name: "重新排", exact: true })).toBeEnabled();
+    await expect(memberDay.getByLabel("開始", { exact: true })).toHaveValue("10:30");
+  } finally { await ownerContext.close(); await memberContext.close(); }
+});
+
+async function prepareReviewWishlist(page: Page, request: APIRequestContext, kind: string) {
+  const suffix = `${Date.now()}-${kind}`;
+  const name = `Wishlist browser review ${suffix}`;
+  const email = `wishlist-review-${suffix}@example.test`;
+  await executeDatabase(`insert into users (email, display_name, status) values ('${email}', 'Review owner', 'active');`);
+  await signIn(page, request, email);
+  await createTrip(page, name);
+  const trips = await (await page.request.get("/api/trips")).json();
+  const tripId = trips.trips.find((trip: { name: string }) => trip.name === name).id as string;
+  return { tripId, headers: { origin: new URL(page.url()).origin, "idempotency-key": crypto.randomUUID() } };
+}
+
+test("deleted planning editors can be dismissed and closed editors do not resurrect places", async ({ page, request }) => {
+  const { tripId, headers } = await prepareReviewWishlist(page, request, "deleted-editor");
+  const removeThroughApi = async (name: string) => {
+    const list = await (await page.request.get(`/api/trips/${tripId}/trip-places`)).json();
+    const place = list.tripPlaces.find((entry: { name: string }) => entry.name === name);
+    expect((await page.request.post(`/api/trips/${tripId}/trip-places/${place.id}/remove`, {
+      headers: { ...headers, "idempotency-key": crypto.randomUUID() }, data: { expectedVersion: place.version },
+    })).status()).toBe(204);
+  };
+  await addManualPlace(page, { name: "Closed editor cafe", note: "Saved note" });
+  const closed = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "Closed editor cafe", exact: true }) });
+  await closed.locator("summary", { hasText: "停留時間、預算和備註" }).click();
+  await closed.locator("summary", { hasText: "停留時間、預算和備註" }).click();
+  await removeThroughApi("Closed editor cafe");
+  await expect(closed).toHaveCount(0);
+
+  await addManualPlace(page, { name: "Own removed cafe", note: "Saved note" });
+  const own = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "Own removed cafe", exact: true }) });
+  await own.locator("summary", { hasText: "停留時間、預算和備註" }).click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await own.getByRole("button", { name: "從想去清單移除", exact: true }).click();
+  await expect(own).toHaveCount(0);
+
+  await addManualPlace(page, { name: "Unsaved removed cafe", note: "Saved note" });
+  const unsaved = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "Unsaved removed cafe", exact: true }) });
+  await unsaved.locator("summary", { hasText: "停留時間、預算和備註" }).click();
+  await unsaved.getByLabel("共享規劃備註").fill("Keep this unsaved deleted-place note");
+  await removeThroughApi("Unsaved removed cafe");
+  const unavailable = unsaved.locator("[data-conflict-panel]");
+  await expect(unavailable).toContainText("Keep this unsaved deleted-place note");
+  await expect(unavailable.getByRole("button", { name: "重新套用我的修改", exact: true })).toBeDisabled();
+  await expect(unsaved.getByRole("button", { name: "從想去清單移除", exact: true })).toHaveCount(0);
+  await unavailable.getByRole("button", { name: "放棄修改並關閉", exact: true }).click();
+  await expect(unsaved).toHaveCount(0);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(unsaved).toHaveCount(0);
+});
+
+test("focus recovers a failed history projection after the notification watermark was read", async ({ page, request }) => {
+  const { tripId, headers } = await prepareReviewWishlist(page, request, "projection-retry");
+  await addManualPlace(page, { name: "Existing projection cafe", note: "Initial saved state" });
+  await page.getByRole("tab", { name: "最近變更", exact: true }).click();
+  const endpoint = `**/api/trips/${tripId}/history`;
+  let failNextRead = true;
+  await page.route(endpoint, async (route) => {
+    if (route.request().method() === "GET" && failNextRead) {
+      failNextRead = false;
+      await route.fulfill({ status: 503, json: { error: { code: "unavailable", message: "Temporary projection failure" } } });
+    } else await route.continue();
+  });
+  const failed = page.waitForResponse((response) => response.url().endsWith(`/trips/${tripId}/history`) && response.status() === 503);
+  expect((await page.request.post(`/api/trips/${tripId}/trip-places`, {
+    headers, data: { method: "manual", name: "Recovered projection cafe", type: "restaurant", address: null, latitude: null, longitude: null, timeZone: null, sourceUrl: null, originalNote: null },
+  })).status()).toBe(201);
+  await failed;
+  await page.unroute(endpoint);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.getByRole("tabpanel", { name: "最近變更", exact: true })).toContainText("變更對象：想去地點 · Recovered projection cafe");
+});
+
+test("open create dialogs keep their input and use fresh creation preconditions", async ({ page, request }) => {
+  const { tripId, headers } = await prepareReviewWishlist(page, request, "create-preconditions");
+  await openTab(page, "行程");
+  const createElsewhere = async (name: string) => {
+    const before = (await (await page.request.get(`/api/trips/${tripId}/skeleton`)).json()).skeleton.tripVersion;
+    const response = await page.request.post(`/api/trips/${tripId}/places`, {
+      headers: { ...headers, "idempotency-key": crypto.randomUUID() },
+      data: { name, type: "activity", address: null, latitude: null, longitude: null, timeZone: "Asia/Tokyo", sourceUrl: null, notes: null, expectedTripVersion: before },
+    });
+    expect(response.status(), await response.text()).toBe(201);
+    const current = (await (await page.request.get(`/api/trips/${tripId}`)).json()).trip;
+    await expect(page.locator('[aria-labelledby="trip-title-heading"]')).toContainText(`版本 ${current.version}`);
+  };
+  await page.getByRole("button", { name: "新增地點", exact: true }).click();
+  const place = page.getByRole("dialog", { name: "新增地點", exact: true });
+  await place.getByLabel("地點名稱").fill("My preserved new place");
+  await place.getByLabel("備註").fill("Unsaved creation input");
+  await createElsewhere("Other creator's place");
+  await expect(place.getByLabel("地點名稱")).toHaveValue("My preserved new place");
+  await place.getByRole("button", { name: "儲存地點", exact: true }).click();
+  await expect(place).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "編輯「My preserved new place」", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "新增地點", exact: true }).click();
+  await place.getByLabel("地點名稱").fill("Retry without discarding new place");
+  const createPath = `**/api/trips/${tripId}/places`;
+  let interfereWithCreate = true;
+  await page.route(createPath, async (route) => {
+    if (!interfereWithCreate) { await route.continue(); return; }
+    interfereWithCreate = false;
+    await createElsewhere("Concurrent create after submission");
+    await route.continue();
+  });
+  const staleCreate = page.waitForResponse((response) => response.url().endsWith(`/trips/${tripId}/places`) && response.status() === 409);
+  await place.getByRole("button", { name: "儲存地點", exact: true }).click();
+  await staleCreate;
+  await expect(place.getByRole("alert")).toBeVisible();
+  await expect(place.getByLabel("地點名稱")).toHaveValue("Retry without discarding new place");
+  await place.getByRole("button", { name: "儲存地點", exact: true }).click();
+  await expect(place).toHaveCount(0);
+
+  await page.getByRole("button", { name: "新增固定行程", exact: true }).click();
+  const item = page.getByRole("dialog", { name: "新增固定行程", exact: true });
+  await item.getByLabel("類型", { exact: true }).selectOption("activity");
+  await item.getByLabel("標題", { exact: true }).fill("My preserved new activity");
+  const start = item.getByRole("group", { name: "開始（當地時間）", exact: true });
+  await start.getByLabel("停留國家").selectOption({ label: "1、JP" });
+  await start.getByLabel("地點", { exact: true }).selectOption({ label: "Other creator's place" });
+  await start.getByLabel("當地日期與時間").fill("2026-11-04T10:00");
+  await start.getByLabel("IANA 時區").fill("Asia/Tokyo");
+  await item.getByLabel("期間（分鐘）").fill("60");
+  await createElsewhere("Another concurrent place");
+  await expect(item.getByLabel("標題", { exact: true })).toHaveValue("My preserved new activity");
+  const itemPath = `**/api/trips/${tripId}/items`;
+  let loseItemResponse = true;
+  await page.route(itemPath, async (route) => {
+    if (!loseItemResponse) { await route.continue(); return; }
+    loseItemResponse = false;
+    const saved = await route.fetch();
+    expect(saved.status()).toBe(201);
+    await route.abort("failed");
+  });
+  await item.getByRole("button", { name: "儲存固定行程", exact: true }).click();
+  await expect(item.getByRole("alert")).toBeVisible();
+  await expect(item.getByLabel("標題", { exact: true })).toHaveValue("My preserved new activity");
+  await item.getByRole("button", { name: "儲存固定行程", exact: true }).click();
+  await expect(item).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "My preserved new activity", exact: true })).toBeVisible();
+  const savedItems = (await (await page.request.get(`/api/trips/${tripId}/skeleton`)).json()).skeleton.items;
+  expect(savedItems.filter((entry: { title: string }) => entry.title === "My preserved new activity")).toHaveLength(1);
+});

@@ -205,23 +205,12 @@ export interface TimelineDayDto {
   entries: TimelineEntryDto[];
 }
 
-export interface ChangeEventDto {
-  id: string;
-  actorId: string;
-  eventType: string;
-  targetType: string;
-  targetId: string;
-  summary: string;
-  createdAt: string;
-}
-
 export interface TripSkeletonDto {
   tripVersion: number;
   places: PlaceDto[];
   items: ItineraryItemDto[];
   days: TimelineDayDto[];
   tripInformationItemIds: string[];
-  events: ChangeEventDto[];
 }
 
 export interface TripSkeletonResponse {
@@ -473,19 +462,6 @@ function timelineDayValue(value: unknown): TimelineDayDto {
   };
 }
 
-function changeEventValue(value: unknown): ChangeEventDto {
-  if (!isRecord(value)) return invalidResponse();
-  return {
-    id: stringValue(value.id),
-    actorId: stringValue(value.actorId),
-    eventType: stringValue(value.eventType),
-    targetType: stringValue(value.targetType),
-    targetId: stringValue(value.targetId),
-    summary: stringValue(value.summary),
-    createdAt: stringValue(value.createdAt),
-  };
-}
-
 export function parseTripSkeletonResponse(value: unknown): TripSkeletonResponse {
   if (!isRecord(value) || !isRecord(value.skeleton)) return invalidResponse();
   const skeleton = value.skeleton;
@@ -493,8 +469,7 @@ export function parseTripSkeletonResponse(value: unknown): TripSkeletonResponse 
     !Array.isArray(skeleton.places) ||
     !Array.isArray(skeleton.items) ||
     !Array.isArray(skeleton.days) ||
-    !Array.isArray(skeleton.tripInformationItemIds) ||
-    !Array.isArray(skeleton.events)
+    !Array.isArray(skeleton.tripInformationItemIds)
   ) {
     return invalidResponse();
   }
@@ -505,7 +480,6 @@ export function parseTripSkeletonResponse(value: unknown): TripSkeletonResponse 
       items: skeleton.items.map(itemValue),
       days: skeleton.days.map(timelineDayValue),
       tripInformationItemIds: skeleton.tripInformationItemIds.map(stringValue),
-      events: skeleton.events.map(changeEventValue),
     },
   };
 }

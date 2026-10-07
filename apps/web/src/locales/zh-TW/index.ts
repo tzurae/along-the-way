@@ -1,4 +1,5 @@
 import { app } from "./app";
+import { collaboration } from "./collaboration";
 import { createTrip } from "./create-trip";
 import { dayPlan } from "./day-plan";
 import { discovery } from "./discovery";
@@ -15,6 +16,7 @@ import { today } from "./today";
 /** Traditional Chinese (Taiwan): the site's first language and the shape every other follows. */
 export const zhTW = {
   app,
+  collaboration,
   createTrip,
   dayPlan,
   discovery,

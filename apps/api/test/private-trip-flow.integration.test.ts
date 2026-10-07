@@ -1,3 +1,4 @@
+import { PostgresCollaborationModule } from "../src/private-trips/postgres-collaboration-module";
 import { createHash } from "node:crypto";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -141,6 +142,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       now: () => new Date(now),
     });
     app = createApp({
+      collaboration: new PostgresCollaborationModule(database),
       dayPlans: unrelatedDayPlanModule,
       discovery: unrelatedDiscoveryModule,
       identityAccess,

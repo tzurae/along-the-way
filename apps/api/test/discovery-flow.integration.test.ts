@@ -1,9 +1,15 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { PostgresCollaborationModule } from "../src/private-trips/postgres-collaboration-module";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createRequire } from "node:module";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { DiscoveryWorkspace } from "../../web/src/DiscoveryWorkspace";
+import { ApiRequestError } from "../../web/src/api-error";
 import type { Hono } from "hono";
 import { sql, type Kysely } from "kysely";
 
 import { parseDiscoveryWorkspaceResponse } from "@along-the-way/contracts/discovery";
-import { parseTripResponse } from "@along-the-way/contracts/private-trips";
+import { parseApiError, parseTripResponse } from "@along-the-way/contracts/private-trips";
 import {
   parseTripPlaceListResponse,
   parseTripPlaceResponse,
@@ -403,6 +409,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       policyVersion: "discovery-test-v2",
     });
     app = createApp({
+      collaboration: new PostgresCollaborationModule(database),
       dayPlans: unrelatedDayPlanModule,
       discovery,
       identityAccess,
@@ -476,6 +483,37 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       body: json(body),
     });
   }
+
+  it("treats a concurrently created discovery brief as a version conflict without overwriting it", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie, "Concurrent brief creation");
+    const path = `/api/trips/${trip.id}/discovery/brief`;
+    const inputs = ["Architecture and temples.", "Food markets and gardens."];
+    const results = await Promise.all(inputs.map((originalText, index) => discoveryRequest(cookie, path, `brief-create-${index}`, {
+      originalText, expectedVersion: null,
+    })));
+    expect(results.map((response) => response.status).sort()).toEqual([200, 409]);
+    const winner = results.findIndex((response) => response.status === 200);
+    const saved = parseDiscoveryWorkspaceResponse(await results[winner]!.json()).discovery;
+    const rejected = await results[1 - winner]!.json();
+    expect(rejected).toMatchObject({ error: { code: "conflict", currentVersion: saved.brief!.version } });
+    const readBrief = async () => parseDiscoveryWorkspaceResponse(await (await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } })).json()).discovery.brief;
+    const readHistory = async () => (await (await app.request(`/api/trips/${trip.id}/history`, { headers: { cookie } })).json()).events;
+    const before = await readHistory();
+    expect(before.filter((event: { eventType: string }) => event.eventType.startsWith("discovery.brief_"))).toHaveLength(1);
+    expect(await readBrief()).toEqual(saved.brief);
+    const stale = await discoveryRequest(cookie, path, "brief-stale-create", { originalText: "Stale third editor.", expectedVersion: null });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ error: { currentVersion: saved.brief!.version, latestChange: { eventId: before[0].id } } });
+    expect(await readBrief()).toEqual(saved.brief);
+    expect(await readHistory()).toEqual(before);
+    const replay = await discoveryRequest(cookie, path, `brief-create-${winner}`, { originalText: inputs[winner], expectedVersion: null });
+    expect(parseDiscoveryWorkspaceResponse(await replay.json()).discovery).toEqual(saved);
+    expect(await readHistory()).toEqual(before);
+    const reapplied = await discoveryRequest(cookie, path, "brief-reapplied", { originalText: inputs[1 - winner], expectedVersion: saved.brief!.version });
+    expect(reapplied.status).toBe(200);
+    expect((await readBrief())?.originalText).toBe(inputs[1 - winner]);
+  });
 
   it("deduplicates model cost, preserves evidence, accepts a proposal, and confirms feedback", async () => {
     const cookie = await login();
@@ -674,6 +712,77 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(model.planInputs.at(-1)?.confirmedFeedback[0]).toContain("Prefer quieter covered markets and keep each day slow.");
     expect(model.planInputs.at(-1)?.confirmedFeedback[0]).not.toContain("Original:");
     expect(model.researchInputs.at(-1)?.confirmedFeedback).toEqual(model.planInputs.at(-1)?.confirmedFeedback);
+  });
+
+  it("keeps unedited UI confirmations distinct from member corrections in research", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    const path = `/api/trips/${trip.id}/discovery`;
+    expect((await discoveryRequest(cookie, `${path}/brief`, "unedited-brief", {
+      originalText: "Find food markets.", expectedVersion: null,
+    })).status).toBe(200);
+    model.releaseFeedback();
+    const originalText = "Avoid crowded indoor markets; prefer open-air stalls with seating.";
+    const created = await discoveryRequest(cookie, `${path}/feedback`, "unedited-feedback", { originalText });
+    expect(created.status).toBe(200);
+    const feedback = parseDiscoveryWorkspaceResponse(await created.json()).discovery.feedback[0]!;
+    // Mount only this client surface in a DOM; the API suite retains its Node environment.
+    const { JSDOM } = createRequire(import.meta.url)("jsdom") as { JSDOM: new () => { window: Window & typeof globalThis } };
+    const dom = new JSDOM();
+    vi.stubGlobal("window", dom.window);
+    vi.stubGlobal("document", dom.window.document);
+    for (const name of ["Node", "Element", "HTMLElement"] as const) vi.stubGlobal(name, dom.window[name]);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const pending: Promise<unknown>[] = [];
+    const request = <T>(url: string, init?: RequestInit): Promise<T> => {
+      const response = (async () => {
+        const headers = new Headers(init?.headers);
+        headers.set("cookie", cookie);
+        headers.set("origin", "https://app.example.test");
+        const reply = await app.request(url, { ...init, headers });
+        const value: unknown = await reply.json();
+        if (!reply.ok) {
+          const { error } = parseApiError(value);
+          throw new ApiRequestError(error.code, error.message, error.correlationId, error.currentVersion, error.latestChange, reply.status);
+        }
+        return value as T;
+      })();
+      pending.push(response.catch(() => undefined));
+      return response;
+    };
+    const settle = () => act(async () => { while (pending.length) await Promise.all(pending.splice(0)); });
+    function button(label: string) {
+      const found = [...host.querySelectorAll("button")].find((entry) => entry.textContent?.trim() === label);
+      expect(found, label).toBeDefined();
+      return found!;
+    }
+    async function click(label: string) {
+      await act(async () => button(label).click());
+      await settle();
+    }
+    try {
+      await act(async () => root.render(createElement(DiscoveryWorkspace, { trip, request, placesRevision: 0, onPlacesChanged() {} })));
+      await settle();
+      await click("確認解讀");
+      const confirmed = parseDiscoveryWorkspaceResponse(await request(path)).discovery.feedback[0]!;
+      expect(confirmed.status).toBe("confirmed");
+      expect.soft(confirmed.interpretationEdited).toBe(false);
+      expect(confirmed.interpretation).toEqual(feedback.interpretation);
+
+      model.releasePlan();
+      await click("尋找候選地點");
+      expect(button("重新研究")).toBeDefined();
+      expect.soft(model.researchInputs.at(-1)?.confirmedFeedback[0]).toContain(originalText);
+      expect.soft(model.researchInputs.at(-1)?.confirmedFeedback[0]).not.toContain("Member-corrected interpretation");
+    } finally {
+      await settle();
+      await act(async () => root.unmount());
+      dom.window.close();
+      vi.unstubAllGlobals();
+    }
   });
 
   it("persists answered and skipped questions for model inputs and clears them when the brief changes", async () => {

@@ -23,6 +23,10 @@ export interface DayWindowDto {
   endMinute: number;
 }
 
+export interface SavedDayWindowDto extends DayWindowDto {
+  version: number;
+}
+
 export type DayTimetableOrder = "current" | "suggested";
 
 export interface CreateDayTimetableInput {
@@ -31,10 +35,18 @@ export interface CreateDayTimetableInput {
 }
 
 export interface ApplyDayPlaceOrderInput {
+  expectedVersion: number;
   orderedTripPlaceIds: string[];
 }
 
-export type UpdateDayWindowInput = DayWindowDto;
+export interface UpdateDayWindowInput extends DayWindowDto {
+  expectedVersion: number;
+}
+
+export interface DayPlaceOrderResponse {
+  orderedTripPlaceIds: string[];
+  version: number;
+}
 
 /** Times are minutes from local midnight of the day. */
 export type DayTimetableRowDto =
@@ -114,7 +126,7 @@ export interface DayLoadDto {
 export interface DayTimetableDto {
   dayId: string;
   date: string;
-  window: DayWindowDto;
+  window: SavedDayWindowDto;
   order: DayTimetableOrder;
   /** Located places in the order tried; saving the order stores exactly this. */
   orderedTripPlaceIds: string[];
@@ -132,7 +144,7 @@ export interface DayTimetableResponse {
 }
 
 export interface DayWindowResponse {
-  window: DayWindowDto;
+  window: SavedDayWindowDto;
 }
 
 /** Why a wishlist place is not in a trip plan. */
@@ -169,7 +181,7 @@ export interface TripPlanResponse {
 
 export interface ApplyTripPlanInput {
   basis: string;
-  days: Array<{ tripDayId: string; orderedTripPlaceIds: string[] }>;
+  days: Array<{ tripDayId: string; orderedTripPlaceIds: string[]; expectedVersion: number }>;
 }
 
 function invalid(): never {
@@ -240,9 +252,9 @@ function nullableLeg(value: unknown) {
   return value === null ? null : leg(value);
 }
 
-function window(value: unknown): DayWindowDto {
+function window(value: unknown): SavedDayWindowDto {
   const row = record(value);
-  return { startMinute: integer(row.startMinute), endMinute: integer(row.endMinute) };
+  return { startMinute: integer(row.startMinute), endMinute: integer(row.endMinute), version: integer(row.version) };
 }
 
 function timetableRow(value: unknown): DayTimetableRowDto {
