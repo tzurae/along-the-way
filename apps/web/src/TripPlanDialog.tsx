@@ -89,6 +89,7 @@ export function TripPlanDialog({
           days: plan.days.map((day) => ({
             tripDayId: day.timetable.dayId,
             orderedTripPlaceIds: day.orderedTripPlaceIds,
+            expectedVersion: day.timetable.window.version,
           })),
         }),
         parse: parseTripPlaceListResponse,

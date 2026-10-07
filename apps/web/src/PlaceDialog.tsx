@@ -21,10 +21,13 @@ import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "./i18n";
+import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./ConflictPanel";
 
 interface PlaceDialogProps {
   place?: PlaceDto;
-  save(input: CreatePlaceInput | UpdatePlaceInput): Promise<void>;
+  save(input: CreatePlaceInput | UpdatePlaceInput, conflictBase?: number): Promise<void>;
+  load?(): Promise<PlaceDto | null>;
+  editingChanged?(open: boolean): void;
 }
 
 const placeTypes: PlaceType[] = [
@@ -36,7 +39,11 @@ const placeTypes: PlaceType[] = [
   "other",
 ];
 
-export function PlaceDialog({ place, save }: PlaceDialogProps) {
+function placeValues(place: PlaceDto): CreatePlaceInput {
+  return { name: place.name, type: place.type, address: place.address, latitude: place.latitude, longitude: place.longitude, timeZone: place.timeZone, sourceUrl: place.sourceUrl, notes: place.notes };
+}
+
+export function PlaceDialog({ place, save, load, editingChanged }: PlaceDialogProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState(place?.name ?? "");
@@ -52,8 +59,12 @@ export function PlaceDialog({ place, save }: PlaceDialogProps) {
   );
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [base, setBase] = useState<EditSnapshot<CreatePlaceInput> | null>(place ? { input: placeValues(place), version: place.version } : null);
+  const resolution = useVersionConflict<CreatePlaceInput>();
 
   function resetDraft() {
+    resolution.clear();
+    setBase(place ? { input: placeValues(place), version: place.version } : null);
     setName(place?.name ?? "");
     setType(place?.type ?? "other");
     setAddress(place?.address ?? "");
@@ -69,6 +80,25 @@ export function PlaceDialog({ place, save }: PlaceDialogProps) {
   function changeOpen(nextOpen: boolean) {
     if (nextOpen && !open) resetDraft();
     setOpen(nextOpen);
+    editingChanged?.(nextOpen);
+  }
+
+  async function persist(input: CreatePlaceInput, version: number | null, conflictBase = resolution.conflictBaseVersion) {
+    setSubmitting(true);
+    setError("");
+    try {
+      await save(place ? { ...input, expectedVersion: version! } : input, conflictBase);
+      resolution.clear();
+      changeOpen(false);
+    } catch (reason) {
+      try {
+        if (base && load && await resolution.capture(reason, base, input, async () => {
+          const current = await load();
+          return current ? { input: placeValues(current), version: current.version } : null;
+        })) return;
+        setError(reason instanceof Error ? reason.message : t.placeDialog.saveError);
+      } catch (failure) { setError(failure instanceof Error ? failure.message : t.collaboration.loadError); }
+    } finally { setSubmitting(false); }
   }
 
   async function submit() {
@@ -110,10 +140,7 @@ export function PlaceDialog({ place, save }: PlaceDialogProps) {
       if (place && expectedVersion === null) {
         throw new Error(t.placeDialog.unavailableVersion);
       }
-      await save(
-        place ? { ...input, expectedVersion: expectedVersion! } : input,
-      );
-      setOpen(false);
+      await persist(input, expectedVersion);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : t.placeDialog.saveError);
     } finally {
@@ -136,7 +163,13 @@ export function PlaceDialog({ place, save }: PlaceDialogProps) {
           <DialogTitle>{place ? t.placeDialog.editPlace : t.placeDialog.addPlace}</DialogTitle>
           <DialogDescription>{t.placeDialog.description}</DialogDescription>
         </DialogHeader>
-        <form className="grid gap-4" onSubmit={(event) => event.preventDefault()}>
+        {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={submitting}
+          onAccept={() => { resolution.clear(); changeOpen(false); }}
+          onReapply={() => void persist(resolution.conflict!.attempted, resolution.conflict!.current!.version, resolution.conflict!.base.version)}
+          onEdit={() => { setBase(resolution.conflict!.current!); setExpectedVersion(resolution.conflict!.current!.version); resolution.resume(); setError(""); }}
+        /> : null}
+        {resolution.conflict && error ? <p role="alert" className="text-destructive">{error}</p> : null}
+        <form hidden={Boolean(resolution.conflict)} className="grid gap-4" onSubmit={(event) => event.preventDefault()}>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field>
               <FieldLabel htmlFor={`place-name-${place?.id ?? "new"}`}>{t.placeDialog.placeName}</FieldLabel>

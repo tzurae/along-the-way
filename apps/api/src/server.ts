@@ -1,4 +1,5 @@
 import { createApp } from "./app";
+import { PostgresCollaborationModule } from "./private-trips/postgres-collaboration-module";
 import { createDatabase, requireDatabaseUrl } from "./database/database";
 import { OpenAiResponsesDiscoveryModel } from "./discovery/openai-responses-discovery-model";
 import { PostgresDiscoveryModule } from "./discovery/postgres-discovery-module";
@@ -59,6 +60,7 @@ const dayPlans = new PostgresDayPlanModule({
 const rateLimiter = new PostgresRateLimiter(database, tokenSecret);
 const readiness = new PostgresReadinessProbe(database);
 const app = createApp({
+  collaboration: new PostgresCollaborationModule(database),
   dayPlans,
   discovery,
   identityAccess,
@@ -73,6 +75,7 @@ const port = Number(process.env.PORT ?? 3000);
 
 const server = Bun.serve({
   port,
+  idleTimeout: 30,
   fetch: app.fetch,
 });
 

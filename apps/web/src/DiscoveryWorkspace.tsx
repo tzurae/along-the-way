@@ -15,6 +15,7 @@ import type { TripDto } from "@along-the-way/contracts/private-trips";
 import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
 import { VoteControl } from "./VoteControl";
+import { ConflictPanel, useVersionConflict } from "./ConflictPanel";
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
 
@@ -189,28 +190,40 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const [pending, setPending] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ area: NoticeArea; text: string } | null>(null);
   const retryKeys = useRef<RetryKeys>(new Map());
+  const briefBase = useRef<DiscoveryWorkspaceDto["brief"]>(null);
+  const answersBase = useRef<DiscoveryWorkspaceDto["brief"]>(null);
+  const feedbackBase = useRef<DiscoveryFeedbackDto | null>(null);
+  const conflictLatest = useRef<DiscoveryWorkspaceDto | null>(null);
+  const resolution = useVersionConflict<Record<string, unknown>>();
+  const conflictAction = useRef<{ operation: string; path: string; payload: Record<string, unknown>; area: NoticeArea; after?: () => void; method?: "POST" | "PUT" } | null>(null);
   const researchLabel = (idle: string) =>
     pending === "save-brief" || pending === "save-questions"
       ? t.progress.saving
       : pending === "generate" ? t.progress.researching : idle;
-  const apply = useCallback((value: unknown) => {
+  const apply = useCallback((value: unknown, inputs: "all" | "brief" | "questions" | "none" = "all") => {
     const next = parseDiscoveryWorkspaceResponse(value).discovery;
     setWorkspace(next);
-    setBriefDraft(next.brief?.originalText ?? "");
-    const savedAnswers = Object.fromEntries(
-      (next.brief?.questionAnswers ?? []).map((entry) => [entry.question, entry.answer]),
-    );
-    const questions = [
-      ...(next.brief?.questionAnswers.map((entry) => entry.question) ?? []),
-      ...(next.brief?.unresolvedQuestions ?? []),
-    ].filter((question, index, all) => all.indexOf(question) === index);
-    setQuestionDrafts(Object.fromEntries(questions.map((question) => [
-      question,
-      {
-        answer: typeof savedAnswers[question] === "string" ? savedAnswers[question] : "",
-        skipped: savedAnswers[question] === null,
-      },
-    ])));
+    if (inputs === "all" || inputs === "brief") {
+      briefBase.current = next.brief;
+      setBriefDraft(next.brief?.originalText ?? "");
+    }
+    if (inputs === "all" || inputs === "questions") {
+      answersBase.current = next.brief;
+      const savedAnswers = Object.fromEntries(
+        (next.brief?.questionAnswers ?? []).map((entry) => [entry.question, entry.answer]),
+      );
+      const questions = [
+        ...(next.brief?.questionAnswers.map((entry) => entry.question) ?? []),
+        ...(next.brief?.unresolvedQuestions ?? []),
+      ].filter((question, index, all) => all.indexOf(question) === index);
+      setQuestionDrafts(Object.fromEntries(questions.map((question) => [
+        question,
+        {
+          answer: typeof savedAnswers[question] === "string" ? savedAnswers[question] : "",
+          skipped: savedAnswers[question] === null,
+        },
+      ])));
+    }
     return next;
   }, []);
 
@@ -245,27 +258,54 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   async function mutate(
     operation: string,
     path: string,
-    payload: unknown,
+    payload: Record<string, unknown>,
     area: NoticeArea,
     after?: () => void,
     method?: "POST" | "PUT",
+    conflictBase = operation === conflictAction.current?.operation ? resolution.conflictBaseVersion : undefined,
   ) {
     if (pending) return;
     setPending(operation);
     setNotice(null);
+    const submittedFeedbackId = operation.startsWith("feedback-confirm:") ? operation.slice("feedback-confirm:".length) : null;
+    const submittedFeedback = feedbackBase.current?.id === submittedFeedbackId ? feedbackBase.current : null;
     try {
       const next = apply(await request(path, {
         method: method ?? (operation === "save-brief" || operation === "save-questions" ? "PUT" : "POST"),
         headers: {
           "Content-Type": "application/json",
           "Idempotency-Key": retryKey(retryKeys.current, operation, payload),
+          ...(conflictBase ? { "Conflict-Base-Version": String(conflictBase) } : {}),
         },
         body: JSON.stringify(payload),
-      }));
+      }), operation === "save-questions" ? "questions" : operation.startsWith("feedback-") ? "none" : "all");
       clearRetryKey(retryKeys.current, operation);
+      resolution.clear();
       after?.();
       return next;
     } catch (error) {
+      if (operation === "save-brief" || operation === "save-questions" || operation.startsWith("feedback-confirm:")) {
+        const { expectedVersion, ...attempted } = payload;
+        // Comparing the AI interpretation must not turn an unedited confirmation into a correction.
+        const comparison = submittedFeedback ? { interpretation: submittedFeedback.interpretation, ...attempted } : attempted;
+        const base = operation === "save-brief"
+          ? { originalText: briefBase.current?.originalText ?? "" }
+          : operation === "save-questions" ? { answers: answersBase.current?.questionAnswers ?? [] }
+          : { decision: "confirm", interpretation: submittedFeedback?.interpretation };
+        try {
+          const captured = await resolution.capture(error, { input: base, version: typeof expectedVersion === "number" ? expectedVersion : 1 }, comparison, async () => {
+            const latest = parseDiscoveryWorkspaceResponse(await request(`/api/trips/${trip.id}/discovery`)).discovery;
+            conflictLatest.current = latest;
+            if (operation === "save-brief" || operation === "save-questions") return latest.brief ? {
+              input: operation === "save-brief" ? { originalText: latest.brief.originalText } : { answers: latest.brief.questionAnswers },
+              version: latest.brief.version,
+            } : null;
+            const feedback = latest.feedback.find((entry) => entry.id === submittedFeedbackId);
+            return feedback ? { input: { decision: "confirm", interpretation: feedback.interpretation }, version: feedback.version } : null;
+          });
+          if (captured) { conflictAction.current = { operation, path, payload, area, after, method }; return; }
+        } catch (failure) { setNotice({ area, text: errorMessage(failure, t.errors.failed) }); return; }
+      }
       if (shouldStartFreshRequest(error)) clearRetryKey(retryKeys.current, operation);
       setNotice({ area, text: errorMessage(error, t.errors.failed) });
     } finally {
@@ -285,21 +325,22 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       });
       return;
     }
+    // Generation uses the saved aggregate; each editable field keeps its own base.
     let brief = workspace.brief;
-    if (!brief || brief.originalText !== briefDraft) {
+    if (!brief || !briefBase.current || briefBase.current.originalText !== briefDraft) {
       const saved = await mutate("save-brief", `/api/trips/${trip.id}/discovery/brief`, {
         originalText: briefDraft,
-        expectedVersion: brief?.version ?? null,
+        expectedVersion: briefBase.current?.version ?? null,
       }, area);
       if (!saved?.brief) return;
       brief = saved.brief;
     } else {
       const answers = resolvedQuestionAnswers(questionDrafts);
-      if (JSON.stringify(answers) !== JSON.stringify(brief.questionAnswers)) {
+      if (answersBase.current && JSON.stringify(answers) !== JSON.stringify(answersBase.current.questionAnswers)) {
         const saved = await mutate(
           "save-questions",
           `/api/trips/${trip.id}/discovery/brief/questions`,
-          { expectedVersion: brief.version, answers },
+          { expectedVersion: answersBase.current.version, answers },
           area,
         );
         if (!saved?.brief) return;
@@ -353,6 +394,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   }
 
   function editFeedback(feedback: DiscoveryFeedbackDto) {
+    feedbackBase.current = feedback;
     setEditingFeedbackId(feedback.id);
     setFeedbackEditDraft({
       interests: feedback.interpretation.interests.join("\n"),
@@ -365,11 +407,12 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
 
   async function decideFeedback(feedback: DiscoveryFeedbackDto, decision: "confirm" | "reject") {
     const edited = editingFeedbackId === feedback.id ? feedbackEditDraft : null;
+    if (editingFeedbackId !== feedback.id) feedbackBase.current = feedback;
     await mutate(
       `feedback-${decision}:${feedback.id}`,
       `/api/trips/${trip.id}/discovery/feedback/${feedback.id}/decision`,
       {
-        expectedVersion: feedback.version,
+        expectedVersion: editingFeedbackId === feedback.id ? feedbackBase.current?.version ?? feedback.version : feedback.version,
         decision,
         ...(decision === "confirm" && edited ? {
           interpretation: {
@@ -390,12 +433,12 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   }
 
   async function saveQuestionAnswers() {
-    if (!workspace?.brief) return;
+    if (!answersBase.current) return;
     const answers = resolvedQuestionAnswers(questionDrafts);
     await mutate(
       "save-questions",
       `/api/trips/${trip.id}/discovery/brief/questions`,
-      { expectedVersion: workspace.brief.version, answers },
+      { expectedVersion: answersBase.current.version, answers },
       "questions",
     );
   }
@@ -408,15 +451,41 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
           <h2 id="ai-discovery-heading" className="font-display text-3xl text-ink-strong sm:text-4xl">{t.header.title}</h2>
           <p className="mt-2 max-w-3xl text-muted-foreground">{t.header.description}</p>
         </div>
-        {workspace?.latestRun ? <button className="flex min-h-11 items-center gap-2 rounded-xl border px-4 font-bold" disabled={pending !== null} onClick={() => void research("again")}><RefreshCw aria-hidden="true" className="size-4" />{researchLabel(t.header.researchAgain)}</button> : null}
+        {workspace?.latestRun ? <button className="flex min-h-11 items-center gap-2 rounded-xl border px-4 font-bold" disabled={pending !== null || Boolean(resolution.conflict)} onClick={() => void research("again")}><RefreshCw aria-hidden="true" className="size-4" />{researchLabel(t.header.researchAgain)}</button> : null}
       </div>
+      {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={pending !== null}
+        onAccept={() => {
+          const operation = conflictAction.current?.operation;
+          if (conflictLatest.current) apply({ discovery: conflictLatest.current },
+            operation === "save-brief" ? "brief" : operation === "save-questions" ? "questions" : "none");
+          if (operation === `feedback-confirm:${editingFeedbackId}`) {
+            setEditingFeedbackId(null); setFeedbackEditDraft(null);
+          }
+          resolution.clear();
+        }}
+        onReapply={() => {
+          const action = conflictAction.current!;
+          void mutate(action.operation, action.path, { ...action.payload, expectedVersion: resolution.conflict!.current!.version },
+            action.area, action.after, action.method, resolution.conflict!.base.version);
+        }}
+        onEdit={() => {
+          const operation = conflictAction.current?.operation;
+          if (operation === "save-brief") briefBase.current = conflictLatest.current?.brief ?? null;
+          else if (operation === "save-questions") answersBase.current = conflictLatest.current?.brief ?? null;
+          else if (operation?.startsWith("feedback-confirm:")) {
+            feedbackBase.current = conflictLatest.current?.feedback.find((entry) => entry.id === operation.slice("feedback-confirm:".length)) ?? null;
+          }
+          resolution.resume();
+        }}
+      /> : null}
+      {resolution.conflict && notice && notice.area !== "again" && notice.area !== "general" ? <p className="mt-4 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
 
       {notice?.area === "again" ? <p className="mt-4 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
       {notice?.area === "general" ? <p className="mt-4 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
       {loading ? <p className="mt-6" role="status">{t.header.loading}</p> : null}
 
       {!loading ? (
-        <div className="mt-6 grid gap-5">
+        <div hidden={Boolean(resolution.conflict)} className="mt-6 grid gap-5">
           <section className="rounded-panel bg-surface-subtle p-4 sm:p-5" aria-label={t.brief.areaLabel}>
             <label className="grid gap-2 font-bold">{t.brief.prompt}
               <textarea

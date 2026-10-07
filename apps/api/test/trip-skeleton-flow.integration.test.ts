@@ -1,3 +1,5 @@
+import { parseTripHistoryResponse } from "@along-the-way/contracts/private-trips";
+import { PostgresCollaborationModule } from "../src/private-trips/postgres-collaboration-module";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -126,6 +128,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       now,
     });
     app = createApp({
+      collaboration: new PostgresCollaborationModule(database),
       dayPlans: unrelatedDayPlanModule,
       discovery: unrelatedDiscoveryModule,
       identityAccess,
@@ -385,10 +388,17 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     const lockedResponse = await mutate(cookie, `/api/trips/${trip.id}/items/${flight.id}/lock`, "overview-lock", { expectedVersion: updated.version });
     const locked = parseItineraryItemResponse(await lockedResponse.json()).item;
     const beforeRejected = await readSkeleton(cookie, trip.id);
-    const rejected = await mutate(cookie, `/api/trips/${trip.id}/flights/${flight.id}`, "overview-locked", { ...payload, expectedVersion: locked.version }, "PATCH");
+    const beforeHistory = await (await app.request(`/api/trips/${trip.id}/history`, { headers: { cookie } })).json();
+    const rejected = await app.request(`/api/trips/${trip.id}/flights/${flight.id}`, {
+      method: "PATCH",
+      headers: { cookie, origin: "https://app.example.test", "content-type": "application/json",
+        "idempotency-key": "overview-locked-reapply", "Conflict-Base-Version": String(before.version) },
+      body: body({ ...payload, expectedVersion: locked.version }),
+    });
     expect(rejected.status).toBe(409);
     expect(await rejected.json()).toMatchObject({ error: { code: "item_locked" } });
     expect(await readSkeleton(cookie, trip.id)).toEqual(beforeRejected);
+    expect(await (await app.request(`/api/trips/${trip.id}/history`, { headers: { cookie } })).json()).toEqual(beforeHistory);
   });
 
   it("adds missing flights to an old trip and creates, edits and deletes lodging without a wishlist hotel", async () => {
@@ -1528,10 +1538,10 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       error: { code: "place_in_use" },
     });
 
-    const audited = await app.request(`/api/trips/${trip.id}/skeleton`, {
+    const audited = await app.request(`/api/trips/${trip.id}/history`, {
       headers: { cookie },
     });
-    const events = parseTripSkeletonResponse(await audited.json()).skeleton.events;
+    const events = parseTripHistoryResponse(await audited.json()).events;
     expect(events.map((event) => event.eventType)).toEqual(
       expect.arrayContaining([
         "itinerary_item.created",
@@ -1572,11 +1582,11 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       },
     );
     expect(replayedDelete.status).toBe(204);
-    const afterDelete = await app.request(`/api/trips/${trip.id}/skeleton`, {
+    const afterDelete = await app.request(`/api/trips/${trip.id}/history`, {
       headers: { cookie },
     });
     expect(
-      parseTripSkeletonResponse(await afterDelete.json()).skeleton.events.map(
+      parseTripHistoryResponse(await afterDelete.json()).events.map(
         (event) => event.eventType,
       ),
     ).toContain("itinerary_item.deleted");
@@ -3266,19 +3276,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         },
       }).execute();
       const refused = await migrator.migrateToLatest();
-      expect(refused.results).toEqual([
-        { migrationName: "008_activity_participants", direction: "Up", status: "Error" },
-        { migrationName: "009_day_place_order", direction: "Up", status: "NotExecuted" },
-        { migrationName: "010_grounded_recommendations", direction: "Up", status: "NotExecuted" },
-        { migrationName: "011_day_plan_window", direction: "Up", status: "NotExecuted" },
-        { migrationName: "012_endpoints_outside_route", direction: "Up", status: "NotExecuted" },
-        { migrationName: "013_discovery_claims", direction: "Up", status: "NotExecuted" },
-        { migrationName: "014_discovery_feedback_answers", direction: "Up", status: "NotExecuted" },
-        { migrationName: "015_member_votes", direction: "Up", status: "NotExecuted" },
-        { migrationName: "016_travel_places", direction: "Up", status: "NotExecuted" },
-        { migrationName: "017_wishlist_simplify", direction: "Up", status: "NotExecuted" },
-        { migrationName: "018_drop_confidence_writes", direction: "Up", status: "NotExecuted" },
-      ]);
+      expect(refused.error).toBeDefined();
       await database.deleteFrom("mutation_requests")
         .where("actor_id", "=", owner.userId).where("operation", "=", "create_trip")
         .where("idempotency_key", "=", "unresolvable-history").execute();

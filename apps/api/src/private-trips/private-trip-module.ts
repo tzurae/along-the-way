@@ -110,6 +110,7 @@ export class AppError extends Error {
     readonly status: 400 | 401 | 403 | 404 | 409 | 429 | 503 = 400,
     readonly retryAfterSeconds?: number,
     readonly currentVersion?: number,
+    readonly conflictTargetId?: string,
   ) {
     super(message);
   }

@@ -16,6 +16,9 @@ import {
   type ProviderPlaceCandidateDto,
   type TripPlaceDto,
 } from "@along-the-way/contracts/trip-places";
+import type { UpdateTripPlacePlanningInput } from "@along-the-way/contracts/trip-places";
+import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./ConflictPanel";
+import { ApiRequestError } from "./api-error";
 import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 
 import { googleMapsPlaceUrl } from "./google-maps";
@@ -298,62 +301,110 @@ function AddPlacePanel({
   );
 }
 
-function PlanningEditor({
-  tripId,
-  place,
-  request,
-  changed,
-}: {
+type PlanningInput = Omit<UpdateTripPlacePlanningInput, "expectedVersion">;
+
+function planningValues(place: TripPlaceDto): PlanningInput {
+  return { durationMinutes: place.durationMinutes, budgetAmountMinor: place.budgetAmountMinor, budgetCurrency: place.budgetCurrency, notes: place.notes };
+}
+
+function PlanningEditor({ tripId, place, available, request, changed, editingChanged }: {
   tripId: string;
   place: TripPlaceDto;
+  available: boolean;
   request: TripPlaceWorkspaceProps["request"];
   changed(): Promise<void>;
+  editingChanged(editing: boolean): void;
 }) {
   const { t: { tripPlaces: t } } = useI18n();
   const [message, setMessage] = useState("");
+  const [base, setBase] = useState<EditSnapshot<PlanningInput>>({ input: planningValues(place), version: place.version });
+  const [draft, setDraft] = useState(base.input);
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const resolution = useVersionConflict<PlanningInput>();
   const retryKeys = useRef<RetryKeys>(new Map());
-  async function save(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
+  const dirty = useRef(false);
+  const conflict = useMemo(() => available ? resolution.conflict : {
+    base, current: null, attempted: draft, latestChange: null,
+  }, [available, resolution.conflict, base, draft]);
+  useEffect(() => {
+    if (!editing && !resolution.conflict && place.version > base.version) {
+      const snapshot = { input: planningValues(place), version: place.version };
+      setBase(snapshot);
+      setDraft(snapshot.input);
+    }
+  }, [place, editing, resolution.conflict, base.version]);
+  async function save(input = draft, version = base.version, conflictBase = resolution.conflictBaseVersion) {
     setMessage("");
+    setBusy(true);
     const operation = `planning:${place.id}`;
-    const payload = {
-      expectedVersion: place.version,
-      durationMinutes: nullableNumber(data.get("durationMinutes")),
-      budgetAmountMinor: nullableNumber(data.get("budgetAmountMinor")),
-      budgetCurrency: data.get("budgetCurrency") || null,
-      notes: data.get("notes") || null,
-    };
+    const payload = { ...input, expectedVersion: version };
     try {
-      await request(`/api/trips/${tripId}/trip-places/${place.id}/planning`, {
+      const response = await request<{ tripPlace: TripPlaceDto }>(`/api/trips/${tripId}/trip-places/${place.id}/planning`, {
         method: "PATCH",
-        headers: { "Idempotency-Key": retryKey(retryKeys.current, operation, payload) },
+        headers: { "Idempotency-Key": retryKey(retryKeys.current, operation, payload), ...(conflictBase ? { "Conflict-Base-Version": String(conflictBase) } : {}) },
         body: JSON.stringify(payload),
         parse: parseTripPlaceResponse,
       });
       clearRetryKey(retryKeys.current, operation);
+      resolution.clear();
+      setBase({ input: planningValues(response.tripPlace), version: response.tripPlace.version });
+      setDraft(planningValues(response.tripPlace));
+      dirty.current = false;
+      setEditing(false);
+      editingChanged(false);
       setMessage(t.planning.saved);
       await changed();
     } catch (error) {
-      setMessage(t.errors.editsPreserved(errorMessage(error, t.errors.requestFailed)));
-    }
+      try {
+        if (error instanceof ApiRequestError && error.code === "trip_place_not_found") {
+          editingChanged(true);
+          await changed();
+          return;
+        }
+        if (await resolution.capture(error, base, input, async () => {
+          const latest = parseTripPlaceListResponse(await request(`/api/trips/${tripId}/trip-places`)).tripPlaces.find((entry) => entry.id === place.id);
+          return latest ? { input: planningValues(latest), version: latest.version } : null;
+        })) { editingChanged(true); return; }
+        setMessage(t.errors.editsPreserved(errorMessage(error, t.errors.requestFailed)));
+      } catch (reason) {
+        setMessage(t.errors.editsPreserved(errorMessage(reason, t.errors.requestFailed)));
+      }
+    } finally { setBusy(false); }
   }
 
-  return (
-    <details className="rounded-xl border border-ink/10 p-3">
-      <summary className="cursor-pointer font-bold">{t.planning.summary}</summary>
-      <form key={place.version} className="mt-4 grid gap-4" onSubmit={save}>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="grid gap-1 font-semibold">{t.planning.durationMinutes}<input className="min-h-11 rounded-lg border px-3" name="durationMinutes" type="number" min="1" defaultValue={place.durationMinutes ?? ""} placeholder={t.planning.unknown} /></label>
-          <label className="grid gap-1 font-semibold">{t.planning.budgetMinorUnits}<input className="min-h-11 rounded-lg border px-3" name="budgetAmountMinor" type="number" min="0" defaultValue={place.budgetAmountMinor ?? ""} placeholder={t.planning.unknown} /></label>
-          <label className="grid gap-1 font-semibold">{t.planning.isoCurrency}<input className="min-h-11 rounded-lg border px-3 uppercase" name="budgetCurrency" maxLength={3} defaultValue={place.budgetCurrency ?? ""} placeholder={t.planning.unknown} /></label>
-          <label className="grid gap-1 font-semibold sm:col-span-2">{t.planning.sharedNote}<textarea className="min-h-20 rounded-lg border p-3" name="notes" defaultValue={place.notes ?? ""} /></label>
-        </div>
-        <button className="min-h-11 rounded-lg bg-ink-strong px-4 font-bold text-on-dark">{t.planning.save}</button>
-        {message ? <p role="status">{message}</p> : null}
-      </form>
-    </details>
-  );
+  return <details open={available ? undefined : true} className="rounded-xl border border-ink/10 p-3" onToggle={(event) => {
+    if (available && event.currentTarget.open && !editing && !conflict) {
+      const snapshot = { input: planningValues(place), version: place.version };
+      setBase(snapshot); setDraft(snapshot.input); setEditing(true);
+    }
+    if (!event.currentTarget.open && !dirty.current && !conflict) {
+      setEditing(false);
+      editingChanged(false);
+    }
+  }}>
+    <summary className="cursor-pointer font-bold">{t.planning.summary}</summary>
+    {conflict ? <ConflictPanel conflict={conflict} busy={busy}
+      onAccept={() => {
+        const current = conflict.current;
+        if (current) { setBase(current); setDraft(current.input); }
+        dirty.current = false;
+        resolution.clear(); setEditing(false); editingChanged(false); setMessage(""); void changed();
+      }}
+      onReapply={() => void save(conflict.attempted, conflict.current!.version, conflict.base.version)}
+      onEdit={() => { setBase(conflict.current!); resolution.resume(); setMessage(""); }}
+    /> : null}
+    <form hidden={Boolean(conflict)} className="mt-4 grid gap-4" onChange={() => { dirty.current = true; setEditing(true); editingChanged(true); }} onSubmit={(event) => { event.preventDefault(); void save(); }}>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="grid gap-1 font-semibold">{t.planning.durationMinutes}<input className="min-h-11 rounded-lg border px-3" name="durationMinutes" type="number" min="1" value={draft.durationMinutes ?? ""} onChange={(event) => setDraft({ ...draft, durationMinutes: event.target.value === "" ? null : Number(event.target.value) })} placeholder={t.planning.unknown} /></label>
+        <label className="grid gap-1 font-semibold">{t.planning.budgetMinorUnits}<input className="min-h-11 rounded-lg border px-3" name="budgetAmountMinor" type="number" min="0" value={draft.budgetAmountMinor ?? ""} onChange={(event) => setDraft({ ...draft, budgetAmountMinor: event.target.value === "" ? null : Number(event.target.value) })} placeholder={t.planning.unknown} /></label>
+        <label className="grid gap-1 font-semibold">{t.planning.isoCurrency}<input className="min-h-11 rounded-lg border px-3 uppercase" name="budgetCurrency" maxLength={3} value={draft.budgetCurrency ?? ""} onChange={(event) => setDraft({ ...draft, budgetCurrency: event.target.value || null })} placeholder={t.planning.unknown} /></label>
+        <label className="grid gap-1 font-semibold sm:col-span-2">{t.planning.sharedNote}<textarea className="min-h-20 rounded-lg border p-3" name="notes" value={draft.notes ?? ""} onChange={(event) => setDraft({ ...draft, notes: event.target.value || null })} /></label>
+      </div>
+      <button disabled={busy} className="min-h-11 rounded-lg bg-ink-strong px-4 font-bold text-on-dark">{t.planning.save}</button>
+    </form>
+    {message ? <p role="status">{message}</p> : null}
+  </details>;
 }
 
 export function TripPlaceWorkspace({
@@ -363,7 +414,8 @@ export function TripPlaceWorkspace({
   onPlacesChanged,
 }: TripPlaceWorkspaceProps) {
   const { locale, t: { tripPlaces: t } } = useI18n();
-  const [places, setPlaces] = useState<TripPlaceDto[]>([]);
+  const [readModel, setReadModel] = useState<{ current: TripPlaceDto[]; retained: TripPlaceDto[] }>({ current: [], retained: [] });
+  const places = readModel.current;
   const [adding, setAdding] = useState(false);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
@@ -372,10 +424,16 @@ export function TripPlaceWorkspace({
   const [pendingVotes, setPendingVotes] = useState<Record<string, true>>({});
   const pendingVoteIds = useRef(new Set<string>());
   const retryKeys = useRef<RetryKeys>(new Map());
+  const editingPlaceIds = useRef(new Set<string>());
 
   const refreshPlaces = useCallback(async () => {
     const response = await request<unknown>(`/api/trips/${trip.id}/trip-places`);
-    setPlaces(parseTripPlaceListResponse(response).tripPlaces);
+    const current = parseTripPlaceListResponse(response).tripPlaces;
+    const currentIds = new Set(current.map((place) => place.id));
+    setReadModel((previous) => ({
+      current,
+      retained: [...previous.current, ...previous.retained].filter((place) => editingPlaceIds.current.has(place.id) && !currentIds.has(place.id)),
+    }));
   }, [request, trip.id]);
 
   const load = useCallback(async () => {
@@ -471,6 +529,7 @@ export function TripPlaceWorkspace({
         body: JSON.stringify(payload),
       });
       clearRetryKey(retryKeys.current, operation);
+      editingPlaceIds.current.delete(place.id);
       await load();
       onPlacesChanged();
     } catch (error) {
@@ -532,10 +591,11 @@ export function TripPlaceWorkspace({
       {message ? <p className="mt-4 rounded-xl bg-surface-subtle p-4" role="alert">{message}</p> : null}
       {/* A reload keeps the list in place; an extra line above it would push the page down. */}
       {loading && places.length === 0 ? <p className="mt-6" role="status">{t.workspace.loading}</p> : null}
-      {!loading && places.length === 0 ? <p className="mt-6 rounded-xl border border-dashed border-ink/20 p-6 text-center text-muted-foreground">{t.workspace.empty}</p> : null}
+      {!loading && places.length === 0 && readModel.retained.length === 0 ? <p className="mt-6 rounded-xl border border-dashed border-ink/20 p-6 text-center text-muted-foreground">{t.workspace.empty}</p> : null}
 
       <div className="mt-6 grid gap-5 xl:grid-cols-2">
-        {places.map((place) => {
+        {[...places, ...readModel.retained].map((place) => {
+          const available = placesById.has(place.id);
           const voteDraft = voteDrafts[place.id];
           const tint = place.votingAvailable && place.voteCount > 0
             ? place.voteCount === highestVoteCount && highestVoteCount >= 2 ? "bg-accent/20" : "bg-accent/10"
@@ -554,8 +614,9 @@ export function TripPlaceWorkspace({
                   <h3 className="font-display text-2xl text-ink-strong">{place.name}</h3>
                   <p className="mt-1 text-sm text-muted-foreground">{place.address ?? t.workspace.unknownAddress}</p>
                 </div>
-                <span className="flex items-center gap-2 rounded-full border border-ink/15 bg-surface px-3 py-1 text-sm font-bold"><StatusIcon status={place.status} />{statusLabel(place.status, t)}</span>
+                {available ? <span className="flex items-center gap-2 rounded-full border border-ink/15 bg-surface px-3 py-1 text-sm font-bold"><StatusIcon status={place.status} />{statusLabel(place.status, t)}</span> : null}
               </div>
+              {available ? <>
               {place.providerObservedAt ? <p className="text-sm text-muted-foreground">{t.workspace.providerObserved(new Date(place.providerObservedAt).toLocaleString(locale))}{place.providerFactsExpired ? `・${t.workspace.expiredFacts}` : ""}</p> : null}
               {place.provider === "google" && place.providerPlaceId ? <a className="inline-flex min-h-10 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
 
@@ -602,9 +663,17 @@ export function TripPlaceWorkspace({
                   </section>
                 );
               })}
+              </> : null}
 
-              <PlanningEditor tripId={trip.id} place={place} request={request} changed={changedPlaces} />
-              <button className="min-h-10 w-fit rounded-lg border px-3 text-sm font-bold" onClick={() => void remove(place)}>{t.workspace.remove}</button>
+              <PlanningEditor tripId={trip.id} place={place} available={available} request={request} changed={changedPlaces}
+                editingChanged={(editing) => {
+                  if (editing) editingPlaceIds.current.add(place.id);
+                  else {
+                    editingPlaceIds.current.delete(place.id);
+                    setReadModel((current) => ({ ...current, retained: current.retained.filter((entry) => entry.id !== place.id) }));
+                  }
+                }} />
+              {available ? <button className="min-h-10 w-fit rounded-lg border px-3 text-sm font-bold" onClick={() => void remove(place)}>{t.workspace.remove}</button> : null}
             </article>
           );
         })}

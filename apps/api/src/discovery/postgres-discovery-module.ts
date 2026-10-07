@@ -297,13 +297,16 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedWorkspace(replay);
+      // A missing row cannot be FOR UPDATE locked: serialize creation by this
+      // aggregate's identity before checking whether its initial version exists.
+      await sql`select pg_advisory_xact_lock(hashtextextended(${operation}, 0))`.execute(transaction);
+      const version = input.expectedVersion == null ? null : expectedVersion(input.expectedVersion);
       const current = await transaction.selectFrom("discovery_briefs")
         .select(["version", "original_text"])
         .where("trip_id", "=", tripId)
         .forUpdate()
         .executeTakeFirst();
       if (current) {
-        const version = expectedVersion(input.expectedVersion);
         if (current.version !== version) {
           throw new AppError("conflict", "The discovery brief changed; reload before saving", 409, undefined, current.version);
         }
@@ -317,7 +320,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           updated_at: this.now(),
         }).where("trip_id", "=", tripId).execute();
       } else {
-        if (input.expectedVersion !== undefined && input.expectedVersion !== null) {
+        if (version !== null) {
           throw new AppError("conflict", "The discovery brief does not exist", 409);
         }
         await transaction.insertInto("discovery_briefs").values({

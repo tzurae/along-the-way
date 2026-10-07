@@ -26,6 +26,7 @@ import {
   remember,
   replayed,
   requireIdempotencyKey,
+  requireDayVersion,
   type DatabaseExecutor,
 } from "../private-trips/postgres-private-trip-store";
 import {
@@ -760,6 +761,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       return {
         tripDayId: uuid(day.tripDayId, "tripDayId").toLowerCase(),
         orderedTripPlaceIds: ids.map((id) => uuid(id, "orderedTripPlaceIds").toLowerCase()),
+        expectedVersion: day.expectedVersion,
       };
     });
     const dayIds = days.map((day) => day.tripDayId);
@@ -776,12 +778,12 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       if (replay) return replayedTripPlaces(replay);
       await this.lockTripContent(transaction, tripId);
       await this.reconcileLegacyPlaces(transaction, tripId);
-      // Lock the days' hours and places too: their writers (#43 order, #46 hours) do not lock the trip.
       const validDays = await transaction.selectFrom("trip_days").select("id")
         .where("trip_id", "=", tripId).where("id", "in", dayIds).orderBy("id").forUpdate().execute();
       if (validDays.length !== dayIds.length) {
         throw new AppError("validation_error", "The plan must use days from this trip");
       }
+      for (const day of days) await requireDayVersion(transaction, tripId, day.tripDayId, day.expectedVersion);
       const current = await transaction.selectFrom("trip_place_day_assignments")
         .select(["trip_place_id", "trip_day_id"])
         .where("trip_id", "=", tripId)

@@ -246,3 +246,63 @@ test("phone Today keeps parallel participants, URL days, private offline snapsho
     for (const peer of peers) await peer.close();
   }
 });
+
+test("Today follows day-version writes live and keeps the new order in its offline snapshot", async ({ browser, baseURL }) => {
+  const origin = new URL(baseURL!).origin;
+  const context = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 } });
+  try {
+    await signIn(context, origin, "owner@example.test");
+    const trip = await createTrip(context.request, origin, `Today issue27 day writes ${Date.now()}`);
+    const day = trip.days[1]!;
+    const places = [];
+    for (const name of ["First day cafe", "Second day cafe"]) {
+      const result = await mutate(context.request, origin, `/api/trips/${trip.id}/trip-places`, {
+        method: "manual", name, type: "restaurant", address: null, latitude: null, longitude: null,
+        timeZone: "Asia/Tokyo", sourceUrl: null, originalNote: null,
+      });
+      places.push(result.tripPlace);
+    }
+    await mutate(context.request, origin, `/api/trips/${trip.id}/trip-place-day-assignments`, {
+      assignments: places.map((place) => ({ tripPlaceId: place.id, tripDayId: day.id, expectedVersion: place.version })),
+    }, "PUT");
+    const page = await context.newPage();
+    await page.goto(`/?trip=${trip.id}&tab=today&day=${day.date}`);
+    const wishlist = page.getByRole("region", { name: "今天想去（未排時間）", exact: true });
+    await expect(wishlist.getByRole("listitem")).toHaveText(["First day cafe", "Second day cafe"]);
+    await expect(page.getByText("即時更新已連線", { exact: true })).toBeVisible();
+    const windowPath = `/api/trips/${trip.id}/days/${day.id}/window`;
+    const before = (await (await context.request.get(windowPath)).json()).window;
+    const saved = await mutate(context.request, origin, `/api/trips/${trip.id}/days/${day.id}/place-order`, {
+      expectedVersion: before.version, orderedTripPlaceIds: places.map((place) => place.id).reverse(),
+    }, "PUT");
+    expect(saved.version).toBeGreaterThan(before.version);
+    await expect(wishlist.getByRole("listitem")).toHaveText(["Second day cafe", "First day cafe"]);
+
+    // Save hours through the local dialog with SSE unavailable: its callback must
+    // refresh the mounted history and Today, not rely on a notification racing it.
+    await page.route("**/api/trips/*/events*", (route) => route.abort());
+    await page.reload();
+    await page.getByRole("tab", { name: "行程", exact: true }).click();
+    const daySection = page.locator(`[data-date="${day.date}"]`);
+    await daySection.getByRole("button", { name: "排這一天", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("button", { name: "重新排", exact: true })).toBeEnabled();
+    const snapshotBefore = await page.evaluate((id) => Object.entries(localStorage).find(([key]) => key.startsWith("along-the-way:today:") && key.endsWith(`:${id}`))?.[1], trip.id);
+    await dialog.getByLabel("開始", { exact: true }).fill("08:00");
+    const savedWindow = page.waitForResponse((response) => response.url().endsWith(windowPath) && response.request().method() === "PUT");
+    await dialog.getByRole("button", { name: "重新排", exact: true }).click();
+    expect((await savedWindow).status()).toBe(200);
+    await expect(dialog.getByRole("button", { name: "重新排", exact: true })).toBeEnabled();
+    await expect(dialog.getByLabel("開始", { exact: true })).toHaveValue("08:00");
+    await expect.poll(() => page.evaluate((id) => Object.entries(localStorage).find(([key]) => key.startsWith("along-the-way:today:") && key.endsWith(`:${id}`))?.[1], trip.id)).not.toBe(snapshotBefore);
+    const current = (await (await context.request.get(windowPath)).json()).window;
+    expect(current).toMatchObject({ startMinute: 480 });
+    expect(current.version).toBeGreaterThan(saved.version);
+    await dialog.getByRole("button", { name: "關閉", exact: true }).click();
+    await page.getByRole("tab", { name: "最近變更", exact: true }).click();
+    await expect(page.getByRole("tabpanel", { name: "最近變更", exact: true })).toContainText(`變更對象：旅程日期 · ${day.date}`);
+    await context.setOffline(true);
+    await expect(page.getByRole("heading", { name: "離線資料", exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "今天想去（未排時間）", exact: true }).getByRole("listitem")).toHaveText(["Second day cafe", "First day cafe"]);
+  } finally { await context.close(); }
+});

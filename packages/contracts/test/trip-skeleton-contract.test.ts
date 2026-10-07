@@ -26,7 +26,6 @@ describe("trip skeleton contract", () => {
         items: [],
         days: [],
         tripInformationItemIds: [],
-        events: [],
       },
     });
 
@@ -140,17 +139,6 @@ describe("trip skeleton contract", () => {
           },
         ],
         tripInformationItemIds: [typedItems[0]!.id, typedItems[1]!.id],
-        events: [
-          {
-            id: "77777777-7777-4777-8777-777777777777",
-            actorId: "88888888-8888-4888-8888-888888888888",
-            eventType: "itinerary_item.locked",
-            targetType: "itinerary_item",
-            targetId: typedItems[0]!.id,
-            summary: "Locked an itinerary item",
-            createdAt: "2026-10-20T00:00:00.000Z",
-          },
-        ],
       },
     });
 
@@ -166,9 +154,6 @@ describe("trip skeleton contract", () => {
     expect(response.skeleton.items[0]?.endpoints[0]).toEqual(endpoint);
     expect(response.skeleton.items[0]?.constraints[0]?.status).toBe("confirmed");
     expect(response.skeleton.days[0]?.entries[0]?.projection).toBe("full");
-    expect(response.skeleton.events[0]?.eventType).toBe(
-      "itinerary_item.locked",
-    );
   });
 
   it("rejects missing, empty, duplicate, or incomplete participant facts rather than inferring a party", () => {
@@ -245,7 +230,6 @@ describe("trip skeleton contract", () => {
           ],
           days: [],
           tripInformationItemIds: [],
-          events: [],
         },
       }),
     ).toThrow("Invalid trip skeleton response");

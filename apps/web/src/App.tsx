@@ -25,6 +25,9 @@ import { TodayWorkspace } from "./TodayWorkspace";
 import { createTodayModel, tripClock } from "./today-model";
 import { TodaySnapshotStore, TODAY_SCHEMA_VERSION, type TodaySnapshot } from "./today-snapshot";
 import { readTripLocation, writeTripLocation, tripTabIds, type TripTab } from "./trip-location";
+import { ApiRequestError } from "./api-error";
+import { useTripLiveUpdates } from "./useTripLiveUpdates";
+import { TripHistory } from "./TripHistory";
 
 
 interface RequestOptions extends RequestInit {
@@ -38,17 +41,6 @@ const RECOVERABLE_MAGIC_CODES: Record<string, true> = {
   used_magic_link: true,
 };
 
-class ApiRequestError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly correlationId?: string,
-    readonly currentVersion?: number,
-    readonly status?: number,
-  ) {
-    super(message);
-  }
-}
 
 function localizedErrorMessage(
   messages: Messages["errors"],
@@ -86,14 +78,14 @@ async function requestJson<T>(
     },
   });
   const value = response.status === 204 ? null : await response.json().catch(() => {
-    throw new ApiRequestError("unknown", messages.unknown, undefined, undefined, response.status);
+    throw new ApiRequestError("unknown", messages.unknown, undefined, undefined, undefined, response.status);
   });
   if (!response.ok) {
     let parsed;
     try {
       parsed = parseApiError(value);
     } catch {
-      throw new ApiRequestError("unknown", messages.unknown, undefined, undefined, response.status);
+      throw new ApiRequestError("unknown", messages.unknown, undefined, undefined, undefined, response.status);
     }
     throw new ApiRequestError(
       parsed.error.code,
@@ -106,6 +98,7 @@ async function requestJson<T>(
       ),
       parsed.error.correlationId,
       parsed.error.currentVersion,
+      parsed.error.latestChange,
       response.status,
     );
   }
@@ -340,6 +333,7 @@ function TripWorkspace({ trip, currentUser, onChanged, request, revision, onTrav
 
 export function App() {
   const { t } = useI18n();
+  const projectionFailure = useRef<(tripId: string) => void>(() => {});
   const accountId = useRef<string | null>(null);
   const readOnly = useRef(false);
   const reconnecting = useRef(false);
@@ -372,6 +366,10 @@ export function App() {
       } else if (coreRead && (!(reason instanceof ApiRequestError) || (reason.status ?? 0) >= 500)) {
         window.dispatchEvent(new Event("today-api-unavailable"));
       }
+      const projection = /^\/api\/trips\/([^/?]+)(?:\/([^/?]+))?/.exec(url);
+      if (isRead && projection && projection[2] !== "version" && projection[2] !== "events" && !readOnly.current) {
+        projectionFailure.current(projection[1]!);
+      }
       throw reason;
     }
   }, [store, t.errors, t.today.mutationDisabled]);
@@ -390,7 +388,6 @@ export function App() {
     setPlacesRevision((revision) => revision + 1);
   }, []);
   const [activeTripTab, setActiveTripTab] = useState<TripTab>(() => readTripLocation().tab ?? "overview");
-  const [recentChangesContainer, setRecentChangesContainer] = useState<HTMLDivElement | null>(null);
 
 
 
@@ -412,7 +409,7 @@ export function App() {
     return response.trips;
   }, [request, store]);
 
-  const loadTrip = useCallback(async (tripId: string) => {
+  const loadTrip = useCallback(async (tripId: string, preserveError = false) => {
     const sequence = ++loadSequence.current;
     const [response, skeleton, places] = await Promise.all([
       request<{ trip: TripDto }>(`/api/trips/${tripId}`, { parse: parseTripResponse }),
@@ -438,7 +435,7 @@ export function App() {
     setSelectedTrip(response.trip);
     readOnly.current = false;
     setOffline(false);
-    setError("");
+    if (!preserveError) setError("");
   }, [request, store, t.today.unavailable]);
 
   const restoreSnapshot = useCallback(() => {
@@ -554,8 +551,29 @@ export function App() {
   }, [offline, reconnect]);
 
   useEffect(() => {
-    if (placesRevision > 0 && selectedTrip && !readOnly.current) void loadTrip(selectedTrip.id).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : t.today.unavailable));
+    if (placesRevision > 0 && selectedTrip && !readOnly.current) void loadTrip(selectedTrip.id, true).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : t.today.unavailable));
   }, [placesRevision, loadTrip, selectedTrip?.id, t.today.unavailable]);
+
+  const { connected: liveConnected, retryReadModels } = useTripLiveUpdates({
+    tripId: offline ? undefined : selectedTrip?.id,
+    request,
+    onChanged: async () => {
+      // Navigation owns its pending destination; a hint from the old trip must not
+      // start a newer load and replace that destination or its browser-history entry.
+      if (!selectedTrip || readOnly.current || readTripLocation().trip !== selectedTrip.id) return;
+      const epoch = sessionEpoch.current;
+      await loadTrip(selectedTrip.id, true);
+      if (epoch === sessionEpoch.current && !readOnly.current) setSyncRevision((revision) => revision + 1);
+    },
+    onRevoked: () => {
+      if (readTripLocation().trip === selectedTrip?.id) ++loadSequence.current;
+      if (accountId.current && selectedTrip) store?.clearTrip(accountId.current, selectedTrip.id);
+      setTodaySnapshot(null);
+      setSelectedTrip(null);
+      void refreshTrips().catch(() => setTrips([]));
+    },
+  });
+  projectionFailure.current = retryReadModels;
 
   useEffect(() => {
     let active = true;
@@ -740,6 +758,7 @@ export function App() {
         </aside>
         {selectedTrip ? (
           <div className="grid min-w-0 gap-5">
+            <p aria-live="polite" className="text-sm text-muted-foreground">{liveConnected ? t.collaboration.live : t.collaboration.reconnecting}</p>
             <section
               className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8"
               aria-labelledby="trip-title-heading"
@@ -814,6 +833,7 @@ export function App() {
               hidden={activeTripTab !== "discovery"}
             >
               <DiscoveryWorkspace
+                key={selectedTrip.id}
                 trip={selectedTrip}
                 request={request}
                 placesRevision={workspaceRevision}
@@ -827,6 +847,7 @@ export function App() {
               hidden={activeTripTab !== "wishlist"}
             >
               <TripPlaceWorkspace
+                key={selectedTrip.id}
                 trip={selectedTrip}
                 request={request}
                 placesRevision={workspaceRevision}
@@ -845,12 +866,12 @@ export function App() {
               hidden={activeTripTab !== "itinerary"}
             >
               <TripSkeletonWorkspace
+                key={selectedTrip.id}
                 trip={selectedTrip}
                 request={request}
                 onTripChanged={() => loadTrip(selectedTrip.id)}
                 placesRevision={workspaceRevision}
                 onPlacesChanged={placesChanged}
-                recentChangesContainer={recentChangesContainer}
                 onTravelEdit={(type) => {
                   const tab = type === "flight" ? "overview" : "lodging";
                   selectTab(tab);
@@ -859,12 +880,13 @@ export function App() {
               />
             </div>
             <div
-              ref={setRecentChangesContainer}
               id="trip-panel-recent"
               role="tabpanel"
               aria-labelledby="trip-tab-recent"
               hidden={activeTripTab !== "recent"}
-            />
+            >
+              <TripHistory key={selectedTrip.id} tripId={selectedTrip.id} revision={workspaceRevision} request={request} />
+            </div>
           </div>
         ) : (
           <section className="grid min-h-72 place-items-center rounded-card border border-dashed border-ink/20 bg-surface/50 p-8 text-center text-muted-foreground">{t.app.chooseOrCreateTrip}</section>

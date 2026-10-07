@@ -5,7 +5,8 @@ import type {
   CreateDayTimetableInput,
   DayLegDto,
   DayTimetableDto,
-  DayWindowDto,
+  SavedDayWindowDto,
+  DayPlaceOrderResponse,
   TripPlanDayDto,
   TripPlanDto,
   TripPlanUnplacedDto,
@@ -27,6 +28,7 @@ import {
   remember,
   replayed,
   requireIdempotencyKey,
+  requireDayVersion,
 } from "../private-trips/postgres-private-trip-store";
 import type { TripPlaceModule } from "../trip-places/trip-place-module";
 import type { TripSkeletonModule } from "../trip-skeleton/trip-skeleton-module";
@@ -52,20 +54,21 @@ export interface DayPlanModule {
   timetable(userId: string, tripId: string, dayId: string, input: CreateDayTimetableInput): Promise<DayTimetableDto>;
   /** A draft adding the wishlist places not yet on any day to days; computed on request, never stored. */
   tripPlan(userId: string, tripId: string): Promise<TripPlanDto>;
+  getWindow(userId: string, tripId: string, dayId: string): Promise<SavedDayWindowDto>;
   applyOrder(
     userId: string,
     tripId: string,
     dayId: string,
     idempotencyKey: string,
     input: ApplyDayPlaceOrderInput,
-  ): Promise<{ orderedTripPlaceIds: string[] }>;
+  ): Promise<DayPlaceOrderResponse>;
   updateWindow(
     userId: string,
     tripId: string,
     dayId: string,
     idempotencyKey: string,
     input: UpdateDayWindowInput,
-  ): Promise<DayWindowDto>;
+  ): Promise<SavedDayWindowDto>;
 }
 
 interface ModuleOptions {
@@ -90,7 +93,7 @@ interface PlannedStop extends RoutePoint {
 /** Everything about a day that does not depend on which places are drafted into it. */
 interface DayContext {
   day: TimelineDayDto;
-  window: DayWindowDto;
+  window: SavedDayWindowDto;
   /** The lodging slept in the night before; null on the first day or when none is known. */
   morning: RoutePoint | null;
   /** The lodging slept in that night. */
@@ -230,6 +233,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
     if (order !== "current" && order !== "suggested") {
       throw new AppError("validation_error", "order must be current or suggested");
     }
+    const before = await this.getWindow(userId, tripId, dayId);
     // Both reads authorize membership and resolve names, coordinates, and zones.
     const [skeleton, places] = await Promise.all([
       this.tripSkeleton.getSkeleton(userId, tripId),
@@ -237,11 +241,14 @@ export class PostgresDayPlanModule implements DayPlanModule {
     ]);
     const day = skeleton.days.find((entry) => entry.id === dayId.toLowerCase());
     if (!day) throw new AppError("trip_day_not_found", "Trip day not found", 404);
-    const windows = await this.readWindows(tripId);
+    const window = await this.getWindow(userId, tripId, dayId);
+    if (window.version !== before.version) {
+      throw new AppError("conflict", "The day changed while its draft was being read", 409, undefined, window.version, dayId);
+    }
 
     const planned = this.plannedOn(places, day.id);
     const stops = planned.filter(located).map(plannedStop);
-    const context = this.dayContext(skeleton, day, windows.get(day.id)!, stops, null);
+    const context = this.dayContext(skeleton, day, window, stops, null);
     const orderedIds = order === "suggested"
       ? orderByStraightLine(stops, context.night ?? context.start)
       : stops.map((stop) => stop.id);
@@ -359,7 +366,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
   private dayContext(
     skeleton: TripSkeletonDto,
     day: TimelineDayDto,
-    window: DayWindowDto,
+    window: SavedDayWindowDto,
     stops: RoutePoint[],
     fallbackZone: string | null,
   ): DayContext {
@@ -534,8 +541,9 @@ export class PostgresDayPlanModule implements DayPlanModule {
       if (!membership) throw new AppError("trip_not_found", "Trip not found", 404);
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replay as { orderedTripPlaceIds: string[] };
+      if (replay) return replay as DayPlaceOrderResponse;
       await lockTrip(transaction, tripId);
+      await requireDayVersion(transaction, tripId, day, input.expectedVersion);
       const assignments = await transaction.selectFrom("trip_place_day_assignments")
         .select("trip_place_id")
         .where("trip_id", "=", tripId)
@@ -560,7 +568,8 @@ export class PostgresDayPlanModule implements DayPlanModule {
         targetId: day,
         summary: `Ordered ${orderedTripPlaceIds.length} planned places for a day`,
       });
-      const response = { orderedTripPlaceIds };
+      const saved = await transaction.selectFrom("trip_days").select("version").where("id", "=", day).executeTakeFirstOrThrow();
+      const response = { orderedTripPlaceIds, version: saved.version };
       await remember(transaction, userId, operation, key, response);
       return response;
     });
@@ -572,7 +581,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
     dayId: string,
     rawKey: string,
     input: UpdateDayWindowInput,
-  ): Promise<DayWindowDto> {
+  ): Promise<SavedDayWindowDto> {
     const startMinute = windowMinute(input?.startMinute, "startMinute");
     const endMinute = windowMinute(input?.endMinute, "endMinute");
     if (startMinute >= endMinute) {
@@ -589,12 +598,13 @@ export class PostgresDayPlanModule implements DayPlanModule {
       if (!membership) throw new AppError("trip_not_found", "Trip not found", 404);
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replay as DayWindowDto;
+      if (replay) return replay as SavedDayWindowDto;
       await lockTrip(transaction, tripId);
+      await requireDayVersion(transaction, tripId, day, input.expectedVersion);
       const updated = await transaction.updateTable("trip_days")
         .set({ day_start_minute: startMinute, day_end_minute: endMinute })
         .where("trip_id", "=", tripId).where("id", "=", day)
-        .returning("id").executeTakeFirst();
+        .returning(["id", "version"]).executeTakeFirst();
       if (!updated) throw new AppError("trip_day_not_found", "Trip day not found", 404);
       const time = (minute: number) =>
         `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
@@ -606,20 +616,30 @@ export class PostgresDayPlanModule implements DayPlanModule {
         targetId: day,
         summary: `Set a day to plan from ${time(startMinute)} to ${time(endMinute)}`,
       });
-      const response = { startMinute, endMinute };
+      const response = { startMinute, endMinute, version: updated.version };
       await remember(transaction, userId, operation, key, response);
       return response;
     });
   }
 
+  async getWindow(userId: string, tripId: string, dayId: string): Promise<SavedDayWindowDto> {
+    const member = await this.database.selectFrom("trip_members").select("id")
+      .where("trip_id", "=", tripId).where("user_id", "=", userId).where("removed_at", "is", null).executeTakeFirst();
+    if (!member) throw new AppError("trip_not_found", "Trip not found", 404);
+    const day = await this.database.selectFrom("trip_days").select(["day_start_minute", "day_end_minute", "version"])
+      .where("trip_id", "=", tripId).where("id", "=", dayId).executeTakeFirst();
+    if (!day) throw new AppError("trip_day_not_found", "Trip day not found", 404);
+    return { startMinute: day.day_start_minute, endMinute: day.day_end_minute, version: day.version };
+  }
+
   /** Each day's planned hours, by day ID. */
   private async readWindows(tripId: string) {
     const rows = await this.database.selectFrom("trip_days")
-      .select(["id", "day_start_minute", "day_end_minute"])
+      .select(["id", "day_start_minute", "day_end_minute", "version"])
       .where("trip_id", "=", tripId)
       .execute();
-    return new Map(rows.map((row): [string, DayWindowDto] =>
-      [row.id, { startMinute: row.day_start_minute, endMinute: row.day_end_minute }]));
+    return new Map(rows.map((row): [string, SavedDayWindowDto] =>
+      [row.id, { startMinute: row.day_start_minute, endMinute: row.day_end_minute, version: row.version }]));
   }
 
   /** Opening hours from the place's provider; unknown when it has none or the lookup fails. */

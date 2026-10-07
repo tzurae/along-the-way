@@ -27,6 +27,7 @@ import { Field, FieldDescription, FieldLabel, FieldLegend, FieldSet } from "@/co
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "./i18n";
+import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./ConflictPanel";
 
 type EditableItem = Exclude<ItineraryItemDto, { type: "flight" | "lodging" }>;
 type EditableItemType = EditableItem["type"];
@@ -36,7 +37,9 @@ interface ItineraryItemDialogProps {
   members: TripMemberDto[];
   places: PlaceDto[];
   item?: EditableItem;
-  save(input: CreateItineraryItemInput | UpdateItineraryItemInput): Promise<void>;
+  save(input: CreateItineraryItemInput | UpdateItineraryItemInput, conflictBase?: number): Promise<void>;
+  load?(): Promise<ItineraryItemDto | null>;
+  editingChanged?(open: boolean): void;
 }
 
 interface EndpointDraft {
@@ -230,7 +233,16 @@ function itemDraft(item?: EditableItem) {
   };
 }
 
-export function ItineraryItemDialog({ countryStops, members, places, item, save }: ItineraryItemDialogProps) {
+function itemValues(item: ItineraryItemDto): CreateItineraryItemInput {
+  return {
+    type: item.type, title: item.title, notes: item.notes, sourceUrl: item.sourceUrl, money: item.money,
+    participantMemberIds: item.participants?.map((member) => member.memberId) ?? null,
+    endpoints: item.endpoints.map(({ role, countryStopId, placeId, localDateTime, timeZone, utcOffset }) => ({ role, countryStopId, placeId, localDateTime, timeZone, utcOffset })),
+    details: item.details,
+  };
+}
+
+export function ItineraryItemDialog({ countryStops, members, places, item, save, load, editingChanged }: ItineraryItemDialogProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const initialDraft = itemDraft(item);
@@ -258,8 +270,12 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
   const [minimumBufferMinutes, setMinimumBufferMinutes] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [baseSnapshot, setBaseSnapshot] = useState<EditSnapshot<CreateItineraryItemInput> | null>(item ? { input: itemValues(item), version: item.version } : null);
+  const resolution = useVersionConflict<CreateItineraryItemInput>();
 
   function resetDraft() {
+    resolution.clear();
+    setBaseSnapshot(item ? { input: itemValues(item), version: item.version } : null);
     const latest = itemDraft(item);
     setType(latest.type);
     setTitle(latest.title);
@@ -285,6 +301,7 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
   function changeOpen(nextOpen: boolean) {
     if (nextOpen && !open) resetDraft();
     setOpen(nextOpen);
+    editingChanged?.(nextOpen);
   }
 
   const details = useMemo<CreateItineraryItemInput["details"]>(() => {
@@ -316,6 +333,25 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
     ];
   }, [item?.participants, members]);
 
+  async function persist(input: CreateItineraryItemInput, version: number | null, conflictBase = resolution.conflictBaseVersion) {
+    setSubmitting(true);
+    setError("");
+    const { constraints: _constraints, ...updatable } = input;
+    try {
+      await save(item ? { ...updatable, expectedVersion: version! } : input, conflictBase);
+      resolution.clear();
+      changeOpen(false);
+    } catch (reason) {
+      try {
+        if (baseSnapshot && load && await resolution.capture(reason, baseSnapshot, updatable, async () => {
+          const current = await load();
+          return current ? { input: itemValues(current), version: current.version } : null;
+        })) return;
+        setError(reason instanceof Error ? reason.message : t.itemDialog.saveError);
+      } catch (failure) { setError(failure instanceof Error ? failure.message : t.collaboration.loadError); }
+    } finally { setSubmitting(false); }
+  }
+
   async function submit() {
     const constraints: ConstraintInput[] = constraintType
       ? [{
@@ -338,24 +374,7 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
       constraints,
     };
 
-    setSubmitting(true);
-    setError("");
-    try {
-      if (item) {
-        if (expectedVersion === null) {
-          throw new Error(t.itemDialog.unavailableVersion);
-        }
-        const { constraints: _constraints, ...updatable } = base;
-        await save({ ...updatable, expectedVersion });
-      } else {
-        await save(base);
-      }
-      setOpen(false);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : t.itemDialog.saveError);
-    } finally {
-      setSubmitting(false);
-    }
+    await persist(base, expectedVersion);
   }
 
   return (
@@ -373,7 +392,21 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save 
           <DialogTitle>{item ? t.itemDialog.editCommitment : t.itemDialog.addCommitment}</DialogTitle>
           <DialogDescription>{t.itemDialog.endpointDescription}</DialogDescription>
         </DialogHeader>
-        <form className="grid gap-5" onSubmit={(event) => event.preventDefault()}>
+        {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={submitting}
+          formatValue={(path, value) => {
+            if (path.endsWith(".placeId")) return places.find((place) => place.id === value)?.name;
+            if (path.startsWith("participantMemberIds.")) {
+              const participant = participantChoices.find((member) => member.memberId === value);
+              return participant?.displayName ?? participant?.email ?? t.collaboration.unknownActor;
+            }
+            if (path.endsWith(".countryStopId")) return countryStops.find((stop) => stop.id === value)?.countryCode;
+          }}
+          onAccept={() => { resolution.clear(); changeOpen(false); }}
+          onReapply={() => void persist(resolution.conflict!.attempted, resolution.conflict!.current!.version, resolution.conflict!.base.version)}
+          onEdit={() => { setBaseSnapshot(resolution.conflict!.current!); setExpectedVersion(resolution.conflict!.current!.version); resolution.resume(); setError(""); }}
+        /> : null}
+        {resolution.conflict && error ? <p role="alert" className="text-destructive">{error}</p> : null}
+        <form hidden={Boolean(resolution.conflict)} className="grid gap-5" onSubmit={(event) => event.preventDefault()}>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field>
               <FieldLabel htmlFor={`item-type-${item?.id ?? "new"}`}>{t.itemDialog.type}</FieldLabel>

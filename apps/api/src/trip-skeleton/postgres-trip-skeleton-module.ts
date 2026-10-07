@@ -346,7 +346,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     tripId: string,
   ): Promise<TripSkeletonDto> {
     await this.requireMember(executor, userId, tripId);
-    const [trip, places, items, dayRows, eventRows] = await Promise.all([
+    const [trip, places, items, dayRows] = await Promise.all([
       executor.selectFrom("trips").select("version").where("id", "=", tripId).executeTakeFirstOrThrow(),
       this.readPlaces(executor, tripId),
       this.readItems(executor, tripId),
@@ -355,21 +355,6 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         .select(["id", "date"])
         .where("trip_id", "=", tripId)
         .orderBy("date")
-        .execute(),
-      executor
-        .selectFrom("change_events")
-        .select([
-          "id",
-          "actor_id",
-          "event_type",
-          "target_type",
-          "target_id",
-          "summary",
-          "created_at",
-        ])
-        .where("trip_id", "=", tripId)
-        .orderBy("created_at", "desc")
-        .limit(100)
         .execute(),
     ]);
     const dayByDate = new Map<string, TimelineDayDto>();
@@ -413,15 +398,6 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
             item.type === "transport",
         )
         .map((item) => item.id),
-      events: eventRows.map((event) => ({
-        id: event.id,
-        actorId: event.actor_id,
-        eventType: event.event_type,
-        targetType: event.target_type,
-        targetId: event.target_id,
-        summary: event.summary,
-        createdAt: isoTimestamp(event.created_at),
-      })),
     };
   }
 
@@ -1173,6 +1149,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         targetType: "constraint",
         targetId: constraintId,
         summary: "Updated an itinerary constraint",
+        relatedTargetIds: [itemId],
       });
       const response = await this.readItem(transaction, tripId, itemId);
       await remember(transaction, userId, operation, key, response);
@@ -1215,6 +1192,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         targetType: "constraint",
         targetId: constraintId,
         summary: "Deleted an itinerary constraint",
+        relatedTargetIds: [itemId],
       });
       const response = await this.readItem(transaction, tripId, itemId);
       await remember(transaction, userId, operation, key, response);

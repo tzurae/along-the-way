@@ -3,7 +3,9 @@
 
   @backend path /api/* /health /ready
   handle @backend {
-    reverse_proxy api:3000
+    reverse_proxy api:3000 {
+      flush_interval -1
+    }
   }
 
   handle {
@@ -12,8 +14,4 @@
 
   header -Server
 
-  log {
-    output stdout
-    format console
-  }
 }

@@ -795,8 +795,11 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   await firstEdit.getByRole("button", { name: "儲存", exact: true }).click();
   await expect(firstEdit).toHaveCount(0);
   await secondEdit.getByRole("button", { name: "儲存", exact: true }).click();
-  await expect(secondEdit.getByRole("alert")).toContainText("資料已變更，無法完成操作。");
-  await expect(secondEdit.getByRole("alert")).toContainText("目前版本：");
+  const flightConflict = secondEdit.locator("[data-conflict-panel]");
+  await expect(flightConflict).toContainText("JL001");
+  await expect(flightConflict).toContainText("JL002");
+  await expect(flightConflict).toContainText("JL003");
+  await flightConflict.getByRole("button", { name: "返回編輯", exact: true }).click();
   await expect(secondEdit.getByLabel("航班號碼", { exact: true })).toHaveValue("JL003");
 
   await page.reload();
@@ -1008,8 +1011,10 @@ test("activity participants persist exact subsets, history, times, and concurren
   await ownerEdit.getByRole("button", { name: "儲存固定行程" }).click();
   await expect(ownerEdit).toHaveCount(0);
   await staleEdit.getByRole("button", { name: "儲存固定行程" }).click();
-  await expect(staleEdit.getByRole("alert")).toContainText("資料已變更，無法完成操作。");
-  await expect(staleEdit.getByRole("alert")).toContainText("目前版本：");
+  const participantConflict = staleEdit.locator("[data-conflict-panel]");
+  await expect(participantConflict).toContainText(participantA);
+  await expect(participantConflict).toContainText(fourthParticipant);
+  await participantConflict.getByRole("button", { name: "返回編輯", exact: true }).click();
   await expect(participantCheckbox(staleEdit, participantA)).toBeChecked();
   await expect(participantCheckbox(staleEdit, participantB)).toBeChecked();
   await staleEdit.press("Escape");

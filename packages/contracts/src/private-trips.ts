@@ -101,12 +101,51 @@ export interface InviteResponse {
   invite: InviteDto;
 }
 
+export interface ConflictChange {
+  eventId: string;
+  actorId: string;
+  actorDisplayName: string | null;
+  actorEmail: string;
+  isOwn: boolean;
+  changedAt: string;
+}
+
+export interface TripChangeNotification {
+  id: string;
+  /** Notification watermark, not an expected aggregate version. */
+  tripVersion: number;
+  entityType: string;
+  entityId: string;
+  kind: string;
+  summary: string;
+}
+
+export interface TripHistoryEvent {
+  id: string;
+  actorId: string;
+  actorDisplayName: string | null;
+  actorEmail: string;
+  createdAt: string;
+  eventType: string;
+  targetType: string;
+  targetId: string;
+  targetName: string | null;
+  reappliedFromVersion: number | null;
+  summary: string;
+}
+
+export interface TripHistoryResponse {
+  events: TripHistoryEvent[];
+  nextCursor: string | null;
+}
+
 export interface ApiErrorResponse {
   error: {
     code: string;
     message: string;
     correlationId?: string;
     currentVersion?: number;
+    latestChange?: ConflictChange | null;
   };
 }
 
@@ -270,6 +309,56 @@ export function parseApiError(value: unknown): ApiErrorResponse {
       message: stringValue(value.error.message),
       ...(correlationId ? { correlationId } : {}),
       ...(currentVersion === undefined ? {} : { currentVersion }),
+      ...(value.error.latestChange === undefined ? {} : {
+        latestChange: value.error.latestChange === null ? null : conflictChange(value.error.latestChange),
+      }),
     },
+  };
+}
+
+function conflictChange(value: unknown): ConflictChange {
+  if (!isRecord(value) || typeof value.isOwn !== "boolean") return invalidResponse();
+  return {
+    eventId: stringValue(value.eventId),
+    actorId: stringValue(value.actorId),
+    actorDisplayName: nullableString(value.actorDisplayName),
+    actorEmail: stringValue(value.actorEmail),
+    isOwn: value.isOwn,
+    changedAt: stringValue(value.changedAt),
+  };
+}
+
+export function parseTripChangeNotification(value: unknown): TripChangeNotification {
+  if (!isRecord(value)) return invalidResponse();
+  return {
+    id: stringValue(value.id),
+    tripVersion: countValue(value.tripVersion),
+    entityType: stringValue(value.entityType),
+    entityId: stringValue(value.entityId),
+    kind: stringValue(value.kind),
+    summary: stringValue(value.summary),
+  };
+}
+
+export function parseTripHistoryResponse(value: unknown): TripHistoryResponse {
+  if (!isRecord(value) || !Array.isArray(value.events)) return invalidResponse();
+  return {
+    nextCursor: nullableString(value.nextCursor),
+    events: value.events.map((event) => {
+      if (!isRecord(event)) return invalidResponse();
+      return {
+        id: stringValue(event.id),
+        actorId: stringValue(event.actorId),
+        actorDisplayName: nullableString(event.actorDisplayName),
+        actorEmail: stringValue(event.actorEmail),
+        createdAt: stringValue(event.createdAt),
+        eventType: stringValue(event.eventType),
+        targetType: stringValue(event.targetType),
+        targetId: stringValue(event.targetId),
+        targetName: nullableString(event.targetName),
+        reappliedFromVersion: event.reappliedFromVersion === null ? null : countValue(event.reappliedFromVersion),
+        summary: stringValue(event.summary),
+      };
+    }),
   };
 }

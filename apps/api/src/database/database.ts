@@ -77,6 +77,7 @@ export interface TripDayTable {
   /** Planned day window in minutes from local midnight; defaults to 09:00–19:00. */
   day_start_minute: Generated<number>;
   day_end_minute: Generated<number>;
+  version: Generated<number>;
 }
 
 export interface PlaceTable {
@@ -413,6 +414,9 @@ export interface WorkerHeartbeatTable {
 
 export interface ChangeEventTable {
   id: Generated<string>;
+  event_order: Generated<string>;
+  conflict_base_version: ColumnType<number | null, number | null | undefined, number | null>;
+  related_target_ids: Generated<string[]>;
   trip_id: string;
   actor_id: string;
   event_type: string;

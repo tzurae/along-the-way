@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { AlongTheWayDatabase } from "../database/database";
@@ -7,6 +8,8 @@ export type DatabaseExecutor =
   | Kysely<AlongTheWayDatabase>
   | Transaction<AlongTheWayDatabase>;
 
+/** Request-scoped audit context only; it never changes concurrency or validation. */
+export const conflictResolutionContext = new AsyncLocalStorage<string | undefined>();
 export function normalizeEmail(value: string) {
   return value.trim().toLowerCase();
 }
@@ -131,8 +134,12 @@ export async function recordEvent(
     targetType: string;
     targetId: string;
     summary: string;
+    relatedTargetIds?: string[];
   },
 ) {
+  const conflictBase = conflictResolutionContext.getStore();
+  if (conflictBase) await sql`select set_config('along.conflict_base_version', ${conflictBase}, true)`.execute(executor);
+  if (event.relatedTargetIds) await sql`select set_config('along.related_targets', ${event.relatedTargetIds}::uuid[]::text, true)`.execute(executor);
   await executor
     .insertInto("change_events")
     .values({
@@ -144,4 +151,16 @@ export async function recordEvent(
       summary: event.summary,
     })
     .execute();
+  if (event.relatedTargetIds) await sql`select set_config('along.related_targets', '', true)`.execute(executor);
+}
+
+export async function requireDayVersion(
+  transaction: Transaction<AlongTheWayDatabase>, tripId: string, dayId: string, expectedVersion: number,
+) {
+  const day = await transaction.selectFrom("trip_days").select("version")
+    .where("trip_id", "=", tripId).where("id", "=", dayId).forUpdate().executeTakeFirst();
+  if (!day) throw new AppError("trip_day_not_found", "Trip day not found", 404);
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion !== day.version) {
+    throw new AppError("conflict", "The day's itinerary changed; reload before saving", 409, undefined, day.version, dayId);
+  }
 }
