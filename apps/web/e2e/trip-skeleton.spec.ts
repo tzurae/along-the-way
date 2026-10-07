@@ -631,9 +631,9 @@ test("the seven-day Osaka Kyoto pilot works on desktop and mobile", async ({ bro
   await page.reload();
   await openTrip(page, name);
   await expect(page.locator(".day-column")).toHaveCount(7);
-  await expect(page.getByText("京都固定晚餐").first()).toBeVisible();
-  await expect(page.getByText("京都午餐").first()).toBeVisible();
-  await expect(page.getByText("抵達後自由時間").first()).toBeVisible();
+  await expect(page.locator("#trip-panel-itinerary").getByText("京都固定晚餐").first()).toBeVisible();
+  await expect(page.locator("#trip-panel-itinerary").getByText("京都午餐").first()).toBeVisible();
+  await expect(page.locator("#trip-panel-itinerary").getByText("抵達後自由時間").first()).toBeVisible();
 
   const authState = await desktopContext.storageState();
   const mobileContext = await browser.newContext({
@@ -670,7 +670,7 @@ test("the seven-day Osaka Kyoto pilot works on desktop and mobile", async ({ bro
 
   await page.reload();
   await openTrip(page, name);
-  await expect(page.getByText("Mobile museum ticket · confirmed").first()).toBeVisible();
+  await expect(page.locator("#trip-panel-itinerary").getByText("Mobile museum ticket · confirmed").first()).toBeVisible();
   await Promise.all([desktopContext.close(), mobileContext.close()]);
 });
 
@@ -726,8 +726,8 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
     .filter({ hasText: "JL001" });
   await expect(arrivalContinuation).toContainText("Haneda Airport");
   await expect(page.getByTestId("departure-priorities")).toContainText("Osaka Hotel");
-  await expect(page.getByText("不可移動・未確認").first()).toBeVisible();
-  await expect(page.getByText("不可移動・有衝突").first()).toBeVisible();
+  await expect(page.locator("#trip-panel-itinerary").getByText("不可移動・未確認").first()).toBeVisible();
+  await expect(page.locator("#trip-panel-itinerary").getByText("不可移動・有衝突").first()).toBeVisible();
 
   const flightCard = timeline.locator(".itinerary-card").filter({ hasText: "JL001" }).first();
   await flightCard.getByRole("button", { name: "鎖定" }).click();

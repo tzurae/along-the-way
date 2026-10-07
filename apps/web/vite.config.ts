@@ -4,12 +4,13 @@ import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { appShellWorker } from "./service-worker-plugin";
 
 const appRoot = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig({
   root: appRoot,
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), appShellWorker()],
   resolve: {
     alias: {
       "@": path.resolve(appRoot, "src"),

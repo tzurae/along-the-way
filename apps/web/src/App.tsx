@@ -19,9 +19,13 @@ import { TripSkeletonWorkspace } from "./TripSkeletonWorkspace";
 import { TripPlaceWorkspace } from "./TripPlaceWorkspace";
 import { TravelWorkspace } from "./TravelWorkspace";
 import { useI18n, type Messages } from "./i18n";
+import { parseTripSkeletonResponse, type TripSkeletonResponse } from "@along-the-way/contracts/trip-skeleton";
+import { parseTripPlaceListResponse, type TripPlaceListResponse } from "@along-the-way/contracts/trip-places";
+import { TodayWorkspace } from "./TodayWorkspace";
+import { createTodayModel, tripClock } from "./today-model";
+import { TodaySnapshotStore, TODAY_SCHEMA_VERSION, type TodaySnapshot } from "./today-snapshot";
+import { readTripLocation, writeTripLocation, tripTabIds, type TripTab } from "./trip-location";
 
-const tripTabIds = ["overview", "discovery", "wishlist", "lodging", "itinerary", "recent"] as const;
-type TripTab = (typeof tripTabIds)[number];
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -40,6 +44,7 @@ class ApiRequestError extends Error {
     message: string,
     readonly correlationId?: string,
     readonly currentVersion?: number,
+    readonly status?: number,
   ) {
     super(message);
   }
@@ -80,13 +85,15 @@ async function requestJson<T>(
       ...options.headers,
     },
   });
-  const value = response.status === 204 ? null : await response.json();
+  const value = response.status === 204 ? null : await response.json().catch(() => {
+    throw new ApiRequestError("unknown", messages.unknown, undefined, undefined, response.status);
+  });
   if (!response.ok) {
     let parsed;
     try {
       parsed = parseApiError(value);
     } catch {
-      throw new Error(messages.unknown);
+      throw new ApiRequestError("unknown", messages.unknown, undefined, undefined, response.status);
     }
     throw new ApiRequestError(
       parsed.error.code,
@@ -99,6 +106,7 @@ async function requestJson<T>(
       ),
       parsed.error.correlationId,
       parsed.error.currentVersion,
+      response.status,
     );
   }
   return (options.parse ? options.parse(value) : value) as T;
@@ -221,8 +229,7 @@ function TripWorkspace({ trip, currentUser, onChanged, request, revision, onTrav
     event.preventDefault();
     inviteKey.current ??= crypto.randomUUID();
     try {
-      const response = await requestJson<{ invite: { email: string } }>(
-        t.errors,
+      const response = await request<{ invite: { email: string } }>(
         `/api/trips/${trip.id}/invites`,
         {
           method: "POST",
@@ -242,7 +249,7 @@ function TripWorkspace({ trip, currentUser, onChanged, request, revision, onTrav
 
   async function removeMember(userId: string) {
     const identity = `remove-member:${userId}`;
-    await requestJson(t.errors, `/api/trips/${trip.id}/members/${userId}`, {
+    await request(`/api/trips/${trip.id}/members/${userId}`, {
       method: "DELETE",
       headers: { "Idempotency-Key": actionKey(identity) },
     });
@@ -252,7 +259,7 @@ function TripWorkspace({ trip, currentUser, onChanged, request, revision, onTrav
 
   async function revokeInvite(inviteId: string) {
     const identity = `revoke-invite:${inviteId}`;
-    await requestJson(t.errors, `/api/trips/${trip.id}/invites/${inviteId}`, {
+    await request(`/api/trips/${trip.id}/invites/${inviteId}`, {
       method: "DELETE",
       headers: { "Idempotency-Key": actionKey(identity) },
     });
@@ -333,11 +340,41 @@ function TripWorkspace({ trip, currentUser, onChanged, request, revision, onTrav
 
 export function App() {
   const { t } = useI18n();
-  const request = useCallback(
-    <T,>(url: string, options: RequestOptions = {}) =>
-      requestJson<T>(t.errors, url, options),
-    [t.errors],
-  );
+  const accountId = useRef<string | null>(null);
+  const readOnly = useRef(false);
+  const reconnecting = useRef(false);
+  const signedOut = useRef(false);
+  const loadSequence = useRef(0);
+  const sessionEpoch = useRef(0);
+  const [store] = useState(() => {
+    try { return new TodaySnapshotStore(window.localStorage); } catch { return null; }
+  });
+  const [todaySnapshot, setTodaySnapshot] = useState<TodaySnapshot | null>(null);
+  const [offline, setOffline] = useState(false);
+  const [persisted, setPersisted] = useState(true);
+  const [retrying, setRetrying] = useState(false);
+  const [selectedDate, setSelectedDate] = useState<string | null>(() => readTripLocation().day);
+  const request = useCallback(async <T,>(url: string, options: RequestOptions = {}): Promise<T> => {
+    if (options.method && !["GET", "HEAD"].includes(options.method.toUpperCase()) && (readOnly.current || !navigator.onLine)) {
+      throw new Error(t.today.mutationDisabled);
+    }
+    const isRead = !options.method || ["GET", "HEAD"].includes(options.method.toUpperCase());
+    const tripRead = isRead ? url.match(/^\/api\/trips\/([^/?]+)(?:\/(?:skeleton|trip-places))?$/) : null;
+    const coreRead = isRead && (tripRead || url === "/api/session" || url === "/api/trips");
+    try { return await requestJson<T>(t.errors, url, options); }
+    catch (reason) {
+      if (reason instanceof ApiRequestError && (reason.status === 401 || (tripRead && [403, 404].includes(reason.status ?? 0)))) {
+        const owner = accountId.current ?? store?.lastAccount();
+        const tripId = tripRead?.[1];
+        if (owner && tripId) store?.clearTrip(owner, tripId);
+        if (owner && reason.status === 401) store?.clearAccount(owner);
+        window.dispatchEvent(new CustomEvent("today-access-denied", { detail: { tripId, status: reason.status } }));
+      } else if (coreRead && (!(reason instanceof ApiRequestError) || (reason.status ?? 0) >= 500)) {
+        window.dispatchEvent(new Event("today-api-unavailable"));
+      }
+      throw reason;
+    }
+  }, [store, t.errors, t.today.mutationDisabled]);
   const [user, setUser] = useState<UserDto | null | undefined>(undefined);
   const [trips, setTrips] = useState<TripSummaryDto[]>([]);
   const [selectedTrip, setSelectedTrip] = useState<TripDto | null>(null);
@@ -347,37 +384,186 @@ export function App() {
   const createTripKey = useRef<string | null>(null);
   const [signInError, setSignInError] = useState("");
   const [placesRevision, setPlacesRevision] = useState(0);
+  const [syncRevision, setSyncRevision] = useState(0);
+  const workspaceRevision = placesRevision + syncRevision;
   const placesChanged = useCallback(() => {
     setPlacesRevision((revision) => revision + 1);
   }, []);
-  const [activeTripTab, setActiveTripTab] = useState<TripTab>("overview");
+  const [activeTripTab, setActiveTripTab] = useState<TripTab>(() => readTripLocation().tab ?? "overview");
   const [recentChangesContainer, setRecentChangesContainer] = useState<HTMLDivElement | null>(null);
 
-  useEffect(() => {
-    setActiveTripTab("overview");
-  }, [selectedTrip?.id]);
 
 
   const refreshTrips = useCallback(async () => {
+    const epoch = sessionEpoch.current;
+    const owner = accountId.current;
     const response = await request<{ trips: TripSummaryDto[] }>("/api/trips", {
       parse: (value) => parseTripListResponse(value),
     });
-    setTrips(response.trips);
+    if (epoch === sessionEpoch.current && owner === accountId.current) {
+      const authorized = new Set(response.trips.map((trip) => trip.id));
+      if (owner) for (const snapshot of store?.forAccount(owner) ?? []) {
+        if (!authorized.has(snapshot.model.tripId)) store?.clearTrip(owner, snapshot.model.tripId);
+      }
+      setTodaySnapshot((snapshot) => snapshot && !authorized.has(snapshot.model.tripId) ? null : snapshot);
+      setSelectedTrip((trip) => trip && !authorized.has(trip.id) ? null : trip);
+      setTrips(response.trips);
+    }
     return response.trips;
-  }, [request]);
+  }, [request, store]);
 
   const loadTrip = useCallback(async (tripId: string) => {
-    const response = await request<{ trip: TripDto }>(`/api/trips/${tripId}`, {
-      parse: (value) => parseTripResponse(value),
-    });
+    const sequence = ++loadSequence.current;
+    const [response, skeleton, places] = await Promise.all([
+      request<{ trip: TripDto }>(`/api/trips/${tripId}`, { parse: parseTripResponse }),
+      request<TripSkeletonResponse>(`/api/trips/${tripId}/skeleton`, { parse: parseTripSkeletonResponse }),
+      request<TripPlaceListResponse>(`/api/trips/${tripId}/trip-places`, { parse: parseTripPlaceListResponse }),
+    ]);
+    if (sequence !== loadSequence.current || !accountId.current) return;
+    if (response.trip.version !== skeleton.skeleton.tripVersion) {
+      window.dispatchEvent(new Event("today-api-unavailable"));
+      throw new Error(t.today.unavailable);
+    }
+    const model = createTodayModel(response.trip, skeleton.skeleton, places.tripPlaces, accountId.current);
+    const saved = store?.save(accountId.current, model);
+    setPersisted(Boolean(saved));
+    setTodaySnapshot(saved ?? { schemaVersion: TODAY_SCHEMA_VERSION, accountId: accountId.current, model, fetchedAt: new Date().toISOString() });
+    const location = readTripLocation();
+    const clock = tripClock(model, Date.now());
+    const tab = location.trip === tripId && location.tab ? location.tab : clock.today ? "today" : "overview";
+    const date = location.trip === tripId && model.days.some((day) => day.date === location.day) ? location.day : (clock.today ?? (clock.phase === "after" ? model.days.at(-1) : model.days[0]))?.date ?? null;
+    setActiveTripTab(tab);
+    setSelectedDate(date);
+    writeTripLocation(tripId, tab, date, true);
     setSelectedTrip(response.trip);
-  }, [request]);
+    readOnly.current = false;
+    setOffline(false);
+    setError("");
+  }, [request, store, t.today.unavailable]);
+
+  const restoreSnapshot = useCallback(() => {
+    if (signedOut.current || store?.isLocallySignedOut()) return false;
+    const owner = accountId.current ?? store?.lastAccount();
+    if (!owner) return false;
+    const location = readTripLocation();
+    const snapshot = location.trip ? store?.read(owner, location.trip) : store?.forAccount(owner)[0];
+    readOnly.current = true;
+    setOffline(true);
+    if (!snapshot) { setTodaySnapshot(null); setSelectedTrip(null); setTrips([]); return false; }
+    accountId.current = owner;
+    ++loadSequence.current;
+    setTodaySnapshot(snapshot);
+    setSelectedTrip(null);
+    setTrips([]);
+    setActiveTripTab("today");
+    setSelectedDate(location.day);
+    writeTripLocation(snapshot.model.tripId, "today", location.day, true);
+    return true;
+  }, [store]);
+
+  const reconnect = useCallback(async () => {
+    if (signedOut.current || store?.isLocallySignedOut() || reconnecting.current) return;
+    reconnecting.current = true;
+    setRetrying(true);
+    const epoch = sessionEpoch.current;
+    try {
+      const session = await request<{ user: UserDto }>("/api/session", { parse: parseSessionResponse });
+      if (epoch !== sessionEpoch.current) return;
+      const previousAccount = accountId.current ?? store?.lastAccount();
+      if (previousAccount && previousAccount !== session.user.id) {
+        store?.clearAccount(previousAccount);
+        setTodaySnapshot(null); setSelectedTrip(null); setTrips([]);
+      }
+      accountId.current = session.user.id;
+      setUser(session.user);
+      const available = await refreshTrips();
+      if (epoch !== sessionEpoch.current) return;
+      const tripId = readTripLocation().trip ?? available[0]?.id;
+      if (tripId) {
+        await loadTrip(tripId);
+        // Read synchronization refreshes mounted panels without triggering the mutation-to-Today effect.
+        if (epoch === sessionEpoch.current) setSyncRevision((revision) => revision + 1);
+      }
+      else { setTodaySnapshot(null); setOffline(false); readOnly.current = false; }
+    } catch (reason) {
+      if (!(reason instanceof ApiRequestError) || ![401, 403, 404].includes(reason.status ?? 0)) restoreSnapshot();
+      setError(reason instanceof Error ? reason.message : t.today.unavailable);
+    } finally { reconnecting.current = false; setRetrying(false); }
+  }, [loadTrip, refreshTrips, request, restoreSnapshot, store, t.today.unavailable]);
+
+  const selectTab = useCallback((tab: TripTab) => {
+    setActiveTripTab(tab);
+    const location = readTripLocation();
+    if (location.trip) writeTripLocation(location.trip, tab, location.day);
+  }, []);
+  const selectDay = useCallback((date: string, replace = false) => {
+    setSelectedDate(date);
+    const location = readTripLocation();
+    if (location.trip) writeTripLocation(location.trip, location.tab ?? "today", date, replace);
+  }, []);
+
+  useEffect(() => {
+    const unavailable = () => { restoreSnapshot(); };
+    const online = () => { void reconnect(); };
+    const denied = (event: Event) => {
+      const detail = (event as CustomEvent<{ tripId?: string; status: number }>).detail;
+      if (detail.status === 401 || detail.tripId === readTripLocation().trip) {
+        ++loadSequence.current;
+        if (detail.status === 401) ++sessionEpoch.current;
+        setTodaySnapshot(null); setSelectedTrip(null);
+        setOffline(false); readOnly.current = false;
+        if (detail.status === 401) { setUser(null); setTrips([]); accountId.current = null; }
+      }
+    };
+    const navigate = () => {
+      const location = readTripLocation();
+      setActiveTripTab(location.tab ?? "overview");
+      setSelectedDate(location.day);
+      if (readOnly.current) restoreSnapshot();
+      else if (location.trip) void loadTrip(location.trip).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : t.today.unavailable));
+    };
+    window.addEventListener("offline", unavailable);
+    window.addEventListener("online", online);
+    window.addEventListener("today-api-unavailable", unavailable);
+    window.addEventListener("today-access-denied", denied);
+    window.addEventListener("popstate", navigate);
+    return () => {
+      window.removeEventListener("offline", unavailable); window.removeEventListener("online", online);
+      window.removeEventListener("today-api-unavailable", unavailable); window.removeEventListener("today-access-denied", denied);
+      window.removeEventListener("popstate", navigate);
+    };
+  }, [loadTrip, reconnect, restoreSnapshot, t.today.unavailable]);
+
+  useEffect(() => {
+    if (!offline) return;
+    const revalidate = () => {
+      if (navigator.onLine && document.visibilityState !== "hidden") void reconnect();
+    };
+    // An offline shell can reopen while navigator.onLine already reports true; the
+    // browser then has no online transition to emit when the API becomes reachable.
+    // Probe only while the visible read-only shell needs recovery. Events bypass
+    // the interval, and reconnect's single-flight guard coalesces simultaneous signals.
+    const interval = window.setInterval(revalidate, 2_000);
+    window.addEventListener("focus", revalidate);
+    document.addEventListener("visibilitychange", revalidate);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", revalidate);
+      document.removeEventListener("visibilitychange", revalidate);
+    };
+  }, [offline, reconnect]);
+
+  useEffect(() => {
+    if (placesRevision > 0 && selectedTrip && !readOnly.current) void loadTrip(selectedTrip.id).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : t.today.unavailable));
+  }, [placesRevision, loadTrip, selectedTrip?.id, t.today.unavailable]);
 
   useEffect(() => {
     let active = true;
+    const epoch = sessionEpoch.current;
     void (async () => {
       try {
         const magicToken = tokenParameter("magicToken");
+        if (!magicToken && store?.isLocallySignedOut()) { setUser(null); return; }
         if (magicToken) {
           await request("/api/auth/magic-links/consume", {
             method: "POST",
@@ -386,15 +572,28 @@ export function App() {
           });
           removeTokenFragment("magicToken");
         }
+        if (magicToken) store?.setLocallySignedOut(false);
         const session = await request<{ user: UserDto }>("/api/session", {
           parse: (value) => parseSessionResponse(value),
         });
-        if (!active) return;
+        if (!active || epoch !== sessionEpoch.current) return;
+        const previousAccount = accountId.current ?? store?.lastAccount();
+        if (previousAccount && previousAccount !== session.user.id) store?.clearAccount(previousAccount);
+        accountId.current = session.user.id;
         setUser(session.user);
         const available = await refreshTrips();
-        if (available[0]) await loadTrip(available[0].id);
+        if (!active || epoch !== sessionEpoch.current) return;
+        const tripId = readTripLocation().trip ?? available[0]?.id;
+        if (tripId) await loadTrip(tripId);
       } catch (reason) {
         if (active) {
+          if (!(reason instanceof ApiRequestError) || (reason.status ?? 0) >= 500) {
+            if (restoreSnapshot()) return;
+          }
+          if (accountId.current && reason instanceof ApiRequestError && [403, 404].includes(reason.status ?? 0)) {
+            setError(reason.message);
+            return;
+          }
           setUser(null);
           if (
             reason instanceof ApiRequestError &&
@@ -411,7 +610,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [loadTrip, refreshTrips, request, t.app.requestNewMagicLink]);
+  }, [loadTrip, refreshTrips, request, restoreSnapshot, store, t.app.requestNewMagicLink]);
 
   async function acceptInvitation() {
     const token = tokenParameter("inviteToken");
@@ -430,6 +629,7 @@ export function App() {
       removeTokenFragment("inviteToken");
       setSelectedTrip(response.trip);
       await refreshTrips();
+      await loadTrip(response.trip.id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : t.app.unableAcceptInvitation);
     } finally {
@@ -448,13 +648,39 @@ export function App() {
     createTripKey.current = null;
     setSelectedTrip(response.trip);
     await refreshTrips();
+    await loadTrip(response.trip.id);
   }
 
   async function logout() {
-    await request("/api/logout", { method: "POST" });
+    ++sessionEpoch.current;
+    signedOut.current = true;
+    store?.setLocallySignedOut(true);
+    const owner = accountId.current ?? store?.lastAccount();
+    if (owner) store?.clearAccount(owner);
+    accountId.current = null;
+    ++loadSequence.current;
+    setTodaySnapshot(null);
     setUser(null);
     setTrips([]);
     setSelectedTrip(null);
+    setOffline(false);
+    const wasOffline = readOnly.current || !navigator.onLine;
+    readOnly.current = false;
+    if (!wasOffline) await request("/api/logout", { method: "POST" }).catch(() => {});
+  }
+
+  if (offline) {
+    return <main className="mx-auto min-h-screen w-[min(100%-1.25rem,58rem)] py-5">
+      <header className="mb-5 flex flex-wrap items-center justify-between gap-3"><h1 className="text-xl font-bold">{todaySnapshot?.model.tripName ?? t.today.title}</h1><button className="min-h-11 rounded-lg border px-4 font-bold" onClick={() => void logout()}>{t.app.signOut}</button></header>
+      <p className="mb-4 text-sm">{t.today.offlineAccount}</p>
+      {error ? <p className="mb-4" role="alert">{error}</p> : null}
+      {todaySnapshot ? <>
+        <nav aria-label={t.today.savedTrips} className="mb-4 flex flex-wrap gap-2">{store?.forAccount(todaySnapshot.accountId).map((snapshot) => <button className="min-h-11 rounded-lg border px-3" key={snapshot.model.tripId} onClick={() => {
+          writeTripLocation(snapshot.model.tripId, "today", null); restoreSnapshot();
+        }}>{snapshot.model.tripName}</button>)}</nav>
+        <TodayWorkspace model={todaySnapshot.model} fetchedAt={todaySnapshot.fetchedAt} selectedDate={selectedDate} onDayChanged={selectDay} offline retry={() => void reconnect()} retrying={retrying} />
+      </> : <section><p role="status">{t.today.noSnapshot}</p><button className="mt-4 min-h-11 rounded-lg border px-4" onClick={() => void reconnect()} disabled={retrying}>{t.today.retry}</button></section>}
+    </main>;
   }
 
   if (user === undefined) {
@@ -471,6 +697,7 @@ export function App() {
 
   const inviteToken = tokenParameter("inviteToken");
   const tripTabs = [
+    { value: "today", label: t.today.title },
     { value: "overview", label: t.app.tabs.overview },
     { value: "discovery", label: t.app.tabs.discovery },
     { value: "wishlist", label: t.app.tabs.wishlist },
@@ -500,7 +727,11 @@ export function App() {
           <CreateTripDialog createTrip={createTrip} />
           <nav aria-label={t.app.trips} className="grid gap-2">
             {trips.map((trip) => (
-              <button key={trip.id} className={`min-h-14 rounded-xl border px-4 py-3 text-left outline-none focus:ring-4 focus:ring-focus/30 ${selectedTrip?.id === trip.id ? "border-accent-strong bg-surface" : "border-ink/10 bg-surface/70"}`} onClick={() => void loadTrip(trip.id)}>
+              <button key={trip.id} className={`min-h-14 rounded-xl border px-4 py-3 text-left outline-none focus:ring-4 focus:ring-focus/30 ${selectedTrip?.id === trip.id ? "border-accent-strong bg-surface" : "border-ink/10 bg-surface/70"}`} onClick={() => {
+                writeTripLocation(trip.id, "overview", null);
+                const url = new URL(window.location.href); url.searchParams.delete("tab"); window.history.replaceState({}, "", url);
+                void loadTrip(trip.id).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : t.today.unavailable));
+              }}>
                 <strong className="block">{trip.name}</strong><small className="text-muted-foreground">{t.app.tripSummary(trip.memberCount, trip.dayCount)}</small>
               </button>
             ))}
@@ -508,7 +739,7 @@ export function App() {
           </nav>
         </aside>
         {selectedTrip ? (
-          <div className="grid gap-5">
+          <div className="grid min-w-0 gap-5">
             <section
               className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8"
               aria-labelledby="trip-title-heading"
@@ -527,8 +758,8 @@ export function App() {
               </p>
             </section>
 
-            <nav className="sticky top-0 z-40 overflow-x-auto bg-paper py-2" aria-label={t.app.tripSections}>
-              <div className="flex w-max min-w-full gap-2" role="tablist">
+            <nav className="sticky top-0 z-40 bg-paper py-2" aria-label={t.app.tripSections}>
+              <div className="flex min-w-0 flex-wrap gap-2" role="tablist">
                 {tripTabs.map((tab) => (
                   <button
                     key={tab.value}
@@ -543,7 +774,7 @@ export function App() {
                     aria-controls={`trip-panel-${tab.value}`}
                     aria-selected={activeTripTab === tab.value}
                     tabIndex={activeTripTab === tab.value ? 0 : -1}
-                    onClick={() => setActiveTripTab(tab.value)}
+                    onClick={() => selectTab(tab.value)}
                     onKeyDown={(event) => {
                       const currentIndex = tripTabIds.indexOf(tab.value);
                       let nextIndex: number | null = null;
@@ -554,7 +785,7 @@ export function App() {
                       if (nextIndex === null) return;
                       event.preventDefault();
                       const nextTab = tripTabIds[nextIndex]!;
-                      setActiveTripTab(nextTab);
+                      selectTab(nextTab);
                       document.getElementById(`trip-tab-${nextTab}`)?.focus();
                     }}
                   >
@@ -564,6 +795,9 @@ export function App() {
               </div>
             </nav>
 
+            <div id="trip-panel-today" role="tabpanel" aria-labelledby="trip-tab-today" hidden={activeTripTab !== "today"}>
+              {todaySnapshot ? <TodayWorkspace key={todaySnapshot.model.tripId} model={todaySnapshot.model} fetchedAt={todaySnapshot.fetchedAt} selectedDate={selectedDate} onDayChanged={selectDay} retry={() => void reconnect()} retrying={retrying} persisted={persisted} /> : <p role="status">{t.today.unavailable}</p>}
+            </div>
             <div
               id="trip-panel-overview"
               role="tabpanel"
@@ -571,7 +805,7 @@ export function App() {
               hidden={activeTripTab !== "overview"}
             >
               <TripWorkspace trip={selectedTrip} currentUser={user} onChanged={() => loadTrip(selectedTrip.id)}
-                request={request} revision={placesRevision} onTravelChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }} />
+                request={request} revision={workspaceRevision} onTravelChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }} />
             </div>
             <div
               id="trip-panel-discovery"
@@ -582,7 +816,7 @@ export function App() {
               <DiscoveryWorkspace
                 trip={selectedTrip}
                 request={request}
-                placesRevision={placesRevision}
+                placesRevision={workspaceRevision}
                 onPlacesChanged={placesChanged}
               />
             </div>
@@ -595,13 +829,13 @@ export function App() {
               <TripPlaceWorkspace
                 trip={selectedTrip}
                 request={request}
-                placesRevision={placesRevision}
+                placesRevision={workspaceRevision}
                 onPlacesChanged={placesChanged}
               />
             </div>
             <div id="trip-panel-lodging" role="tabpanel" aria-labelledby="trip-tab-lodging" hidden={activeTripTab !== "lodging"}
               className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8">
-              <TravelWorkspace key={selectedTrip.id} trip={selectedTrip} type="lodging" request={request} revision={placesRevision}
+              <TravelWorkspace key={selectedTrip.id} trip={selectedTrip} type="lodging" request={request} revision={workspaceRevision}
                 onChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }} />
             </div>
             <div
@@ -614,12 +848,12 @@ export function App() {
                 trip={selectedTrip}
                 request={request}
                 onTripChanged={() => loadTrip(selectedTrip.id)}
-                placesRevision={placesRevision}
+                placesRevision={workspaceRevision}
                 onPlacesChanged={placesChanged}
                 recentChangesContainer={recentChangesContainer}
                 onTravelEdit={(type) => {
                   const tab = type === "flight" ? "overview" : "lodging";
-                  setActiveTripTab(tab);
+                  selectTab(tab);
                   document.getElementById(`trip-tab-${tab}`)?.focus();
                 }}
               />

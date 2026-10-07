@@ -906,7 +906,7 @@ export function TripSkeletonWorkspace({
         day={planningDay}
         request={request}
         onClose={() => setPlanningDay(null)}
-        onOrderSaved={load}
+        onOrderSaved={async () => { await load(); onPlacesChanged(); }}
       />
 
       <TripPlanDialog

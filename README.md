@@ -477,5 +477,108 @@ prior notes and proposal decisions are not restored, and reopening events stay.*
 Implementation and added API, migration, contract and browser regressions are
 UNVERIFIED until the coordinator runs validation, including the real UI at 25080.
 
+## Mobile Today and read-only offline trips (Issue #28)
+
+「今天」 is the first trip tab and the default when an actual TripDay matches
+the current instant in that day's IANA time zone; otherwise 「總覽」 remains
+the default. `?trip=<id>&tab=today&day=YYYY-MM-DD` preserves the selected trip,
+tab and valid day across reloads and browser history. Automatic corrections replace
+the current history entry and wait for the destination trip's model. Other tabs
+remain mounted; a successful Today sync publishes a separate read-refresh revision
+so itinerary, lodging and recent changes update without a Today reload loop.
+
+The shared `resolveDayTimeZone` contract preserves the planner's precedence:
+located lodging for the night (then the previous night), located wishlist places
+assigned to the day in their saved order, then formal item endpoints. Today
+explicitly falls back to the first country stop's zone. An unresolved zone is
+shown as unknown; neither the device nor server zone is substituted. The device
+clock supplies only the current instant. Before departure the page shows the
+countdown and first fixed item; after the trip it shows completion and reviewable
+dates rather than a next destination.
+
+The read model uses the authenticated trip, skeleton and saved wishlist GETs.
+It does not call planning, discovery generation, place enrichment or route
+providers. Flights, lodging, transport, reservations/meals, activities and free
+time remain formal itinerary items. Day membership includes both formal endpoint
+projections and normalized intervals overlapping the day's actual zoned boundaries,
+including overnight activities, intermediate lodging nights and 23/25-hour DST days.
+Each boundary resolves its own calendar date's zoned start: if today's midnight is
+skipped and the day starts at 01:00, tomorrow's boundary is still resolved from
+tomorrow's date rather than carrying that 01:00 clock time forward.
+Assigned wishlist places appear only under 「今天想去（未排時間）」; accepting a
+day's suggested order refreshes the Today wishlist, its timezone and its snapshot.
+Cards show existing type-specific details, full start/end times, explicit participant
+sets, constraints and first-party notes; absent fields are omitted. Each endpoint
+keeps its own local time; cross-zone card headings and personal current/next lines
+identify the endpoint place and IANA zone rather than converting both ends into
+the displayed day's zone. Personal current/next uses only the signed-in member's confirmed
+participation and half-open time intervals (`start <= now < end`). Unconfirmed
+participants are never promoted to the whole group. Overlaps stay in one column
+and are labeled 「並行」, without inventing travel between adjacent group items.
+Only reliable coordinates produce Maps links; transport directions use that
+formal item's own endpoints. Missing locations stay 「位置待補充」. No persisted
+route observation is part of this formal read model, so transportation is labeled
+unavailable rather than displaying generated route estimates or stale live traffic.
+
+Each successful, version-consistent read saves one localStorage snapshot per
+account and trip: `{ schemaVersion: 2, accountId, fetchedAt, model }`. The model
+contains trip ID/name/version, the current member ID, resolved day zones, item
+IDs, separate untimed wishlist names, and allowlisted card fields. Participant
+labels use display name, falling back to email, only for participants in the stored
+formal items; unused profile emails are not copied. Invitations, change events,
+member profiles, drafts, credentials, provider keys and unsaved inputs are never copied.
+Malformed, extra-field or incompatible snapshots are discarded. Storage failure
+is visible and does not prevent reading the online itinerary.
+
+Browser-offline events or failed core API reads open a dedicated 「離線資料」
+shell with snapshot time and an explicit warning that membership and newer edits
+cannot be checked. Editable panels are absent there and the request boundary
+refuses mutations; nothing is queued. Reconnect/retry validates the session and
+trip membership again before replacing the snapshot. Every successful authorized
+trip-list read also purges this account's snapshots for absent trips, including
+unselected revoked trips. Core trip GETs returning 401/403/404 delete cached access;
+an inaccessible bookmarked trip does not invalidate a valid session or hide other
+authorized trips. Logout clears that account's snapshots and in-memory itinerary.
+Offline logout also records a local signed-out boolean so a surviving HttpOnly
+cookie cannot silently reopen private data on reconnect; a new magic-link sign-in
+clears that marker. It does not queue a remote logout. Online the action is
+「重新同步」; the read-only shell offers 「重新連線並同步」.
+A failed mutation while the browser remains online keeps its existing dialog,
+input, error feedback and idempotency key for an explicit retry; it does not switch
+to the offline shell. Provider-only failures likewise do not change this boundary.
+Recovery revalidates immediately on `online`, focus, and becoming visible. While
+the read-only shell is visible and `navigator.onLine` is true, a single-flight
+read check also runs every two seconds: a service-worker offline reopen can
+already report online and emit no new connectivity event when requests recover.
+This fallback only retries authenticated reads, stops on recovery, and never
+resubmits a mutation.
+
+The production Vite build emits `/sw.js` from the built asset manifest and finalized
+HTML content, so an HTML-only deployment also changes the worker/cache revision.
+It registers at the application root and caches only the public HTML shell and
+hashed built assets, never `/api/*` or other responses. Offline root navigation
+uses that shell, then the private read-only snapshot store. Development mode does
+not register a worker. There are **no database migrations or new API endpoints**
+for this issue; the shared zone resolver is the only new shared contract export.
+
+Unit coverage includes different device/trip dates, DST and midnight boundaries
+(including midnight gaps in Santiago and Havana),
+multi-night lodging, pre/post-trip, cross-zone endpoint presentation, participant
+identity/pending states, overlaps, gaps/completion and snapshot privacy/schema/account
+isolation. Mounted-App HTTP-boundary regressions cover unselected revocation,
+inaccessible bookmarks, delayed cross-trip Back/Forward, mounted-panel sync and
+accepted day ordering. An isolated Vite-build/worker-runtime scenario verifies an
+HTML-only deployment reaches offline reopening and API requests bypass the worker.
+`apps/web/e2e/today.spec.ts` exercises the real API with disposable four-member trips,
+`page.clock`, phone/desktop overlaps, cross-zone flights, a midnight-crossing activity,
+day URL reload/Back/Forward, a California trip, `context.setOffline`, formal-version
+and mounted-panel refresh, unselected membership removal, inaccessible bookmarks
+and offline logout. Run that spec against the **production** web build so complete
+offline reopening also exercises the service worker.
+The Chromium spec verifies single-column phone/desktop overlaps and offline
+reopening/recovery through the production shell. Real-device accessibility,
+actual external navigation destinations and the 2.5s 4G performance target
+remain UNVERIFIED.
+
 The existing static site remains available at
 <https://tzurae.github.io/along-the-way/>.

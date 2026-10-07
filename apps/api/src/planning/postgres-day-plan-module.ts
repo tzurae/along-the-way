@@ -1,4 +1,5 @@
 import { Temporal } from "@js-temporal/polyfill";
+import { lodgingForNight, resolveDayTimeZone } from "@along-the-way/contracts/day-time-zone";
 import type {
   ApplyDayPlaceOrderInput,
   CreateDayTimetableInput,
@@ -364,11 +365,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
   ): DayContext {
     const morning = this.lodgingFor(skeleton, Temporal.PlainDate.from(day.date).subtract({ days: 1 }).toString());
     const night = this.lodgingFor(skeleton, day.date);
-    const timeZone = (night ?? morning)?.timeZone
-      ?? stops.find((stop) => stop.timeZone)?.timeZone
-      ?? day.entries.flatMap((entry) => skeleton.items.find((item) => item.id === entry.itemId)?.endpoints ?? [])[0]?.timeZone
-      ?? fallbackZone
-      ?? "UTC";
+    const timeZone = resolveDayTimeZone(skeleton, day, stops, fallbackZone) ?? "UTC";
     const { blocks, points } = this.blocksFor(skeleton, day, timeZone);
     const landings = blocks.filter((block) => isMove(block) && !block.endsAfterDay)
       .sort((left, right) => left.endMinute - right.endMinute || left.itemId.localeCompare(right.itemId));
@@ -695,24 +692,15 @@ export class PostgresDayPlanModule implements DayPlanModule {
 
   /** The lodging slept in that night: check-in on or before the date, checkout after it. */
   private lodgingFor(skeleton: TripSkeletonDto, date: string): RoutePoint | null {
-    const placesById = new Map(skeleton.places.map((place) => [place.id, place]));
-    for (const item of skeleton.items) {
-      if (item.type !== "lodging") continue;
-      const start = endpoint(item, "start");
-      const end = endpoint(item, "end");
-      if (!start || !end) continue;
-      if (start.localDateTime.slice(0, 10) > date || end.localDateTime.slice(0, 10) <= date) continue;
-      const place = placesById.get(start.placeId);
-      if (!place || !located(place)) continue;
-      return {
-        id: place.id,
-        name: place.name,
-        latitude: place.latitude!,
-        longitude: place.longitude!,
-        timeZone: start.timeZone,
-      };
-    }
-    return null;
+    const lodging = lodgingForNight(skeleton, date);
+    if (!lodging) return null;
+    return {
+      id: lodging.place.id,
+      name: lodging.place.name,
+      latitude: lodging.place.latitude!,
+      longitude: lodging.place.longitude!,
+      timeZone: lodging.timeZone,
+    };
   }
 
   private async leg(from: RoutePoint, to: RoutePoint, departureTime: string): Promise<DayLegDto> {
