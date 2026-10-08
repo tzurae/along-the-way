@@ -3,8 +3,8 @@ import { parseTripHistoryResponse, type TripHistoryEvent } from "@along-the-way/
 import { Button } from "@/components/ui/button";
 import { useI18n } from "./i18n";
 
-export function TripHistory({ tripId, revision, request }: {
-  tripId: string; revision: number;
+export function TripHistory({ tripId, revision, active, request }: {
+  tripId: string; revision: number; active: boolean;
   request<T>(url: string, options?: RequestInit): Promise<T>;
 }) {
   const { t, locale } = useI18n();
@@ -14,18 +14,35 @@ export function TripHistory({ tripId, revision, request }: {
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
   const generation = useRef(0);
+  const needsRecovery = useRef(true);
+  const activeRef = useRef(active);
+  activeRef.current = active;
   useEffect(() => {
     const current = ++generation.current;
+    needsRecovery.current = true;
     setBusy(true);
     void request(`/api/trips/${tripId}/history`).then((value) => {
       if (current !== generation.current) return;
       const page = parseTripHistoryResponse(value);
+      needsRecovery.current = false;
       setEvents(page.events); setNextCursor(page.nextCursor); setError("");
     }).catch((reason) => {
       if (current === generation.current) setError(reason instanceof Error ? reason.message : t.collaboration.historyError);
     }).finally(() => { if (current === generation.current) setBusy(false); });
     return () => { generation.current += 1; };
   }, [tripId, revision, request, retry, t.collaboration.historyError]);
+
+  // The notification cursor can advance before this projection read settles.
+  // Recover the visible history directly on focus when its latest read is still unresolved or failed.
+  useEffect(() => {
+    const recover = () => {
+      if (activeRef.current && document.visibilityState !== "hidden" && needsRecovery.current) {
+        setRetry((value) => value + 1);
+      }
+    };
+    window.addEventListener("focus", recover);
+    return () => window.removeEventListener("focus", recover);
+  }, []);
 
   async function more() {
     if (!nextCursor || busy) return;

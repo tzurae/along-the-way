@@ -6,6 +6,7 @@ import {
   CloudOff,
   Images,
   MapPinOff,
+  X,
 } from "lucide-react";
 
 import type { TripDto } from "@along-the-way/contracts/private-trips";
@@ -23,7 +24,15 @@ import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 
 import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
-import { VoteControl } from "./VoteControl";
+import { VoteControl, VoteVoters } from "./VoteControl";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -105,6 +114,19 @@ function nullableNumber(value: FormDataEntryValue | null) {
   if (typeof value !== "string" || value.trim() === "") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function useLargeScreen() {
+  const [large, setLarge] = useState(() => typeof window.matchMedia === "function" && window.matchMedia("(min-width: 1024px)").matches);
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(min-width: 1024px)");
+    const changed = () => setLarge(query.matches);
+    changed();
+    query.addEventListener("change", changed);
+    return () => query.removeEventListener("change", changed);
+  }, []);
+  return large;
 }
 
 function AddPlacePanel({
@@ -229,7 +251,6 @@ function AddPlacePanel({
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">{t.add.eyebrow}</p>
             <h3 id="add-wishlist-place" className="font-display text-3xl text-ink-strong">{t.add.title}</h3>
           </div>
           <button className="min-h-11 rounded-lg border px-4 font-bold" onClick={close}>{t.add.close}</button>
@@ -425,6 +446,24 @@ export function TripPlaceWorkspace({
   const pendingVoteIds = useRef(new Set<string>());
   const retryKeys = useRef<RetryKeys>(new Map());
   const editingPlaceIds = useRef(new Set<string>());
+  const largeScreen = useLargeScreen();
+  const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
+  const detailTitleRef = useRef<HTMLHeadingElement>(null);
+  const [mergeConfirmation, setMergeConfirmation] = useState<{ source: TripPlaceDto; target: TripPlaceDto } | null>(null);
+  const [merging, setMerging] = useState(false);
+  useEffect(() => {
+    if (!selectedPlaceId) return;
+    const frame = window.requestAnimationFrame(() => detailTitleRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [largeScreen, selectedPlaceId]);
+
+  function openDetail(placeId: string) {
+    if (placeId === selectedPlaceId) {
+      window.requestAnimationFrame(() => detailTitleRef.current?.focus());
+      return;
+    }
+    setSelectedPlaceId(placeId);
+  }
 
   const refreshPlaces = useCallback(async () => {
     const response = await request<unknown>(`/api/trips/${trip.id}/trip-places`);
@@ -452,6 +491,21 @@ export function TripPlaceWorkspace({
     void load();
   }, [load, placesRevision, trip.members.length]);
 
+  useEffect(() => {
+    const retained = readModel.retained[0];
+    if (retained) setSelectedPlaceId(retained.id);
+  }, [readModel.retained]);
+
+  function closeDetail() {
+    const placeId = selectedPlaceId;
+    setSelectedPlaceId(null);
+    if (placeId) {
+      window.requestAnimationFrame(() => {
+        document.querySelector<HTMLElement>(`[data-place-detail-trigger="${placeId}"]`)?.focus();
+      });
+    }
+  }
+
   async function changedPlaces() {
     await load();
     onPlacesChanged();
@@ -461,6 +515,24 @@ export function TripPlaceWorkspace({
     () => new Map(places.map((place) => [place.id, place])),
     [places],
   );
+  const duplicateSuggestionsByPlace = useMemo(() => {
+    const byPlace = new Map<string, TripPlaceDto["duplicateSuggestions"]>();
+    function add(placeId: string, suggestion: TripPlaceDto["duplicateSuggestions"][number]) {
+      const existing = byPlace.get(placeId) ?? [];
+      if (!existing.some((entry) => entry.id === suggestion.id)) {
+        byPlace.set(placeId, [...existing, suggestion]);
+      }
+    }
+    for (const place of places) {
+      for (const suggestion of place.duplicateSuggestions) {
+        add(place.id, suggestion);
+        if (placesById.has(suggestion.otherTripPlaceId)) {
+          add(suggestion.otherTripPlaceId, { ...suggestion, otherTripPlaceId: place.id });
+        }
+      }
+    }
+    return byPlace;
+  }, [places, placesById]);
 
   async function setVote(place: TripPlaceDto, voted: boolean) {
     if (pendingVoteIds.current.has(place.id)) return;
@@ -537,15 +609,14 @@ export function TripPlaceWorkspace({
     }
   }
 
-  async function merge(source: TripPlaceDto, targetId: string) {
-    const target = places.find((place) => place.id === targetId);
-    if (!target) return;
+  async function merge(source: TripPlaceDto, target: TripPlaceDto) {
     const operation = `merge:${source.id}:${target.id}`;
     const payload = {
       targetTripPlaceId: target.id,
       expectedSourceVersion: source.version,
       expectedTargetVersion: target.version,
     };
+    setMerging(true);
     try {
       await request(`/api/trips/${trip.id}/trip-places/${source.id}/merge`, {
         method: "POST",
@@ -554,10 +625,14 @@ export function TripPlaceWorkspace({
         parse: parseTripPlaceResponse,
       });
       clearRetryKey(retryKeys.current, operation);
+      setSelectedPlaceId(target.id);
+      setMergeConfirmation(null);
       await load();
       onPlacesChanged();
     } catch (error) {
       setMessage(errorMessage(error, t.errors.requestFailed));
+    } finally {
+      setMerging(false);
     }
   }
 
@@ -576,108 +651,229 @@ export function TripPlaceWorkspace({
   }
 
   const highestVoteCount = places.reduce((highest, place) => Math.max(highest, place.voteCount), 0);
+  const listedPlaces = [...places, ...readModel.retained];
+  const showVotes = places.some((place) => place.votingAvailable);
+  const placeNameCounts = new Map<string, number>();
+  for (const place of listedPlaces) {
+    placeNameCounts.set(place.name, (placeNameCounts.get(place.name) ?? 0) + 1);
+  }
+  const selectedPlace = listedPlaces.find((place) => place.id === selectedPlaceId) ?? null;
+  const showTableColumns = selectedPlace === null;
+
+  function quickActions(place: TripPlaceDto) {
+    if (!placesById.has(place.id) || !place.votingAvailable) return null;
+    const voteDraft = voteDrafts[place.id];
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <VoteControl compact name={place.name} voters={place.voters} voteCount={place.voteCount} ownVote={place.ownVote} votingAvailable disabled={Boolean(pendingVotes[place.id])} onChange={(voted) => void setVote(place, voted)} />
+        {failedVotes[place.id] && voteDraft !== undefined ? (
+          <button className="min-h-11 whitespace-nowrap rounded-lg border px-3 font-bold outline-none hover:bg-surface focus:ring-4 focus:ring-focus/30" disabled={pendingVotes[place.id]} onClick={() => void setVote(place, voteDraft)}>{t.vote.retry}</button>
+        ) : null}
+      </div>
+    );
+  }
+
+  function placeDetail(place: TripPlaceDto) {
+    const available = placesById.has(place.id);
+    const factsLabel = place.factsSource === "provider"
+      ? place.providerAttribution ?? t.workspace.providerFacts
+      : place.provider === "google"
+        ? t.workspace.memberFactsWithGoogle
+        : t.workspace.manualEntry;
+    const duplicateSuggestions = duplicateSuggestionsByPlace.get(place.id) ?? [];
+    return (
+      <div className="grid gap-4">
+        <div>
+          <p className="text-sm text-muted-foreground">{t.workspace.factsSource(factsLabel)}{place.aiProposalId ? `・${t.workspace.aiProposal}` : ""}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{place.address ?? t.workspace.unknownAddress}</p>
+        </div>
+        {place.providerObservedAt ? <p className="text-sm text-muted-foreground">{t.workspace.providerObserved(new Date(place.providerObservedAt).toLocaleString(locale))}{place.providerFactsExpired ? `・${t.workspace.expiredFacts}` : ""}</p> : null}
+        {place.provider === "google" && place.providerPlaceId ? <a className="inline-flex min-h-11 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
+        {place.sourceUrl ? <a className="w-fit break-all text-sm font-bold text-accent-strong underline underline-offset-2" href={place.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
+        {place.notes ? <p className="whitespace-pre-wrap break-words text-sm">{place.notes}</p> : null}
+        {quickActions(place)}
+        {available && place.votingAvailable ? <VoteVoters voters={place.voters} /> : null}
+        {available ? duplicateSuggestions.map((suggestion) => {
+          const other = placesById.get(suggestion.otherTripPlaceId);
+          return (
+            <section key={suggestion.id} className="rounded-xl border border-accent-strong bg-surface p-3" aria-label={t.duplicates.comparisonLabel}>
+              <strong className="block">{t.duplicates.compare}</strong>
+              <p className="mt-1 text-sm">{t.duplicates.reason(duplicateReason(suggestion.reason, t))}</p>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                {([
+                  [t.duplicates.thisOption, place],
+                  [t.duplicates.otherOption, other],
+                ] as const).map(([label, candidate]) => (
+                  <section key={label} className="rounded-lg border border-ink/10 p-3" aria-label={label}>
+                    <span className="text-xs font-bold text-muted-foreground">{label}</span>
+                    {candidate ? (
+                      <>
+                        <h5 className="text-xl font-semibold">{candidate.name}</h5>
+                        <p className="text-sm">{t.placeType[candidate.type]}・{candidate.address ?? t.workspace.unknownAddress}</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          {candidate.factsSource === "provider" ? t.duplicates.providerFacts : t.duplicates.memberFacts}
+                        </p>
+                        {candidate.notes ? <p className="mt-1 whitespace-pre-wrap break-words text-sm">{candidate.notes}</p> : null}
+                        {candidate.sourceUrl ? <a className="mt-1 block break-all text-sm underline underline-offset-2" href={candidate.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
+                      </>
+                    ) : <p className="mt-1 text-sm text-muted-foreground">{t.duplicates.unavailable}</p>}
+                  </section>
+                ))}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button className="min-h-11 rounded-lg bg-accent px-3 font-bold text-ink-strong outline-none hover:bg-accent/80 focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={!other} onClick={() => {
+                  if (other) setMergeConfirmation({ source: place, target: other });
+                }}>{t.duplicates.merge}</button>
+                <button className="min-h-11 rounded-lg border px-3 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={() => void keepSeparate(suggestion.id)}>{t.duplicates.keepSeparate}</button>
+              </div>
+            </section>
+          );
+        }) : null}
+        <PlanningEditor key={place.id} tripId={trip.id} place={place} available={available} request={request} changed={changedPlaces}
+          editingChanged={(editing) => {
+            if (editing) editingPlaceIds.current.add(place.id);
+            else {
+              editingPlaceIds.current.delete(place.id);
+              setReadModel((current) => ({ ...current, retained: current.retained.filter((entry) => entry.id !== place.id) }));
+            }
+          }} />
+        {available ? <button className="min-h-11 w-fit rounded-lg border px-3 text-sm font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={() => void remove(place)}>{t.workspace.remove}</button> : null}
+      </div>
+    );
+  }
 
   return (
     <section className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8" aria-labelledby="shared-wishlist-heading">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">{t.workspace.eyebrow}</p>
           <h2 id="shared-wishlist-heading" className="font-display text-3xl text-ink-strong sm:text-4xl">{t.workspace.title}</h2>
           <p className="mt-2 max-w-3xl text-muted-foreground">{t.workspace.description}</p>
         </div>
-        <button className="min-h-12 rounded-xl bg-accent px-5 font-bold text-ink-strong" onClick={() => setAdding(true)}>{t.workspace.addPlace}</button>
+        <button className="min-h-12 rounded-xl bg-accent px-5 font-bold text-ink-strong outline-none hover:bg-accent/80 focus:ring-4 focus:ring-focus/30" onClick={() => setAdding(true)}>{t.workspace.addPlace}</button>
       </div>
 
       {message ? <p className="mt-4 rounded-xl bg-surface-subtle p-4" role="alert">{message}</p> : null}
-      {/* A reload keeps the list in place; an extra line above it would push the page down. */}
       {loading && places.length === 0 ? <p className="mt-6" role="status">{t.workspace.loading}</p> : null}
       {!loading && places.length === 0 && readModel.retained.length === 0 ? <p className="mt-6 rounded-xl border border-dashed border-ink/20 p-6 text-center text-muted-foreground">{t.workspace.empty}</p> : null}
 
-      <div className="mt-6 grid gap-5 xl:grid-cols-2">
-        {[...places, ...readModel.retained].map((place) => {
-          const available = placesById.has(place.id);
-          const voteDraft = voteDrafts[place.id];
-          const tint = place.votingAvailable && place.voteCount > 0
-            ? place.voteCount === highestVoteCount && highestVoteCount >= 2 ? "bg-accent/20" : "bg-accent/10"
-            : "bg-surface-subtle";
-          const typeLabel = t.placeType[place.type];
-          const factsLabel = place.factsSource === "provider"
-            ? `${typeLabel}・${place.providerAttribution ?? t.workspace.providerFacts}`
-            : place.provider === "google"
-              ? `${typeLabel}・${t.workspace.memberFactsWithGoogle}`
-              : `${typeLabel}・${t.workspace.manualEntry}`;
-          return (
-            <article aria-label={t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress)} key={place.id} className={`grid content-start gap-4 rounded-panel border border-ink/10 ${tint} p-4 sm:p-5`}>
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{factsLabel}{place.aiProposalId ? `・${t.workspace.aiProposal}` : ""}</p>
-                  <h3 className="font-display text-2xl text-ink-strong">{place.name}</h3>
-                  <p className="mt-1 text-sm text-muted-foreground">{place.address ?? t.workspace.unknownAddress}</p>
-                </div>
-                {available ? <span className="flex items-center gap-2 rounded-full border border-ink/15 bg-surface px-3 py-1 text-sm font-bold"><StatusIcon status={place.status} />{statusLabel(place.status, t)}</span> : null}
-              </div>
-              {available ? <>
-              {place.providerObservedAt ? <p className="text-sm text-muted-foreground">{t.workspace.providerObserved(new Date(place.providerObservedAt).toLocaleString(locale))}{place.providerFactsExpired ? `・${t.workspace.expiredFacts}` : ""}</p> : null}
-              {place.provider === "google" && place.providerPlaceId ? <a className="inline-flex min-h-10 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
-
-              {place.assignedDayId ? (
-                <p className="rounded-xl bg-surface p-3 font-semibold">
-                  {t.workspace.plannedFor(trip.days.find((day) => day.id === place.assignedDayId)?.date ?? t.workspace.unavailableTripDay)}
-                </p>
-              ) : null}
-              <VoteControl name={place.name} voters={place.voters} voteCount={place.voteCount} ownVote={place.ownVote} votingAvailable={place.votingAvailable} disabled={Boolean(pendingVotes[place.id])} onChange={(voted) => void setVote(place, voted)} />
-              {place.votingAvailable && failedVotes[place.id] && voteDraft !== undefined ? <button className="min-h-10 rounded-lg border px-3 font-bold" disabled={pendingVotes[place.id]} onClick={() => void setVote(place, voteDraft)}>{t.vote.retry}</button> : null}
-
-              {place.notes ? <p className="whitespace-pre-wrap break-words text-sm">{place.notes}</p> : null}
-              {place.sourceUrl ? <a className="w-fit break-all text-sm font-bold text-accent-strong underline" href={place.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
-              {place.duplicateSuggestions.filter((suggestion) =>
-                place.id < suggestion.otherTripPlaceId
-              ).map((suggestion) => {
-                const other = placesById.get(suggestion.otherTripPlaceId);
+      {listedPlaces.length > 0 ? (
+        <div
+          className={`mt-6 grid min-w-0 gap-5 ${selectedPlace ? "lg:grid-cols-[minmax(0,1fr)_24rem]" : ""}`}
+          data-detail-open={selectedPlace ? "true" : "false"}
+        >
+          <div data-wishlist-table-wrapper className="min-w-0 overflow-hidden rounded-panel border border-ink/10">
+            <table className={`block w-full border-separate border-spacing-0 text-left ${showTableColumns ? "xl:table" : ""}`} aria-label={t.workspace.tableLabel}>
+              <thead className={`table w-full table-fixed bg-surface-subtle text-sm ${showTableColumns ? "xl:table-header-group" : ""}`}>
+                <tr>
+                  <th className={`px-3 py-3 font-bold ${showTableColumns ? "xl:min-w-64 xl:px-4" : ""}`} scope="col">{t.workspace.columns.place}</th>
+                  <th className={`hidden px-3 py-3 font-bold ${showTableColumns ? "xl:table-cell xl:w-44" : ""}`} scope="col">{t.workspace.columns.type}</th>
+                  <th className={`hidden px-3 py-3 font-bold ${showTableColumns ? "xl:table-cell xl:w-40" : ""}`} scope="col">{t.workspace.columns.planned}</th>
+                  {showVotes ? <th className={`w-0 p-0 ${showTableColumns ? "xl:w-48 xl:px-3 xl:py-3" : ""}`} scope="col"><span className={`sr-only ${showTableColumns ? "xl:not-sr-only" : ""}`}>{t.workspace.columns.votes}</span></th> : null}
+                </tr>
+              </thead>
+              {listedPlaces.map((place) => {
+                const available = placesById.has(place.id);
+                const tint = place.votingAvailable && place.voteCount > 0
+                  ? place.voteCount === highestVoteCount && highestVoteCount >= 2 ? "bg-accent/20" : "bg-accent/10"
+                  : "bg-surface-subtle";
+                const typeLabel = t.placeType[place.type];
+                const assignedDate = place.assignedDayId
+                  ? trip.days.find((day) => day.id === place.assignedDayId)?.date ?? t.workspace.unavailableTripDay
+                  : null;
+                const plannedLabel = assignedDate
+                  ? assignedDate
+                  : place.status === "scheduled" ? t.status.scheduled : t.workspace.notPlanned;
+                const duplicateSuggestions = duplicateSuggestionsByPlace.get(place.id) ?? [];
+                const actionStatus = duplicateSuggestions.length > 0 ? "possible-duplicate" : place.status;
+                const needsAction = actionStatus === "needs-location"
+                  || actionStatus === "possible-duplicate"
+                  || actionStatus === "provider-unavailable";
+                const repeatedName = (placeNameCounts.get(place.name) ?? 0) > 1;
+                const rowLabel = repeatedName
+                  ? t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress)
+                  : place.name;
+                const selected = selectedPlaceId === place.id;
                 return (
-                  <section key={suggestion.id} className="rounded-xl border border-accent-strong bg-surface p-3" aria-label={t.duplicates.comparisonLabel}>
-                    <strong className="block">{t.duplicates.compare}</strong>
-                    <p className="mt-1 text-sm">{t.duplicates.reason(duplicateReason(suggestion.reason, t))}</p>
-                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                      {([
-                        [t.duplicates.thisOption, place],
-                        [t.duplicates.otherOption, other],
-                      ] as const).map(([label, candidate]) => (
-                        <div key={label} className="rounded-lg border border-ink/10 p-3">
-                          <span className="text-xs font-bold uppercase tracking-[0.12em] text-muted-foreground">{label}</span>
-                          {candidate ? (
-                            <>
-                              <h5 className="font-display text-xl">{candidate.name}</h5>
-                              <p className="text-sm">{t.placeType[candidate.type]}・{candidate.address ?? t.workspace.unknownAddress}</p>
-                              <p className="mt-1 text-sm text-muted-foreground">
-                                {candidate.factsSource === "provider" ? t.duplicates.providerFacts : t.duplicates.memberFacts}
-                              </p>
-                              {candidate.notes ? <p className="mt-1 whitespace-pre-wrap break-words text-sm">{candidate.notes}</p> : null}
-                              {candidate.sourceUrl ? <a className="mt-1 block break-all text-sm underline" href={candidate.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
-                            </>
-                          ) : <p className="mt-1 text-sm text-muted-foreground">{t.duplicates.unavailable}</p>}
-                        </div>
-                      ))}
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2"><button className="min-h-10 rounded-lg bg-accent px-3 font-bold" disabled={!other} onClick={() => void merge(place, suggestion.otherTripPlaceId)}>{t.duplicates.merge}</button><button className="min-h-10 rounded-lg border px-3 font-bold" onClick={() => void keepSeparate(suggestion.id)}>{t.duplicates.keepSeparate}</button></div>
-                  </section>
+                  <tbody key={place.id} data-wishlist-place={place.name} className={`block w-full ${showTableColumns ? "xl:table-row-group" : ""}`}>
+                    <tr
+                      aria-label={rowLabel}
+                      aria-current={selected ? "true" : undefined}
+                      className={`grid w-full cursor-pointer grid-cols-1 ${tint} ${selected ? "ring-2 ring-inset ring-accent-strong" : ""} ${showTableColumns ? "xl:table-row" : ""}`}
+                      onClick={(event) => {
+                        if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select")) return;
+                        openDetail(place.id);
+                      }}
+                    >
+                      <th className={`py-3 px-3 align-top ${showTableColumns ? "xl:table-cell xl:min-w-64 xl:px-4 xl:py-4" : ""}`} scope="row">
+                        <button
+                          type="button"
+                          data-place-detail-trigger={place.id}
+                          className="inline-flex min-h-11 items-start text-left text-xl font-semibold text-ink-strong underline-offset-4 outline-none hover:underline focus-visible:rounded focus-visible:ring-4 focus-visible:ring-focus/30"
+                          aria-label={t.workspace.viewDetail(place.name)}
+                          onClick={() => openDetail(place.id)}
+                        >
+                          {place.name}
+                        </button>
+                        {repeatedName ? <span className="mt-1 block text-sm font-normal text-muted-foreground">{place.address ?? t.workspace.unknownAddress}</span> : null}
+                        {available && needsAction ? (
+                          <span className="mt-1 flex w-fit items-center gap-1 rounded-full border border-ink/15 bg-surface px-2 py-1 text-xs font-bold">
+                            <StatusIcon status={actionStatus} />{statusLabel(actionStatus, t)}
+                          </span>
+                        ) : null}
+                        <p className={`mt-1 text-sm font-normal text-muted-foreground ${showTableColumns ? "xl:hidden" : ""}`}>{t.workspace.rowSummary(typeLabel, available ? plannedLabel : null)}</p>
+                      </th>
+                      <td className={`hidden px-3 py-4 align-top ${showTableColumns ? "xl:table-cell" : ""}`}>{typeLabel}</td>
+                      <td className={`hidden px-3 py-4 align-top font-semibold tabular-nums ${showTableColumns ? "xl:table-cell" : ""}`}>{available ? plannedLabel : null}</td>
+                      {showVotes ? (
+                        <td className={`align-top ${showTableColumns ? "xl:table-cell xl:px-3 xl:py-2" : ""} ${available && place.votingAvailable ? "px-3 pb-3" : showTableColumns ? "p-0 xl:p-2" : "p-0"}`}>
+                          {quickActions(place)}
+                        </td>
+                      ) : null}
+                    </tr>
+                  </tbody>
                 );
               })}
-              </> : null}
+            </table>
+          </div>
 
-              <PlanningEditor tripId={trip.id} place={place} available={available} request={request} changed={changedPlaces}
-                editingChanged={(editing) => {
-                  if (editing) editingPlaceIds.current.add(place.id);
-                  else {
-                    editingPlaceIds.current.delete(place.id);
-                    setReadModel((current) => ({ ...current, retained: current.retained.filter((entry) => entry.id !== place.id) }));
-                  }
-                }} />
-              {available ? <button className="min-h-10 w-fit rounded-lg border px-3 text-sm font-bold" onClick={() => void remove(place)}>{t.workspace.remove}</button> : null}
-            </article>
-          );
-        })}
-      </div>
+          {largeScreen && selectedPlace ? (
+            <aside className="max-h-[calc(100dvh-2rem)] self-start overflow-y-auto rounded-panel border border-ink/10 bg-surface p-5 lg:sticky lg:top-4" aria-label={t.workspace.detailTitle(selectedPlace.name)} aria-live="polite">
+              <div className="mb-4 flex items-start justify-between gap-3">
+                <h3 ref={detailTitleRef} tabIndex={-1} className="rounded font-display text-2xl outline-none focus:ring-4 focus:ring-focus/30">{t.workspace.detailTitle(selectedPlace.name)}</h3>
+                <button type="button" className="flex size-11 shrink-0 items-center justify-center rounded-lg border outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" aria-label={t.workspace.closeDetail} onClick={closeDetail}><X aria-hidden="true" className="size-4" /></button>
+              </div>
+              {placeDetail(selectedPlace)}
+            </aside>
+          ) : null}
+        </div>
+      ) : null}
+
+      {!largeScreen && selectedPlace ? (
+        <Dialog open onOpenChange={(open) => { if (!open) closeDetail(); }}>
+          <DialogContent className="bottom-0 left-0 top-auto max-h-[85dvh] w-full max-w-none translate-x-0 translate-y-0 content-start overflow-y-auto rounded-b-none rounded-t-2xl p-5">
+            <DialogHeader>
+              <DialogTitle ref={detailTitleRef} tabIndex={-1} className="rounded pr-10 font-display text-2xl outline-none focus:ring-4 focus:ring-focus/30">{t.workspace.detailTitle(selectedPlace.name)}</DialogTitle>
+            </DialogHeader>
+            {placeDetail(selectedPlace)}
+          </DialogContent>
+        </Dialog>
+      ) : null}
+
+      <Dialog open={mergeConfirmation !== null} onOpenChange={(open) => { if (!open && !merging) setMergeConfirmation(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{mergeConfirmation ? t.duplicates.confirmTitle(mergeConfirmation.source.name, mergeConfirmation.target.name) : ""}</DialogTitle>
+            <DialogDescription>{t.duplicates.confirmDescription}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <button type="button" className="min-h-11 rounded-lg bg-accent px-4 font-bold text-ink-strong outline-none hover:bg-accent/80 focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={merging} onClick={() => {
+              if (mergeConfirmation) void merge(mergeConfirmation.source, mergeConfirmation.target);
+            }}>{t.duplicates.confirm}</button>
+            <button type="button" className="min-h-11 rounded-lg border px-4 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={merging} onClick={() => setMergeConfirmation(null)}>{t.duplicates.cancel}</button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {adding ? <AddPlacePanel tripId={trip.id} request={request} close={() => setAdding(false)} changed={changedPlaces} /> : null}
     </section>
   );

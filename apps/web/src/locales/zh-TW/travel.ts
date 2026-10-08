@@ -49,6 +49,6 @@ export const travel = {
   saveError: "無法儲存，請確認資料後重試。",
   retry: "重試",
   locked: "已鎖定，請先到行程解鎖。",
-  editInOverview: "到總覽修改航班",
+  editInOverview: "到航班修改航班",
   editInLodging: "到住宿修改住宿",
 };

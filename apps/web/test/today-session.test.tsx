@@ -74,6 +74,17 @@ function button(text: string, container: ParentNode = document): HTMLButtonEleme
   return found!;
 }
 const click = (element: HTMLElement) => act(async () => element.click());
+async function switchTrip(name: string) {
+  const trigger = document.querySelector<HTMLButtonElement>('button[aria-label$="切換旅程"]');
+  expect(trigger).toBeInTheDocument();
+  await click(trigger!);
+  const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
+  expect(dialog).toBeInTheDocument();
+  const option = [...dialog!.querySelectorAll<HTMLButtonElement>("button")]
+    .find((element) => element.querySelector("strong")?.textContent === name);
+  expect(option).toBeDefined();
+  await click(option!);
+}
 const snapshot = () => new TodaySnapshotStore(localStorage).read(todayUser.id, "A")!;
 async function travelHistory(direction: "back" | "forward") {
   await act(async () => {
@@ -96,10 +107,8 @@ it("keeps valid authentication and other trips when a bookmarked trip is inacces
   history.replaceState({}, "", "/?trip=revoked&tab=today");
   await mount();
   expect(document.querySelector('input[type="email"]')).toBeNull();
-  const allowed = [...host.querySelectorAll("button")].find((element) => element.textContent?.includes("Trip A"));
-  expect(allowed).toBeDefined();
-  await click(allowed!);
-  expect(document.getElementById("trip-tab-today")).toBeInTheDocument();
+  await switchTrip("Trip A");
+  expect(document.querySelector('[data-trip-tab="today"]')).toBeInTheDocument();
   expect(snapshot().model.tripId).toBe("A");
 });
 
@@ -107,8 +116,7 @@ it("preserves destination dates and forward history while a cross-trip Back read
   await mount();
   const select = document.querySelector<HTMLSelectElement>('#trip-panel-today select')!;
   await act(async () => { select.value = "2026-10-22"; select.dispatchEvent(new Event("change", { bubbles: true })); });
-  const tripB = [...host.querySelectorAll("button")].find((element) => element.textContent?.includes("Trip B"))!;
-  await click(tripB);
+  await switchTrip("Trip B");
   expect(new URLSearchParams(location.search).get("day")).toBe("2026-11-21");
   let release!: () => void;
   gate = new Promise<void>((resolve) => { release = resolve; });
@@ -127,8 +135,8 @@ it("refreshes mounted itinerary, lodging and recent changes after explicit Today
   const lodging = { ...todayActivity("REMOVED_LODGING"), type: "lodging" as const, details: { bookedBy: null, confirmationCode: null } };
   skeleton = todaySkeleton(trips[0], [todayActivity("REMOVED_ACTIVITY"), lodging]);
   await mount();
-  expect(document.getElementById("trip-panel-itinerary")).toHaveTextContent("REMOVED_ACTIVITY");
-  expect(document.getElementById("trip-panel-lodging")).toHaveTextContent("REMOVED_LODGING");
+  expect(document.getElementById("itinerary-segment-panel-daily")).toHaveTextContent("REMOVED_ACTIVITY");
+  expect(document.getElementById("itinerary-segment-panel-lodging")).toHaveTextContent("REMOVED_LODGING");
   trips[0] = { ...trips[0]!, version: 8 };
   skeleton = todaySkeleton(trips[0]);
   tripHistory = { events: [{
@@ -139,11 +147,11 @@ it("refreshes mounted itinerary, lodging and recent changes after explicit Today
   const sync = [...host.querySelectorAll<HTMLButtonElement>("#trip-panel-today button")].find((element) => /重新.*同步/.test(element.textContent ?? ""))!;
   await click(sync);
   expect(document.getElementById("trip-panel-today")).toHaveTextContent("正式行程版本 8");
-  expect(document.getElementById("trip-panel-itinerary")).not.toHaveTextContent("REMOVED_ACTIVITY");
-  expect(document.getElementById("trip-panel-lodging")).not.toHaveTextContent("REMOVED_LODGING");
-  expect(document.getElementById("trip-panel-recent")).toHaveTextContent("刪除了固定行程");
-  expect(document.getElementById("trip-panel-recent")).toHaveTextContent("History editor");
-  expect(document.getElementById("trip-panel-recent")).not.toHaveTextContent("REMOVED_ACTIVITY");
+  expect(document.getElementById("itinerary-segment-panel-daily")).not.toHaveTextContent("REMOVED_ACTIVITY");
+  expect(document.getElementById("itinerary-segment-panel-lodging")).not.toHaveTextContent("REMOVED_LODGING");
+  expect(document.getElementById("trip-panel-members")).toHaveTextContent("刪除了固定行程");
+  expect(document.getElementById("trip-panel-members")).toHaveTextContent("History editor");
+  expect(document.getElementById("trip-panel-members")).not.toHaveTextContent("REMOVED_ACTIVITY");
   const afterSync = requests.length;
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
   expect(requests.length).toBe(afterSync);
@@ -152,8 +160,9 @@ it("refreshes mounted itinerary, lodging and recent changes after explicit Today
 it("updates the offline wishlist order and day timezone after accepting a suggested day order", async () => {
   await mount();
   expect(snapshot().model.days[0]!.timeZone).toBe("Asia/Tokyo");
-  await click(document.getElementById("trip-tab-itinerary")!);
-  await click(button("排這一天", document.getElementById("trip-panel-itinerary")!));
+  await click(document.querySelector<HTMLButtonElement>('[data-trip-tab="itinerary"]')!);
+  await click(document.getElementById("itinerary-segment-daily")!);
+  await click(button("排這一天", document.getElementById("itinerary-segment-panel-daily")!));
   await click(button("試試建議順序"));
   await click(button("使用這個順序"));
   expect(savedOrder).toBe(true);
@@ -163,7 +172,7 @@ it("updates the offline wishlist order and day timezone after accepting a sugges
 
 it.each(["change", "revocation"] as const)("does not let the old trip's %s supersede an in-flight Back navigation", async (invalidation) => {
   await mount();
-  await click([...host.querySelectorAll("button")].find((element) => element.textContent?.includes("Trip B"))!);
+  await switchTrip("Trip B");
   const oldTripSource = liveSources.find((source) => source.url.includes("/trips/B/events"))!;
   let release!: () => void;
   gate = new Promise<void>((resolve) => { release = resolve; });
@@ -183,7 +192,7 @@ it.each(["change", "revocation"] as const)("does not let the old trip's %s super
   expect(document.querySelector("#trip-panel-today select")).toHaveValue("2026-10-21");
   if (invalidation === "revocation") {
     expect(new TodaySnapshotStore(localStorage).read(todayUser.id, "B")).toBeNull();
-    expect(document.querySelector('nav[aria-label="旅程"]')).not.toHaveTextContent("Trip B");
+    expect(document.body).not.toHaveTextContent("Trip B");
   } else {
     await travelHistory("forward");
     expect(new URLSearchParams(location.search).get("trip")).toBe("B");
@@ -194,6 +203,8 @@ it.each(["change", "revocation"] as const)("does not let the old trip's %s super
 it("keeps a failed online mutation's error visible after a live read refresh", async () => {
   history.replaceState({}, "", "/?trip=A&tab=overview#inviteToken=used");
   await mount();
+  expect(new URLSearchParams(location.search).get("tab")).toBe("itinerary");
+  expect(new URLSearchParams(location.search).get("segment")).toBe("flight");
   await click(button("接受邀請"));
   expect(document.querySelector('[role="alert"]')).toHaveTextContent("這個邀請已使用。");
   liveVersion = 1;
@@ -204,5 +215,5 @@ it("keeps a failed online mutation's error visible after a live read refresh", a
     }) }));
   });
   expect(document.querySelector('[role="alert"]')).toHaveTextContent("這個邀請已使用。");
-  expect(document.getElementById("trip-panel-overview")).toBeInTheDocument();
+  expect(document.getElementById("itinerary-segment-panel-flight")).toBeInTheDocument();
 });

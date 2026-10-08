@@ -66,7 +66,7 @@ export const tripSkeleton = {
   loadingItinerary: "正在載入行程…",
   eyebrow: "行程骨架",
   heading: "固定行程與每日行程",
-  introduction: "先建立實際地點，再依當地時間安排交通、訂位、用餐、活動與自由時間。航班在「總覽」填寫，住宿在「住宿」分頁填寫。",
+  introduction: "先建立實際地點，再依當地時間安排交通、訂位、用餐、活動與自由時間。航班和住宿請在「行程」的對應區段填寫。",
   places: "地點",
   noPlaces: "尚無地點。請先新增實際的車站、餐廳與活動場地。",
   noAddress: "尚無地址",
