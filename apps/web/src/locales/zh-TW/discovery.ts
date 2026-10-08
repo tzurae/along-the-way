@@ -96,6 +96,13 @@ export const discovery = {
     shortlistLabel: "AI 候選地點清單",
     shortlistTitle: "AI 候選清單",
     ariaLabel: (name: string) => `AI 推薦：${name}`,
+    columns: {
+      place: "地點",
+      category: "類別",
+      votes: "票數",
+      actions: "動作",
+      more: "更多",
+    },
     unknownAddress: "地址未知",
     recommendedByFor: (name: string) => `${name} 的推薦來源`,
     recommendedBy: "推薦來源",

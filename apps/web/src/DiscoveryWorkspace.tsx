@@ -12,9 +12,10 @@ import {
   type DiscoveryWorkspaceDto,
 } from "@along-the-way/contracts/discovery";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
+import { parseTripPlaceListResponse } from "@along-the-way/contracts/trip-places";
 import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
-import { VoteControl } from "./VoteControl";
+import { VoteControl, VoteVoters } from "./VoteControl";
 import { ConflictPanel, useVersionConflict } from "./ConflictPanel";
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
@@ -107,50 +108,68 @@ function shortfallText(shortfall: DiscoveryShortfallDto, t: Messages["discovery"
   }
 }
 
-function ClaimSentenceList({
-  sentences,
-  evidence,
+type NumberedEvidence = Map<string, {
+  item: CandidateProposalDto["evidence"][number];
+  number: number;
+}>;
+
+function ClaimSentence({
+  sentence,
+  numberedEvidence,
   t,
 }: {
-  sentences: DiscoveryClaimSentenceDto[];
-  evidence: CandidateProposalDto["evidence"];
+  sentence: DiscoveryClaimSentenceDto;
+  numberedEvidence: NumberedEvidence;
   t: Messages["discovery"];
 }) {
-  const numberedEvidence = new Map(
-    evidence.map((item, index) => [item.id, { item, number: index + 1 }]),
+  const cited = sentence.evidenceIds.flatMap((id) => {
+    const numbered = numberedEvidence.get(id);
+    return numbered ? [numbered] : [];
+  });
+  return (
+    <>
+      <span>{sentence.text}</span>
+      {cited.length ? (
+        <span className="ml-1 inline-flex flex-wrap items-baseline gap-1">
+          {cited.map(({ item, number }) => (
+            <a
+              key={item.id}
+              className="text-xs font-bold text-accent-strong underline"
+              href={item.sourceUrl}
+              target="_blank"
+              rel="noreferrer"
+              aria-label={t.proposal.citationLabel(number, item.title)}
+            >
+              [{number}]
+            </a>
+          ))}
+          {cited.some(({ item }) => item.isStale)
+            ? <span className="text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span>
+            : null}
+        </span>
+      ) : <span className="ml-2 text-xs text-muted-foreground">{t.proposal.inference}</span>}
+    </>
   );
+}
+
+function ClaimSentenceList({
+  sentences,
+  numberedEvidence,
+  t,
+  startAt = 0,
+}: {
+  sentences: DiscoveryClaimSentenceDto[];
+  numberedEvidence: NumberedEvidence;
+  t: Messages["discovery"];
+  startAt?: number;
+}) {
   return (
     <ul className="grid list-disc gap-2 pl-5 text-sm">
-      {sentences.map((sentence, sentenceIndex) => {
-        const cited = sentence.evidenceIds.flatMap((id) => {
-          const numbered = numberedEvidence.get(id);
-          return numbered ? [numbered] : [];
-        });
-        return (
-          <li key={`${sentenceIndex}:${sentence.text}`}>
-            <span>{sentence.text}</span>
-            {cited.length ? (
-              <span className="ml-1 inline-flex flex-wrap items-baseline gap-1">
-                {cited.map(({ item, number }) => (
-                  <a
-                    key={item.id}
-                    className="text-xs font-bold text-accent-strong underline"
-                    href={item.sourceUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    aria-label={t.proposal.citationLabel(number, item.title)}
-                  >
-                    [{number}]
-                  </a>
-                ))}
-                {cited.some(({ item }) => item.isStale)
-                  ? <span className="text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span>
-                  : null}
-              </span>
-            ) : <span className="ml-2 text-xs text-muted-foreground">{t.proposal.inference}</span>}
-          </li>
-        );
-      })}
+      {sentences.map((sentence, sentenceIndex) => sentenceIndex < startAt ? null : (
+        <li key={`${sentenceIndex}:${sentence.text}`}>
+          <ClaimSentence sentence={sentence} numberedEvidence={numberedEvidence} t={t} />
+        </li>
+      ))}
     </ul>
   );
 }
@@ -179,7 +198,7 @@ function resolvedQuestionAnswers(drafts: Record<string, QuestionDraft>): Discove
 
 
 export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChanged }: DiscoveryWorkspaceProps) {
-  const { locale, t: { discovery: t } } = useI18n();
+  const { locale, t: { discovery: t, tripPlaces: tripPlacesT } } = useI18n();
   const [workspace, setWorkspace] = useState<DiscoveryWorkspaceDto | null>(null);
   const [briefDraft, setBriefDraft] = useState("");
   const [feedbackDraft, setFeedbackDraft] = useState("");
@@ -189,6 +208,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ area: NoticeArea; text: string } | null>(null);
+  const [expandedProposals, setExpandedProposals] = useState<Record<string, boolean>>({});
   const retryKeys = useRef<RetryKeys>(new Map());
   const briefBase = useRef<DiscoveryWorkspaceDto["brief"]>(null);
   const answersBase = useRef<DiscoveryWorkspaceDto["brief"]>(null);
@@ -372,6 +392,61 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     );
   }
 
+  async function removeAcceptedProposal(proposal: CandidateProposalDto) {
+    if (pending || !proposal.acceptedTripPlaceId) return;
+    if (!window.confirm(tripPlacesT.workspace.confirmRemove(proposal.name))) return;
+    const operation = `remove-accepted:${proposal.id}`;
+    setPending(operation);
+    setNotice(null);
+    try {
+      const tripPlaces = parseTripPlaceListResponse(
+        await request<unknown>(`/api/trips/${trip.id}/trip-places`),
+      ).tripPlaces;
+      const acceptedPlace = tripPlaces.find((place) => place.id === proposal.acceptedTripPlaceId);
+      if (acceptedPlace) {
+        const payload = { expectedVersion: acceptedPlace.version };
+        await request(`/api/trips/${trip.id}/trip-places/${acceptedPlace.id}/remove`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": retryKey(retryKeys.current, operation, payload),
+          },
+          body: JSON.stringify(payload),
+        });
+        clearRetryKey(retryKeys.current, operation);
+      }
+      const refreshed = parseDiscoveryWorkspaceResponse(
+        await request(`/api/trips/${trip.id}/discovery`),
+      ).discovery;
+      setWorkspace(refreshed);
+      onPlacesChanged();
+    } catch (error) {
+      setNotice({ area: "general", text: errorMessage(error, t.errors.failed) });
+    } finally {
+      setPending(null);
+    }
+  }
+
+  function proposalActions(proposal: CandidateProposalDto) {
+    if (proposal.status === "pending") {
+      return (
+        <div className="flex flex-wrap gap-2 xl:flex-nowrap">
+          <button className="flex min-h-11 items-center gap-2 whitespace-nowrap rounded-lg bg-accent px-3 font-bold text-ink-strong" disabled={pending !== null} onClick={() => void decideProposal(proposal, "accept")}><Check aria-hidden="true" className="size-4" />{t.proposal.accept}</button>
+          <button className="flex min-h-11 items-center gap-2 whitespace-nowrap rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "reject")}><X aria-hidden="true" className="size-4" />{t.proposal.decline}</button>
+        </div>
+      );
+    }
+    if (proposal.status === "accepted") {
+      return (
+        <div className="flex flex-wrap items-center gap-2 xl:flex-nowrap">
+          <span className="whitespace-nowrap font-bold">{t.status.accepted}</span>
+          {proposal.acceptedTripPlaceId ? <button className="min-h-11 whitespace-nowrap rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void removeAcceptedProposal(proposal)}>{tripPlacesT.workspace.remove}</button> : null}
+        </div>
+      );
+    }
+    return <span className="font-bold">{t.status[proposal.status]}</span>;
+  }
+
 
   async function createFeedback() {
     const text = feedbackDraft.trim();
@@ -442,6 +517,9 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       "questions",
     );
   }
+  const showProposalVotes = workspace?.proposals.some(
+    (proposal) => proposal.status === "pending" && proposal.votingAvailable,
+  ) ?? false;
 
   return (
     <section className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8" aria-labelledby="ai-discovery-heading">
@@ -574,54 +652,116 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
           {workspace?.proposals.length ? (
             <section aria-label={t.proposal.shortlistLabel}>
               <h3 className="font-display text-3xl">{t.proposal.shortlistTitle}</h3>
-              <div className="mt-4 grid gap-4 xl:grid-cols-2">
-                {workspace.proposals.map((proposal) => (
-                  <article key={proposal.id} className="grid content-start gap-4 rounded-panel border border-ink/10 bg-surface-subtle p-4" aria-label={t.proposal.ariaLabel(proposal.name)}>
-                    <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{proposal.category ?? t.placeType[proposal.type]}</p><h4 className="font-display text-2xl">{proposal.name}</h4><p className="text-sm text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</p></div><span className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{t.status[proposal.status]}</span></div>
-                    {proposal.endorsements.length ? <div aria-label={t.proposal.recommendedByFor(proposal.name)}><strong>{t.proposal.recommendedBy}</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabel(endorsement, t)}</li>)}</ul></div> : null}
-                    {proposal.recommendationSentences !== null
-                      ? <ClaimSentenceList sentences={proposal.recommendationSentences} evidence={proposal.evidence} t={t} />
-                      : <p>{proposal.recommendation}</p>}
-                    <a className="inline-flex min-h-10 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(proposal.name, proposal.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.proposal.viewPhotos}</a>
-                    <div className="grid gap-3 sm:grid-cols-3">
-                      <div><strong>{t.proposal.matches}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.matchedNeeds.map((item) => <li key={item}>{item}</li>)}</ul></div>
-                      <div>
-                        <strong>{t.proposal.tradeoffs}</strong>
-                        {proposal.tradeoffSentences !== null
-                          ? <ClaimSentenceList sentences={proposal.tradeoffSentences} evidence={proposal.evidence} t={t} />
-                          : <ul className="mt-1 list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul>}
-                      </div>
-                      <div><strong>{t.proposal.unknowns}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.unknowns.map((item) => <li key={item}>{item}</li>)}</ul></div>
-                    </div>
-                    <div>
-                      <strong>{t.proposal.evidence}</strong>
-                      <ul className="mt-1 grid gap-1">
-                        {proposal.evidence.map((item, evidenceIndex) => {
-                          const number = evidenceIndex + 1;
-                          return (
-                            <li key={item.id}>
-                              <a
-                                className="inline-flex items-center gap-1 break-all font-bold text-accent-strong underline"
-                                href={item.sourceUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                aria-label={t.proposal.citationLabel(number, item.title)}
-                              >
-                                [{number}] {item.title}<ExternalLink aria-hidden="true" className="size-3" />
-                              </a>
-                              <span className="ml-2 text-xs text-muted-foreground">{item.attribution}・{t.proposal.observedAt(new Date(item.observedAt).toLocaleString(locale))}</span>
-                              {item.isStale ? <span className="ml-2 text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span> : null}
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    </div>
-                    {proposal.status === "pending" ? (
-                      <VoteControl name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable={proposal.votingAvailable} disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} />
-                    ) : null}
-                    {proposal.status === "pending" ? <div className="flex flex-wrap gap-2"><button className="flex min-h-10 items-center gap-2 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "accept")}><Check aria-hidden="true" className="size-4" />{t.proposal.accept}</button><button className="flex min-h-10 items-center gap-2 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "reject")}><X aria-hidden="true" className="size-4" />{t.proposal.decline}</button></div> : null}
-                  </article>
-                ))}
+              <div className="mt-4 overflow-hidden rounded-panel border border-ink/10">
+                <table className="block w-full border-separate border-spacing-0 text-left xl:table" aria-label={t.proposal.shortlistLabel}>
+                  <thead className="table w-full table-fixed bg-surface-subtle text-sm xl:table-header-group">
+                    <tr>
+                      <th className="px-3 py-3 font-bold xl:min-w-64 xl:px-4" scope="col">{t.proposal.columns.place}</th>
+                      <th className="hidden w-36 px-3 py-3 font-bold xl:table-cell" scope="col">{t.proposal.columns.category}</th>
+                      {showProposalVotes ? <th className="w-0 p-0 xl:w-40 xl:px-3 xl:py-3" scope="col"><span className="sr-only xl:not-sr-only">{t.proposal.columns.votes}</span></th> : null}
+                      <th className="w-0 p-0 xl:w-80 xl:px-3 xl:py-3" scope="col"><span className="sr-only xl:not-sr-only">{t.proposal.columns.actions}</span></th>
+                      <th className="w-20 px-2 py-3 font-bold xl:w-24 xl:px-3" scope="col"><span className="sr-only">{t.proposal.columns.more}</span></th>
+                    </tr>
+                  </thead>
+                  {workspace.proposals.map((proposal) => {
+                    const expanded = expandedProposals[proposal.id] ?? false;
+                    const detailsId = `discovery-proposal-${proposal.id}-details`;
+                    const category = proposal.category ?? t.placeType[proposal.type];
+                    const firstSentence = proposal.recommendationSentences?.[0];
+                    const hasTradeoffs = proposal.tradeoffSentences !== null
+                      ? proposal.tradeoffSentences.length > 0
+                      : proposal.tradeoffs.length > 0;
+                    const numberedEvidence = new Map(
+                      proposal.evidence.map((item, index) => [item.id, { item, number: index + 1 }] as const),
+                    );
+                    return (
+                      <tbody key={proposal.id} data-discovery-proposal={proposal.name} className="block w-full xl:table-row-group">
+                        <tr aria-label={t.proposal.ariaLabel(proposal.name)} className="grid w-full grid-cols-[minmax(0,1fr)_5rem] bg-surface-subtle xl:table-row">
+                          <th className="col-span-2 col-start-1 row-start-1 py-3 pl-3 pr-24 align-top xl:table-cell xl:min-w-64 xl:px-4 xl:py-4" scope="row">
+                            <span className="text-xl font-semibold text-ink-strong">{proposal.name}</span>
+                            {firstSentence ? (
+                              <p className="mt-1 text-sm font-semibold"><ClaimSentence sentence={firstSentence} numberedEvidence={numberedEvidence} t={t} /></p>
+                            ) : proposal.recommendationSentences === null ? (
+                              <p className="mt-1 line-clamp-2 text-sm font-semibold text-muted-foreground">{proposal.recommendation}</p>
+                            ) : null}
+                          </th>
+                          <td className="hidden px-3 py-4 align-top xl:table-cell">{category}</td>
+                          {showProposalVotes ? (
+                            <td className={`col-span-2 col-start-1 row-start-2 align-top xl:table-cell xl:px-3 xl:py-3 ${proposal.status === "pending" && proposal.votingAvailable ? "px-3 pb-3" : "p-0 xl:p-3"}`}>
+                              {proposal.status === "pending" && proposal.votingAvailable ? (
+                                <VoteControl compact name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} />
+                              ) : null}
+                            </td>
+                          ) : null}
+                          <td className={`col-span-2 col-start-1 px-3 pb-3 align-top xl:table-cell xl:px-3 xl:py-3 ${showProposalVotes ? "row-start-3" : "row-start-2"}`}>{proposalActions(proposal)}</td>
+                          <td className="col-start-2 row-span-3 row-start-1 px-2 py-2 align-top xl:table-cell xl:px-3">
+                            <button
+                              type="button"
+                              className="min-h-11 whitespace-nowrap rounded-lg border bg-surface px-3 font-bold"
+                              aria-expanded={expanded}
+                              aria-controls={detailsId}
+                              onClick={() => setExpandedProposals((current) => ({ ...current, [proposal.id]: !expanded }))}
+                            >
+                              {t.proposal.columns.more}
+                            </button>
+                          </td>
+                        </tr>
+                        <tr id={detailsId} hidden={!expanded} className="block w-full bg-surface xl:table-row">
+                          <td className="block w-full border-t border-ink/10 p-4 xl:table-cell xl:p-5" colSpan={showProposalVotes ? 5 : 4}>
+                            <div className="grid gap-4">
+                              <dl className="xl:hidden"><div><dt className="text-sm font-bold">{t.proposal.columns.category}</dt><dd>{category}</dd></div></dl>
+                              <p className="text-sm text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</p>
+                              {proposal.endorsements.length ? <div aria-label={t.proposal.recommendedByFor(proposal.name)}><strong>{t.proposal.recommendedBy}</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabel(endorsement, t)}</li>)}</ul></div> : null}
+                              {proposal.recommendationSentences === null ? <p>{proposal.recommendation}</p> : null}
+                              {proposal.recommendationSentences && proposal.recommendationSentences.length > 1
+                                ? <ClaimSentenceList sentences={proposal.recommendationSentences} numberedEvidence={numberedEvidence} t={t} startAt={1} />
+                                : null}
+                              {proposal.status === "pending" && proposal.votingAvailable ? <VoteVoters voters={proposal.voters} /> : null}
+                              <a className="inline-flex min-h-11 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(proposal.name, proposal.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.proposal.viewPhotos}</a>
+                              {proposal.matchedNeeds.length || hasTradeoffs || proposal.unknowns.length ? (
+                                <div className="grid gap-3 sm:grid-cols-3">
+                                  {proposal.matchedNeeds.length ? <div><strong>{t.proposal.matches}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.matchedNeeds.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
+                                  {hasTradeoffs ? (
+                                    <div>
+                                      <strong>{t.proposal.tradeoffs}</strong>
+                                      {proposal.tradeoffSentences !== null
+                                        ? <ClaimSentenceList sentences={proposal.tradeoffSentences} numberedEvidence={numberedEvidence} t={t} />
+                                        : <ul className="mt-1 list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul>}
+                                    </div>
+                                  ) : null}
+                                  {proposal.unknowns.length ? <div><strong>{t.proposal.unknowns}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.unknowns.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
+                                </div>
+                              ) : null}
+                              <div>
+                                <strong>{t.proposal.evidence}</strong>
+                                <ul className="mt-1 grid gap-1">
+                                  {proposal.evidence.map((item, evidenceIndex) => {
+                                    const number = evidenceIndex + 1;
+                                    return (
+                                      <li key={item.id}>
+                                        <a
+                                          className="inline-flex items-center gap-1 break-all font-bold text-accent-strong underline"
+                                          href={item.sourceUrl}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          aria-label={t.proposal.citationLabel(number, item.title)}
+                                        >
+                                          [{number}] {item.title}<ExternalLink aria-hidden="true" className="size-3" />
+                                        </a>
+                                        <span className="ml-2 text-xs text-muted-foreground">{item.attribution}・{t.proposal.observedAt(new Date(item.observedAt).toLocaleString(locale))}</span>
+                                        {item.isStale ? <span className="ml-2 text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span> : null}
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      </tbody>
+                    );
+                  })}
+                </table>
               </div>
             </section>
           ) : workspace?.latestRun ? <p className="rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.length ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}

@@ -23,7 +23,7 @@ import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 
 import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
-import { VoteControl } from "./VoteControl";
+import { VoteControl, VoteVoters } from "./VoteControl";
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -425,6 +425,7 @@ export function TripPlaceWorkspace({
   const pendingVoteIds = useRef(new Set<string>());
   const retryKeys = useRef<RetryKeys>(new Map());
   const editingPlaceIds = useRef(new Set<string>());
+  const [expandedPlaces, setExpandedPlaces] = useState<Record<string, boolean>>({});
 
   const refreshPlaces = useCallback(async () => {
     const response = await request<unknown>(`/api/trips/${trip.id}/trip-places`);
@@ -461,6 +462,24 @@ export function TripPlaceWorkspace({
     () => new Map(places.map((place) => [place.id, place])),
     [places],
   );
+  const duplicateSuggestionsByPlace = useMemo(() => {
+    const byPlace = new Map<string, TripPlaceDto["duplicateSuggestions"]>();
+    function add(placeId: string, suggestion: TripPlaceDto["duplicateSuggestions"][number]) {
+      const existing = byPlace.get(placeId) ?? [];
+      if (!existing.some((entry) => entry.id === suggestion.id)) {
+        byPlace.set(placeId, [...existing, suggestion]);
+      }
+    }
+    for (const place of places) {
+      for (const suggestion of place.duplicateSuggestions) {
+        add(place.id, suggestion);
+        if (placesById.has(suggestion.otherTripPlaceId)) {
+          add(suggestion.otherTripPlaceId, { ...suggestion, otherTripPlaceId: place.id });
+        }
+      }
+    }
+    return byPlace;
+  }, [places, placesById]);
 
   async function setVote(place: TripPlaceDto, voted: boolean) {
     if (pendingVoteIds.current.has(place.id)) return;
@@ -576,6 +595,12 @@ export function TripPlaceWorkspace({
   }
 
   const highestVoteCount = places.reduce((highest, place) => Math.max(highest, place.voteCount), 0);
+  const listedPlaces = [...places, ...readModel.retained];
+  const showVotes = places.some((place) => place.votingAvailable);
+  const placeNameCounts = new Map<string, number>();
+  for (const place of listedPlaces) {
+    placeNameCounts.set(place.name, (placeNameCounts.get(place.name) ?? 0) + 1);
+  }
 
   return (
     <section className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8" aria-labelledby="shared-wishlist-heading">
@@ -593,91 +618,150 @@ export function TripPlaceWorkspace({
       {loading && places.length === 0 ? <p className="mt-6" role="status">{t.workspace.loading}</p> : null}
       {!loading && places.length === 0 && readModel.retained.length === 0 ? <p className="mt-6 rounded-xl border border-dashed border-ink/20 p-6 text-center text-muted-foreground">{t.workspace.empty}</p> : null}
 
-      <div className="mt-6 grid gap-5 xl:grid-cols-2">
-        {[...places, ...readModel.retained].map((place) => {
-          const available = placesById.has(place.id);
-          const voteDraft = voteDrafts[place.id];
-          const tint = place.votingAvailable && place.voteCount > 0
-            ? place.voteCount === highestVoteCount && highestVoteCount >= 2 ? "bg-accent/20" : "bg-accent/10"
-            : "bg-surface-subtle";
-          const typeLabel = t.placeType[place.type];
-          const factsLabel = place.factsSource === "provider"
-            ? `${typeLabel}・${place.providerAttribution ?? t.workspace.providerFacts}`
-            : place.provider === "google"
-              ? `${typeLabel}・${t.workspace.memberFactsWithGoogle}`
-              : `${typeLabel}・${t.workspace.manualEntry}`;
-          return (
-            <article aria-label={t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress)} key={place.id} className={`grid content-start gap-4 rounded-panel border border-ink/10 ${tint} p-4 sm:p-5`}>
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{factsLabel}{place.aiProposalId ? `・${t.workspace.aiProposal}` : ""}</p>
-                  <h3 className="font-display text-2xl text-ink-strong">{place.name}</h3>
-                  <p className="mt-1 text-sm text-muted-foreground">{place.address ?? t.workspace.unknownAddress}</p>
-                </div>
-                {available ? <span className="flex items-center gap-2 rounded-full border border-ink/15 bg-surface px-3 py-1 text-sm font-bold"><StatusIcon status={place.status} />{statusLabel(place.status, t)}</span> : null}
-              </div>
-              {available ? <>
-              {place.providerObservedAt ? <p className="text-sm text-muted-foreground">{t.workspace.providerObserved(new Date(place.providerObservedAt).toLocaleString(locale))}{place.providerFactsExpired ? `・${t.workspace.expiredFacts}` : ""}</p> : null}
-              {place.provider === "google" && place.providerPlaceId ? <a className="inline-flex min-h-10 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
-
-              {place.assignedDayId ? (
-                <p className="rounded-xl bg-surface p-3 font-semibold">
-                  {t.workspace.plannedFor(trip.days.find((day) => day.id === place.assignedDayId)?.date ?? t.workspace.unavailableTripDay)}
-                </p>
-              ) : null}
-              <VoteControl name={place.name} voters={place.voters} voteCount={place.voteCount} ownVote={place.ownVote} votingAvailable={place.votingAvailable} disabled={Boolean(pendingVotes[place.id])} onChange={(voted) => void setVote(place, voted)} />
-              {place.votingAvailable && failedVotes[place.id] && voteDraft !== undefined ? <button className="min-h-10 rounded-lg border px-3 font-bold" disabled={pendingVotes[place.id]} onClick={() => void setVote(place, voteDraft)}>{t.vote.retry}</button> : null}
-
-              {place.notes ? <p className="whitespace-pre-wrap break-words text-sm">{place.notes}</p> : null}
-              {place.sourceUrl ? <a className="w-fit break-all text-sm font-bold text-accent-strong underline" href={place.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
-              {place.duplicateSuggestions.filter((suggestion) =>
-                place.id < suggestion.otherTripPlaceId
-              ).map((suggestion) => {
-                const other = placesById.get(suggestion.otherTripPlaceId);
-                return (
-                  <section key={suggestion.id} className="rounded-xl border border-accent-strong bg-surface p-3" aria-label={t.duplicates.comparisonLabel}>
-                    <strong className="block">{t.duplicates.compare}</strong>
-                    <p className="mt-1 text-sm">{t.duplicates.reason(duplicateReason(suggestion.reason, t))}</p>
-                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                      {([
-                        [t.duplicates.thisOption, place],
-                        [t.duplicates.otherOption, other],
-                      ] as const).map(([label, candidate]) => (
-                        <div key={label} className="rounded-lg border border-ink/10 p-3">
-                          <span className="text-xs font-bold uppercase tracking-[0.12em] text-muted-foreground">{label}</span>
-                          {candidate ? (
-                            <>
-                              <h5 className="font-display text-xl">{candidate.name}</h5>
-                              <p className="text-sm">{t.placeType[candidate.type]}・{candidate.address ?? t.workspace.unknownAddress}</p>
-                              <p className="mt-1 text-sm text-muted-foreground">
-                                {candidate.factsSource === "provider" ? t.duplicates.providerFacts : t.duplicates.memberFacts}
-                              </p>
-                              {candidate.notes ? <p className="mt-1 whitespace-pre-wrap break-words text-sm">{candidate.notes}</p> : null}
-                              {candidate.sourceUrl ? <a className="mt-1 block break-all text-sm underline" href={candidate.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
-                            </>
-                          ) : <p className="mt-1 text-sm text-muted-foreground">{t.duplicates.unavailable}</p>}
+      {listedPlaces.length > 0 ? (
+        <div className="mt-6 overflow-hidden rounded-panel border border-ink/10">
+          <table className="block w-full border-separate border-spacing-0 text-left xl:table" aria-label={t.workspace.tableLabel}>
+            <thead className="table w-full table-fixed bg-surface-subtle text-sm xl:table-header-group">
+              <tr>
+                <th className="px-3 py-3 font-bold xl:min-w-64 xl:px-4" scope="col">{t.workspace.columns.place}</th>
+                <th className="hidden px-3 py-3 font-bold xl:table-cell xl:w-44" scope="col">{t.workspace.columns.type}</th>
+                <th className="hidden px-3 py-3 font-bold xl:table-cell xl:w-40" scope="col">{t.workspace.columns.planned}</th>
+                {showVotes ? <th className="w-0 p-0 xl:w-48 xl:px-3 xl:py-3" scope="col"><span className="sr-only xl:not-sr-only">{t.workspace.columns.votes}</span></th> : null}
+                <th className="w-20 px-2 py-3 font-bold xl:w-24 xl:px-3" scope="col"><span className="sr-only">{t.workspace.columns.more}</span></th>
+              </tr>
+            </thead>
+            {listedPlaces.map((place) => {
+              const available = placesById.has(place.id);
+              const voteDraft = voteDrafts[place.id];
+              const tint = place.votingAvailable && place.voteCount > 0
+                ? place.voteCount === highestVoteCount && highestVoteCount >= 2 ? "bg-accent/20" : "bg-accent/10"
+                : "bg-surface-subtle";
+              const typeLabel = t.placeType[place.type];
+              const factsLabel = place.factsSource === "provider"
+                ? place.providerAttribution ?? t.workspace.providerFacts
+                : place.provider === "google"
+                  ? t.workspace.memberFactsWithGoogle
+                  : t.workspace.manualEntry;
+              const assignedDate = place.assignedDayId
+                ? trip.days.find((day) => day.id === place.assignedDayId)?.date ?? t.workspace.unavailableTripDay
+                : null;
+              const plannedLabel = assignedDate
+                ? assignedDate
+                : place.status === "scheduled" ? t.status.scheduled : t.workspace.notPlanned;
+              const duplicateSuggestions = duplicateSuggestionsByPlace.get(place.id) ?? [];
+              const actionStatus = duplicateSuggestions.length > 0 ? "possible-duplicate" : place.status;
+              const needsAction = actionStatus === "needs-location"
+                || actionStatus === "possible-duplicate"
+                || actionStatus === "provider-unavailable";
+              const expanded = !available || (expandedPlaces[place.id] ?? false);
+              const detailsId = `wishlist-place-${place.id}-details`;
+              const repeatedName = (placeNameCounts.get(place.name) ?? 0) > 1;
+              const rowLabel = repeatedName
+                ? t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress)
+                : place.name;
+              return (
+                <tbody key={place.id} data-wishlist-place={place.name} className="block w-full xl:table-row-group">
+                  <tr aria-label={rowLabel} className={`grid w-full grid-cols-[minmax(0,1fr)_5rem] ${tint} xl:table-row`}>
+                    <th className="col-span-2 col-start-1 row-start-1 py-3 pl-3 pr-24 align-top xl:table-cell xl:min-w-64 xl:px-4 xl:py-4" scope="row">
+                      <span className="text-xl font-semibold text-ink-strong">{place.name}</span>
+                      {repeatedName ? <span className="mt-1 block text-sm font-normal text-muted-foreground">{place.address ?? t.workspace.unknownAddress}</span> : null}
+                      {available && needsAction ? (
+                        <span className="mt-1 flex w-fit items-center gap-1 rounded-full border border-ink/15 bg-surface px-2 py-1 text-xs font-bold">
+                          <StatusIcon status={actionStatus} />{statusLabel(actionStatus, t)}
+                        </span>
+                      ) : null}
+                    </th>
+                    <td className="hidden px-3 py-4 align-top xl:table-cell">{typeLabel}</td>
+                    <td className="hidden px-3 py-4 align-top font-semibold tabular-nums xl:table-cell">{available ? plannedLabel : null}</td>
+                    {showVotes ? (
+                      <td className={`col-span-2 col-start-1 row-start-2 align-top xl:table-cell xl:px-3 xl:py-2 ${available && place.votingAvailable ? "px-3 pb-3" : "p-0 xl:p-2"}`}>
+                        {available && place.votingAvailable ? (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <VoteControl compact name={place.name} voters={place.voters} voteCount={place.voteCount} ownVote={place.ownVote} votingAvailable disabled={Boolean(pendingVotes[place.id])} onChange={(voted) => void setVote(place, voted)} />
+                            {failedVotes[place.id] && voteDraft !== undefined ? <button className="min-h-11 whitespace-nowrap rounded-lg border px-3 font-bold" disabled={pendingVotes[place.id]} onClick={() => void setVote(place, voteDraft)}>{t.vote.retry}</button> : null}
+                          </div>
+                        ) : null}
+                      </td>
+                    ) : null}
+                    <td className="col-start-2 row-span-2 row-start-1 px-2 py-2 align-top xl:table-cell xl:px-3">
+                      {available ? (
+                        <button
+                          type="button"
+                          className="min-h-11 whitespace-nowrap rounded-lg border bg-surface px-3 font-bold"
+                          aria-expanded={expanded}
+                          aria-controls={detailsId}
+                          onClick={() => setExpandedPlaces((current) => ({ ...current, [place.id]: !expanded }))}
+                        >
+                          {t.workspace.columns.more}
+                        </button>
+                      ) : null}
+                    </td>
+                  </tr>
+                  <tr id={detailsId} hidden={!expanded} className="block w-full bg-surface xl:table-row">
+                    <td className="block w-full border-t border-ink/10 p-4 xl:table-cell xl:p-5" colSpan={showVotes ? 5 : 4}>
+                      <div className="grid gap-4">
+                        <dl className="grid grid-cols-2 gap-3 xl:hidden">
+                          <div><dt className="text-sm font-bold">{t.workspace.columns.type}</dt><dd>{typeLabel}</dd></div>
+                          {available ? <div><dt className="text-sm font-bold">{t.workspace.columns.planned}</dt><dd className="tabular-nums">{plannedLabel}</dd></div> : null}
+                        </dl>
+                        <div>
+                          <p className="text-sm text-muted-foreground">{t.workspace.factsSource(factsLabel)}{place.aiProposalId ? `・${t.workspace.aiProposal}` : ""}</p>
+                          <p className="mt-1 text-sm text-muted-foreground">{place.address ?? t.workspace.unknownAddress}</p>
                         </div>
-                      ))}
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2"><button className="min-h-10 rounded-lg bg-accent px-3 font-bold" disabled={!other} onClick={() => void merge(place, suggestion.otherTripPlaceId)}>{t.duplicates.merge}</button><button className="min-h-10 rounded-lg border px-3 font-bold" onClick={() => void keepSeparate(suggestion.id)}>{t.duplicates.keepSeparate}</button></div>
-                  </section>
-                );
-              })}
-              </> : null}
-
-              <PlanningEditor tripId={trip.id} place={place} available={available} request={request} changed={changedPlaces}
-                editingChanged={(editing) => {
-                  if (editing) editingPlaceIds.current.add(place.id);
-                  else {
-                    editingPlaceIds.current.delete(place.id);
-                    setReadModel((current) => ({ ...current, retained: current.retained.filter((entry) => entry.id !== place.id) }));
-                  }
-                }} />
-              {available ? <button className="min-h-10 w-fit rounded-lg border px-3 text-sm font-bold" onClick={() => void remove(place)}>{t.workspace.remove}</button> : null}
-            </article>
-          );
-        })}
-      </div>
+                        {place.providerObservedAt ? <p className="text-sm text-muted-foreground">{t.workspace.providerObserved(new Date(place.providerObservedAt).toLocaleString(locale))}{place.providerFactsExpired ? `・${t.workspace.expiredFacts}` : ""}</p> : null}
+                        {place.provider === "google" && place.providerPlaceId ? <a className="inline-flex min-h-11 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
+                        {place.sourceUrl ? <a className="w-fit break-all text-sm font-bold text-accent-strong underline" href={place.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
+                        {place.notes ? <p className="whitespace-pre-wrap break-words text-sm">{place.notes}</p> : null}
+                        {available && place.votingAvailable ? <VoteVoters voters={place.voters} /> : null}
+                        {available ? duplicateSuggestions.map((suggestion) => {
+                          const other = placesById.get(suggestion.otherTripPlaceId);
+                          return (
+                            <section key={suggestion.id} className="rounded-xl border border-accent-strong bg-surface p-3" aria-label={t.duplicates.comparisonLabel}>
+                              <strong className="block">{t.duplicates.compare}</strong>
+                              <p className="mt-1 text-sm">{t.duplicates.reason(duplicateReason(suggestion.reason, t))}</p>
+                              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                                {([
+                                  [t.duplicates.thisOption, place],
+                                  [t.duplicates.otherOption, other],
+                                ] as const).map(([label, candidate]) => (
+                                  <section key={label} className="rounded-lg border border-ink/10 p-3" aria-label={label}>
+                                    <span className="text-xs font-bold uppercase tracking-[0.12em] text-muted-foreground">{label}</span>
+                                    {candidate ? (
+                                      <>
+                                        <h5 className="text-xl font-semibold">{candidate.name}</h5>
+                                        <p className="text-sm">{t.placeType[candidate.type]}・{candidate.address ?? t.workspace.unknownAddress}</p>
+                                        <p className="mt-1 text-sm text-muted-foreground">
+                                          {candidate.factsSource === "provider" ? t.duplicates.providerFacts : t.duplicates.memberFacts}
+                                        </p>
+                                        {candidate.notes ? <p className="mt-1 whitespace-pre-wrap break-words text-sm">{candidate.notes}</p> : null}
+                                        {candidate.sourceUrl ? <a className="mt-1 block break-all text-sm underline" href={candidate.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
+                                      </>
+                                    ) : <p className="mt-1 text-sm text-muted-foreground">{t.duplicates.unavailable}</p>}
+                                  </section>
+                                ))}
+                              </div>
+                              <div className="mt-3 flex flex-wrap gap-2"><button className="min-h-11 rounded-lg bg-accent px-3 font-bold text-ink-strong" disabled={!other} onClick={() => void merge(place, suggestion.otherTripPlaceId)}>{t.duplicates.merge}</button><button className="min-h-11 rounded-lg border px-3 font-bold" onClick={() => void keepSeparate(suggestion.id)}>{t.duplicates.keepSeparate}</button></div>
+                            </section>
+                          );
+                        }) : null}
+                        <PlanningEditor tripId={trip.id} place={place} available={available} request={request} changed={changedPlaces}
+                          editingChanged={(editing) => {
+                            if (editing) editingPlaceIds.current.add(place.id);
+                            else {
+                              editingPlaceIds.current.delete(place.id);
+                              setReadModel((current) => ({ ...current, retained: current.retained.filter((entry) => entry.id !== place.id) }));
+                            }
+                          }} />
+                        {available ? <button className="min-h-11 w-fit rounded-lg border px-3 text-sm font-bold" onClick={() => void remove(place)}>{t.workspace.remove}</button> : null}
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              );
+            })}
+          </table>
+        </div>
+      ) : null}
       {adding ? <AddPlacePanel tripId={trip.id} request={request} close={() => setAdding(false)} changed={changedPlaces} /> : null}
     </section>
   );
