@@ -91,6 +91,7 @@ export const tripPlaces = {
     manualEntry: "手動輸入",
     aiProposal: "AI 推薦",
     placeAtAddress: (name: string, address: string) => `${name}，地址：${address}`,
+    rowSummary: (type: string, planned: string | null) => planned ? `${type}・${planned}` : type,
     factsSource: (source: string) => `資料來源：${source}`,
     unknownAddress: "地址未知",
     providerObserved: (date: string) => `服務提供者資料擷取於 ${date}`,

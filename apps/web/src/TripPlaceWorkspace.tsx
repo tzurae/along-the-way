@@ -670,6 +670,7 @@ export function TripPlaceWorkspace({
                           <StatusIcon status={actionStatus} />{statusLabel(actionStatus, t)}
                         </span>
                       ) : null}
+                      <p className="mt-1 text-sm font-normal text-muted-foreground xl:hidden">{t.workspace.rowSummary(typeLabel, available ? plannedLabel : null)}</p>
                     </th>
                     <td className="hidden px-3 py-4 align-top xl:table-cell">{typeLabel}</td>
                     <td className="hidden px-3 py-4 align-top font-semibold tabular-nums xl:table-cell">{available ? plannedLabel : null}</td>
@@ -700,10 +701,6 @@ export function TripPlaceWorkspace({
                   <tr id={detailsId} hidden={!expanded} className="block w-full bg-surface xl:table-row">
                     <td className="block w-full border-t border-ink/10 p-4 xl:table-cell xl:p-5" colSpan={showVotes ? 5 : 4}>
                       <div className="grid gap-4">
-                        <dl className="grid grid-cols-2 gap-3 xl:hidden">
-                          <div><dt className="text-sm font-bold">{t.workspace.columns.type}</dt><dd>{typeLabel}</dd></div>
-                          {available ? <div><dt className="text-sm font-bold">{t.workspace.columns.planned}</dt><dd className="tabular-nums">{plannedLabel}</dd></div> : null}
-                        </dl>
                         <div>
                           <p className="text-sm text-muted-foreground">{t.workspace.factsSource(factsLabel)}{place.aiProposalId ? `・${t.workspace.aiProposal}` : ""}</p>
                           <p className="mt-1 text-sm text-muted-foreground">{place.address ?? t.workspace.unknownAddress}</p>

@@ -554,6 +554,8 @@ test("manual wishlist intake remains usable on a mobile viewport", async ({ brow
   await expect(mobileTable.getByRole("columnheader", { name: "票數" })).toHaveCount(1);
   await expect(mobileTable.getByRole("columnheader", { name: "類型" })).toBeHidden();
   await expect(mobileTable.getByRole("columnheader", { name: "排在" })).toBeHidden();
+  await expect(retryCard.getByRole("button", { name: "更多", exact: true })).toHaveAttribute("aria-expanded", "false");
+  await expect(retryCard.getByText("餐廳或咖啡廳・未排入", { exact: true })).toBeVisible();
   expect((await retryCard.getByRole("button", { name: "投票", exact: true }).boundingBox())?.height).toBeGreaterThanOrEqual(44);
   expect((await retryCard.getByRole("button", { name: "更多", exact: true }).boundingBox())?.height).toBeGreaterThanOrEqual(44);
   const voteRoute = /\/api\/trips\/[^/]+\/trip-places\/[^/]+\/vote$/;

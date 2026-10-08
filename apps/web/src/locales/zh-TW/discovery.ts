@@ -103,6 +103,7 @@ export const discovery = {
       actions: "動作",
       more: "更多",
     },
+    rowSummary: (category: string, tradeoff: string | null) => tradeoff ? `${category}・${tradeoff}` : category,
     unknownAddress: "地址未知",
     recommendedByFor: (name: string) => `${name} 的推薦來源`,
     recommendedBy: "推薦來源",

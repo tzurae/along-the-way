@@ -668,6 +668,9 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                     const detailsId = `discovery-proposal-${proposal.id}-details`;
                     const category = proposal.category ?? t.placeType[proposal.type];
                     const firstSentence = proposal.recommendationSentences?.[0];
+                    const firstTradeoff = proposal.tradeoffSentences !== null
+                      ? proposal.tradeoffSentences[0]?.text ?? null
+                      : proposal.tradeoffs[0] ?? null;
                     const hasTradeoffs = proposal.tradeoffSentences !== null
                       ? proposal.tradeoffSentences.length > 0
                       : proposal.tradeoffs.length > 0;
@@ -684,6 +687,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                             ) : proposal.recommendationSentences === null ? (
                               <p className="mt-1 line-clamp-2 text-sm font-semibold text-muted-foreground">{proposal.recommendation}</p>
                             ) : null}
+                            <p className="mt-1 line-clamp-1 text-sm font-normal text-muted-foreground xl:hidden">{t.proposal.rowSummary(category, firstTradeoff)}</p>
                           </th>
                           <td className="hidden px-3 py-4 align-top xl:table-cell">{category}</td>
                           {showProposalVotes ? (
@@ -709,7 +713,6 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                         <tr id={detailsId} hidden={!expanded} className="block w-full bg-surface xl:table-row">
                           <td className="block w-full border-t border-ink/10 p-4 xl:table-cell xl:p-5" colSpan={showProposalVotes ? 5 : 4}>
                             <div className="grid gap-4">
-                              <dl className="xl:hidden"><div><dt className="text-sm font-bold">{t.proposal.columns.category}</dt><dd>{category}</dd></div></dl>
                               <p className="text-sm text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</p>
                               {proposal.endorsements.length ? <div aria-label={t.proposal.recommendedByFor(proposal.name)}><strong>{t.proposal.recommendedBy}</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabel(endorsement, t)}</li>)}</ul></div> : null}
                               {proposal.recommendationSentences === null ? <p>{proposal.recommendation}</p> : null}

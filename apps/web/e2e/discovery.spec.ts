@@ -236,6 +236,8 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   await expect(proposalTable.getByRole("columnheader", { name: "類別" })).toBeHidden();
   await expect(proposalTable.getByRole("columnheader", { name: "票數" })).toHaveCount(1);
   await expect(proposalTable.getByRole("columnheader", { name: "動作" })).toHaveCount(1);
+  await expect(proposal.getByRole("button", { name: "更多", exact: true })).toHaveAttribute("aria-expanded", "false");
+  await expect(proposal.getByText("活動・busy around lunch", { exact: true })).toBeVisible();
   await expect(page.getByRole("row", { name: "AI 推薦：Nishiki Market", exact: true }).getByRole("button", { name: "加入想去清單" })).toBeVisible();
   expect((await proposal.getByRole("button", { name: "加入想去清單" }).boundingBox())?.height).toBeGreaterThanOrEqual(44);
   expect((await proposal.getByRole("button", { name: "更多", exact: true }).boundingBox())?.height).toBeGreaterThanOrEqual(44);
