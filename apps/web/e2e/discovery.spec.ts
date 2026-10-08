@@ -78,7 +78,8 @@ async function signIn(page: Page, request: APIRequestContext, email: string) {
 }
 
 async function createTrip(page: Page, name: string) {
-  await page.getByRole("button", { name: "建立旅程" }).click();
+  await page.getByRole("button", { name: /切換旅程$/ }).click();
+  await page.getByRole("dialog", { name: "切換旅程" }).getByRole("button", { name: "建立旅程" }).click();
   const dialog = page.getByRole("dialog", { name: "建立旅程" });
   await dialog.getByLabel("旅程名稱").fill(name);
   await dialog.getByRole("button", { name: "選擇日期範圍" }).click();
@@ -97,11 +98,12 @@ async function createTrip(page: Page, name: string) {
   await page.getByRole("option", { name: /\(JP\)/ }).dispatchEvent("click");
   await fillTripFlights(dialog, "2026-11-03", "2026-11-09");
   await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
-  await expect(page.getByRole("heading", { name })).toBeVisible();
+  await expect(page.getByRole("button", { name: new RegExp(`${name}，切換旅程`) })).toBeVisible();
 }
 
 async function openTab(page: Page, name: "AI 找地點" | "想去清單") {
-  await page.getByRole("tab", { name, exact: true }).click();
+  await page.getByRole("tab", { name: "地點", exact: true }).click();
+  await page.getByRole("tab", { name: name === "AI 找地點" ? "AI 建議" : "想去", exact: true }).click();
 }
 
 function proposalEntry(page: Page, name: string) {
@@ -199,29 +201,42 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   await expect(page.getByRole("row", { name: "AI 推薦：Nishiki Market", exact: true }).getByRole("link", { name: "Official Nishiki Market guide" })).toHaveText(/^\[2\]/);
   const legacyProposal = proposalEntry(page, "Legacy Garden");
   await expect(page.getByRole("row", { name: "AI 推薦：Legacy Garden", exact: true }).getByText(legacyRecommendation, { exact: true })).toBeVisible();
-  const legacyMore = legacyProposal.getByRole("button", { name: "更多", exact: true });
-  await legacyMore.click();
-  const legacyDetailsId = await legacyMore.getAttribute("aria-controls");
-  await expect(legacyProposal.locator(`#${legacyDetailsId}`).getByText(legacyRecommendation, { exact: true })).toBeVisible();
-  await legacyMore.click();
-  await legacyProposal.getByRole("button", { name: "不要再推薦" }).click();
+  await legacyProposal.getByRole("button", { name: "查看 Legacy Garden 的詳情", exact: true }).click();
+  const legacyDetails = page.getByRole("complementary", { name: "Legacy Garden 的詳情" });
+  await expect(legacyDetails.getByRole("heading", { name: "Legacy Garden 的詳情" })).toBeFocused();
+  await expect(legacyDetails.getByText(legacyRecommendation, { exact: true })).toBeVisible();
+  await legacyDetails.getByRole("button", { name: "關閉 AI 建議詳情" }).click();
+  await expect(legacyProposal.getByRole("button", { name: "查看 Legacy Garden 的詳情", exact: true })).toBeFocused();
+  const rejectLegacy = legacyProposal.getByRole("button", { name: "不要再推薦" });
+  await rejectLegacy.click();
+  const rejectDialog = page.getByRole("dialog", { name: "不要再推薦「Legacy Garden」？" });
+  await expect(rejectDialog).toContainText("未來的研究不會再推薦");
+  await rejectDialog.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(legacyProposal.getByText("已設為不要再推薦", { exact: true })).toHaveCount(0);
+  await rejectLegacy.click();
+  await page.getByRole("dialog", { name: "不要再推薦「Legacy Garden」？" }).getByRole("button", { name: "確定不要再推薦" }).click();
   await expect(legacyProposal.getByText("已設為不要再推薦", { exact: true })).toBeVisible();
   await expect(proposal.getByText("信心程度", { exact: false })).toHaveCount(0);
   await expect(page.getByRole("table", { name: "AI 候選地點清單" }).getByRole("columnheader", { name: "票數" })).toHaveCount(0);
-  const more = proposal.getByRole("button", { name: "更多", exact: true });
-  await expect(more).toHaveAttribute("aria-expanded", "false");
-  await more.click();
-  await expect(more).toHaveAttribute("aria-expanded", "true");
-  const nishikiDetailsId = await more.getAttribute("aria-controls");
-  const nishikiDetails = proposal.locator(`#${nishikiDetailsId}`);
-  await expect(nishikiDetails.getByRole("link", { name: "Official Nishiki Market guide" })).toHaveText(/^\[2\]/);
-  await expect(nishikiDetails.getByRole("link", { name: "Official Nishiki Market guide" })).toHaveAttribute("href", "https://kyoto.example.test/nishiki");
+  for (const width of [1280, 1440]) {
+    await page.setViewportSize({ width, height: 720 });
+    await expect(proposal.getByRole("cell", { name: "活動", exact: true })).toBeVisible();
+  }
+  await proposal.getByRole("button", { name: "查看 Nishiki Market 的詳情", exact: true }).click();
+  const nishikiDetails = page.getByRole("complementary", { name: "Nishiki Market 的詳情" });
+  await expect(nishikiDetails.getByRole("heading", { name: "Nishiki Market 的詳情" })).toBeFocused();
+  const recommendationCitation = nishikiDetails.getByRole("listitem").filter({ hasText: "A compact food-market stop matching the trip focus." }).getByRole("link", { name: "Official Nishiki Market guide" });
+  await expect(recommendationCitation).toHaveText(/^\[2\]/);
+  const evidenceCitation = nishikiDetails.getByText("佐證資料", { exact: true }).locator("..").getByRole("link", { name: "Official Nishiki Market guide" });
+  await expect(evidenceCitation).toHaveText(/^\[2\]/);
+  await expect(evidenceCitation).toHaveAttribute("href", "https://kyoto.example.test/nishiki");
+  await expect(nishikiDetails.getByText("A compact food-market stop matching the trip focus.", { exact: true })).toBeVisible();
   await expect(nishikiDetails.getByText("Visit outside the lunch rush for an easier pace.", { exact: true })).toBeVisible();
   await expect(nishikiDetails.getByText("AI 推論，未查證", { exact: true })).toBeVisible();
-  await expect(proposal.getByRole("link", { name: "在 Google Maps 看照片" }))
+  await expect(nishikiDetails.getByRole("link", { name: "在 Google Maps 看照片" }))
     .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
-  await more.click();
-  await expect(more).toHaveAttribute("aria-expanded", "false");
+  await nishikiDetails.getByRole("button", { name: "關閉 AI 建議詳情" }).click();
+  await expect(proposal.getByRole("button", { name: "查看 Nishiki Market 的詳情", exact: true })).toBeFocused();
   await expect(proposal.getByRole("button", { name: "投票", exact: true })).toHaveCount(0);
   await executeDatabase(`
     insert into users (email, display_name, status) values ('discovery-member-${suffix}@example.test', 'Discovery member', 'active');
@@ -231,16 +246,35 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   `);
   await page.reload();
   await openTab(page, "AI 找地點");
+  await proposal.getByRole("button", { name: "查看 Nishiki Market 的詳情", exact: true }).click();
+  for (const width of [1280, 1440]) {
+    await page.setViewportSize({ width, height: 720 });
+    const proposalWrapperBox = await page.locator("[data-discovery-table-wrapper]").boundingBox();
+    expect(proposalWrapperBox).not.toBeNull();
+    for (const action of await proposal.getByRole("button").all()) {
+      if (!await action.isVisible()) continue;
+      const actionBox = await action.boundingBox();
+      expect(actionBox).not.toBeNull();
+      expect(actionBox!.x).toBeGreaterThanOrEqual(proposalWrapperBox!.x);
+      expect(actionBox!.x + actionBox!.width).toBeLessThanOrEqual(proposalWrapperBox!.x + proposalWrapperBox!.width);
+    }
+  }
+  await page.getByRole("complementary", { name: "Nishiki Market 的詳情" }).getByRole("button", { name: "關閉 AI 建議詳情" }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   const proposalTable = page.getByRole("table", { name: "AI 候選地點清單" });
   await expect(proposalTable.getByRole("columnheader", { name: "類別" })).toBeHidden();
   await expect(proposalTable.getByRole("columnheader", { name: "票數" })).toHaveCount(1);
   await expect(proposalTable.getByRole("columnheader", { name: "動作" })).toHaveCount(1);
-  await expect(proposal.getByRole("button", { name: "更多", exact: true })).toHaveAttribute("aria-expanded", "false");
   await expect(proposal.getByText("活動・busy around lunch", { exact: true })).toBeVisible();
   await expect(page.getByRole("row", { name: "AI 推薦：Nishiki Market", exact: true }).getByRole("button", { name: "加入想去清單" })).toBeVisible();
   expect((await proposal.getByRole("button", { name: "加入想去清單" }).boundingBox())?.height).toBeGreaterThanOrEqual(44);
-  expect((await proposal.getByRole("button", { name: "更多", exact: true }).boundingBox())?.height).toBeGreaterThanOrEqual(44);
+  const mobileDetailTrigger = proposal.getByRole("button", { name: "查看 Nishiki Market 的詳情", exact: true });
+  expect((await mobileDetailTrigger.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+  await mobileDetailTrigger.click();
+  await expect(page.getByRole("dialog", { name: "Nishiki Market 的詳情" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Nishiki Market 的詳情" }).getByRole("heading", { name: "Nishiki Market 的詳情" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(mobileDetailTrigger).toBeFocused();
   await page.setViewportSize({ width: 1280, height: 720 });
   await proposal.getByRole("button", { name: "投票", exact: true }).click();
   await expect(proposal.getByRole("button", { name: "已投票", exact: true })).toHaveAttribute("aria-pressed", "true");
@@ -253,13 +287,14 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   const wishlist = page.getByRole("region", { name: "共享地點想去清單" });
   const wishlistPlace = wishlistEntry(page, "Nishiki Market");
   await expect(wishlist.getByRole("row", { name: "Nishiki Market", exact: true })).toBeVisible();
-  await wishlistPlace.getByRole("button", { name: "更多", exact: true }).click();
-  await expect(wishlistPlace.getByText("AI 推薦", { exact: false })).toBeVisible();
-  await expect(wishlistPlace.getByRole("link", { name: "在 Google Maps 看照片" }))
+  await wishlistPlace.getByRole("button", { name: "查看 Nishiki Market 的詳情", exact: true }).click();
+  const wishlistDetails = page.getByRole("complementary", { name: "Nishiki Market 的詳情" });
+  await expect(wishlistDetails.getByText("AI 推薦", { exact: false })).toBeVisible();
+  await expect(wishlistDetails.getByRole("link", { name: "在 Google Maps 看照片" }))
     .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
-  await expect(wishlistPlace.getByText("1 票", { exact: true })).toBeVisible();
-  await expect(wishlistPlace.getByRole("button", { name: "已投票", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await expect(wishlistPlace.getByRole("link", { name: "開啟原始來源" }))
+  await expect(wishlistDetails.getByText("1 票", { exact: true })).toBeVisible();
+  await expect(wishlistDetails.getByRole("button", { name: "已投票", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(wishlistDetails.getByRole("link", { name: "開啟原始來源" }))
     .toHaveAttribute("href", /query_place_id=ChIJ-Nishiki-Market-E2E/);
   await openTab(page, "AI 找地點");
   page.once("dialog", async (dialog) => {
@@ -278,12 +313,11 @@ test("a traveler reviews grounded AI evidence and accepts a proposal into the wi
   await expect(proposal.getByRole("button", { name: "從想去清單移除" })).toBeVisible();
   await openTab(page, "想去清單");
   await expect(wishlist.getByRole("row", { name: "Nishiki Market", exact: true })).toHaveCount(1);
-  await expect(wishlist.getByText("1 票", { exact: true })).toBeVisible();
-  // Removing from the wishlist tab must refresh the AI tab and reopen the proposal.
-  const wishlistMore = wishlistPlace.getByRole("button", { name: "更多", exact: true });
-  if ((await wishlistMore.getAttribute("aria-expanded")) !== "true") await wishlistMore.click();
+  await expect(wishlist.getByRole("row", { name: "Nishiki Market", exact: true }).getByText("1 票", { exact: true })).toBeVisible();
+  // Removing from the wishlist detail must refresh the AI tab and reopen the proposal.
+  await wishlistPlace.getByRole("button", { name: "查看 Nishiki Market 的詳情", exact: true }).click();
   page.once("dialog", async (dialog) => dialog.accept());
-  await wishlistPlace.getByRole("button", { name: "從想去清單移除" }).click();
+  await page.getByRole("complementary", { name: "Nishiki Market 的詳情" }).getByRole("button", { name: "從想去清單移除" }).click();
   await expect(wishlist.getByRole("row", { name: "Nishiki Market", exact: true })).toHaveCount(0);
   await openTab(page, "AI 找地點");
   await expect(proposal.getByRole("button", { name: "加入想去清單" })).toBeVisible();
@@ -329,7 +363,7 @@ test("research and feedback explain missing AI configuration without sending any
 
   expect(discoveryWrites).toEqual([]);
   await page.reload();
-  await page.getByRole("button", { name: new RegExp(tripName) }).click();
+  await expect(page.getByRole("button", { name: new RegExp(`${tripName}，切換旅程`) })).toBeVisible();
   await openTab(page, "AI 找地點");
   await expect(page.getByLabel("AI 規劃時該考量什麼？")).toHaveValue("");
 });
@@ -376,7 +410,7 @@ test("one Find candidates action saves changed text, researches the saved versio
     if (sent.url().includes("/discovery/") && sent.method() !== "GET") writes.push(new URL(sent.url()).pathname.split("/").at(-1)!);
   });
   await page.reload();
-  await page.getByRole("button", { name: new RegExp(tripName) }).click();
+  await expect(page.getByRole("button", { name: new RegExp(`${tripName}，切換旅程`) })).toBeVisible();
   await openTab(page, "AI 找地點");
 
   const brief = page.getByRole("region", { name: "旅程研究需求" });
@@ -409,7 +443,7 @@ test("one Find candidates action saves changed text, researches the saved versio
   // Only the missing service is named, and nothing is sent.
   available = { modelAvailable: true, placeProviderAvailable: false };
   await page.reload();
-  await page.getByRole("button", { name: new RegExp(tripName) }).click();
+  await expect(page.getByRole("button", { name: new RegExp(`${tripName}，切換旅程`) })).toBeVisible();
   await openTab(page, "AI 找地點");
   await brief.getByRole("button", { name: "尋找候選地點" }).click();
   await expect(brief.getByRole("alert")).toContainText("Google Maps 金鑰");
@@ -427,9 +461,10 @@ test("one Find candidates action saves changed text, researches the saved versio
   `);
   available = { modelAvailable: false, placeProviderAvailable: true };
   await page.reload();
-  await page.getByRole("button", { name: new RegExp(tripName) }).click();
+  await expect(page.getByRole("button", { name: new RegExp(`${tripName}，切換旅程`) })).toBeVisible();
   await openTab(page, "AI 找地點");
   const research = page.getByRole("region", { name: "讓 AI 尋找選項並說明原因" });
+  await page.getByText("研究需求與設定", { exact: true }).click();
   await research.getByRole("button", { name: "重新研究" }).click();
   await expect(research.getByRole("alert").first()).toContainText("AI 服務金鑰與模型");
   await expect(brief.getByRole("alert")).toHaveCount(0);
@@ -460,7 +495,7 @@ async function prepareConflictDiscovery(page: Page, request: APIRequestContext, 
     await route.fulfill({ response, json: body });
   });
   await page.reload();
-  await page.getByRole("button", { name: new RegExp(name) }).click();
+  await expect(page.getByRole("button", { name: new RegExp(`${name}，切換旅程`) })).toBeVisible();
   await openTab(page, "AI 找地點");
   return { tripId, headers: { origin: new URL(page.url()).origin, "idempotency-key": crypto.randomUUID() } };
 }

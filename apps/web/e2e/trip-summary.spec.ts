@@ -116,7 +116,12 @@ async function signIn(page: Page, request: APIRequestContext, email: string) {
     page,
     await emailLink(request, email, "Sign in to Along the Way"),
   );
-  await expect(page.getByText(`登入帳號：${email}`)).toBeVisible();
+  const identity = page.getByText(`登入帳號：${email}`, { exact: true });
+  if (!await identity.isVisible()) {
+    await page.getByRole("button", { name: /切換旅程$/ }).click();
+    await expect(page.getByRole("dialog", { name: "切換旅程" }).getByText(`登入帳號：${email}`, { exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+  }
 }
 
 function localDateLabel(date: string) {
@@ -143,8 +148,8 @@ async function selectDateRange(
   await page.locator(`[data-day="${localDateLabel(endDate)}"]`).click();
 }
 
-async function openTab(page: Page, name: "總覽") {
-  await page.getByRole("tab", { name, exact: true }).click();
+async function openMembers(page: Page) {
+  await page.getByRole("tab", { name: "成員", exact: true }).click();
 }
 
 async function createTrip(
@@ -152,7 +157,8 @@ async function createTrip(
   input: TripInput,
   beforeSubmit?: (dialog: ReturnType<Page["getByRole"]>) => Promise<void>,
 ) {
-  await page.getByRole("button", { name: "建立旅程" }).click();
+  await page.getByRole("button", { name: /切換旅程$/ }).click();
+  await page.getByRole("dialog", { name: "切換旅程" }).getByRole("button", { name: "建立旅程" }).click();
   const dialog = page.getByRole("dialog", { name: "建立旅程" });
   await dialog.getByLabel("旅程名稱").fill(input.name);
   await selectDateRange(page, dialog, input.startDate, input.endDate);
@@ -169,8 +175,8 @@ async function createTrip(
   await beforeSubmit?.(dialog);
   await fillTripFlights(dialog, input.startDate, input.endDate);
   await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
-  await expect(page.getByRole("heading", { name: input.name })).toBeVisible();
-  await openTab(page, "總覽");
+  await expect(page.getByRole("button", { name: new RegExp(`${input.name}，切換旅程`) })).toBeVisible();
+  await openMembers(page);
 }
 
 async function inviteEditor(
@@ -178,10 +184,10 @@ async function inviteEditor(
   request: APIRequestContext,
   email: string,
 ) {
-  await openTab(page, "總覽");
+  await openMembers(page);
   await page.getByLabel("透過電子郵件邀請編輯者").fill(email);
   await page.getByRole("button", { name: "寄出邀請" }).click();
-  await expect(page.getByRole("status")).toContainText(email);
+  await expect(page.getByRole("status").filter({ hasText: email })).toBeVisible();
   return emailLink(request, email, "Join 大阪京都家庭旅行");
 }
 
@@ -195,10 +201,8 @@ async function acceptEditor(
   await openEmailLink(page, inviteLink);
   await signIn(page, request, email);
   await page.getByRole("button", { name: "接受邀請" }).click();
-  await openTab(page, "總覽");
-  await expect(
-    page.getByRole("heading", { name: "大阪京都家庭旅行" }),
-  ).toBeVisible();
+  await openMembers(page);
+  await expect(page.getByRole("button", { name: /大阪京都家庭旅行，切換旅程/ })).toBeVisible();
   return page;
 }
 
@@ -257,12 +261,15 @@ test("private trips work across four identities, viewports, and rejection paths"
 
   await page.goto("/");
   await signIn(page, request, "owner@example.test");
-  const createTripTrigger = page.getByRole("button", { name: "建立旅程" });
+  await page.getByRole("button", { name: /切換旅程$/ }).click();
+  const switcher = page.getByRole("dialog", { name: "切換旅程" });
+  const createTripTrigger = switcher.getByRole("button", { name: "建立旅程" });
   await createTripTrigger.click();
   await expect(page.getByRole("dialog", { name: "建立旅程" })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog", { name: "建立旅程" })).toHaveCount(0);
   await expect(createTripTrigger).toBeFocused();
+  await page.keyboard.press("Escape");
 
   await createTrip(page, {
     name: "大阪京都家庭旅行",
@@ -308,7 +315,9 @@ test("private trips work across four identities, viewports, and rejection paths"
     await expect(dialog.getByRole("alert")).toContainText("移動後會讓相同國家相鄰。");
     expect(await dialog.getByRole("listitem").allTextContents()).toEqual(routeBeforeInvalidMove);
   });
-  await expect(page.getByText("7天", { exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "行程", exact: true }).click();
+  await page.getByRole("tab", { name: "航班", exact: true }).click();
+  await expect(page.getByText("2026-10-21 – 2026-10-27", { exact: false })).toBeVisible();
   await expect(page.getByText("無法推定預設幣別")).toBeVisible();
   const countryRoute = page.locator('section[aria-labelledby="trip-country-route"]');
   await expect(countryRoute.getByRole("listitem").nth(0)).toContainText("(JP)");
@@ -337,20 +346,25 @@ test("private trips work across four identities, viewports, and rejection paths"
 
   await page.reload();
   // A reload selects the first listed trip; other specs' trips may be listed before this one.
-  await page.getByRole("button", { name: /^大阪京都家庭旅行 \d+ 位成員/ }).click();
-  await expect(page.getByRole("heading", { name: "大阪京都家庭旅行", exact: true })).toBeVisible();
-  await openTab(page, "總覽");
-  await expect(page.getByRole("tabpanel", { name: "總覽", exact: true }).getByText("wife@example.test", { exact: true })).toBeVisible();
-  await expect(page.getByRole("tabpanel", { name: "總覽", exact: true }).getByText("mother@example.test", { exact: true })).toBeVisible();
-  await expect(page.getByRole("tabpanel", { name: "總覽", exact: true }).getByText("friend@example.test", { exact: true })).toBeVisible();
-  await expect(page.getByText("4位成員", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /切換旅程$/ }).click();
+  const switcherDialog = page.getByRole("dialog", { name: "切換旅程" });
+  await expect(switcherDialog.getByText(/2026-10-21 – 2026-10-27・4 位成員/)).toBeVisible();
+  await switcherDialog.getByRole("button", { name: /^大阪京都家庭旅行/ }).click();
+  await expect(page.getByRole("button", { name: /大阪京都家庭旅行，切換旅程/ })).toBeVisible();
+  await openMembers(page);
+  const membersPanel = page.getByRole("tabpanel", { name: "成員", exact: true });
+  await expect(membersPanel.getByText("wife@example.test", { exact: true })).toBeVisible();
+  await expect(membersPanel.getByText("mother@example.test", { exact: true })).toBeVisible();
+  await expect(membersPanel.getByText("friend@example.test", { exact: true })).toBeVisible();
+  await expect(membersPanel.getByRole("list").first().getByRole("listitem")).toHaveCount(4);
 
   const wifePage = editorPages[0]!;
   const motherPage = editorPages[1]!;
   await motherPage.reload();
-  await openTab(motherPage, "總覽");
-  await expect(motherPage.getByRole("tabpanel", { name: "總覽", exact: true }).getByText("friend@example.test", { exact: true })).toBeVisible();
-  await expect(motherPage.getByText("4位成員", { exact: true })).toBeVisible();
+  await openMembers(motherPage);
+  const motherMembers = motherPage.getByRole("tabpanel", { name: "成員", exact: true });
+  await expect(motherMembers.getByText("friend@example.test", { exact: true })).toBeVisible();
+  await expect(motherMembers.getByRole("list").first().getByRole("listitem")).toHaveCount(4);
 
   await createTrip(wifePage, {
     name: "手機建立的台北旅程",
@@ -363,14 +377,17 @@ test("private trips work across four identities, viewports, and rejection paths"
     expect(bounds ? bounds.x + bounds.width : Number.POSITIVE_INFINITY)
       .toBeLessThanOrEqual(390);
   });
-  await expect(wifePage.getByText("預設幣別 TWD")).toBeVisible();
+  await wifePage.getByRole("tab", { name: "行程", exact: true }).click();
+  await wifePage.getByRole("tab", { name: "航班", exact: true }).click();
   await expect(wifePage.getByText("Asia/Taipei", { exact: true })).toBeVisible();
-  await wifePage
-    .getByRole("button", { name: /大阪京都家庭旅行/ })
-    .click();
-  await openTab(wifePage, "總覽");
-  await expect(wifePage.getByRole("tabpanel", { name: "總覽", exact: true }).getByText("friend@example.test", { exact: true })).toBeVisible();
-  await expect(wifePage.getByText("4位成員", { exact: true })).toBeVisible();
+  await wifePage.getByRole("button", { name: /切換旅程$/ }).click();
+  const wifeSwitcher = wifePage.getByRole("dialog", { name: "切換旅程" });
+  await expect(wifeSwitcher.getByText("預設幣別 TWD")).toBeVisible();
+  await wifeSwitcher.getByRole("button", { name: /^大阪京都家庭旅行/ }).click();
+  await openMembers(wifePage);
+  const wifeMembers = wifePage.getByRole("tabpanel", { name: "成員", exact: true });
+  await expect(wifeMembers.getByText("friend@example.test", { exact: true })).toBeVisible();
+  await expect(wifeMembers.getByRole("list").first().getByRole("listitem")).toHaveCount(4);
 
   await expect(wifePage.getByLabel("透過電子郵件邀請編輯者")).toHaveCount(0);
   const forbiddenStatus = await wifePage.evaluate(async (id) => {
@@ -446,7 +463,9 @@ test("private trips work across four identities, viewports, and rejection paths"
   await expect(expiredPage.getByRole("alert")).toContainText("這個邀請已過期。");
 
   expect(await privateTripStatus(wifePage, osakaTripId)).toBe(200);
-  const wifeItem = page
+  const wifeItem = membersPanel
+    .getByRole("list")
+    .first()
     .getByRole("listitem")
     .filter({ hasText: "wife@example.test" });
   await wifeItem.getByRole("button", { name: "移除" }).click();
@@ -459,7 +478,7 @@ test("private trips work across four identities, viewports, and rejection paths"
     endDate: "2027-03-07",
     countryStops: [{ code: "KR", query: "kr" }],
   });
-  await expect(page.getByText("3天", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /首爾週末，切換旅程/ })).toBeVisible();
 
   const invalidContext = await browser.newContext();
   const invalidPage = await invalidContext.newPage();

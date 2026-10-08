@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import {
   parseApiError,
@@ -12,6 +12,9 @@ import {
   type UserDto,
 } from "@along-the-way/contracts/private-trips";
 
+import { CalendarDays, ChevronsUpDown, MapPin, Route, Users } from "lucide-react";
+
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { countryStopLabel } from "./country-stop-label";
 import { CreateTripDialog } from "./CreateTripDialog";
 import { DiscoveryWorkspace } from "./DiscoveryWorkspace";
@@ -24,7 +27,18 @@ import { parseTripPlaceListResponse, type TripPlaceListResponse } from "@along-t
 import { TodayWorkspace } from "./TodayWorkspace";
 import { createTodayModel, tripClock } from "./today-model";
 import { TodaySnapshotStore, TODAY_SCHEMA_VERSION, type TodaySnapshot } from "./today-snapshot";
-import { readTripLocation, writeTripLocation, tripTabIds, type TripTab } from "./trip-location";
+import {
+  defaultSegment,
+  itinerarySegmentIds,
+  placesSegmentIds,
+  readTripLocation,
+  tripTabIds,
+  writeTripLocation,
+  type ItinerarySegment,
+  type PlacesSegment,
+  type TripSegment,
+  type TripTab,
+} from "./trip-location";
 import { ApiRequestError } from "./api-error";
 import { useTripLiveUpdates } from "./useTripLiveUpdates";
 import { TripHistory } from "./TripHistory";
@@ -194,16 +208,45 @@ function LoginPanel({
 }
 
 
-interface TripWorkspaceProps {
+interface TripMembersWorkspaceProps {
   trip: TripDto;
   currentUser: UserDto;
   onChanged: () => Promise<void>;
   request<T>(url: string, options?: RequestOptions): Promise<T>;
-  revision: number;
-  onTravelChanged(): Promise<void>;
 }
 
-function TripWorkspace({ trip, currentUser, onChanged, request, revision, onTravelChanged }: TripWorkspaceProps) {
+function TripFlightWorkspace({ trip, request, revision, onChanged }: {
+  trip: TripDto;
+  request<T>(url: string, options?: RequestOptions): Promise<T>;
+  revision: number;
+  onChanged(): Promise<void>;
+}) {
+  const { t } = useI18n();
+  return (
+    <section className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8">
+      <section aria-labelledby="trip-country-route">
+        <h3 id="trip-country-route" className="font-semibold">{t.app.countryRoute}</h3>
+        {trip.countryStops.length > 0 ? (
+          <ol className="mt-2 grid gap-2">
+            {trip.countryStops.map((stop) => (
+              <li key={stop.id} className="flex items-center justify-between gap-3 rounded-xl bg-surface-subtle px-4 py-3">
+                <span><strong className="mr-3">{stop.position + 1}.</strong>{countryStopLabel(stop.countryCode)}</span>
+                <small className="text-muted-foreground">{stop.timeZone ?? t.app.timeZoneNotInferred}</small>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="mt-2 rounded-xl bg-surface-subtle p-4 text-muted-foreground">{t.app.legacyTripNoCountryRoute}</p>
+        )}
+      </section>
+      <div className="mt-8">
+        <TravelWorkspace key={trip.id} trip={trip} type="flight" request={request} revision={revision} onChanged={onChanged} />
+      </div>
+    </section>
+  );
+}
+
+function TripMembersWorkspace({ trip, currentUser, onChanged, request }: TripMembersWorkspaceProps) {
   const { t } = useI18n();
   const [inviteEmail, setInviteEmail] = useState("");
   const [message, setMessage] = useState("");
@@ -262,30 +305,7 @@ function TripWorkspace({ trip, currentUser, onChanged, request, revision, onTrav
 
   return (
     <section className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8">
-      <section aria-labelledby="trip-country-route">
-        <h3 id="trip-country-route" className="font-semibold">{t.app.countryRoute}</h3>
-        {trip.countryStops.length > 0 ? (
-          <ol className="mt-2 grid gap-2">
-            {trip.countryStops.map((stop) => (
-              <li key={stop.id} className="flex items-center justify-between gap-3 rounded-xl bg-surface-subtle px-4 py-3">
-                <span><strong className="mr-3">{stop.position + 1}.</strong>{countryStopLabel(stop.countryCode)}</span>
-                <small className="text-muted-foreground">{stop.timeZone ?? t.app.timeZoneNotInferred}</small>
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <p className="mt-2 rounded-xl bg-surface-subtle p-4 text-muted-foreground">{t.app.legacyTripNoCountryRoute}</p>
-        )}
-      </section>
-      <div className="mt-5 grid grid-cols-2 gap-px overflow-hidden rounded-xl bg-ink/10 sm:max-w-sm">
-        <div className="bg-surface-subtle p-4"><strong className="block text-2xl">{trip.memberCount}</strong>{t.app.memberUnit}</div>
-        <div className="bg-surface-subtle p-4"><strong className="block text-2xl">{trip.dayCount}</strong>{t.app.dayUnit}</div>
-      </div>
-      <div className="mt-8">
-        <TravelWorkspace key={trip.id} trip={trip} type="flight" request={request} revision={revision} onChanged={onTravelChanged} />
-      </div>
-
-      <div className="mt-8 grid gap-6 lg:grid-cols-[1fr_0.9fr]">
+      <div className="grid gap-6 lg:grid-cols-[1fr_0.9fr]">
         <div>
           <h3 className="font-display text-2xl">{t.app.members}</h3>
           <ul className="mt-3 grid gap-3">
@@ -293,7 +313,7 @@ function TripWorkspace({ trip, currentUser, onChanged, request, revision, onTrav
               <li key={member.id} className="flex min-h-14 items-center justify-between gap-3 rounded-xl bg-surface-subtle px-4 py-3">
                 <span className="min-w-0 [overflow-wrap:anywhere]"><strong className="block">{member.displayName ?? member.email}</strong><small className="text-muted-foreground">{t.app.role(member.role)}{member.userId === currentUser.id ? `・${t.app.you}` : ""}</small></span>
                 {trip.role === "owner" && member.role === "editor" ? (
-                  <button className="min-h-10 rounded-lg border border-accent-strong px-3 text-sm font-bold text-accent-strong" onClick={() => void removeMember(member.userId)}>
+                  <button className="min-h-11 rounded-lg border border-accent-strong px-3 text-sm font-bold text-accent-strong outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={() => void removeMember(member.userId)}>
                     {t.app.remove}
                   </button>
                 ) : null}
@@ -307,9 +327,9 @@ function TripWorkspace({ trip, currentUser, onChanged, request, revision, onTrav
           <ul className="mt-3 grid gap-3">
             {trip.invites.filter((invite) => invite.status === "pending").map((invite) => (
               <li key={invite.id} className="flex min-h-14 items-center justify-between gap-3 rounded-xl bg-surface-subtle px-4 py-3">
-                <span>{invite.email}</span>
+                <span className="min-w-0 [overflow-wrap:anywhere]">{invite.email}</span>
                 {trip.role === "owner" ? (
-                  <button className="min-h-10 rounded-lg border px-3 text-sm font-bold" onClick={() => void revokeInvite(invite.id)}>{t.app.revoke}</button>
+                  <button className="min-h-11 rounded-lg border px-3 text-sm font-bold outline-none hover:bg-surface focus:ring-4 focus:ring-focus/30" onClick={() => void revokeInvite(invite.id)}>{t.app.revoke}</button>
                 ) : null}
               </li>
             ))}
@@ -319,15 +339,172 @@ function TripWorkspace({ trip, currentUser, onChanged, request, revision, onTrav
             <form className="mt-5 grid gap-3" onSubmit={inviteMember}>
               <label className="grid gap-1 font-semibold">
                 {t.app.inviteEditorByEmail}
-                <input className="min-h-11 rounded-lg border px-3" type="email" required value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} />
+                <input className="min-h-11 rounded-lg border px-3 outline-none focus:border-focus focus:ring-2 focus:ring-focus/30" type="email" required value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} />
               </label>
-              <button className="min-h-11 rounded-xl bg-ink-strong px-4 font-bold text-white">{t.app.sendInvitation}</button>
+              <button className="min-h-11 rounded-xl bg-ink-strong px-4 font-bold text-white outline-none hover:bg-ink focus:ring-4 focus:ring-focus/30">{t.app.sendInvitation}</button>
             </form>
           ) : null}
           {message ? <p className="mt-3" role="status">{message}</p> : null}
         </div>
       </div>
     </section>
+  );
+}
+
+function TripSwitcher({ trips, selectedTrip, signedInEmail, createTrip, selectTrip, signOut }: {
+  trips: TripSummaryDto[];
+  selectedTrip: TripDto | null;
+  signedInEmail: string;
+  createTrip(input: CreateTripInput): Promise<void>;
+  selectTrip(tripId: string): void;
+  signOut(): void;
+}) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger
+        className="flex min-h-11 w-full min-w-0 max-w-full items-center gap-2 overflow-hidden rounded-lg border border-ink/15 bg-surface px-3 text-left font-bold outline-none hover:border-ink/30 focus:ring-4 focus:ring-focus/30"
+        aria-label={t.app.switchTrip(selectedTrip?.name ?? t.app.chooseTrip)}
+      >
+        <span className="min-w-0 flex-1 truncate">{selectedTrip?.name ?? t.app.chooseTrip}</span>
+        <ChevronsUpDown aria-hidden="true" className="size-4 shrink-0" />
+      </DialogTrigger>
+      <DialogContent className="max-lg:bottom-0 max-lg:left-0 max-lg:top-auto max-lg:w-full max-lg:max-w-none max-lg:translate-x-0 max-lg:translate-y-0 max-lg:rounded-b-none lg:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{t.app.chooseTrip}</DialogTitle>
+          <DialogDescription>{t.app.trips}</DialogDescription>
+        </DialogHeader>
+        <p className="text-sm text-muted-foreground">{t.app.signedInAs(signedInEmail)}</p>
+        {selectedTrip ? (
+          <p className="rounded-lg bg-surface-subtle px-3 py-2 text-sm text-muted-foreground">
+            {selectedTrip.startDate} – {selectedTrip.endDate}
+            {selectedTrip.defaultCurrency ? t.app.defaultCurrency(selectedTrip.defaultCurrency) : t.app.noDefaultCurrency}
+          </p>
+        ) : null}
+        <div className="grid max-h-[60dvh] gap-2 overflow-y-auto">
+          {trips.map((trip) => (
+            <button
+              key={trip.id}
+              type="button"
+              className={`min-h-14 rounded-xl border px-4 py-3 text-left outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30 ${selectedTrip?.id === trip.id ? "border-accent-strong bg-surface-subtle" : "border-ink/10"}`}
+              aria-current={selectedTrip?.id === trip.id ? "page" : undefined}
+              onClick={() => {
+                setOpen(false);
+                selectTrip(trip.id);
+              }}
+            >
+              <strong className="block">{trip.name}</strong>
+              <small className="text-muted-foreground">{t.app.tripDatesAndMembers(trip.startDate, trip.endDate, trip.memberCount)}</small>
+            </button>
+          ))}
+          {trips.length === 0 ? <p className="rounded-xl bg-surface-subtle p-4 text-muted-foreground">{t.app.createFirstTrip}</p> : null}
+        </div>
+        <CreateTripDialog createTrip={async (input) => {
+          await createTrip(input);
+          setOpen(false);
+        }} />
+        <button type="button" className="min-h-11 w-full rounded-lg border px-4 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={signOut}>{t.app.signOut}</button>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function TripNavigation({ layout, activeTab, selectTab }: {
+  layout: "mobile" | "desktop";
+  activeTab: TripTab;
+  selectTab(tab: TripTab): void;
+}) {
+  const { t } = useI18n();
+  const destinations = [
+    { value: "today", label: t.app.tabs.today, Icon: CalendarDays },
+    { value: "itinerary", label: t.app.tabs.itinerary, Icon: Route },
+    { value: "places", label: t.app.tabs.places, Icon: MapPin },
+    { value: "members", label: t.app.tabs.members, Icon: Users },
+  ] as const;
+  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: TripTab) => {
+    const currentIndex = tripTabIds.indexOf(tab);
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (currentIndex + 1) % tripTabIds.length;
+    if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = (currentIndex - 1 + tripTabIds.length) % tripTabIds.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = tripTabIds.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const nextTab = tripTabIds[nextIndex]!;
+    selectTab(nextTab);
+    document.querySelector<HTMLElement>(`[data-trip-tab="${nextTab}"][data-layout="${layout}"]`)?.focus();
+  };
+  return (
+    <nav
+      aria-label={t.app.tripSections}
+      className={layout === "mobile"
+        ? "fixed inset-x-0 bottom-0 z-40 border-t border-ink/10 bg-surface/95 pb-[env(safe-area-inset-bottom)] shadow-feedback backdrop-blur-sm lg:hidden"
+        : "hidden lg:block"}
+    >
+      <div className={layout === "mobile" ? "grid grid-cols-4" : "grid gap-1"} role="tablist" aria-orientation={layout === "desktop" ? "vertical" : "horizontal"}>
+        {destinations.map(({ value, label, Icon }) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            data-trip-tab={value}
+            data-layout={layout}
+            aria-controls={`trip-panel-${value}`}
+            aria-selected={activeTab === value}
+            tabIndex={activeTab === value ? 0 : -1}
+            className={`flex min-h-14 items-center justify-center gap-1 rounded-lg px-2 py-2 font-bold outline-none focus:ring-4 focus:ring-inset focus:ring-focus/30 ${layout === "mobile" ? "flex-col text-xs" : "justify-start text-sm"} ${activeTab === value ? "bg-surface-subtle text-accent-strong" : "text-muted-foreground hover:bg-surface-subtle hover:text-ink"}`}
+            onClick={() => selectTab(value)}
+            onKeyDown={(event) => handleKeyDown(event, value)}
+          >
+            <Icon aria-hidden="true" className="size-5" />
+            <span>{label}</span>
+          </button>
+        ))}
+      </div>
+    </nav>
+  );
+}
+
+function SegmentControl<T extends string>({ label, id, items, active, onSelect }: {
+  label: string;
+  id: string;
+  items: readonly { value: T; label: string }[];
+  active: T;
+  onSelect(value: T): void;
+}) {
+  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>, value: T) => {
+    const currentIndex = items.findIndex((item) => item.value === value);
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % items.length;
+    if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + items.length) % items.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = items.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const next = items[nextIndex]!;
+    onSelect(next.value);
+    document.getElementById(`${id}-segment-${next.value}`)?.focus();
+  };
+  return (
+    <div className="mb-4 grid grid-flow-col auto-cols-fr rounded-xl bg-surface-subtle p-1 sm:max-w-md" role="tablist" aria-label={label}>
+      {items.map((item) => (
+        <button
+          key={item.value}
+          id={`${id}-segment-${item.value}`}
+          type="button"
+          role="tab"
+          aria-controls={`${id}-segment-panel-${item.value}`}
+          aria-selected={active === item.value}
+          tabIndex={active === item.value ? 0 : -1}
+          className={`min-h-11 rounded-lg px-3 font-bold outline-none focus:ring-4 focus:ring-focus/30 ${active === item.value ? "bg-surface text-accent-strong shadow-sm" : "text-muted-foreground hover:text-ink"}`}
+          onClick={() => onSelect(item.value)}
+          onKeyDown={(event) => handleKeyDown(event, item.value)}
+        >
+          {item.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -387,7 +564,11 @@ export function App() {
   const placesChanged = useCallback(() => {
     setPlacesRevision((revision) => revision + 1);
   }, []);
-  const [activeTripTab, setActiveTripTab] = useState<TripTab>(() => readTripLocation().tab ?? "overview");
+  const [activeTripTab, setActiveTripTab] = useState<TripTab>(() => readTripLocation().tab ?? "itinerary");
+  const [activeSegment, setActiveSegment] = useState<TripSegment | null>(() => {
+    const location = readTripLocation();
+    return location.segment ?? defaultSegment(location.tab ?? "itinerary");
+  });
 
 
 
@@ -427,11 +608,15 @@ export function App() {
     setTodaySnapshot(saved ?? { schemaVersion: TODAY_SCHEMA_VERSION, accountId: accountId.current, model, fetchedAt: new Date().toISOString() });
     const location = readTripLocation();
     const clock = tripClock(model, Date.now());
-    const tab = location.trip === tripId && location.tab ? location.tab : clock.today ? "today" : "overview";
+    const tab = location.trip === tripId && location.tab ? location.tab : clock.today ? "today" : "itinerary";
+    const segment = location.trip === tripId && location.tab
+      ? location.segment ?? defaultSegment(tab)
+      : defaultSegment(tab);
     const date = location.trip === tripId && model.days.some((day) => day.date === location.day) ? location.day : (clock.today ?? (clock.phase === "after" ? model.days.at(-1) : model.days[0]))?.date ?? null;
     setActiveTripTab(tab);
+    setActiveSegment(segment);
     setSelectedDate(date);
-    writeTripLocation(tripId, tab, date, true);
+    writeTripLocation(tripId, tab, segment, date, true);
     setSelectedTrip(response.trip);
     readOnly.current = false;
     setOffline(false);
@@ -453,8 +638,9 @@ export function App() {
     setSelectedTrip(null);
     setTrips([]);
     setActiveTripTab("today");
+    setActiveSegment(null);
     setSelectedDate(location.day);
-    writeTripLocation(snapshot.model.tripId, "today", location.day, true);
+    writeTripLocation(snapshot.model.tripId, "today", null, location.day, true);
     return true;
   }, [store]);
 
@@ -489,14 +675,23 @@ export function App() {
   }, [loadTrip, refreshTrips, request, restoreSnapshot, store, t.today.unavailable]);
 
   const selectTab = useCallback((tab: TripTab) => {
+    const segment = defaultSegment(tab);
     setActiveTripTab(tab);
+    setActiveSegment(segment);
     const location = readTripLocation();
-    if (location.trip) writeTripLocation(location.trip, tab, location.day);
+    if (location.trip) writeTripLocation(location.trip, tab, segment, location.day);
+  }, []);
+  const selectSegment = useCallback((tab: TripTab, segment: TripSegment) => {
+    setActiveTripTab(tab);
+    setActiveSegment(segment);
+    const location = readTripLocation();
+    if (location.trip) writeTripLocation(location.trip, tab, segment, location.day);
   }, []);
   const selectDay = useCallback((date: string, replace = false) => {
     setSelectedDate(date);
     const location = readTripLocation();
-    if (location.trip) writeTripLocation(location.trip, location.tab ?? "today", date, replace);
+    const tab = location.tab ?? "today";
+    if (location.trip) writeTripLocation(location.trip, tab, location.segment ?? defaultSegment(tab), date, replace);
   }, []);
 
   useEffect(() => {
@@ -514,7 +709,9 @@ export function App() {
     };
     const navigate = () => {
       const location = readTripLocation();
-      setActiveTripTab(location.tab ?? "overview");
+      const tab = location.tab ?? "itinerary";
+      setActiveTripTab(tab);
+      setActiveSegment(location.segment ?? defaultSegment(tab));
       setSelectedDate(location.day);
       if (readOnly.current) restoreSnapshot();
       else if (location.trip) void loadTrip(location.trip).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : t.today.unavailable));
@@ -694,7 +891,7 @@ export function App() {
       {error ? <p className="mb-4" role="alert">{error}</p> : null}
       {todaySnapshot ? <>
         <nav aria-label={t.today.savedTrips} className="mb-4 flex flex-wrap gap-2">{store?.forAccount(todaySnapshot.accountId).map((snapshot) => <button className="min-h-11 rounded-lg border px-3" key={snapshot.model.tripId} onClick={() => {
-          writeTripLocation(snapshot.model.tripId, "today", null); restoreSnapshot();
+          writeTripLocation(snapshot.model.tripId, "today", null, null); restoreSnapshot();
         }}>{snapshot.model.tripName}</button>)}</nav>
         <TodayWorkspace model={todaySnapshot.model} fetchedAt={todaySnapshot.fetchedAt} selectedDate={selectedDate} onDayChanged={selectDay} offline retry={() => void reconnect()} retrying={retrying} />
       </> : <section><p role="status">{t.today.noSnapshot}</p><button className="mt-4 min-h-11 rounded-lg border px-4" onClick={() => void reconnect()} disabled={retrying}>{t.today.retry}</button></section>}
@@ -714,184 +911,164 @@ export function App() {
   }
 
   const inviteToken = tokenParameter("inviteToken");
-  const tripTabs = [
-    { value: "today", label: t.today.title },
-    { value: "overview", label: t.app.tabs.overview },
-    { value: "discovery", label: t.app.tabs.discovery },
-    { value: "wishlist", label: t.app.tabs.wishlist },
-    { value: "lodging", label: t.app.tabs.lodging },
-    { value: "itinerary", label: t.app.tabs.itinerary },
-    { value: "recent", label: t.app.tabs.recent },
+  const itinerarySegment = itinerarySegmentIds.includes(activeSegment as ItinerarySegment)
+    ? activeSegment as ItinerarySegment
+    : "daily";
+  const placesSegment = placesSegmentIds.includes(activeSegment as PlacesSegment)
+    ? activeSegment as PlacesSegment
+    : "wishlist";
+  const itinerarySegments = [
+    { value: "daily", label: t.app.itinerarySegments.daily },
+    { value: "flight", label: t.app.itinerarySegments.flight },
+    { value: "lodging", label: t.app.itinerarySegments.lodging },
   ] as const;
-
+  const placeSegments = [
+    { value: "wishlist", label: t.app.placesSegments.wishlist },
+    { value: "discovery", label: t.app.placesSegments.discovery },
+  ] as const;
+  const selectTrip = (tripId: string) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("trip", tripId);
+    url.searchParams.delete("tab");
+    url.searchParams.delete("segment");
+    url.searchParams.delete("day");
+    window.history.pushState({}, "", url);
+    void loadTrip(tripId).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : t.today.unavailable));
+  };
 
   return (
-    <main className="mx-auto min-h-screen w-[min(100%-1.25rem,96rem)] py-5 sm:py-8">
-      <header className="flex flex-wrap items-center justify-between gap-4 rounded-panel bg-surface/90 px-5 py-4 shadow-feedback">
-        <div><p className="text-xs font-bold tracking-[0.14em] text-accent-strong">ALONG THE WAY</p><p className="text-sm text-muted-foreground">{t.app.signedInAs(user.email)}</p></div>
-        <button className="min-h-10 rounded-lg border px-4 font-bold" onClick={() => void logout()}>{t.app.signOut}</button>
+    <main className="min-h-screen w-full min-w-0 max-w-full overflow-x-clip pb-[calc(4rem+env(safe-area-inset-bottom))] lg:pb-8">
+      <header className="sticky top-0 z-40 border-b border-ink/10 bg-paper/95 px-3 py-2 backdrop-blur-sm lg:hidden">
+        <div className="mx-auto flex max-w-[96rem] items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <TripSwitcher trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} createTrip={createTrip} selectTrip={selectTrip} signOut={() => void logout()} />
+          </div>
+          {liveConnected ? (
+            <span className="flex size-6 shrink-0 items-center justify-center" title={t.collaboration.live}>
+              <span aria-hidden="true" className="size-2 rounded-full bg-accent-strong" />
+              <span className="sr-only">{t.collaboration.live}</span>
+            </span>
+          ) : null}
+        </div>
       </header>
 
-      {inviteToken ? (
-        <section className="my-5 flex flex-wrap items-center justify-between gap-3 rounded-panel bg-ink-strong p-5 text-on-dark">
-          <div><strong className="block text-lg">{t.app.tripInvitation}</strong><span>{t.app.acceptWithSignedInEmail}</span></div>
-          <button className="min-h-11 rounded-xl bg-accent px-5 font-bold" disabled={accepting} onClick={() => void acceptInvitation()}>{accepting ? t.app.accepting : t.app.acceptInvitation}</button>
-        </section>
-      ) : null}
-      {error ? <p className="my-4 rounded-xl bg-surface p-4 text-accent-strong" role="alert">{error}</p> : null}
-
-      <div className="my-6 grid gap-5 lg:grid-cols-[17rem_1fr]">
-        <aside className="grid content-start gap-4">
-          <CreateTripDialog createTrip={createTrip} />
-          <nav aria-label={t.app.trips} className="grid gap-2">
-            {trips.map((trip) => (
-              <button key={trip.id} className={`min-h-14 rounded-xl border px-4 py-3 text-left outline-none focus:ring-4 focus:ring-focus/30 ${selectedTrip?.id === trip.id ? "border-accent-strong bg-surface" : "border-ink/10 bg-surface/70"}`} onClick={() => {
-                writeTripLocation(trip.id, "overview", null);
-                const url = new URL(window.location.href); url.searchParams.delete("tab"); window.history.replaceState({}, "", url);
-                void loadTrip(trip.id).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : t.today.unavailable));
-              }}>
-                <strong className="block">{trip.name}</strong><small className="text-muted-foreground">{t.app.tripSummary(trip.memberCount, trip.dayCount)}</small>
-              </button>
-            ))}
-            {trips.length === 0 ? <p className="rounded-xl bg-surface/70 p-4 text-muted-foreground">{t.app.createFirstTrip}</p> : null}
-          </nav>
-        </aside>
-        {selectedTrip ? (
-          <div className="grid min-w-0 gap-5">
-            <p aria-live="polite" className="text-sm text-muted-foreground">{liveConnected ? t.collaboration.live : t.collaboration.reconnecting}</p>
-            <section
-              className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8"
-              aria-labelledby="trip-title-heading"
-            >
-              <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">
-                {t.app.tripVersion(t.app.role(selectedTrip.role), selectedTrip.version)}
-              </p>
-              <h2 id="trip-title-heading" className="mt-2 font-display text-3xl text-ink-strong sm:text-4xl">
-                {selectedTrip.name}
-              </h2>
-              <p className="mt-2 text-muted-foreground">
-                {selectedTrip.startDate} – {selectedTrip.endDate}
-                {selectedTrip.defaultCurrency
-                  ? t.app.defaultCurrency(selectedTrip.defaultCurrency)
-                  : t.app.noDefaultCurrency}
-              </p>
-            </section>
-
-            <nav className="sticky top-0 z-40 bg-paper py-2" aria-label={t.app.tripSections}>
-              <div className="flex min-w-0 flex-wrap gap-2" role="tablist">
-                {tripTabs.map((tab) => (
-                  <button
-                    key={tab.value}
-                    id={`trip-tab-${tab.value}`}
-                    type="button"
-                    className={`min-h-11 shrink-0 whitespace-nowrap rounded-xl border px-4 font-bold outline-none focus:ring-4 focus:ring-focus/30 ${
-                      activeTripTab === tab.value
-                        ? "border-accent-strong bg-surface text-accent-strong"
-                        : "border-ink/15 bg-surface-subtle"
-                    }`}
-                    role="tab"
-                    aria-controls={`trip-panel-${tab.value}`}
-                    aria-selected={activeTripTab === tab.value}
-                    tabIndex={activeTripTab === tab.value ? 0 : -1}
-                    onClick={() => selectTab(tab.value)}
-                    onKeyDown={(event) => {
-                      const currentIndex = tripTabIds.indexOf(tab.value);
-                      let nextIndex: number | null = null;
-                      if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % tripTabIds.length;
-                      if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + tripTabIds.length) % tripTabIds.length;
-                      if (event.key === "Home") nextIndex = 0;
-                      if (event.key === "End") nextIndex = tripTabIds.length - 1;
-                      if (nextIndex === null) return;
-                      event.preventDefault();
-                      const nextTab = tripTabIds[nextIndex]!;
-                      selectTab(nextTab);
-                      document.getElementById(`trip-tab-${nextTab}`)?.focus();
-                    }}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
-            </nav>
-
-            <div id="trip-panel-today" role="tabpanel" aria-labelledby="trip-tab-today" hidden={activeTripTab !== "today"}>
-              {todaySnapshot ? <TodayWorkspace key={todaySnapshot.model.tripId} model={todaySnapshot.model} fetchedAt={todaySnapshot.fetchedAt} selectedDate={selectedDate} onDayChanged={selectDay} retry={() => void reconnect()} retrying={retrying} persisted={persisted} /> : <p role="status">{t.today.unavailable}</p>}
-            </div>
-            <div
-              id="trip-panel-overview"
-              role="tabpanel"
-              aria-labelledby="trip-tab-overview"
-              hidden={activeTripTab !== "overview"}
-            >
-              <TripWorkspace trip={selectedTrip} currentUser={user} onChanged={() => loadTrip(selectedTrip.id)}
-                request={request} revision={workspaceRevision} onTravelChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }} />
-            </div>
-            <div
-              id="trip-panel-discovery"
-              role="tabpanel"
-              aria-labelledby="trip-tab-discovery"
-              hidden={activeTripTab !== "discovery"}
-            >
-              <DiscoveryWorkspace
-                key={selectedTrip.id}
-                trip={selectedTrip}
-                request={request}
-                placesRevision={workspaceRevision}
-                onPlacesChanged={placesChanged}
-              />
-            </div>
-            <div
-              id="trip-panel-wishlist"
-              role="tabpanel"
-              aria-labelledby="trip-tab-wishlist"
-              hidden={activeTripTab !== "wishlist"}
-            >
-              <TripPlaceWorkspace
-                key={selectedTrip.id}
-                trip={selectedTrip}
-                request={request}
-                placesRevision={workspaceRevision}
-                onPlacesChanged={placesChanged}
-              />
-            </div>
-            <div id="trip-panel-lodging" role="tabpanel" aria-labelledby="trip-tab-lodging" hidden={activeTripTab !== "lodging"}
-              className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8">
-              <TravelWorkspace key={selectedTrip.id} trip={selectedTrip} type="lodging" request={request} revision={workspaceRevision}
-                onChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }} />
-            </div>
-            <div
-              id="trip-panel-itinerary"
-              role="tabpanel"
-              aria-labelledby="trip-tab-itinerary"
-              hidden={activeTripTab !== "itinerary"}
-            >
-              <TripSkeletonWorkspace
-                key={selectedTrip.id}
-                trip={selectedTrip}
-                request={request}
-                onTripChanged={() => loadTrip(selectedTrip.id)}
-                placesRevision={workspaceRevision}
-                onPlacesChanged={placesChanged}
-                onTravelEdit={(type) => {
-                  const tab = type === "flight" ? "overview" : "lodging";
-                  selectTab(tab);
-                  document.getElementById(`trip-tab-${tab}`)?.focus();
-                }}
-              />
-            </div>
-            <div
-              id="trip-panel-recent"
-              role="tabpanel"
-              aria-labelledby="trip-tab-recent"
-              hidden={activeTripTab !== "recent"}
-            >
-              <TripHistory key={selectedTrip.id} tripId={selectedTrip.id} revision={workspaceRevision} request={request} />
-            </div>
+      <div className="mx-auto grid w-[min(100%-1.25rem,96rem)] min-w-0 gap-5 py-4 lg:grid-cols-[17rem_minmax(0,1fr)] lg:py-8">
+        <aside className="sticky top-8 hidden max-h-[calc(100dvh-4rem)] content-start gap-4 overflow-y-auto rounded-panel bg-surface/70 p-4 lg:grid">
+          <TripSwitcher trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} createTrip={createTrip} selectTrip={selectTrip} signOut={() => void logout()} />
+          <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} />
+          <div className="mt-2 border-t border-ink/10 pt-4">
+            {liveConnected ? (
+              <span className="mb-2 flex items-center gap-2 text-xs text-muted-foreground" title={t.collaboration.live}>
+                <span aria-hidden="true" className="size-2 rounded-full bg-accent-strong" />
+                {t.collaboration.live}
+              </span>
+            ) : null}
+            <p className="truncate text-sm text-muted-foreground" title={user.email}>{t.app.signedInAs(user.email)}</p>
+            <button className="mt-2 min-h-11 w-full rounded-lg border px-4 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={() => void logout()}>{t.app.signOut}</button>
           </div>
-        ) : (
-          <section className="grid min-h-72 place-items-center rounded-card border border-dashed border-ink/20 bg-surface/50 p-8 text-center text-muted-foreground">{t.app.chooseOrCreateTrip}</section>
-        )}
+        </aside>
+
+        <div className="grid min-w-0 content-start gap-4">
+          {inviteToken ? (
+            <section className="flex flex-wrap items-center justify-between gap-3 rounded-panel bg-ink-strong p-5 text-on-dark">
+              <div><strong className="block text-lg">{t.app.tripInvitation}</strong><span>{t.app.acceptWithSignedInEmail}</span></div>
+              <button className="min-h-11 rounded-xl bg-accent px-5 font-bold outline-none focus:ring-4 focus:ring-focus/40 disabled:opacity-60" disabled={accepting} onClick={() => void acceptInvitation()}>{accepting ? t.app.accepting : t.app.acceptInvitation}</button>
+            </section>
+          ) : null}
+          {error ? <p className="rounded-xl bg-surface p-4 text-accent-strong" role="alert">{error}</p> : null}
+
+          {selectedTrip ? (
+            <>
+              <section className="hidden rounded-card border border-ink/10 bg-surface p-6 shadow-card lg:block" aria-labelledby="trip-title-heading">
+                <h1 id="trip-title-heading" className="font-display text-3xl text-ink-strong">{selectedTrip.name}</h1>
+                <p className="mt-2 text-muted-foreground">
+                  {selectedTrip.startDate} – {selectedTrip.endDate}
+                  {selectedTrip.defaultCurrency ? t.app.defaultCurrency(selectedTrip.defaultCurrency) : t.app.noDefaultCurrency}
+                  {`・${t.app.tripVersion(t.app.role(selectedTrip.role), selectedTrip.version)}`}
+                </p>
+              </section>
+              {!liveConnected ? <p aria-live="polite" role="status" className="rounded-xl border border-ink/10 bg-surface-subtle p-3 text-sm text-muted-foreground">{t.collaboration.reconnecting}</p> : null}
+
+              <div id="trip-panel-today" role="tabpanel" aria-label={t.app.tabs.today} hidden={activeTripTab !== "today"}>
+                {todaySnapshot ? <TodayWorkspace key={todaySnapshot.model.tripId} model={todaySnapshot.model} fetchedAt={todaySnapshot.fetchedAt} selectedDate={selectedDate} onDayChanged={selectDay} retry={() => void reconnect()} retrying={retrying} persisted={persisted} /> : <p role="status">{t.today.unavailable}</p>}
+              </div>
+
+              <div id="trip-panel-itinerary" role="tabpanel" aria-label={t.app.tabs.itinerary} hidden={activeTripTab !== "itinerary"}>
+                <SegmentControl
+                  label={t.app.itinerarySectionPicker}
+                  id="itinerary"
+                  items={itinerarySegments}
+                  active={itinerarySegment}
+                  onSelect={(segment) => selectSegment("itinerary", segment)}
+                />
+                <div id="itinerary-segment-panel-daily" role="tabpanel" aria-labelledby="itinerary-segment-daily" hidden={itinerarySegment !== "daily"}>
+                  <TripSkeletonWorkspace
+                    key={selectedTrip.id}
+                    trip={selectedTrip}
+                    request={request}
+                    onTripChanged={() => loadTrip(selectedTrip.id)}
+                    placesRevision={workspaceRevision}
+                    onPlacesChanged={placesChanged}
+                    onTravelEdit={(type) => {
+                      const segment: ItinerarySegment = type === "flight" ? "flight" : "lodging";
+                      selectSegment("itinerary", segment);
+                      window.requestAnimationFrame(() => document.getElementById(`itinerary-segment-${segment}`)?.focus());
+                    }}
+                  />
+                </div>
+                <div id="itinerary-segment-panel-flight" role="tabpanel" aria-labelledby="itinerary-segment-flight" hidden={itinerarySegment !== "flight"}>
+                  <TripFlightWorkspace
+                    trip={selectedTrip}
+                    request={request}
+                    revision={workspaceRevision}
+                    onChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }}
+                  />
+                </div>
+                <div id="itinerary-segment-panel-lodging" role="tabpanel" aria-labelledby="itinerary-segment-lodging" hidden={itinerarySegment !== "lodging"} className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8">
+                  <TravelWorkspace key={selectedTrip.id} trip={selectedTrip} type="lodging" request={request} revision={workspaceRevision}
+                    onChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }} />
+                </div>
+              </div>
+
+              <div id="trip-panel-places" role="tabpanel" aria-label={t.app.tabs.places} hidden={activeTripTab !== "places"}>
+                <SegmentControl
+                  label={t.app.placesSectionPicker}
+                  id="places"
+                  items={placeSegments}
+                  active={placesSegment}
+                  onSelect={(segment) => selectSegment("places", segment)}
+                />
+                <div id="places-segment-panel-wishlist" role="tabpanel" aria-labelledby="places-segment-wishlist" hidden={placesSegment !== "wishlist"}>
+                  <TripPlaceWorkspace
+                    key={selectedTrip.id}
+                    trip={selectedTrip}
+                    request={request}
+                    placesRevision={workspaceRevision}
+                    onPlacesChanged={placesChanged}
+                  />
+                </div>
+                <div id="places-segment-panel-discovery" role="tabpanel" aria-labelledby="places-segment-discovery" hidden={placesSegment !== "discovery"}>
+                  <DiscoveryWorkspace
+                    key={selectedTrip.id}
+                    trip={selectedTrip}
+                    request={request}
+                    placesRevision={workspaceRevision}
+                    onPlacesChanged={placesChanged}
+                  />
+                </div>
+              </div>
+
+              <div id="trip-panel-members" role="tabpanel" aria-label={t.app.tabs.members} hidden={activeTripTab !== "members"} className="grid gap-5">
+                <TripMembersWorkspace trip={selectedTrip} currentUser={user} onChanged={() => loadTrip(selectedTrip.id)} request={request} />
+                <TripHistory key={selectedTrip.id} tripId={selectedTrip.id} revision={workspaceRevision} active={activeTripTab === "members"} request={request} />
+              </div>
+            </>
+          ) : (
+            <section className="grid min-h-72 place-items-center rounded-card border border-dashed border-ink/20 bg-surface/50 p-8 text-center text-muted-foreground">{t.app.chooseOrCreateTrip}</section>
+          )}
+        </div>
       </div>
+      {selectedTrip ? <TripNavigation layout="mobile" activeTab={activeTripTab} selectTab={selectTab} /> : null}
     </main>
   );
 }

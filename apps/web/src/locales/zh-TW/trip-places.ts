@@ -31,7 +31,6 @@ export const tripPlaces = {
     editsPreserved: (message: string) => `${message} 你的編輯內容仍保留在表單中。`,
   },
   add: {
-    eyebrow: "共享想去清單",
     title: "新增地點",
     close: "關閉",
     methodLabel: "地點新增方式",
@@ -72,7 +71,6 @@ export const tripPlaces = {
     save: "儲存規劃資訊",
   },
   workspace: {
-    eyebrow: "一起規劃",
     title: "共享地點想去清單",
     description: "收集連結、搜尋結果和私人地點。兩位以上成員可各投一票，票數高的地點排在前面。",
     addPlace: "新增想去地點",
@@ -84,7 +82,6 @@ export const tripPlaces = {
       type: "類型",
       planned: "排在",
       votes: "票數",
-      more: "更多",
     },
     providerFacts: "服務提供者資料",
     memberFactsWithGoogle: "成員提供的資料・保留 Google Maps 識別資訊以供配對",
@@ -102,6 +99,10 @@ export const tripPlaces = {
     remove: "從想去清單移除",
     confirmRemove: (name: string) => `確定要把「${name}」移出想去清單嗎？票和天數安排會一起清除。`,
     openOriginalSource: "開啟原始來源",
+    viewDetail: (name: string) => `查看 ${name} 的詳情`,
+    detailTitle: (name: string) => `${name} 的詳情`,
+    detailEmpty: "選擇一個地點查看詳情。",
+    closeDetail: "關閉地點詳情",
   },
   duplicates: {
     comparisonLabel: "可能重複的地點比較",
@@ -117,5 +118,9 @@ export const tripPlaces = {
     unavailable: "這個選項已無法使用。",
     merge: "合併",
     keepSeparate: "保持分開",
+    confirmTitle: (source: string, target: string) => `確認合併「${source}」與「${target}」？`,
+    confirmDescription: "合併後只會保留一個地點；備註、投票、來源和排入的日期會合在一起。這個動作無法復原。",
+    confirm: "確定合併",
+    cancel: "取消",
   },
 };

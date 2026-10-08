@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Bot, Check, ExternalLink, Images, RefreshCw, Search, X } from "lucide-react";
+import { Check, ExternalLink, Images, Search, X } from "lucide-react";
 
 import {
   parseDiscoveryWorkspaceResponse,
@@ -17,6 +17,14 @@ import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
 import { VoteControl, VoteVoters } from "./VoteControl";
 import { ConflictPanel, useVersionConflict } from "./ConflictPanel";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
 
@@ -49,6 +57,19 @@ function errorMessage(error: unknown, fallback: string) {
 function shouldStartFreshRequest(error: unknown) {
   if (typeof error !== "object" || error === null || !("code" in error)) return false;
   return error.code === "model_unavailable" || error.code === "provider_unavailable";
+}
+
+function useLargeScreen() {
+  const [large, setLarge] = useState(() => typeof window.matchMedia === "function" && window.matchMedia("(min-width: 1024px)").matches);
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(min-width: 1024px)");
+    const changed = () => setLarge(query.matches);
+    changed();
+    query.addEventListener("change", changed);
+    return () => query.removeEventListener("change", changed);
+  }, []);
+  return large;
 }
 
 // Where an outcome is reported: next to the control that caused it, or at the top.
@@ -156,16 +177,14 @@ function ClaimSentenceList({
   sentences,
   numberedEvidence,
   t,
-  startAt = 0,
 }: {
   sentences: DiscoveryClaimSentenceDto[];
   numberedEvidence: NumberedEvidence;
   t: Messages["discovery"];
-  startAt?: number;
 }) {
   return (
     <ul className="grid list-disc gap-2 pl-5 text-sm">
-      {sentences.map((sentence, sentenceIndex) => sentenceIndex < startAt ? null : (
+      {sentences.map((sentence, sentenceIndex) => (
         <li key={`${sentenceIndex}:${sentence.text}`}>
           <ClaimSentence sentence={sentence} numberedEvidence={numberedEvidence} t={t} />
         </li>
@@ -208,7 +227,25 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ area: NoticeArea; text: string } | null>(null);
-  const [expandedProposals, setExpandedProposals] = useState<Record<string, boolean>>({});
+  const largeScreen = useLargeScreen();
+  const [selectedProposalId, setSelectedProposalId] = useState<string | null>(null);
+  const detailTitleRef = useRef<HTMLHeadingElement>(null);
+  const [rejectConfirmation, setRejectConfirmation] = useState<CandidateProposalDto | null>(null);
+  const [researchSettingsOpen, setResearchSettingsOpen] = useState(true);
+  useEffect(() => {
+    if (!selectedProposalId) return;
+    const frame = window.requestAnimationFrame(() => detailTitleRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [largeScreen, selectedProposalId]);
+
+  function openProposalDetail(proposalId: string) {
+    if (proposalId === selectedProposalId) {
+      window.requestAnimationFrame(() => detailTitleRef.current?.focus());
+      return;
+    }
+    setSelectedProposalId(proposalId);
+  }
+
   const retryKeys = useRef<RetryKeys>(new Map());
   const briefBase = useRef<DiscoveryWorkspaceDto["brief"]>(null);
   const answersBase = useRef<DiscoveryWorkspaceDto["brief"]>(null);
@@ -216,6 +253,19 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const conflictLatest = useRef<DiscoveryWorkspaceDto | null>(null);
   const resolution = useVersionConflict<Record<string, unknown>>();
   const conflictAction = useRef<{ operation: string; path: string; payload: Record<string, unknown>; area: NoticeArea; after?: () => void; method?: "POST" | "PUT" } | null>(null);
+  useEffect(() => {
+    setResearchSettingsOpen(!workspace?.latestRun);
+  }, [workspace?.latestRun?.generatedAt]);
+
+  function closeProposalDetail() {
+    const proposalId = selectedProposalId;
+    setSelectedProposalId(null);
+    if (proposalId) {
+      window.requestAnimationFrame(() => {
+        document.querySelector<HTMLElement>(`[data-proposal-detail-trigger="${proposalId}"]`)?.focus();
+      });
+    }
+  }
   const researchLabel = (idle: string) =>
     pending === "save-brief" || pending === "save-questions"
       ? t.progress.saving
@@ -373,7 +423,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   }
 
   async function decideProposal(proposal: CandidateProposalDto, decision: "accept" | "reject") {
-    await mutate(
+    return mutate(
       `${decision}:${proposal.id}`,
       `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/${decision}`,
       { expectedVersion: proposal.version },
@@ -430,15 +480,15 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   function proposalActions(proposal: CandidateProposalDto) {
     if (proposal.status === "pending") {
       return (
-        <div className="flex flex-wrap gap-2 xl:flex-nowrap">
-          <button className="flex min-h-11 items-center gap-2 whitespace-nowrap rounded-lg bg-accent px-3 font-bold text-ink-strong" disabled={pending !== null} onClick={() => void decideProposal(proposal, "accept")}><Check aria-hidden="true" className="size-4" />{t.proposal.accept}</button>
-          <button className="flex min-h-11 items-center gap-2 whitespace-nowrap rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideProposal(proposal, "reject")}><X aria-hidden="true" className="size-4" />{t.proposal.decline}</button>
+        <div className="flex flex-wrap gap-2 2xl:flex-nowrap">
+          <button className="flex min-h-11 items-center gap-2 whitespace-nowrap rounded-lg bg-accent px-3 font-bold text-ink-strong outline-none hover:bg-accent/80 focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={pending !== null} onClick={() => void decideProposal(proposal, "accept")}><Check aria-hidden="true" className="size-4" />{t.proposal.accept}</button>
+          <button className="flex min-h-11 items-center gap-2 whitespace-nowrap rounded-lg border px-3 font-bold outline-none hover:bg-surface focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={pending !== null} onClick={() => setRejectConfirmation(proposal)}><X aria-hidden="true" className="size-4" />{t.proposal.decline}</button>
         </div>
       );
     }
     if (proposal.status === "accepted") {
       return (
-        <div className="flex flex-wrap items-center gap-2 xl:flex-nowrap">
+        <div className="flex flex-wrap items-center gap-2 2xl:flex-nowrap">
           <span className="whitespace-nowrap font-bold">{t.status.accepted}</span>
           {proposal.acceptedTripPlaceId ? <button className="min-h-11 whitespace-nowrap rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void removeAcceptedProposal(proposal)}>{tripPlacesT.workspace.remove}</button> : null}
         </div>
@@ -520,16 +570,83 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const showProposalVotes = workspace?.proposals.some(
     (proposal) => proposal.status === "pending" && proposal.votingAvailable,
   ) ?? false;
+  const selectedProposal = workspace?.proposals.find((proposal) => proposal.id === selectedProposalId) ?? null;
+  const showTableColumns = selectedProposal === null;
+  const proposalNameCounts = new Map<string, number>();
+  for (const proposal of workspace?.proposals ?? []) {
+    proposalNameCounts.set(proposal.name, (proposalNameCounts.get(proposal.name) ?? 0) + 1);
+  }
 
+  function proposalDetail(proposal: CandidateProposalDto) {
+    const numberedEvidence = new Map(
+      proposal.evidence.map((item, index) => [item.id, { item, number: index + 1 }] as const),
+    );
+    const hasTradeoffs = proposal.tradeoffSentences !== null
+      ? proposal.tradeoffSentences.length > 0
+      : proposal.tradeoffs.length > 0;
+    return (
+      <div className="grid gap-4">
+        <p className="text-sm text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</p>
+        {proposal.endorsements.length ? <div aria-label={t.proposal.recommendedByFor(proposal.name)}><strong>{t.proposal.recommendedBy}</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabel(endorsement, t)}</li>)}</ul></div> : null}
+        {proposal.recommendationSentences === null ? <p>{proposal.recommendation}</p> : null}
+        {proposal.recommendationSentences && proposal.recommendationSentences.length > 0
+          ? <ClaimSentenceList sentences={proposal.recommendationSentences} numberedEvidence={numberedEvidence} t={t} />
+          : null}
+        {proposal.status === "pending" && proposal.votingAvailable ? (
+          <>
+            <VoteControl compact name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} />
+            <VoteVoters voters={proposal.voters} />
+          </>
+        ) : null}
+        {proposalActions(proposal)}
+        <a className="inline-flex min-h-11 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" href={googleMapsPlaceUrl(proposal.name, proposal.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.proposal.viewPhotos}</a>
+        {proposal.matchedNeeds.length || hasTradeoffs || proposal.unknowns.length ? (
+          <div className="grid gap-3 sm:grid-cols-3">
+            {proposal.matchedNeeds.length ? <div><strong>{t.proposal.matches}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.matchedNeeds.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
+            {hasTradeoffs ? (
+              <div>
+                <strong>{t.proposal.tradeoffs}</strong>
+                {proposal.tradeoffSentences !== null
+                  ? <ClaimSentenceList sentences={proposal.tradeoffSentences} numberedEvidence={numberedEvidence} t={t} />
+                  : <ul className="mt-1 list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul>}
+              </div>
+            ) : null}
+            {proposal.unknowns.length ? <div><strong>{t.proposal.unknowns}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.unknowns.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
+          </div>
+        ) : null}
+        <div>
+          <strong>{t.proposal.evidence}</strong>
+          <ul className="mt-1 grid gap-1">
+            {proposal.evidence.map((item, evidenceIndex) => {
+              const number = evidenceIndex + 1;
+              return (
+                <li key={item.id}>
+                  <a
+                    className="inline-flex items-center gap-1 break-all font-bold text-accent-strong underline underline-offset-2"
+                    href={item.sourceUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label={t.proposal.citationLabel(number, item.title)}
+                  >
+                    [{number}] {item.title}<ExternalLink aria-hidden="true" className="size-3" />
+                  </a>
+                  <span className="ml-2 text-xs text-muted-foreground">{item.attribution}・{t.proposal.observedAt(new Date(item.observedAt).toLocaleString(locale))}</span>
+                  {item.isStale ? <span className="ml-2 text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span> : null}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      </div>
+    );
+  }
   return (
     <section className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8" aria-labelledby="ai-discovery-heading">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.14em] text-accent-strong"><Bot aria-hidden="true" className="size-4" />{t.header.eyebrow}</p>
           <h2 id="ai-discovery-heading" className="font-display text-3xl text-ink-strong sm:text-4xl">{t.header.title}</h2>
           <p className="mt-2 max-w-3xl text-muted-foreground">{t.header.description}</p>
         </div>
-        {workspace?.latestRun ? <button className="flex min-h-11 items-center gap-2 rounded-xl border px-4 font-bold" disabled={pending !== null || Boolean(resolution.conflict)} onClick={() => void research("again")}><RefreshCw aria-hidden="true" className="size-4" />{researchLabel(t.header.researchAgain)}</button> : null}
       </div>
       {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={pending !== null}
         onAccept={() => {
@@ -564,35 +681,8 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
 
       {!loading ? (
         <div hidden={Boolean(resolution.conflict)} className="mt-6 grid gap-5">
-          <section className="rounded-panel bg-surface-subtle p-4 sm:p-5" aria-label={t.brief.areaLabel}>
-            <label className="grid gap-2 font-bold">{t.brief.prompt}
-              <textarea
-                className="min-h-32 rounded-xl border bg-surface p-3 font-normal"
-                value={briefDraft}
-                onChange={(event) => setBriefDraft(event.target.value)}
-                placeholder={t.brief.placeholder}
-              />
-            </label>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button className="flex min-h-11 items-center gap-2 rounded-xl bg-accent px-4 font-bold text-ink-strong" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research("find")}><Search aria-hidden="true" className="size-4" />{researchLabel(t.brief.findCandidates)}</button>
-            </div>
-            {notice?.area === "find" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
-            {!workspace?.modelAvailable ? <p className="mt-3 text-sm text-muted-foreground">{t.brief.modelUnavailable}</p> : null}
-            {!workspace?.placeProviderAvailable ? <p className="mt-2 text-sm text-muted-foreground">{t.brief.placesUnavailable}</p> : null}
-          </section>
-
-          {workspace?.brief?.structured ? (
-            <section className="rounded-panel border border-ink/10 p-4" aria-label={t.brief.interpretationLabel}>
-              <h3 className="font-display text-2xl">{t.brief.understood}</h3>
-              <dl className="mt-3 grid gap-3 sm:grid-cols-2">
-                <div><dt className="font-bold">{t.brief.interests}</dt><dd>{workspace.brief.structured.interests.join("、") || t.brief.unknown}</dd></div>
-                <div><dt className="font-bold">{t.brief.areas}</dt><dd>{workspace.brief.structured.areas.join("、") || t.brief.unknown}</dd></div>
-                <div><dt className="font-bold">{t.brief.pace}</dt><dd>{workspace.brief.structured.pace ?? t.brief.unknown}</dd></div>
-                <div><dt className="font-bold">{t.brief.budget}</dt><dd>{workspace.brief.structured.budget ?? t.brief.unknown}</dd></div>
-                <div className="sm:col-span-2"><dt className="font-bold">{t.brief.avoid}</dt><dd>{workspace.brief.structured.exclusions.join("、") || t.brief.nothingConfirmed}</dd></div>
-              </dl>
-              {Object.keys(questionDrafts).length ? (
-                <div className="mt-4">
+          {Object.keys(questionDrafts).length ? (
+            <section className="order-1 rounded-panel border border-ink/10 p-4" aria-label={t.brief.questions}>
                   <strong>{t.brief.questions}</strong>
                   <ul className="mt-2 grid gap-3">
                     {Object.entries(questionDrafts).map(([question, draft]) => (
@@ -632,8 +722,38 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                     {pending === "save-questions" ? t.progress.saving : t.brief.saveAnswers}
                   </button>
                   {notice?.area === "questions" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
-                </div>
-              ) : null}
+            </section>
+          ) : null}
+          <details className="order-3 rounded-panel border border-ink/10 p-4" open={researchSettingsOpen} onToggle={(event) => setResearchSettingsOpen(event.currentTarget.open)}>
+            <summary className="cursor-pointer font-display text-2xl">{t.brief.researchSettings}</summary>
+            <div className="mt-4 grid gap-5">
+          <section className="rounded-panel bg-surface-subtle p-4 sm:p-5" aria-label={t.brief.areaLabel}>
+            <label className="grid gap-2 font-bold">{t.brief.prompt}
+              <textarea
+                className="min-h-32 rounded-xl border bg-surface p-3 font-normal"
+                value={briefDraft}
+                onChange={(event) => setBriefDraft(event.target.value)}
+                placeholder={t.brief.placeholder}
+              />
+            </label>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button className="flex min-h-11 items-center gap-2 rounded-xl bg-accent px-4 font-bold text-ink-strong" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research(workspace?.latestRun ? "again" : "find")}><Search aria-hidden="true" className="size-4" />{researchLabel(workspace?.latestRun ? t.header.researchAgain : t.brief.findCandidates)}</button>
+            </div>
+            {notice?.area === "find" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
+            {!workspace?.modelAvailable ? <p className="mt-3 text-sm text-muted-foreground">{t.brief.modelUnavailable}</p> : null}
+            {!workspace?.placeProviderAvailable ? <p className="mt-2 text-sm text-muted-foreground">{t.brief.placesUnavailable}</p> : null}
+          </section>
+
+          {workspace?.brief?.structured ? (
+            <section className="rounded-panel border border-ink/10 p-4" aria-label={t.brief.interpretationLabel}>
+              <h3 className="font-display text-2xl">{t.brief.understood}</h3>
+              <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div><dt className="font-bold">{t.brief.interests}</dt><dd>{workspace.brief.structured.interests.join("、") || t.brief.unknown}</dd></div>
+                <div><dt className="font-bold">{t.brief.areas}</dt><dd>{workspace.brief.structured.areas.join("、") || t.brief.unknown}</dd></div>
+                <div><dt className="font-bold">{t.brief.pace}</dt><dd>{workspace.brief.structured.pace ?? t.brief.unknown}</dd></div>
+                <div><dt className="font-bold">{t.brief.budget}</dt><dd>{workspace.brief.structured.budget ?? t.brief.unknown}</dd></div>
+                <div className="sm:col-span-2"><dt className="font-bold">{t.brief.avoid}</dt><dd>{workspace.brief.structured.exclusions.join("、") || t.brief.nothingConfirmed}</dd></div>
+              </dl>
             </section>
           ) : null}
 
@@ -648,129 +768,131 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
               {workspace.latestRun.searchPlan.queries.length ? <details className="mt-3"><summary className="cursor-pointer font-bold">{t.searchPlan.checkedOnGoogleMaps(workspace.latestRun.searchPlan.queries.length)}</summary><ul className="mt-2 grid gap-2 sm:grid-cols-2">{workspace.latestRun.searchPlan.queries.map((query, index) => <li key={`${index}:${query}`} className="rounded-lg bg-surface-subtle p-3">{query}</li>)}</ul></details> : null}
             </section>
           ) : null}
+            </div>
+          </details>
 
           {workspace?.proposals.length ? (
-            <section aria-label={t.proposal.shortlistLabel}>
+            <section className="order-2" aria-label={t.proposal.shortlistLabel}>
               <h3 className="font-display text-3xl">{t.proposal.shortlistTitle}</h3>
-              <div className="mt-4 overflow-hidden rounded-panel border border-ink/10">
-                <table className="block w-full border-separate border-spacing-0 text-left xl:table" aria-label={t.proposal.shortlistLabel}>
-                  <thead className="table w-full table-fixed bg-surface-subtle text-sm xl:table-header-group">
-                    <tr>
-                      <th className="px-3 py-3 font-bold xl:min-w-64 xl:px-4" scope="col">{t.proposal.columns.place}</th>
-                      <th className="hidden w-36 px-3 py-3 font-bold xl:table-cell" scope="col">{t.proposal.columns.category}</th>
-                      {showProposalVotes ? <th className="w-0 p-0 xl:w-40 xl:px-3 xl:py-3" scope="col"><span className="sr-only xl:not-sr-only">{t.proposal.columns.votes}</span></th> : null}
-                      <th className="w-0 p-0 xl:w-80 xl:px-3 xl:py-3" scope="col"><span className="sr-only xl:not-sr-only">{t.proposal.columns.actions}</span></th>
-                      <th className="w-20 px-2 py-3 font-bold xl:w-24 xl:px-3" scope="col"><span className="sr-only">{t.proposal.columns.more}</span></th>
-                    </tr>
-                  </thead>
-                  {workspace.proposals.map((proposal) => {
-                    const expanded = expandedProposals[proposal.id] ?? false;
-                    const detailsId = `discovery-proposal-${proposal.id}-details`;
-                    const category = proposal.category ?? t.placeType[proposal.type];
-                    const firstSentence = proposal.recommendationSentences?.[0];
-                    const firstTradeoff = proposal.tradeoffSentences !== null
-                      ? proposal.tradeoffSentences[0]?.text ?? null
-                      : proposal.tradeoffs[0] ?? null;
-                    const hasTradeoffs = proposal.tradeoffSentences !== null
-                      ? proposal.tradeoffSentences.length > 0
-                      : proposal.tradeoffs.length > 0;
-                    const numberedEvidence = new Map(
-                      proposal.evidence.map((item, index) => [item.id, { item, number: index + 1 }] as const),
-                    );
-                    return (
-                      <tbody key={proposal.id} data-discovery-proposal={proposal.name} className="block w-full xl:table-row-group">
-                        <tr aria-label={t.proposal.ariaLabel(proposal.name)} className="grid w-full grid-cols-[minmax(0,1fr)_5rem] bg-surface-subtle xl:table-row">
-                          <th className="col-span-2 col-start-1 row-start-1 py-3 pl-3 pr-24 align-top xl:table-cell xl:min-w-64 xl:px-4 xl:py-4" scope="row">
-                            <span className="text-xl font-semibold text-ink-strong">{proposal.name}</span>
-                            {firstSentence ? (
-                              <p className="mt-1 text-sm font-semibold"><ClaimSentence sentence={firstSentence} numberedEvidence={numberedEvidence} t={t} /></p>
-                            ) : proposal.recommendationSentences === null ? (
-                              <p className="mt-1 line-clamp-2 text-sm font-semibold text-muted-foreground">{proposal.recommendation}</p>
+              <div
+                className={`mt-4 grid min-w-0 gap-5 ${selectedProposal ? "lg:grid-cols-[minmax(0,1fr)_24rem]" : ""}`}
+                data-detail-open={selectedProposal ? "true" : "false"}
+              >
+                <div data-discovery-table-wrapper className="min-w-0 overflow-hidden rounded-panel border border-ink/10">
+                  <table className={`block w-full border-separate border-spacing-0 text-left ${showTableColumns ? "xl:table" : ""}`} aria-label={t.proposal.shortlistLabel}>
+                    <thead className={`table w-full table-fixed bg-surface-subtle text-sm ${showTableColumns ? "xl:table-header-group" : ""}`}>
+                      <tr>
+                        <th className={`px-3 py-3 font-bold ${showTableColumns ? "xl:min-w-64 xl:px-4" : ""}`} scope="col">{t.proposal.columns.place}</th>
+                        <th className={`hidden w-36 px-3 py-3 font-bold ${showTableColumns ? "xl:table-cell" : ""}`} scope="col">{t.proposal.columns.category}</th>
+                        {showProposalVotes ? <th className={`w-0 p-0 ${showTableColumns ? "xl:w-40 xl:px-3 xl:py-3" : ""}`} scope="col"><span className={`sr-only ${showTableColumns ? "xl:not-sr-only" : ""}`}>{t.proposal.columns.votes}</span></th> : null}
+                        <th className={`w-0 p-0 ${showTableColumns ? "xl:w-80 xl:px-3 xl:py-3" : ""}`} scope="col"><span className={`sr-only ${showTableColumns ? "xl:not-sr-only" : ""}`}>{t.proposal.columns.actions}</span></th>
+                      </tr>
+                    </thead>
+                    {workspace.proposals.map((proposal) => {
+                      const category = proposal.category ?? t.placeType[proposal.type];
+                      const firstSentence = proposal.recommendationSentences?.[0];
+                      const firstTradeoff = proposal.tradeoffSentences !== null
+                        ? proposal.tradeoffSentences[0]?.text ?? null
+                        : proposal.tradeoffs[0] ?? null;
+                      const numberedEvidence = new Map(
+                        proposal.evidence.map((item, index) => [item.id, { item, number: index + 1 }] as const),
+                      );
+                      const repeatedName = (proposalNameCounts.get(proposal.name) ?? 0) > 1;
+                      const rowLabel = repeatedName
+                        ? t.proposal.proposalAtAddress(proposal.name, proposal.address ?? t.proposal.unknownAddress)
+                        : t.proposal.ariaLabel(proposal.name);
+                      const selected = proposal.id === selectedProposalId;
+                      return (
+                        <tbody key={proposal.id} data-discovery-proposal={proposal.name} className={`block w-full ${showTableColumns ? "xl:table-row-group" : ""}`}>
+                          <tr
+                            aria-label={rowLabel}
+                            aria-current={selected ? "true" : undefined}
+                            className={`grid w-full cursor-pointer grid-cols-1 bg-surface-subtle ${selected ? "ring-2 ring-inset ring-accent-strong" : ""} ${showTableColumns ? "xl:table-row" : ""}`}
+                            onClick={(event) => {
+                              if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select")) return;
+                              openProposalDetail(proposal.id);
+                            }}
+                          >
+                            <th className={`px-3 py-3 align-top ${showTableColumns ? "xl:table-cell xl:min-w-64 xl:px-4 xl:py-4" : ""}`} scope="row">
+                              <button
+                                type="button"
+                                data-proposal-detail-trigger={proposal.id}
+                                className="inline-flex min-h-11 items-start text-left text-xl font-semibold text-ink-strong underline-offset-4 outline-none hover:underline focus-visible:rounded focus-visible:ring-4 focus-visible:ring-focus/30"
+                                aria-label={t.proposal.viewDetail(proposal.name)}
+                                onClick={() => openProposalDetail(proposal.id)}
+                              >
+                                {proposal.name}
+                              </button>
+                              {repeatedName ? <span className="mt-1 block text-sm font-normal text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</span> : null}
+                              {firstSentence ? (
+                                <p className="mt-1 text-sm font-semibold"><ClaimSentence sentence={firstSentence} numberedEvidence={numberedEvidence} t={t} /></p>
+                              ) : proposal.recommendationSentences === null ? (
+                                <p className="mt-1 line-clamp-2 text-sm font-semibold text-muted-foreground">{proposal.recommendation}</p>
+                              ) : null}
+                              <p className={`mt-1 line-clamp-1 text-sm font-normal text-muted-foreground ${showTableColumns ? "xl:hidden" : ""}`}>{t.proposal.rowSummary(category, firstTradeoff)}</p>
+                            </th>
+                            <td className={`hidden px-3 py-4 align-top ${showTableColumns ? "xl:table-cell" : ""}`}>{category}</td>
+                            {showProposalVotes ? (
+                              <td className={`align-top ${showTableColumns ? "xl:table-cell xl:px-3 xl:py-3" : ""} ${proposal.status === "pending" && proposal.votingAvailable ? "px-3 pb-3" : showTableColumns ? "p-0 xl:p-3" : "p-0"}`}>
+                                {proposal.status === "pending" && proposal.votingAvailable ? (
+                                  <VoteControl compact name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} />
+                                ) : null}
+                              </td>
                             ) : null}
-                            <p className="mt-1 line-clamp-1 text-sm font-normal text-muted-foreground xl:hidden">{t.proposal.rowSummary(category, firstTradeoff)}</p>
-                          </th>
-                          <td className="hidden px-3 py-4 align-top xl:table-cell">{category}</td>
-                          {showProposalVotes ? (
-                            <td className={`col-span-2 col-start-1 row-start-2 align-top xl:table-cell xl:px-3 xl:py-3 ${proposal.status === "pending" && proposal.votingAvailable ? "px-3 pb-3" : "p-0 xl:p-3"}`}>
-                              {proposal.status === "pending" && proposal.votingAvailable ? (
-                                <VoteControl compact name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} />
-                              ) : null}
-                            </td>
-                          ) : null}
-                          <td className={`col-span-2 col-start-1 px-3 pb-3 align-top xl:table-cell xl:px-3 xl:py-3 ${showProposalVotes ? "row-start-3" : "row-start-2"}`}>{proposalActions(proposal)}</td>
-                          <td className="col-start-2 row-span-3 row-start-1 px-2 py-2 align-top xl:table-cell xl:px-3">
-                            <button
-                              type="button"
-                              className="min-h-11 whitespace-nowrap rounded-lg border bg-surface px-3 font-bold"
-                              aria-expanded={expanded}
-                              aria-controls={detailsId}
-                              onClick={() => setExpandedProposals((current) => ({ ...current, [proposal.id]: !expanded }))}
-                            >
-                              {t.proposal.columns.more}
-                            </button>
-                          </td>
-                        </tr>
-                        <tr id={detailsId} hidden={!expanded} className="block w-full bg-surface xl:table-row">
-                          <td className="block w-full border-t border-ink/10 p-4 xl:table-cell xl:p-5" colSpan={showProposalVotes ? 5 : 4}>
-                            <div className="grid gap-4">
-                              <p className="text-sm text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</p>
-                              {proposal.endorsements.length ? <div aria-label={t.proposal.recommendedByFor(proposal.name)}><strong>{t.proposal.recommendedBy}</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabel(endorsement, t)}</li>)}</ul></div> : null}
-                              {proposal.recommendationSentences === null ? <p>{proposal.recommendation}</p> : null}
-                              {proposal.recommendationSentences && proposal.recommendationSentences.length > 1
-                                ? <ClaimSentenceList sentences={proposal.recommendationSentences} numberedEvidence={numberedEvidence} t={t} startAt={1} />
-                                : null}
-                              {proposal.status === "pending" && proposal.votingAvailable ? <VoteVoters voters={proposal.voters} /> : null}
-                              <a className="inline-flex min-h-11 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold" href={googleMapsPlaceUrl(proposal.name, proposal.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.proposal.viewPhotos}</a>
-                              {proposal.matchedNeeds.length || hasTradeoffs || proposal.unknowns.length ? (
-                                <div className="grid gap-3 sm:grid-cols-3">
-                                  {proposal.matchedNeeds.length ? <div><strong>{t.proposal.matches}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.matchedNeeds.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
-                                  {hasTradeoffs ? (
-                                    <div>
-                                      <strong>{t.proposal.tradeoffs}</strong>
-                                      {proposal.tradeoffSentences !== null
-                                        ? <ClaimSentenceList sentences={proposal.tradeoffSentences} numberedEvidence={numberedEvidence} t={t} />
-                                        : <ul className="mt-1 list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul>}
-                                    </div>
-                                  ) : null}
-                                  {proposal.unknowns.length ? <div><strong>{t.proposal.unknowns}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.unknowns.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
-                                </div>
-                              ) : null}
-                              <div>
-                                <strong>{t.proposal.evidence}</strong>
-                                <ul className="mt-1 grid gap-1">
-                                  {proposal.evidence.map((item, evidenceIndex) => {
-                                    const number = evidenceIndex + 1;
-                                    return (
-                                      <li key={item.id}>
-                                        <a
-                                          className="inline-flex items-center gap-1 break-all font-bold text-accent-strong underline"
-                                          href={item.sourceUrl}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          aria-label={t.proposal.citationLabel(number, item.title)}
-                                        >
-                                          [{number}] {item.title}<ExternalLink aria-hidden="true" className="size-3" />
-                                        </a>
-                                        <span className="ml-2 text-xs text-muted-foreground">{item.attribution}・{t.proposal.observedAt(new Date(item.observedAt).toLocaleString(locale))}</span>
-                                        {item.isStale ? <span className="ml-2 text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span> : null}
-                                      </li>
-                                    );
-                                  })}
-                                </ul>
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      </tbody>
-                    );
-                  })}
-                </table>
+                            <td className={`px-3 pb-3 align-top ${showTableColumns ? "xl:table-cell xl:px-3 xl:py-3" : ""}`}>{proposalActions(proposal)}</td>
+                          </tr>
+                        </tbody>
+                      );
+                    })}
+                  </table>
+                </div>
+                {largeScreen && selectedProposal ? (
+                  <aside className="max-h-[calc(100dvh-2rem)] self-start overflow-y-auto rounded-panel border border-ink/10 bg-surface p-5 lg:sticky lg:top-4" aria-label={t.proposal.detailTitle(selectedProposal.name)} aria-live="polite">
+                    <div className="mb-4 flex items-start justify-between gap-3">
+                      <h4 ref={detailTitleRef} tabIndex={-1} className="rounded font-display text-2xl outline-none focus:ring-4 focus:ring-focus/30">{t.proposal.detailTitle(selectedProposal.name)}</h4>
+                      <button type="button" className="flex size-11 shrink-0 items-center justify-center rounded-lg border outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" aria-label={t.proposal.closeDetail} onClick={closeProposalDetail}><X aria-hidden="true" className="size-4" /></button>
+                    </div>
+                    {proposalDetail(selectedProposal)}
+                  </aside>
+                ) : null}
               </div>
             </section>
-          ) : workspace?.latestRun ? <p className="rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.length ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}
+          ) : workspace?.latestRun ? <p className="order-2 rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.length ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}
+
+          {!largeScreen && selectedProposal ? (
+            <Dialog open onOpenChange={(open) => { if (!open) closeProposalDetail(); }}>
+              <DialogContent className="bottom-0 left-0 top-auto max-h-[85dvh] w-full max-w-none translate-x-0 translate-y-0 content-start overflow-y-auto rounded-b-none rounded-t-2xl p-5">
+                <DialogHeader>
+                  <DialogTitle ref={detailTitleRef} tabIndex={-1} className="rounded pr-10 font-display text-2xl outline-none focus:ring-4 focus:ring-focus/30">{t.proposal.detailTitle(selectedProposal.name)}</DialogTitle>
+                </DialogHeader>
+                {proposalDetail(selectedProposal)}
+              </DialogContent>
+            </Dialog>
+          ) : null}
+
+          <Dialog open={rejectConfirmation !== null} onOpenChange={(open) => { if (!open && pending === null) setRejectConfirmation(null); }}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>{rejectConfirmation ? t.proposal.rejectConfirmTitle(rejectConfirmation.name) : ""}</DialogTitle>
+                <DialogDescription>{t.proposal.rejectConfirmDescription}</DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <button type="button" className="min-h-11 rounded-lg bg-accent px-4 font-bold text-ink-strong outline-none hover:bg-accent/80 focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={pending !== null} onClick={() => {
+                  const proposal = rejectConfirmation;
+                  if (!proposal) return;
+                  void decideProposal(proposal, "reject").then((next) => {
+                    if (!next) return;
+                    setRejectConfirmation(null);
+                    if (selectedProposalId === proposal.id) closeProposalDetail();
+                  });
+                }}>{t.proposal.rejectConfirm}</button>
+                <button type="button" className="min-h-11 rounded-lg border px-4 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={pending !== null} onClick={() => setRejectConfirmation(null)}>{t.proposal.cancel}</button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
 
           {workspace?.decided.length ? (
-            <section className="rounded-panel border border-ink/10 p-4" aria-label={t.decided.areaLabel}>
+            <section className="order-4 rounded-panel border border-ink/10 p-4" aria-label={t.decided.areaLabel}>
               <h3 className="font-display text-2xl">{t.decided.title}</h3>
               <p className="mt-1 text-sm text-muted-foreground">{t.decided.description}</p>
               <ul className="mt-3 grid gap-2">{workspace.decided.map((decision) => <li key={decision.proposalId} className="flex flex-wrap items-baseline justify-between gap-2 rounded-lg bg-surface-subtle p-3"><strong>{decision.name}</strong><span className="text-sm">{decision.status === "accepted" ? t.decided.accepted : t.decided.rejected}・{t.decided.decidedAt(new Date(decision.decidedAt).toLocaleDateString(locale))}</span></li>)}</ul>
@@ -778,14 +900,14 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
           ) : null}
 
           {workspace?.latestRun?.shortfalls.length ? (
-            <section className="rounded-panel border border-ink/10 p-4" aria-label={t.missing.areaLabel}>
+            <section className="order-4 rounded-panel border border-ink/10 p-4" aria-label={t.missing.areaLabel}>
               <h3 className="font-display text-2xl">{t.missing.title}</h3>
               <p className="mt-1 text-sm text-muted-foreground">{t.missing.description}</p>
               <ul className="mt-3 grid gap-2">{workspace.latestRun.shortfalls.map((shortfall) => <li key={`${shortfall.code}:${shortfall.subject}`} className="rounded-lg bg-surface-subtle p-3"><strong>{shortfall.subject}</strong>{shortfall.named ? <span className="ml-2 text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{t.missing.requested}</span> : null}<span className="block text-sm">{shortfallText(shortfall, t)}</span></li>)}</ul>
             </section>
           ) : null}
 
-          <section className="rounded-panel bg-surface-subtle p-4" aria-label={t.feedback.areaLabel}>
+          <section className="order-4 rounded-panel bg-surface-subtle p-4" aria-label={t.feedback.areaLabel}>
             <h3 className="font-display text-2xl">{t.feedback.title}</h3>
             <label className="mt-3 grid gap-2 font-bold">{t.feedback.label}<textarea className="min-h-24 rounded-xl border bg-surface p-3 font-normal" value={feedbackDraft} onChange={(event) => setFeedbackDraft(event.target.value)} placeholder={t.feedback.placeholder} /></label>
             <button className="mt-3 min-h-11 rounded-xl border px-4 font-bold" disabled={pending !== null || !feedbackDraft.trim()} onClick={() => void createFeedback()}>{pending === "feedback:overall" ? t.feedback.interpreting : t.feedback.interpret}</button>

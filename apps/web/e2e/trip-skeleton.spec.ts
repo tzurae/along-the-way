@@ -177,10 +177,10 @@ async function inviteEditor(
   tripName: string,
   email: string,
 ) {
-  await openTab(ownerPage, "總覽");
+  await openTab(ownerPage, "成員");
   await ownerPage.getByLabel("透過電子郵件邀請編輯者").fill(email);
   await ownerPage.getByRole("button", { name: "寄出邀請" }).click();
-  await expect(ownerPage.getByRole("status")).toContainText(email);
+  await expect(ownerPage.getByRole("tabpanel", { name: "成員", exact: true }).getByRole("status").filter({ hasText: email })).toBeVisible();
   return emailLink(request, email, `Join ${tripName}`);
 }
 
@@ -214,7 +214,8 @@ async function createTrip(
     flights?: (dialog: Locator) => Promise<void>;
   },
 ) {
-  await page.getByRole("button", { name: "建立旅程" }).click();
+  await page.getByRole("button", { name: /切換旅程$/ }).click();
+  await page.getByRole("dialog", { name: "切換旅程" }).getByRole("button", { name: "建立旅程" }).click();
   const dialog = page.getByRole("dialog", { name: "建立旅程" });
   await dialog.getByLabel("旅程名稱").fill(input.name);
   await dialog.getByRole("button", { name: "選擇日期範圍" }).click();
@@ -238,12 +239,17 @@ async function createTrip(
   await fillTripFlights(dialog, input.startDate, input.endDate);
   await input.flights?.(dialog);
   await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
-  await expect(page.getByRole("heading", { name: input.name })).toBeVisible();
+  await expect(page.getByRole("button", { name: new RegExp(`${input.name}，切換旅程`) })).toBeVisible();
   await openTab(page, "行程");
 }
 
-async function openTab(page: Page, name: "總覽" | "住宿" | "行程" | "最近變更") {
-  await page.getByRole("tab", { name, exact: true }).click();
+async function openTab(page: Page, name: "成員" | "航班" | "住宿" | "行程" | "最近變更") {
+  const destination = name === "成員" || name === "最近變更" ? "成員" : "行程";
+  await page.getByRole("tab", { name: destination, exact: true }).click();
+  if (destination === "行程") {
+    const segment = name === "航班" ? "航班" : name === "住宿" ? "住宿" : "每日";
+    await page.getByRole("tab", { name: segment, exact: true }).click();
+  }
 }
 
 async function createPlace(
@@ -314,8 +320,8 @@ async function addFlight(
     bufferMinutes?: string;
   },
 ) {
-  await openTab(page, "總覽");
-  const fixture = page.locator("#trip-panel-overview [data-travel-item-id]").filter({ hasText: "FIXTURE-" }).first();
+  await openTab(page, "航班");
+  const fixture = page.locator("#itinerary-segment-panel-flight [data-travel-item-id]").filter({ hasText: "FIXTURE-" }).first();
   await fixture.getByRole("button", { name: /^修改 / }).click();
   const dialog = page.getByRole("dialog", { name: "修改航班" });
   await dialog.getByLabel("航班號碼", { exact: true }).fill(input.serviceNumber);
@@ -521,8 +527,9 @@ async function readSkeleton(page: Page, id: string) {
 }
 
 async function openTrip(page: Page, name: string) {
-  await page.getByRole("button", { name: new RegExp(name) }).click();
-  await expect(page.getByRole("heading", { name })).toBeVisible();
+  await page.getByRole("button", { name: /切換旅程$/ }).click();
+  await page.getByRole("dialog", { name: "切換旅程" }).getByRole("button").filter({ hasText: name }).click();
+  await expect(page.getByRole("button", { name: new RegExp(`${name}，切換旅程`) })).toBeVisible();
   await openTab(page, "行程");
   await expect(page.getByRole("heading", { name: "固定行程與每日行程" })).toBeVisible();
 }
@@ -737,14 +744,14 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   const hanedaPlace = page.locator(".place-card").filter({ hasText: "Haneda Airport" });
   await expect(hanedaPlace).toContainText("請先解鎖引用此地點的固定行程，才能編輯地點。");
   await expect(hanedaPlace.getByRole("button", { name: "編輯「Haneda Airport」" })).toHaveCount(0);
-  await openTab(page, "總覽");
+  await openTab(page, "航班");
   await expect(page.getByRole("button", { name: "修改 JL001", exact: true })).toBeDisabled();
   await openTab(page, "行程");
   await flightCard.getByRole("button", { name: "解鎖" }).click();
   const unlockDialog = page.getByRole("dialog", { name: "要解鎖「JL001」嗎？" });
   await expect(unlockDialog).toContainText("未來的排程流程");
   await unlockDialog.getByRole("button", { name: "解鎖固定行程" }).click();
-  await expect(flightCard.getByRole("button", { name: "到總覽修改航班" })).toBeVisible();
+  await expect(flightCard.getByRole("button", { name: "到航班修改航班" })).toBeVisible();
   await flightCard.getByRole("button", { name: "未確認", exact: true }).click();
   await expect(flightCard).toContainText("固定時間・未確認");
 
@@ -752,16 +759,18 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
     .getByRole("region", { name: "旅程資訊", exact: true })
     .locator(".itinerary-card")
     .filter({ hasText: "JL001" });
-  await tripInformationFlight.getByRole("button", { name: "到總覽修改航班" }).click();
-  await page.getByRole("button", { name: "修改 JL001", exact: true }).click();
+  await tripInformationFlight.getByRole("button", { name: "到航班修改航班" }).click();
+  await expect(page.getByRole("tab", { name: "航班", exact: true })).toHaveAttribute("aria-selected", "true");
+  await page.locator("#itinerary-segment-panel-flight").getByRole("button", { name: "修改 JL001", exact: true }).click();
   let samePageEdit = page.getByRole("dialog", { name: "修改航班" });
   await expect(samePageEdit.getByLabel("起飛時間（當地）")).toHaveValue("2027-11-01T10:00");
   await samePageEdit.press("Escape");
   await expect(samePageEdit).toHaveCount(0);
 
   await openTab(page, "行程");
-  await flightCard.getByRole("button", { name: "到總覽修改航班" }).click();
-  await page.getByRole("button", { name: "修改 JL001", exact: true }).click();
+  await flightCard.getByRole("button", { name: "到航班修改航班" }).click();
+  await expect(page.getByRole("tab", { name: "航班", exact: true })).toHaveAttribute("aria-selected", "true");
+  await page.locator("#itinerary-segment-panel-flight").getByRole("button", { name: "修改 JL001", exact: true }).click();
   samePageEdit = page.getByRole("dialog", { name: "修改航班" });
   await samePageEdit.getByLabel("起飛時間（當地）").fill("2027-11-01T11:00");
   await samePageEdit.getByRole("button", { name: "儲存", exact: true }).click();
@@ -786,7 +795,7 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   const secondFlight = secondTimeline.locator(".itinerary-card").filter({ hasText: "JL001" }).first();
 
   await page.getByRole("button", { name: "修改 JL001", exact: true }).click();
-  await secondFlight.getByRole("button", { name: "到總覽修改航班" }).click();
+  await secondFlight.getByRole("button", { name: "到航班修改航班" }).click();
   await secondPage.getByRole("button", { name: "修改 JL001", exact: true }).click();
   const firstEdit = page.getByRole("dialog", { name: "修改航班" });
   const secondEdit = secondPage.getByRole("dialog", { name: "修改航班" });
@@ -868,8 +877,8 @@ test("activity participants persist exact subsets, history, times, and concurren
 
   await page.reload();
   await openTrip(page, name);
-  await openTab(page, "總覽");
-  await expect(page.getByText("4位成員", { exact: true })).toBeVisible();
+  await openTab(page, "成員");
+  await expect(page.getByRole("tabpanel", { name: "成員", exact: true }).getByRole("list").first().getByRole("listitem")).toHaveCount(4);
   await createPlace(page, {
     name: "Participant activity venue",
     type: "activity",
@@ -1037,7 +1046,7 @@ test("activity participants persist exact subsets, history, times, and concurren
   await unlockDialog.getByRole("button", { name: "解鎖固定行程" }).click();
   await expect(betaCard.getByRole("button", { name: "編輯「乙」" })).toBeVisible();
 
-  await openTab(page, "總覽");
+  await openTab(page, "成員");
   const membersPanel = page.getByRole("heading", { name: "成員", exact: true }).locator("..");
   const memberARow = membersPanel.getByRole("listitem").filter({ hasText: participantA });
   await memberARow.getByRole("button", { name: "移除" }).click();
@@ -1147,16 +1156,17 @@ test("travel editors keep airports and hotels out of the wishlist and old flight
   expect(options).not.toContain("lodging");
   expect(options).toContain("activity");
   await itineraryDialog.press("Escape");
-  await openTab(page, "總覽");
-  const overview = page.locator("#trip-panel-overview");
-  await expect(overview.getByRole("heading", { name: "去程 · FIXTURE-OUT" })).toBeVisible();
-  await expect(overview.getByRole("heading", { name: "回程 · FIXTURE-RETURN" })).toBeVisible();
+  await openTab(page, "航班");
+  const flightPanel = page.locator("#itinerary-segment-panel-flight");
+  await expect(flightPanel.getByRole("heading", { name: "去程 · FIXTURE-OUT" })).toBeVisible();
+  await expect(flightPanel.getByRole("heading", { name: "回程 · FIXTURE-RETURN" })).toBeVisible();
   for (const flight of ["FIXTURE-OUT", "FIXTURE-RETURN"]) {
+    await expect(page.getByRole("tab", { name: "航班", exact: true })).toHaveAttribute("aria-selected", "true");
     page.once("dialog", (dialog) => void dialog.accept());
-    await overview.getByRole("button", { name: `刪除 ${flight}`, exact: true }).click();
-    await expect(overview.getByRole("button", { name: `修改 ${flight}`, exact: true })).toHaveCount(0);
+    await flightPanel.getByRole("button", { name: `刪除 ${flight}`, exact: true }).click();
+    await expect(flightPanel.getByRole("button", { name: `修改 ${flight}`, exact: true })).toHaveCount(0);
   }
-  await expect(overview.getByText("尚未填寫航班", { exact: true })).toBeVisible();
+  await expect(flightPanel.getByText("尚未填寫航班", { exact: true })).toBeVisible();
   // The nonblocking prompt must not stop lodging work in another mounted panel.
   await openTab(page, "住宿");
   await page.getByRole("button", { name: "新增住宿", exact: true }).click();
@@ -1175,10 +1185,11 @@ test("travel editors keep airports and hotels out of the wishlist and old flight
   await page.reload();
   await openTrip(page, name);
   await openTab(page, "住宿");
-  await expect(page.locator("#trip-panel-lodging")).toContainText("2026-10-26 11:00");
-  await page.getByRole("tab", { name: "想去清單", exact: true }).click();
-  await expect(page.locator("#trip-panel-wishlist")).not.toContainText("Only travel hotel");
-  await expect(page.locator("#trip-panel-wishlist")).not.toContainText("Fixture home airport");
+  await expect(page.locator("#itinerary-segment-panel-lodging")).toContainText("2026-10-26 11:00");
+  await page.getByRole("tab", { name: "地點", exact: true }).click();
+  await page.getByRole("tab", { name: "想去", exact: true }).click();
+  await expect(page.locator("#places-segment-panel-wishlist")).not.toContainText("Only travel hotel");
+  await expect(page.locator("#places-segment-panel-wishlist")).not.toContainText("Fixture home airport");
   await openTab(page, "住宿");
   page.once("dialog", (dialog) => void dialog.accept());
   await page.getByRole("button", { name: "刪除 Only travel hotel", exact: true }).click();
@@ -1186,8 +1197,8 @@ test("travel editors keep airports and hotels out of the wishlist and old flight
   await openTab(page, "行程");
   await expect(page.getByRole("region", { name: "旅程資訊", exact: true }).getByRole("heading", { name: "Only travel hotel" })).toHaveCount(0);
 
-  await openTab(page, "總覽");
-  await overview.getByRole("button", { name: "新增航班", exact: true }).click();
+  await openTab(page, "航班");
+  await flightPanel.getByRole("button", { name: "新增航班", exact: true }).click();
   editor = page.getByRole("dialog", { name: "新增航班" });
   await editor.getByLabel("航班號碼", { exact: true }).fill("RESTORED-OUT");
   await editor.getByLabel("出發機場", { exact: true }).fill("Home airport");
@@ -1198,12 +1209,12 @@ test("travel editors keep airports and hotels out of the wishlist and old flight
   await editor.getByLabel("抵達時間（當地）").fill("2026-10-21T06:00");
   await editor.getByRole("button", { name: "儲存", exact: true }).click();
   await expect(editor).toHaveCount(0);
-  await expect(overview.getByRole("heading", { name: "去程 · RESTORED-OUT" })).toBeVisible();
-  await expect(overview.getByText("尚未填寫航班", { exact: true })).toBeVisible();
+  await expect(flightPanel.getByRole("heading", { name: "去程 · RESTORED-OUT" })).toBeVisible();
+  await expect(flightPanel.getByText("尚未填寫航班", { exact: true })).toBeVisible();
   await page.reload();
   await openTrip(page, name);
-  await openTab(page, "總覽");
-  await expect(overview.getByRole("heading", { name: "去程 · RESTORED-OUT" })).toBeVisible();
+  await openTab(page, "航班");
+  await expect(flightPanel.getByRole("heading", { name: "去程 · RESTORED-OUT" })).toBeVisible();
 });
 
 test("travel forms preserve the chosen occurrence of a repeated local hour", async ({ page, request }) => {
@@ -1222,7 +1233,7 @@ test("travel forms preserve the chosen occurrence of a repeated local hour", asy
       await outbound.getByLabel("抵達時間的 UTC 時差（選填）").fill("-05:00");
     },
   });
-  await openTab(page, "總覽");
+  await openTab(page, "航班");
   await page.getByRole("button", { name: "修改 FIXTURE-OUT", exact: true }).click();
   let editor = page.getByRole("dialog", { name: "修改航班" });
   await expect(editor.getByLabel("起飛時間的 UTC 時差（選填）")).toHaveValue("-04:00");
