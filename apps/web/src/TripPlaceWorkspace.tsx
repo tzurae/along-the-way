@@ -6,7 +6,9 @@ import {
   CircleCheck,
   CloudOff,
   Images,
+  MapPin,
   MapPinOff,
+  Pencil,
   Plus,
 } from "lucide-react";
 
@@ -29,6 +31,7 @@ import { VoteControl, VoteVoters } from "./VoteControl";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews } from "./PlaceThumbnail";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
+import { NativeSelect } from "./components/ui/native-select";
 import "./pocket-discovery.css";
 import {
   Dialog,
@@ -121,7 +124,7 @@ function StatusIcon({ status }: { status: TripPlaceDto["status"] }) {
         : status === "provider-unavailable"
           ? CloudOff
           : CircleCheck;
-  return <Icon aria-hidden="true" className="size-4 shrink-0" />;
+  return <Icon aria-hidden="true" className="size-3.5 shrink-0" />;
 }
 
 function nullableNumber(value: FormDataEntryValue | null) {
@@ -244,8 +247,7 @@ function AddPlacePanel({
   }
 
   return (
-    <PlaceDetailSheet open appearance="workspace" title={t.add.title} onClose={close}>
-      <p className="pd-add-intro">加入後會成為全家都能表態的候選地點。</p>
+    <PlaceDetailSheet open appearance="workspace" title={t.add.title} description={t.add.description} onClose={close}>
       <div className="pd-tabs" role="tablist" aria-label={t.add.methodLabel}>
         {([
           ["search", t.add.search],
@@ -273,10 +275,10 @@ function AddPlacePanel({
         <form className="pd-form" onSubmit={addManual}>
           <p className="pd-add-intro">適合加入住家、朋友推薦，或暫時在地圖上找不到的地點。</p>
           <label>{t.add.placeName}<input name="name" required maxLength={200} /></label>
-          <label>{t.add.placeType}<select name="type">{placeTypeValues.map((value) => <option key={value} value={value}>{t.placeType[value]}</option>)}</select></label>
-          <label>{t.add.originalNote}<textarea name="originalNote" /></label>
+          <label>{t.add.placeType}<NativeSelect name="type">{placeTypeValues.map((value) => <option key={value} value={value}>{t.placeType[value]}</option>)}</NativeSelect></label>
+          <label>{t.add.originalNote}<textarea name="originalNote" maxLength={200} rows={2} placeholder={t.add.reasonPlaceholder} /><span className="pd-field-help">{t.add.reasonHelp}</span></label>
           <details>
-            <summary className="cursor-pointer font-bold">位置與來源（選填）</summary>
+            <summary className="cursor-pointer font-bold">{t.add.locationAndSource}</summary>
             <div className="pd-form mt-3">
               <label>{t.add.addressIfKnown}<input name="address" /></label>
               <div className="grid gap-3 sm:grid-cols-2">
@@ -297,7 +299,7 @@ function AddPlacePanel({
           ) : (
             <label>{t.add.searchGoogleMaps}<input required maxLength={300} value={query} onChange={(event) => setQuery(event.target.value)} /></label>
           )}
-          <label>{t.add.originalNote}<textarea value={note} onChange={(event) => setNote(event.target.value)} /></label>
+          <label>{t.add.originalNote}<textarea value={note} maxLength={200} rows={2} placeholder={t.add.reasonPlaceholder} onChange={(event) => setNote(event.target.value)} /><span className="pd-field-help">{t.add.reasonHelp}</span></label>
           <button className="pd-primary" disabled={busy}>{busy ? t.add.checking : mode === "url" ? t.add.resolveLink : t.add.searchPlaces}</button>
         </form>
       )}
@@ -322,10 +324,10 @@ function AddPlacePanel({
   );
 }
 
-type PlanningInput = Omit<UpdateTripPlacePlanningInput, "expectedVersion">;
+type PlanningInput = Pick<UpdateTripPlacePlanningInput, "durationMinutes" | "budgetAmountMinor" | "budgetCurrency">;
 
 function planningValues(place: TripPlaceDto): PlanningInput {
-  return { durationMinutes: place.durationMinutes, budgetAmountMinor: place.budgetAmountMinor, budgetCurrency: place.budgetCurrency, notes: place.notes };
+  return { durationMinutes: place.durationMinutes, budgetAmountMinor: place.budgetAmountMinor, budgetCurrency: place.budgetCurrency };
 }
 
 function PlanningEditor({ tripId, place, available, request, changed, editingChanged }: {
@@ -420,12 +422,74 @@ function PlanningEditor({ tripId, place, available, request, changed, editingCha
         <label className="grid gap-1 font-semibold">{t.planning.durationMinutes}<input className="min-h-11 rounded-lg border px-3" name="durationMinutes" type="number" min="1" value={draft.durationMinutes ?? ""} onChange={(event) => setDraft({ ...draft, durationMinutes: event.target.value === "" ? null : Number(event.target.value) })} placeholder={t.planning.unknown} /></label>
         <label className="grid gap-1 font-semibold">{t.planning.budgetMinorUnits}<input className="min-h-11 rounded-lg border px-3" name="budgetAmountMinor" type="number" min="0" value={draft.budgetAmountMinor ?? ""} onChange={(event) => setDraft({ ...draft, budgetAmountMinor: event.target.value === "" ? null : Number(event.target.value) })} placeholder={t.planning.unknown} /></label>
         <label className="grid gap-1 font-semibold">{t.planning.isoCurrency}<input className="min-h-11 rounded-lg border px-3 uppercase" name="budgetCurrency" maxLength={3} value={draft.budgetCurrency ?? ""} onChange={(event) => setDraft({ ...draft, budgetCurrency: event.target.value || null })} placeholder={t.planning.unknown} /></label>
-        <label className="grid gap-1 font-semibold sm:col-span-2">{t.planning.sharedNote}<textarea className="min-h-20 rounded-lg border p-3" name="notes" value={draft.notes ?? ""} onChange={(event) => setDraft({ ...draft, notes: event.target.value || null })} /></label>
       </div>
       <button disabled={busy} className="min-h-11 rounded-lg bg-ink-strong px-4 font-bold text-on-dark">{t.planning.save}</button>
     </form>
     {message ? <p role="status">{message}</p> : null}
   </details>;
+}
+
+function ReasonEditor({ tripId, place, available, request, changed }: {
+  tripId: string;
+  place: TripPlaceDto;
+  available: boolean;
+  request: TripPlaceWorkspaceProps["request"];
+  changed(): Promise<void>;
+}) {
+  const { t: { tripPlaces: t } } = useI18n();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(place.notes ?? "");
+  const [baseVersion, setBaseVersion] = useState(place.version);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const keys = useRef<RetryKeys>(new Map());
+
+  useEffect(() => {
+    if (editing) return;
+    setDraft(place.notes ?? "");
+    setBaseVersion(place.version);
+  }, [editing, place.notes, place.version]);
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    const notes = draft.trim() || null;
+    const payload = { notes, expectedVersion: baseVersion };
+    setBusy(true);
+    setMessage("");
+    try {
+      await request(`/api/trips/${tripId}/trip-places/${place.id}/planning`, {
+        method: "PATCH",
+        headers: { "Idempotency-Key": retryKey(keys.current, `reason:${place.id}`, payload) },
+        body: JSON.stringify(payload),
+        parse: parseTripPlaceResponse,
+      });
+      clearRetryKey(keys.current, `reason:${place.id}`);
+      setEditing(false);
+      await changed();
+    } catch (error) {
+      setMessage(t.errors.editsPreserved(errorMessage(error, t.errors.requestFailed)));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <section className="pd-detail-section">
+    <div className="pd-reason-head">
+      <h3>{t.workspace.reasonTitle}</h3>
+      {available && !editing ? <button type="button" className="pd-reason-action" onClick={() => { setDraft(place.notes ?? ""); setBaseVersion(place.version); setEditing(true); }}><Pencil aria-hidden="true" className="size-4" />{place.notes ? t.workspace.editReason : t.workspace.addReason}</button> : null}
+    </div>
+    {editing ? (
+      <form className="pd-reason-form" onSubmit={(event) => void save(event)}>
+        <textarea value={draft} maxLength={200} rows={3} placeholder={t.add.reasonPlaceholder} onChange={(event) => setDraft(event.target.value)} />
+        <p className="pd-field-help">{t.add.reasonHelp}</p>
+        <div className="pd-reason-actions">
+          <button type="button" className="pd-secondary" disabled={busy} onClick={() => { setEditing(false); setMessage(""); }}>{t.workspace.cancelReason}</button>
+          <button type="submit" className="pd-primary" disabled={busy}><CircleCheck aria-hidden="true" className="size-4" />{busy ? t.workspace.savingReason : t.workspace.saveReason}</button>
+        </div>
+      </form>
+    ) : <p className={place.notes ? "pd-reason-copy" : "pd-reason-copy pd-muted"}>{place.notes ?? t.workspace.noReasonDetail}</p>}
+    {message ? <p className="pd-notice mt-3" role="alert">{message}</p> : null}
+  </section>;
 }
 
 function PlaceDayPicker({ trip, place, available, request, changed }: {
@@ -491,17 +555,29 @@ function PlaceDayPicker({ trip, place, available, request, changed }: {
   }
   if (place.scheduled) return null;
   const located = place.latitude !== null && place.longitude !== null;
+  if (!located) {
+    return <section className="pd-detail-section">
+      <h3>{t.tripPlaces.workspace.scheduleTitle}</h3>
+      <div className="pd-location-warning" role="status">
+        <MapPinOff aria-hidden="true" className="size-4" />
+        <div>
+          <strong>{t.tripPlaces.workspace.locationMissing}</strong>
+          <p>{t.tripPlaces.workspace.locationMissingHelp}</p>
+          <a className="pd-secondary pd-location-action" href={`?trip=${encodeURIComponent(trip.id)}&tab=itinerary&segment=daily&manage=places`}><MapPin aria-hidden="true" className="size-4" />{t.tripPlaces.workspace.addLocation}</a>
+        </div>
+      </div>
+    </section>;
+  }
   return <section className="pd-detail-section">
-    <h3>排入行程</h3>
+    <h3>{t.tripPlaces.workspace.scheduleTitle}</h3>
     <form onSubmit={(event) => void save(event)}>
-      <fieldset className="pd-daypicker" disabled={busy || !available || !located}>
-        <legend className="sr-only">選擇行程日期</legend>
+      <fieldset className="pd-daypicker" disabled={busy || !available}>
+        <legend className="sr-only">{t.tripPlaces.workspace.chooseDay}</legend>
         <label><input type="radio" name={`day-${place.id}`} value="" checked={!dayId} onChange={() => setDayId("")} /><span>{place.selectedForItinerary ? t.tripPlaces.workspace.pendingArrangement : t.tripPlaces.workspace.notPlanned}</span></label>
         {trip.days.map((day, index) => <label key={day.id}><input type="radio" name={`day-${place.id}`} value={day.id} checked={dayId === day.id} onChange={() => setDayId(day.id)} /><span>{t.tripSkeleton.dayLabel(index + 1)}<small>{new Intl.DateTimeFormat(locale, { timeZone: "UTC", month: "numeric", day: "numeric" }).format(new Date(`${day.date}T12:00:00Z`))}</small></span></label>)}
       </fieldset>
-      {!located ? <p className="pd-subhead">先確認地圖位置，才能排入行程。</p> : null}
-      <button className="pd-primary mt-3" disabled={busy || !available || !located || dayId === base.dayId}>{busy ? "安排中…" : dayId ? "排入行程" : "移出這一天"}</button>
-      {error ? <div className="pd-notice mt-3" role="alert">{error}<button type="button" className="pd-secondary mt-2" disabled={busy} onClick={() => { setDayId(place.assignedDayId ?? ""); setBase({ dayId: place.assignedDayId ?? "", version: place.version }); setError(""); }}>重新載入日期</button></div> : null}
+      {dayId !== base.dayId ? <button className="pd-primary mt-3" disabled={busy || !available}>{busy ? t.tripPlaces.workspace.scheduling : dayId ? t.tripPlaces.workspace.addToSchedule : t.tripPlaces.workspace.removeFromDay}</button> : null}
+      {error ? <div className="pd-notice mt-3" role="alert">{error}<button type="button" className="pd-secondary mt-2" disabled={busy} onClick={() => { setDayId(place.assignedDayId ?? ""); setBase({ dayId: place.assignedDayId ?? "", version: place.version }); setError(""); }}>{t.tripPlaces.workspace.reloadDay}</button></div> : null}
     </form>
   </section>;
 }
@@ -783,73 +859,69 @@ export function TripPlaceWorkspace({
         : t.workspace.manualEntry;
     const duplicateSuggestions = duplicateSuggestionsByPlace.get(place.id) ?? [];
     return (
-      <div className="pd-detail">
-        <PlaceDetailContent tripId={trip.id} reference={{ kind: "trip-place", id: place.id }} request={request} />
-        <section className="pd-detail-section pt-1">
-          <div className="pd-detail-badges">
-            <span className="pd-chip">{t.placeType[place.type]}</span>
-            <span className="pd-state">{itineraryMembershipLabel(place, t)}</span>
-            {place.status !== "ready" ? <span className="pd-state"><StatusIcon status={place.status} />{statusLabel(place.status, t)}</span> : null}
-          </div>
-          <p className="mt-3 text-sm text-muted-foreground">{place.address ?? t.workspace.unknownAddress}</p>
-          <p className="mt-1 text-sm text-muted-foreground">{t.workspace.factsSource(factsLabel)}{place.aiProposalId ? `・${t.workspace.aiProposal}` : ""}</p>
-        </section>
-        <section className="pd-detail-section">
-          <h3>地點與資料來源</h3>
-          {place.providerObservedAt ? <p className="text-sm text-muted-foreground">{t.workspace.providerObserved(new Date(place.providerObservedAt).toLocaleString(locale))}{place.providerFactsExpired ? `・${t.workspace.expiredFacts}` : ""}</p> : null}
-          <div className="pd-source-links mt-3">
-            {place.provider === "google" && place.providerPlaceId ? <a className="pd-secondary" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
-            {place.sourceUrl ? <a className="inline-flex min-h-11 items-center break-all text-sm font-bold text-accent-strong underline underline-offset-2" href={place.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
-          </div>
-        </section>
-        {place.notes ? <section className="pd-detail-section"><h3>地點與成員備註</h3><p className="whitespace-pre-wrap break-words text-sm">{place.notes}</p></section> : null}
-        {available && place.votingAvailable ? <section className="pd-detail-section"><VoteVoters voters={place.voters} /></section> : null}
-        {available ? duplicateSuggestions.map((suggestion) => {
-          const other = placesById.get(suggestion.otherTripPlaceId);
-          return (
-            <section key={suggestion.id} className="rounded-xl border border-accent-strong bg-surface p-3" aria-label={t.duplicates.comparisonLabel}>
-              <strong className="block">{t.duplicates.compare}</strong>
-              <p className="mt-1 text-sm">{t.duplicates.reason(duplicateReason(suggestion.reason, t))}</p>
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                {([
-                  [t.duplicates.thisOption, place],
-                  [t.duplicates.otherOption, other],
-                ] as const).map(([label, candidate]) => (
-                  <section key={label} className="rounded-lg border border-ink/10 p-3" aria-label={label}>
-                    <span className="text-xs font-bold text-muted-foreground">{label}</span>
-                    {candidate ? (
-                      <>
-                        <h5 className="text-xl font-semibold">{candidate.name}</h5>
-                        <p className="text-sm">{t.placeType[candidate.type]}・{candidate.address ?? t.workspace.unknownAddress}</p>
-                        <p className="mt-1 text-sm text-muted-foreground">
-                          {candidate.factsSource === "provider" ? t.duplicates.providerFacts : t.duplicates.memberFacts}
-                        </p>
-                        {candidate.notes ? <p className="mt-1 whitespace-pre-wrap break-words text-sm">{candidate.notes}</p> : null}
-                        {candidate.sourceUrl ? <a className="mt-1 block break-all text-sm underline underline-offset-2" href={candidate.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
-                      </>
-                    ) : <p className="mt-1 text-sm text-muted-foreground">{t.duplicates.unavailable}</p>}
-                  </section>
-                ))}
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button className="min-h-11 rounded-lg bg-accent px-3 font-bold text-ink-strong outline-none hover:bg-accent/80 focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={!other} onClick={() => {
-                  if (other) setMergeConfirmation({ source: place, target: other });
-                }}>{t.duplicates.merge}</button>
-                <button className="min-h-11 rounded-lg border px-3 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={() => void keepSeparate(suggestion.id)}>{t.duplicates.keepSeparate}</button>
-              </div>
-            </section>
-          );
-        }) : null}
-        <PlaceDayPicker key={`day:${place.id}`} trip={trip} place={place} available={available} request={request} changed={changedPlaces} />
-        <PlanningEditor key={place.id} tripId={trip.id} place={place} available={available} request={request} changed={changedPlaces}
-          editingChanged={(editing) => {
-            if (editing) editingPlaceIds.current.add(place.id);
-            else {
-              editingPlaceIds.current.delete(place.id);
-              setReadModel((current) => ({ ...current, retained: current.retained.filter((entry) => entry.id !== place.id) }));
-            }
-          }} />
-      </div>
+      <PlaceDetailContent
+        tripId={trip.id}
+        reference={{ kind: "trip-place", id: place.id }}
+        request={request}
+        collapsible
+        interlude={<div className="pd-detail">
+          <ReasonEditor tripId={trip.id} place={place} available={available} request={request} changed={changedPlaces} />
+          <PlaceDayPicker key={`day:${place.id}`} trip={trip} place={place} available={available} request={request} changed={changedPlaces} />
+          <PlanningEditor key={place.id} tripId={trip.id} place={place} available={available} request={request} changed={changedPlaces}
+            editingChanged={(editing) => {
+              if (editing) editingPlaceIds.current.add(place.id);
+              else {
+                editingPlaceIds.current.delete(place.id);
+                setReadModel((current) => ({ ...current, retained: current.retained.filter((entry) => entry.id !== place.id) }));
+              }
+            }} />
+          <section className="pd-detail-section">
+            <h3>{t.workspace.placeAndSources}</h3>
+            <p className="pd-detail-meta"><MapPin aria-hidden="true" className="size-4" /><span>{place.address ?? t.workspace.unknownAddress}</span></p>
+            <p className="mt-1 text-sm text-muted-foreground">{t.workspace.factsSource(factsLabel)}{place.aiProposalId ? `・${t.workspace.aiProposal}` : ""}</p>
+            {place.providerObservedAt ? <p className="mt-1 text-sm text-muted-foreground">{t.workspace.providerObserved(new Date(place.providerObservedAt).toLocaleString(locale))}{place.providerFactsExpired ? `・${t.workspace.expiredFacts}` : ""}</p> : null}
+            <div className="pd-source-links mt-3">
+              {place.provider === "google" && place.providerPlaceId ? <a className="pd-secondary" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
+              {place.sourceUrl ? <a className="inline-flex min-h-11 items-center break-all text-sm font-bold text-accent-strong underline underline-offset-2" href={place.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
+            </div>
+          </section>
+          {available && place.votingAvailable ? <section className="pd-detail-section"><VoteVoters voters={place.voters} /></section> : null}
+          {available ? duplicateSuggestions.map((suggestion) => {
+            const other = placesById.get(suggestion.otherTripPlaceId);
+            return (
+              <section key={suggestion.id} className="rounded-xl border border-accent-strong bg-surface p-3" aria-label={t.duplicates.comparisonLabel}>
+                <strong className="block">{t.duplicates.compare}</strong>
+                <p className="mt-1 text-sm">{t.duplicates.reason(duplicateReason(suggestion.reason, t))}</p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  {([
+                    [t.duplicates.thisOption, place],
+                    [t.duplicates.otherOption, other],
+                  ] as const).map(([label, candidate]) => (
+                    <section key={label} className="rounded-lg border border-ink/10 p-3" aria-label={label}>
+                      <span className="text-xs font-bold text-muted-foreground">{label}</span>
+                      {candidate ? (
+                        <>
+                          <h5 className="text-xl font-semibold">{candidate.name}</h5>
+                          <p className="text-sm">{t.placeType[candidate.type]}・{candidate.address ?? t.workspace.unknownAddress}</p>
+                          <p className="mt-1 text-sm text-muted-foreground">{candidate.factsSource === "provider" ? t.duplicates.providerFacts : t.duplicates.memberFacts}</p>
+                          {candidate.notes ? <p className="mt-1 whitespace-pre-wrap break-words text-sm">{candidate.notes}</p> : null}
+                          {candidate.sourceUrl ? <a className="mt-1 block break-all text-sm underline underline-offset-2" href={candidate.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
+                        </>
+                      ) : <p className="mt-1 text-sm text-muted-foreground">{t.duplicates.unavailable}</p>}
+                    </section>
+                  ))}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button className="min-h-11 rounded-lg bg-accent px-3 font-bold text-ink-strong outline-none hover:bg-accent/80 focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={!other} onClick={() => {
+                    if (other) setMergeConfirmation({ source: place, target: other });
+                  }}>{t.duplicates.merge}</button>
+                  <button className="min-h-11 rounded-lg border px-3 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={() => void keepSeparate(suggestion.id)}>{t.duplicates.keepSeparate}</button>
+                </div>
+              </section>
+            );
+          }) : null}
+        </div>}
+      />
     );
   }
 
@@ -861,7 +933,17 @@ export function TripPlaceWorkspace({
       </div>
       {message ? <p className="pd-notice" role="alert">{message}</p> : null}
       {loading && places.length === 0 ? <p className="pd-subhead" role="status">{t.workspace.loading}</p> : null}
-      {!loading && places.length === 0 && readModel.retained.length === 0 ? <p className="pd-empty">{t.workspace.empty}</p> : null}
+      {!loading && places.length === 0 && readModel.retained.length === 0 ? (
+        <section className="pd-empty">
+          <div>
+            <span className="pd-empty-icon"><MapPin aria-hidden="true" className="size-6" /></span>
+            <h3>{t.workspace.emptyTitle}</h3>
+            <p>{t.workspace.emptyDescription}</p>
+            <p className="pd-empty-ai">{t.workspace.emptyAiPrefix}<a href={`?trip=${encodeURIComponent(trip.id)}&tab=places&segment=discovery`}>{t.workspace.emptyAiLink}</a>{t.workspace.emptyAiSuffix}</p>
+            <button type="button" className="pd-primary" onClick={() => setAdding(true)}><Plus aria-hidden="true" className="size-4" />{t.workspace.addFirstPlace}</button>
+          </div>
+        </section>
+      ) : null}
       {listedPlaces.length > 0 ? (
         <div className="pd-list" aria-label={t.workspace.tableLabel}>
           {listedPlaces.map((place) => {
@@ -897,7 +979,7 @@ export function TripPlaceWorkspace({
                       {available && needsAction ? <span className="pd-state"><StatusIcon status={actionStatus} />{statusLabel(actionStatus, t)}</span> : null}
                     </div>
                     {repeatedName ? <p className="pd-row-note">{place.address ?? t.workspace.unknownAddress}</p> : null}
-                    <p className="pd-row-note">{place.notes && place.notes !== place.address ? place.notes : repeatedName ? null : place.address}</p>
+                    <p className={`pd-row-note${place.notes ? "" : " pd-muted"}`}>{place.notes ?? t.workspace.noReason}</p>
                     <PlacePhotoCredit photo={previews.photos.get(place.id)} />
                   </div>
                 </div>
@@ -911,7 +993,14 @@ export function TripPlaceWorkspace({
         </div>
       ) : null}
       {selectedPlace ? (
-        <PlaceDetailSheet open title={selectedPlace.name} titleRef={detailTitleRef} onClose={closeDetail} footer={
+        <PlaceDetailSheet
+          open
+          appearance="workspace"
+          title={selectedPlace.name}
+          description={<div className="pd-detail-badges"><span className="pd-chip">{t.placeType[selectedPlace.type]}</span><span className="pd-state">{itineraryMembershipLabel(selectedPlace, t)}</span>{selectedPlace.status !== "ready" ? <span className="pd-state"><StatusIcon status={selectedPlace.status} />{statusLabel(selectedPlace.status, t)}</span> : null}</div>}
+          titleRef={detailTitleRef}
+          onClose={closeDetail}
+          footer={
           removalConfirmation ? <div className="pd-confirm-footer"><p>{t.workspace.confirmRemove(removalConfirmation.name)}</p>{message ? <p role="alert">{message}</p> : null}<div><button className="pd-secondary" disabled={removing} onClick={() => setRemovalConfirmation(null)}>保留地點</button><button className="pd-danger-button" disabled={removing} onClick={() => void remove(removalConfirmation)}>{removing ? "移除中…" : t.workspace.remove}</button></div></div>
           : <div>{message ? <p className="pd-notice" role="alert">{message}</p> : null}<div className="pd-fixed-actions">{quickActions(selectedPlace)}{placesById.has(selectedPlace.id) ? <button className="pd-danger-link" disabled={removing} onClick={() => { setMessage(""); setRemovalConfirmation(selectedPlace); }}>{t.workspace.remove}</button> : null}</div></div>
         }>

@@ -66,7 +66,7 @@ function ComboboxInput({
         render={<InputGroupInput disabled={disabled} />}
         {...props}
       />
-      <InputGroupAddon align="inline-end">
+      <InputGroupAddon align="inline-end" className="has-[>button]:mr-0">
         {showTrigger && (
           <InputGroupButton
             size="icon-xs"

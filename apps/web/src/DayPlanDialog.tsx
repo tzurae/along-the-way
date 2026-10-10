@@ -9,7 +9,7 @@ import {
   type DayWindowDto,
   type DayPlaceOrderResponse,
 } from "@along-the-way/contracts/day-plans";
-import { Check, Clock3, HelpCircle, ListOrdered, Route, Sparkles, TriangleAlert } from "lucide-react";
+import { Check, ChevronDown, Clock3, HelpCircle, ListOrdered, Route, Sparkles, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -323,35 +323,6 @@ export function DayPlanDialog({
           onEdit={() => { if (resolution.conflict?.current) setBase(resolution.conflict.current); resolution.resume(); }}
         /> : null}
 
-        <form
-          hidden={Boolean(resolution.conflict)}
-          className="route-constraints"
-          onSubmit={(event) => void replan(event)}
-        >
-          <div className="route-constraints-heading">
-            <Clock3 />
-            <div>
-              <strong>可安排時間</strong>
-              <span>固定行程與已確認限制會保留不動。</span>
-            </div>
-          </div>
-          <label>
-            <span>{t.dayPlan.start}</span>
-            <input type="time" value={start} required onChange={(event) => setStart(event.target.value)} />
-          </label>
-          <label>
-            <span>{t.dayPlan.end}</span>
-            <input type="time" value={end} hidden={endOfDay} disabled={endOfDay} required={!endOfDay} onChange={(event) => setEnd(event.target.value)} />
-            {endOfDay ? <span className="route-end-of-day">當天結束（24:00）</span> : null}
-          </label>
-          <label className="route-endday-toggle">
-            <input type="checkbox" checked={endOfDay} onChange={(event) => setEndOfDay(event.target.checked)} />
-            <span>安排到當天結束（24:00）</span>
-          </label>
-          <Button type="submit" variant="outline" size="lg" disabled={busy !== null || !timetable}>
-            {t.dayPlan.rePlan}
-          </Button>
-        </form>
 
         {error ? <p role="alert" className="route-error">{error}</p> : null}
         {busy === "planning" ? <p role="status" className="route-status">{t.dayPlan.planning}</p> : null}
@@ -398,6 +369,7 @@ export function DayPlanDialog({
               ) : null}
             </div>
 
+
             <div className="route-segments" role="tablist" aria-label="比較順序">
               <button
                 type="button"
@@ -423,6 +395,44 @@ export function DayPlanDialog({
               </button>
             </div>
 
+            <details className="route-time-settings">
+              <summary>
+                <span className="route-time-settings-label">
+                  <Clock3 aria-hidden="true" />
+                  <span>
+                    <strong>可安排時間</strong>
+                    <small>{start}–{endOfDay ? "24:00" : end}</small>
+                  </span>
+                </span>
+                <span className="route-time-settings-action">
+                  調整時間
+                  <ChevronDown aria-hidden="true" />
+                </span>
+              </summary>
+              <form
+                hidden={Boolean(resolution.conflict)}
+                className="route-constraints"
+                onSubmit={(event) => void replan(event)}
+              >
+                <p>固定行程與已確認限制會保留不動。</p>
+                <label>
+                  <span>{t.dayPlan.start}</span>
+                  <input type="time" value={start} required onChange={(event) => setStart(event.target.value)} />
+                </label>
+                <label>
+                  <span>{t.dayPlan.end}</span>
+                  <input type="time" value={end} hidden={endOfDay} disabled={endOfDay} required={!endOfDay} onChange={(event) => setEnd(event.target.value)} />
+                  {endOfDay ? <span className="route-end-of-day">當天結束（24:00）</span> : null}
+                </label>
+                <label className="route-endday-toggle">
+                  <input type="checkbox" checked={endOfDay} onChange={(event) => setEndOfDay(event.target.checked)} />
+                  <span>安排到當天結束（24:00）</span>
+                </label>
+                <Button type="submit" variant="outline" size="lg" disabled={busy !== null || !timetable}>
+                  {t.dayPlan.rePlan}
+                </Button>
+              </form>
+            </details>
             <div className="route-versions">
               {timetableVersion("current")}
               {timetableVersion("suggested")}

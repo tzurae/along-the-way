@@ -1,0 +1,100 @@
+[data-slot="dialog-content"].form-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: min(768px, calc(100vw - 32px));
+  max-width: 768px;
+  max-height: calc(100dvh - 32px);
+  overflow: hidden;
+  border-radius: 22px;
+  padding: 24px;
+}
+
+[data-slot="dialog-content"].form-sheet--place {
+  width: min(672px, calc(100vw - 32px));
+  max-width: 672px;
+}
+
+.form-sheet [data-slot="dialog-header"] {
+  flex: none;
+  padding-right: 52px;
+}
+
+.form-sheet [data-slot="dialog-title"] {
+  font-family: var(--font-display);
+  font-size: 24px;
+}
+
+.form-sheet > [data-slot="dialog-close"] {
+  top: 14px;
+  right: 14px;
+  z-index: 3;
+  width: 44px;
+  height: 44px;
+}
+
+.form-sheet__form {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.form-sheet__form[hidden] {
+  display: none;
+}
+
+.form-sheet__body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.form-sheet > .form-sheet__body {
+  flex: 1 1 auto;
+}
+
+.form-sheet .native-select {
+  display: block;
+  width: 100%;
+}
+
+.form-sheet input,
+.form-sheet select,
+.form-sheet textarea {
+  min-height: 44px;
+  border-radius: 12px;
+  background: white;
+}
+
+.form-sheet .form-sheet__footer {
+  flex: none;
+  flex-direction: row;
+  justify-content: flex-end;
+  margin: 16px -24px -24px;
+  border-radius: 0 0 22px 22px;
+  padding: 16px 24px;
+}
+
+.form-sheet .form-sheet__footer button {
+  min-height: 44px;
+  border-radius: 999px;
+}
+
+@media (max-width: 599px) {
+  [data-slot="dialog-content"].form-sheet {
+    width: 100%;
+    max-width: none;
+    max-height: 92dvh;
+    border-radius: 22px 22px 0 0;
+  }
+
+  .form-sheet .form-sheet__footer {
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  }
+
+  .form-sheet .form-sheet__footer button {
+    flex: 1 1 0;
+  }
+}

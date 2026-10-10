@@ -4,6 +4,7 @@ export const placeDetail = {
   accessDenied: "你目前無法查看這個景點的詳情。請重新確認旅程成員資格。",
   offlineUnavailable: "離線時無法重新取得景點詳情；已保存的今日行程仍可閱讀。",
   empty: "目前尚無已刊登的景點介紹。",
+  moreInformation: "景點介紹、主要看點與資料來源",
   noPhoto: "尚無可用照片",
   photoUnavailable: "照片暫時無法載入",
   photoCount: (current: number, total: number) => `${current}／${total}`,

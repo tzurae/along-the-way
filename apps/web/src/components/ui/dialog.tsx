@@ -44,9 +44,11 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  placement = "center",
   ...props
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean
+  placement?: "center" | "sheet"
 }) {
   const { t } = useI18n()
   return (
@@ -56,6 +58,7 @@ function DialogContent({
         data-slot="dialog-content"
         className={cn(
           "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 transition-[scale,opacity] duration-100 motion-reduce:transition-none motion-reduce:data-ending-style:scale-100 motion-reduce:data-starting-style:scale-100 outline-none sm:max-w-sm data-ending-style:opacity-0 data-starting-style:opacity-0 data-ending-style:scale-[0.98] data-starting-style:scale-[0.98]",
+          placement === "sheet" && "max-[599px]:top-[8dvh] max-[599px]:right-0 max-[599px]:bottom-0 max-[599px]:left-0 max-[599px]:translate-x-0 max-[599px]:translate-y-0",
           className
         )}
         {...props}

@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, CalendarDays, ChevronRight, CircleDot, Clock3, ExternalLink, Lock, MapPin, Navigation, TriangleAlert, Users, WifiOff } from "lucide-react";
+import { ArrowLeft, ArrowRight, CalendarDays, Check, ChevronRight, CircleDot, Clock3, ExternalLink, Lock, MapPin, Navigation, TriangleAlert, Users, WifiOff } from "lucide-react";
 import type { PlaceDetailReference, PlacePhotoDto } from "@along-the-way/contracts/place-details";
 import { useI18n } from "./i18n";
 import { googleMapsCoordinatesUrl, googleMapsNavigationUrl } from "./google-maps";
@@ -8,6 +8,7 @@ import { readTripLocation } from "./trip-location";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest } from "./PlaceThumbnail";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
+import { NativeSelect } from "./components/ui/native-select";
 
 interface TodayDetailSelection {
   reference: PlaceDetailReference;
@@ -37,9 +38,8 @@ function TodayTime({ item, zone }: { item: TodayItem; zone: string | null }) {
   return t.today.timeRange(label(item.start, startZone, start?.place ?? null), label(item.end, endZone, end ? end.place : start?.place ?? null));
 }
 
-function TodayItemDetails({ item, zone, now, parallel, memberId, date, previews, previewsLoading, openPlace }: {
+function TodayItemDetails({ item, now, parallel, memberId, date, previews, previewsLoading, openPlace }: {
   item: TodayItem;
-  zone: string | null;
   now: number;
   parallel: boolean;
   memberId: string;
@@ -51,7 +51,6 @@ function TodayItemDetails({ item, zone, now, parallel, memberId, date, previews,
   const { t, locale } = useI18n();
   const text = t.today;
   const headingId = useId();
-  const format = (instant: string, timeZone: string) => new Intl.DateTimeFormat(locale, { timeZone, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(instant));
   const current = item.start && item.end && Date.parse(item.start) <= now && now < Date.parse(item.end);
   const start = item.endpoints.find((endpoint) => endpoint.role === "start");
   const end = item.endpoints.find((endpoint) => endpoint.role === "end");
@@ -59,53 +58,64 @@ function TodayItemDetails({ item, zone, now, parallel, memberId, date, previews,
   const official = safeExternalUrl(item.sourceUrl);
   const startLabel = item.type === "flight" ? text.departure : item.type === "lodging" ? text.checkIn : item.type === "transport" ? text.origin : text.start;
   const endLabel = item.type === "flight" ? text.arrival : item.type === "lodging" ? text.checkOut : item.type === "transport" ? text.destination : text.end;
+  const needsManualCheck = item.constraints.length > 0 || !item.start || !item.end;
   return <article className="today-item-detail" aria-labelledby={headingId} data-current={Boolean(current)}>
-    <p className="font-semibold tabular-nums"><TodayTime item={item} zone={zone} /></p>
-    <h4 id={headingId} className="mt-1 text-xl font-bold">{item.title}</h4>
-    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-      <span>{text.types[item.type]}</span>
-      {current ? <span className="inline-flex items-center gap-1 font-bold"><Clock3 size={16} aria-hidden="true" />{text.current}</span> : null}
-      {parallel ? <span className="inline-flex items-center gap-1"><Users size={16} aria-hidden="true" />{text.parallel}</span> : null}
-      {item.locked ? <span className="inline-flex items-center gap-1"><Lock size={16} aria-hidden="true" />{text.locked}</span> : null}
-    </div>
-    <p className="mt-2 text-sm">{item.participants === null ? text.participantsUnknown : <>{text.participants}：{item.participants.length === 0 ? text.noParticipants : item.participants.map((person) => `${person.name}${person.id === memberId ? `（${text.you}）` : ""}`).join("、")}</>}</p>
-    <dl className="mt-4 grid gap-3 text-sm">
-      {item.endpoints.map((endpoint) => {
-        const maps = endpoint.place ? googleMapsCoordinatesUrl(endpoint.place) : null;
-        const detailIdentity = endpoint.place?.id ?? null;
-        const triggerKey = detailIdentity ? encodeURIComponent(`${item.id}:${endpoint.role}:${detailIdentity}`) : "";
-        return <div key={endpoint.role} className="flex min-w-0 items-start gap-3">
-          {endpoint.place && detailIdentity && openPlace ? <PlaceThumbnail photo={previews.get(detailIdentity)} loading={previewsLoading} /> : null}
-          <div className="min-w-0">
-            <dt className="font-semibold">{endpoint.role === "start" ? startLabel : endLabel}</dt>
-            <dd>
-              {format(endpoint.instant, endpoint.timeZone)} · {endpoint.timeZone}
-              {endpoint.place ? <> · {detailIdentity && openPlace ? <button
-                type="button"
-                className="min-h-11 max-w-full break-words text-left font-bold underline decoration-ink/30 underline-offset-4 outline-none hover:decoration-ink focus-visible:rounded focus-visible:ring-4 focus-visible:ring-focus/30"
-                aria-label={text.viewPlaceDetail(endpoint.place.name)}
-                data-today-place-detail-trigger={triggerKey}
-                onClick={() => openPlace({ reference: { kind: "itinerary-place", id: detailIdentity }, name: endpoint.place!.name, triggerKey, date })}
-              >{endpoint.place.name}</button> : endpoint.place.name}</> : null}
-            </dd>
-            {endpoint.place?.address ? <dd>{endpoint.place.address}</dd> : null}
-            <dd>{maps ? <a className="today-link" href={maps} target="_blank" rel="noopener noreferrer">{text.maps}<ExternalLink size={14} aria-hidden="true" /><span className="text-xs">{text.leavesApp}</span></a> : <span className="inline-flex items-center gap-1"><TriangleAlert size={15} aria-hidden="true" />{text.locationMissing}</span>}</dd>
-          </div>
-        </div>;
-      })}
-      {item.facts.map((fact) => <div key={fact.kind}><dt className="font-semibold">{text.facts[fact.kind]}</dt><dd className="whitespace-pre-wrap">{fact.value}</dd></div>)}
-    </dl>
-    {item.constraints.length || !item.start || !item.end ? <section className="mt-4 text-sm" aria-label={text.manualChecks}>
-      <h5 className="flex items-center gap-1 font-semibold"><TriangleAlert size={16} aria-hidden="true" />{text.manualChecks}</h5>
-      <ul className="mt-1 list-inside list-disc">
-        {!item.start || !item.end ? <li>{text.timeUnknown}</li> : null}
-        {item.constraints.map((constraint, index) => <li key={index}>{constraint.type === "fixed_time" ? text.fixed : constraint.type === "immovable" ? text.immovable : text.buffer(constraint.minutes)} · {text.constraintStatus[constraint.status]}</li>)}
-      </ul>
-    </section> : null}
-    {item.type === "transport" ? <p className="mt-3 text-sm text-muted-foreground">{text.routeUnavailable}</p> : null}
-    {directions ? <a className="today-link mt-2" href={directions} target="_blank" rel="noopener noreferrer">{text.directions}<ExternalLink size={16} aria-hidden="true" /><span className="text-xs">{text.leavesApp}</span></a> : null}
-    {official ? <a className="today-link mt-2" href={official} target="_blank" rel="noopener noreferrer">{text.officialLink}<ExternalLink size={16} aria-hidden="true" /><span className="text-xs">{text.leavesApp}</span></a> : null}
-    {item.notes ? <details className="mt-3"><summary className="min-h-11 cursor-pointer py-2 font-semibold">{text.notes}</summary><p className="whitespace-pre-wrap">{item.notes}</p></details> : null}
+    <h4 id={headingId}>{item.title}</h4>
+    <section className="today-detail-section">
+      <h5>{text.endpointsSection}</h5>
+      <dl className="today-detail-facts">
+        {item.endpoints.map((endpoint) => {
+          const maps = endpoint.place ? googleMapsCoordinatesUrl(endpoint.place) : null;
+          const detailIdentity = endpoint.place?.id ?? null;
+          const triggerKey = detailIdentity ? encodeURIComponent(`${item.id}:${endpoint.role}:${detailIdentity}`) : "";
+          return <div key={endpoint.role} className="today-detail-endpoint">
+            {endpoint.place && detailIdentity && openPlace ? <PlaceThumbnail photo={previews.get(detailIdentity)} loading={previewsLoading} /> : null}
+            <div className="min-w-0">
+              <dt>{endpoint.role === "start" ? startLabel : endLabel}</dt>
+              <dd>
+                {new Intl.DateTimeFormat(locale, { timeZone: endpoint.timeZone, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(endpoint.instant))} · {endpoint.timeZone}
+                {endpoint.place ? <> · {detailIdentity && openPlace ? <button
+                  type="button"
+                  className="min-h-11 max-w-full break-words text-left font-bold underline decoration-ink/30 underline-offset-4 outline-none hover:decoration-ink focus-visible:rounded focus-visible:ring-4 focus-visible:ring-focus/30"
+                  aria-label={text.viewPlaceDetail(endpoint.place.name)}
+                  data-today-place-detail-trigger={triggerKey}
+                  onClick={() => openPlace({ reference: { kind: "itinerary-place", id: detailIdentity }, name: endpoint.place!.name, triggerKey, date })}
+                >{endpoint.place.name}</button> : endpoint.place.name}</> : null}
+              </dd>
+              {endpoint.place?.address ? <dd>{endpoint.place.address}</dd> : null}
+              <dd>{maps ? <a className="today-link" href={maps} target="_blank" rel="noopener noreferrer">{text.maps}<ExternalLink size={14} aria-hidden="true" /><span className="text-xs">{text.leavesApp}</span></a> : <span className="inline-flex items-center gap-1"><TriangleAlert size={15} aria-hidden="true" />{text.locationMissing}</span>}</dd>
+            </div>
+          </div>;
+        })}
+      </dl>
+      {directions ? <a className="today-link mt-2" href={directions} target="_blank" rel="noopener noreferrer">{text.directions}<ExternalLink size={16} aria-hidden="true" /><span className="text-xs">{text.leavesApp}</span></a> : null}
+    </section>
+    <section className="today-detail-section">
+      <h5>{text.confirmationSection}</h5>
+      <div className="today-detail-meta">
+        <span>{text.types[item.type]}</span>
+        {current ? <span><Clock3 size={16} aria-hidden="true" />{text.current}</span> : null}
+        {parallel ? <span><Users size={16} aria-hidden="true" />{text.parallel}</span> : null}
+        {item.locked ? <span><Lock size={16} aria-hidden="true" />{text.locked}</span> : null}
+      </div>
+      <p className="today-detail-participants">{item.participants === null ? text.participantsUnknown : <>{text.participants}：{item.participants.length === 0 ? text.noParticipants : item.participants.map((person) => `${person.name}${person.id === memberId ? `（${text.you}）` : ""}`).join("、")}</>}</p>
+      {item.facts.length ? <dl className="today-detail-facts">
+        {item.facts.map((fact) => <div key={fact.kind}><dt>{text.facts[fact.kind]}</dt><dd className="whitespace-pre-wrap">{fact.value}</dd></div>)}
+      </dl> : null}
+      {official ? <a className="today-link mt-2" href={official} target="_blank" rel="noopener noreferrer">{text.officialLink}<ExternalLink size={16} aria-hidden="true" /><span className="text-xs">{text.leavesApp}</span></a> : null}
+    </section>
+    <section className="today-detail-section">
+      <h5>{text.notes}</h5>
+      {needsManualCheck ? <div className="text-sm">
+        <p className="inline-flex items-center gap-1 font-semibold"><TriangleAlert size={16} aria-hidden="true" />{text.manualChecks}</p>
+        <ul className="mt-1 list-inside list-disc">
+          {!item.start || !item.end ? <li>{text.timeUnknown}</li> : null}
+          {item.constraints.map((constraint, index) => <li key={index}>{constraint.type === "fixed_time" ? text.fixed : constraint.type === "immovable" ? text.immovable : text.buffer(constraint.minutes)} · {text.constraintStatus[constraint.status]}</li>)}
+        </ul>
+      </div> : null}
+      {item.type === "transport" ? <p className="mt-3 text-sm text-muted-foreground">{text.routeUnavailable}</p> : null}
+      {item.notes ? <p className="mt-3 whitespace-pre-wrap">{item.notes}</p> : !needsManualCheck && item.type !== "transport" ? <p className="text-sm text-muted-foreground">{text.noNotes}</p> : null}
+    </section>
   </article>;
 }
 
@@ -359,6 +369,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, onArrangeDay
   const selectedItemParallel = selectedItem
     ? parallelItemIds(dayItems(model, selectedItemDay)).has(selectedItem.id)
     : false;
+  const emptyDay = items.length === 0;
 
   return <section className="today-workspace" aria-label={text.title}>
     <header className="today-pagehead">
@@ -366,15 +377,21 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, onArrangeDay
       <div className="today-headnav">
         <nav className="today-dayrow" aria-label={text.chooseDay}>
           <button type="button" aria-label={text.previous} disabled={index === 0} onClick={() => onDayChanged(model.days[index - 1]!.date)}><ArrowLeft size={16} /><span>{text.previous}</span></button>
-          <select aria-label={text.chooseDay} value={day.date} onChange={(event) => onDayChanged(event.target.value)}>{model.days.map((entry) => <option key={entry.id} value={entry.date}>{new Intl.DateTimeFormat(locale, { timeZone: "UTC", month: "numeric", day: "numeric", weekday: "short" }).format(new Date(`${entry.date}T12:00:00Z`))}</option>)}</select>
+          <NativeSelect aria-label={text.chooseDay} value={day.date} onChange={(event) => onDayChanged(event.target.value)}>{model.days.map((entry) => <option key={entry.id} value={entry.date}>{new Intl.DateTimeFormat(locale, { timeZone: "UTC", month: "numeric", day: "numeric", weekday: "short" }).format(new Date(`${entry.date}T12:00:00Z`))}</option>)}</NativeSelect>
           <button type="button" aria-label={text.nextDay} disabled={index === model.days.length - 1} onClick={() => onDayChanged(model.days[index + 1]!.date)}><span>{text.nextDay}</span><ArrowRight size={16} /></button>
         </nav>
-        <div className="today-zone"><span><Clock3 size={13} />{day.timeZone ? text.localTime(day.timeZone) : text.zoneUnknown}</span><button type="button" onClick={retry} disabled={retrying}>{retrying ? text.retrying : offline ? text.retry : text.sync}</button></div>
+        <div className="today-zone">
+          <span><Clock3 size={13} />{day.timeZone ? text.localTime(day.timeZone) : text.zoneUnknown}</span>
+          {offline || retrying
+            ? <button type="button" onClick={retry} disabled={retrying}>{retrying ? text.retrying : text.retry}</button>
+            : <span className="today-sync-status"><Check size={14} aria-hidden="true" />{text.synced}</span>}
+        </div>
       </div>
     </header>
     {offline ? <aside className="today-notice" role="status"><WifiOff size={20} /><div><strong>{text.offline}</strong><p>{text.offlineHelp}</p><small>{text.fetchedAt(snapshotTime)}</small></div></aside> : null}
     {!persisted ? <p className="today-notice" role="status">{text.storageUnavailable}</p> : null}
-    <div className="today-grid">
+    <div className={`today-grid${emptyDay ? " is-empty" : ""}`}>
+      {!emptyDay ? (
       <section className="today-lead" aria-label={leadLabel}>
         <div className="today-lead-label">{clock.phase === "before" || !selectedIsToday ? <CalendarDays size={16} /> : leadCurrent ? <CircleDot size={16} /> : <MapPin size={16} />}{leadLabel}</div>
         <h3>{leadTitle}</h3>
@@ -393,15 +410,23 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, onArrangeDay
         </div>
         {navigationUrl && offline ? <span className="today-navnote">{text.navigationOffline}</span> : null}
       </section>
+      ) : null}
       <section ref={timelineRef} className="today-timeline" aria-label={text.group} tabIndex={-1}>
-        <div className="today-sectionhead"><h3>{clock.phase === "before" && index === 0 ? text.firstDayPlan : text.timeline}</h3><span>{text.itemCount(items.length)}</span></div>
         {items.length ? <>
+          <div className="today-sectionhead"><h3>{clock.phase === "before" && index === 0 ? text.firstDayPlan : text.timeline}</h3><span>{text.itemCount(items.length)}</span></div>
           {pastItems.length ? <>
             <div className="today-past-label"><Clock3 size={15} aria-hidden="true" />{text.elapsedItems(pastItems.length)}{pastRange ? <span>{pastRange}</span> : null}</div>
             <ol className="today-timeline-list today-pastlist">{pastItems.map((item) => <TodayCard key={item.id} item={item} zone={day.timeZone} selectedDate={day.date} parallel={parallel.has(item.id)} state="past" onOpen={openItem} />)}</ol>
           </> : null}
           <ol className="today-timeline-list">{activeItems.map((item) => <TodayCard key={item.id} item={item} zone={day.timeZone} selectedDate={day.date} parallel={parallel.has(item.id)} state={stateById[item.id] ?? "later"} onOpen={openItem} />)}</ol>
-        </> : <div className="today-empty"><p>{text.empty}</p>{onArrangeDay && !offline ? <button type="button" className="today-secondary-action mt-3" onClick={() => onArrangeDay(day.date)}><CalendarDays size={18} aria-hidden="true" />{t.tripSkeleton.arrangeThisDay}</button> : null}</div>}
+        </> : <>
+          <div className="today-empty">
+            <CalendarDays size={28} aria-hidden="true" />
+            <h3>{text.empty}</h3>
+            <p>{text.emptyHelp}</p>
+            {onArrangeDay && !offline ? <button type="button" className="today-primary-action" onClick={() => onArrangeDay(day.date)}><CalendarDays size={17} aria-hidden="true" />{t.tripSkeleton.arrangeThisDay}</button> : null}
+          </div>
+        </>}
         {day.wishlist.length ? <section className="today-wishlist" aria-label={text.wishlist}><div className="today-sectionhead"><h3>{text.wishlist}</h3><span>{day.wishlist.length}</span></div><p>{text.wishlistHelp}</p><ul>{day.wishlist.map((place) => {
           const triggerKey = encodeURIComponent(`wishlist:${place.id}`);
           return <li key={place.id}>
@@ -412,8 +437,14 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, onArrangeDay
       </section>
     </div>
     <p className="today-last-sync">{text.syncedAt(snapshotTime)}</p>
-    <PlaceDetailSheet appearance="workspace" open={Boolean(selectedItem) && !selectedDetail} title={selectedItem?.title ?? ""} onClose={closeItem}>
-      {selectedItem ? <TodayItemDetails item={selectedItem} zone={selectedItemDay.timeZone} now={now} parallel={selectedItemParallel} memberId={model.memberId} date={selectedItemDay.date} previews={endpointPreviews.photos} previewsLoading={endpointPreviews.loading} openPlace={openPlace} /> : null}
+    <PlaceDetailSheet
+      appearance="workspace"
+      open={Boolean(selectedItem) && !selectedDetail}
+      title={selectedItem?.title ?? ""}
+      description={selectedItem ? <TodayTime item={selectedItem} zone={selectedItemDay.timeZone} /> : undefined}
+      onClose={closeItem}
+    >
+      {selectedItem ? <TodayItemDetails item={selectedItem} now={now} parallel={selectedItemParallel} memberId={model.memberId} date={selectedItemDay.date} previews={endpointPreviews.photos} previewsLoading={endpointPreviews.loading} openPlace={openPlace} /> : null}
     </PlaceDetailSheet>
     <PlaceDetailSheet open={Boolean(selectedDetail)} title={selectedDetail ? text.detailTitle(selectedDetail.name) : ""} onClose={closeDetail}>{detail}</PlaceDetailSheet>
   </section>;

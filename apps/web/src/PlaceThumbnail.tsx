@@ -113,5 +113,5 @@ export function PlacePhotoCredit({ photo }: { photo: PlacePhotoDto | null | unde
   if (!photo) return null;
   const source = safeExternalUrl(photo.sourceUrl);
   const license = safeExternalUrl(photo.licenseUrl);
-  return <small className="place-photo-credit"><span className="place-photo-credit__text" title={photo.creditText}>{photo.creditText}</span><span className="place-photo-credit__links">{source ? <a href={source} target="_blank" rel="noreferrer">來源</a> : null}{license ? <a href={license} target="_blank" rel="noreferrer">授權</a> : null}<span>縮圖預覽（裁切）</span></span></small>;
+  return <small className="place-photo-credit"><span className="place-photo-credit__text">{photo.creditText}</span><span className="place-photo-credit__links">{source ? <a href={source} target="_blank" rel="noreferrer">來源</a> : null}{license ? <a href={license} target="_blank" rel="noreferrer">授權</a> : null}<span>縮圖預覽（裁切）</span></span></small>;
 }

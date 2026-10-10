@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import { countryStopLabel } from "./country-stop-label";
 import { emptyFlight, FlightFields, flightComplete } from "./FlightFields";
 import { useI18n } from "./i18n";
@@ -154,16 +155,24 @@ function TravelEditor({ trip, type, item, skeleton, request, saved, close }: Tra
       <form hidden={Boolean(resolution.conflict)} className="grid gap-5" onSubmit={(event) => { event.preventDefault(); void save(); }}>
         {type === "flight" ? <FlightFields value={flight} onChange={setFlight} legend={t.travel.flights} startDate={trip.startDate} endDate={trip.endDate} /> : <>
           <Field><FieldLabel htmlFor={`${id}-stop`}>{t.travel.countryStop}</FieldLabel>
-            <select id={`${id}-stop`} required className="min-h-10 rounded-lg border border-input bg-transparent px-3" value={lodging.countryStopId} onChange={(event) => {
-              const previousZone = trip.countryStops.find((stop) => stop.id === lodging.countryStopId)?.timeZone;
-              const nextZone = trip.countryStops.find((stop) => stop.id === event.target.value)?.timeZone;
-              const zone = !lodging.hotel.timeZone || lodging.hotel.timeZone === previousZone ? nextZone ?? "" : lodging.hotel.timeZone;
-              setLodging({ ...lodging, countryStopId: event.target.value, hotel: { ...lodging.hotel, timeZone: zone },
-                checkInUtcOffset: zone === lodging.hotel.timeZone ? lodging.checkInUtcOffset : null,
-                checkOutUtcOffset: zone === lodging.hotel.timeZone ? lodging.checkOutUtcOffset : null });
-            }}><option value="">{t.travel.chooseCountryStop}</option>
+            <NativeSelect
+              id={`${id}-stop`}
+              required
+              className="w-full rounded-lg border border-input bg-transparent"
+              value={lodging.countryStopId}
+              onChange={(event) => {
+                const previousZone = trip.countryStops.find((stop) => stop.id === lodging.countryStopId)?.timeZone;
+                const nextZone = trip.countryStops.find((stop) => stop.id === event.target.value)?.timeZone;
+                const zone = !lodging.hotel.timeZone || lodging.hotel.timeZone === previousZone ? nextZone ?? "" : lodging.hotel.timeZone;
+                setLodging({ ...lodging, countryStopId: event.target.value, hotel: { ...lodging.hotel, timeZone: zone },
+                  checkInUtcOffset: zone === lodging.hotel.timeZone ? lodging.checkInUtcOffset : null,
+                  checkOutUtcOffset: zone === lodging.hotel.timeZone ? lodging.checkOutUtcOffset : null });
+              }}
+            >
+              <option value="">{t.travel.chooseCountryStop}</option>
               {trip.countryStops.map((stop) => <option key={stop.id} value={stop.id}>{stop.position + 1}. {countryStopLabel(stop.countryCode)}</option>)}
-            </select></Field>
+            </NativeSelect>
+          </Field>
           <Field><FieldLabel htmlFor={`${id}-search`}>{t.travel.hotelSearch}</FieldLabel>
             <div className="flex gap-2"><Input id={`${id}-search`} value={query} onChange={(event) => setQuery(event.target.value)} />
               <Button type="button" variant="outline" disabled={searching || !query.trim()} onClick={() => void search()}>{searching ? t.travel.searching : t.travel.search}</Button></div>
@@ -269,7 +278,7 @@ export function TravelWorkspace(props: TravelWorkspaceProps) {
   return <section aria-labelledby={`${id}-heading`} className="travel-workspace">
     <div className="travel-pagehead">
       <h3 id={`${id}-heading`}>{type === "flight" ? t.travel.flights : t.travel.lodgings}</h3>
-      {skeleton && (type === "lodging" || items.length < 2) ? <Button disabled={refreshing} onClick={() => setEditor({ item: null })}>{type === "flight" ? t.travel.addFlight : t.travel.addLodging}</Button> : null}
+      {skeleton ? <Button disabled={refreshing} onClick={() => setEditor({ item: null })}>{type === "flight" ? t.travel.addFlight : t.travel.addLodging}</Button> : null}
     </div>
     <p className="text-sm text-muted-foreground">{type === "flight" ? t.travel.sharedFlights : t.travel.lodgingDescription}</p>
     {error ? <div role="alert"><p className="text-destructive">{error}</p><Button variant="outline" onClick={() => void load()}>{t.travel.retry}</Button></div> : null}

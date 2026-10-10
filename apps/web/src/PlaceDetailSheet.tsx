@@ -8,15 +8,16 @@ import "./place-detail.css";
 export interface PlaceDetailSheetProps {
   open: boolean;
   title: ReactNode;
+  description?: ReactNode;
   onClose(): void;
   titleRef?: RefObject<HTMLHeadingElement | null>;
   children: ReactNode;
   footer?: ReactNode;
-  /** Photo B is edge-to-edge; non-photo workspace editors retain the inset demo shell. */
+  /** Surface variant hook; both variants share the approved responsive sheet shell. */
   appearance?: "photo" | "workspace";
 }
 
-export function PlaceDetailSheet({ open, title, onClose, titleRef, children, footer, appearance = "photo" }: PlaceDetailSheetProps) {
+export function PlaceDetailSheet({ open, title, description, onClose, titleRef, children, footer, appearance = "photo" }: PlaceDetailSheetProps) {
   const internalTitleRef = useRef<HTMLHeadingElement | null>(null);
   const headingRef = titleRef ?? internalTitleRef;
   const { t } = useI18n();
@@ -38,8 +39,12 @@ export function PlaceDetailSheet({ open, title, onClose, titleRef, children, foo
   return (
     <Dialog open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
       <DialogContent className="place-detail-sheet translate-x-0 translate-y-0" data-appearance={appearance} initialFocus={headingRef} showCloseButton={false}>
-        <header className="place-detail-sheet__head">
-          <DialogTitle ref={titleReference} tabIndex={-1} className="place-detail-sheet__title">{title}</DialogTitle>
+        <div className="place-detail-sheet__grab" aria-hidden="true" />
+        <header className="place-detail-sheet__head" data-has-description={description != null}>
+          <div className="place-detail-sheet__heading">
+            <DialogTitle ref={titleReference} tabIndex={-1} className="place-detail-sheet__title">{title}</DialogTitle>
+            {description != null ? <div className="place-detail-sheet__description">{description}</div> : null}
+          </div>
           <button type="button" className="place-detail-sheet__close" aria-label={t.app.close} onClick={onClose}>
             <X aria-hidden="true" className="size-5" />
           </button>

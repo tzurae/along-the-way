@@ -41,6 +41,8 @@ export const travel = {
   save: "儲存",
   saving: "儲存中…",
   cancel: "取消",
+  appointmentConfirmationInfo: "訂位確認資訊",
+  constraintStatus: "限制狀態",
   edit: (name: string) => `修改 ${name}`,
   delete: (name: string) => `刪除 ${name}`,
   confirmDelete: (name: string) => `確定刪除「${name}」？`,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Temporal } from "@js-temporal/polyfill";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import {
@@ -22,7 +22,7 @@ import {
   type UpdatePlaceInput,
   type ZonedEndpointDto,
 } from "@along-the-way/contracts/trip-skeleton";
-import { CalendarClock, CalendarDays, CalendarPlus, ChevronDown, Lock, MapPin, MapPinOff, Plane, Plus, Route, Trash2, Unlock } from "lucide-react";
+import { CalendarClock, CalendarDays, CalendarMinus, CalendarPlus, ChevronDown, Clock3, Lock, MapPin, MapPinOff, Plane, Plus, Route, StickyNote, Trash2, Unlock, Wallet } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -253,12 +253,14 @@ function DayAssignmentPicker({
   errorPlaceId,
   error,
   assign,
+  editLocation,
 }: {
   places: TripPlaceDto[];
   busyPlaceId: string | null;
   errorPlaceId: string | null;
   error: string;
   assign(place: TripPlaceDto): Promise<void>;
+  editLocation(place: TripPlaceDto): ReactNode;
 }) {
   const { t, locale } = useI18n();
   const pending = places.filter((place) =>
@@ -308,19 +310,17 @@ function DayAssignmentPicker({
                   </span>
                 </div>
               </div>
-              <button
-                type="button"
-                className="plan-schedule-button"
-                disabled={busyPlaceId !== null || blocked}
-                onClick={() => void assign(place)}
-              >
-                {blocked ? <MapPinOff aria-hidden="true" /> : <CalendarPlus aria-hidden="true" />}
-                {blocked
-                  ? t.tripSkeleton.completeLocation
-                  : rowBusy
-                    ? t.tripSkeleton.scheduling
-                    : t.tripSkeleton.scheduleThisDay}
-              </button>
+              {blocked ? editLocation(place) : (
+                <button
+                  type="button"
+                  className="plan-schedule-button"
+                  disabled={busyPlaceId !== null}
+                  onClick={() => void assign(place)}
+                >
+                  <CalendarPlus aria-hidden="true" />
+                  {rowBusy ? t.tripSkeleton.scheduling : t.tripSkeleton.scheduleThisDay}
+                </button>
+              )}
               {errorPlaceId === place.id && error ? (
                 <p role="alert" className="plan-row-error">{error}</p>
               ) : null}
@@ -381,6 +381,8 @@ export function TripSkeletonWorkspace({
   const [viewingItem, setViewingItem] = useState<{ itemId: string; continuation: boolean } | null>(null);
   const [assignmentDayId, setAssignmentDayId] = useState<string | null>(null);
   const [assignmentErrorPlaceId, setAssignmentErrorPlaceId] = useState<string | null>(null);
+  const [managementOpen, setManagementOpen] = useState(false);
+  const [placeInventoryOpen, setPlaceInventoryOpen] = useState(false);
   const assignmentErrorPlaceIdRef = useRef<string | null>(null);
   const [viewingAssignedPlaceId, setViewingAssignedPlaceId] = useState<string | null>(null);
   const viewingAssignedPlace = viewingAssignedPlaceId ? tripPlaces.find((place) => place.id === viewingAssignedPlaceId) : undefined;
@@ -389,11 +391,26 @@ export function TripSkeletonWorkspace({
   const actionKeys = useRef(new Map<string, string>());
   const editorOpen = useRef(false);
   const latestSkeleton = useRef<TripSkeletonDto | null>(null);
+  const managementPlacesSummaryRef = useRef<HTMLElement | null>(null);
+  const managePlacesHandled = useRef(false);
   const loadGeneration = useRef(0);
   const updateAssignmentErrorPlaceId = useCallback((placeId: string | null) => {
     assignmentErrorPlaceIdRef.current = placeId;
     setAssignmentErrorPlaceId(placeId);
   }, []);
+
+  const openPlaceManagement = useCallback(() => {
+    setAssignmentDayId(null);
+    updateAssignmentErrorPlaceId(null);
+    setError("");
+    setManagementOpen(true);
+    setPlaceInventoryOpen(true);
+    window.requestAnimationFrame(() => {
+      const summary = managementPlacesSummaryRef.current;
+      summary?.scrollIntoView({ block: "start", behavior: "smooth" });
+      summary?.focus({ preventScroll: true });
+    });
+  }, [updateAssignmentErrorPlaceId]);
 
   const editingChanged = useCallback((open: boolean) => {
     editorOpen.current = open;
@@ -444,6 +461,7 @@ export function TripSkeletonWorkspace({
   // blanking it would shorten the page and drop the reader's scroll position.
   useEffect(() => {
     setSkeleton(null);
+    managePlacesHandled.current = false;
   }, [trip.id]);
 
   useEffect(() => {
@@ -459,6 +477,20 @@ export function TripSkeletonWorkspace({
     setError("");
     onArrangeOpened?.();
   }, [arrangeDate, skeleton, onArrangeOpened, updateAssignmentErrorPlaceId]);
+
+  useEffect(() => {
+    if (!skeleton || managePlacesHandled.current) return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("manage") !== "places") return;
+    managePlacesHandled.current = true;
+    openPlaceManagement();
+    url.searchParams.delete("manage");
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
+  }, [openPlaceManagement, skeleton]);
 
   const placesById = useMemo(
     () => new Map(skeleton?.places.map((place) => [place.id, place]) ?? []),
@@ -513,6 +545,47 @@ export function TripSkeletonWorkspace({
       placeCreateAttempt.current = null;
       await onTripChanged();
     }
+  }
+
+  function renderLocationEditor(tripPlace: TripPlaceDto) {
+    const place = placesById.get(tripPlace.placeId);
+    if (!place) {
+      return (
+        <>
+          <button
+            type="button"
+            className="plan-schedule-button"
+            disabled={busyId !== null}
+            onClick={openPlaceManagement}
+          >
+            <MapPinOff aria-hidden="true" />
+            {t.tripSkeleton.completeLocation}
+          </button>
+          <p className="plan-location-recovery-note">
+            {t.tripSkeleton.locationRecoveryHelper}
+          </p>
+        </>
+      );
+    }
+    return (
+      <PlaceDialog
+        place={place}
+        editingChanged={editingChanged}
+        focusLocationOnOpen
+        triggerClassName="plan-schedule-button"
+        triggerDisabled={busyId !== null}
+        triggerLabel={(
+          <>
+            <MapPinOff aria-hidden="true" />
+            {t.tripSkeleton.completeLocation}
+          </>
+        )}
+        load={async () =>
+          (await readForConflict()).places.find((entry) => entry.id === place.id) ?? null
+        }
+        save={(input, conflictBase) => savePlace(input, place, conflictBase)}
+      />
+    );
   }
 
   async function deletePlace(place: PlaceDto) {
@@ -883,7 +956,13 @@ export function TripSkeletonWorkspace({
           <summary>
             <span className="plan-pending-title">
               <strong>{t.tripSkeleton.pendingTitle}</strong>
-              <span>{t.tripSkeleton.pendingCount(pendingPlaces.length)}</span>
+              <span>{t.tripSkeleton.pendingHelper}</span>
+            </span>
+            <span
+              className="plan-pending-count"
+              aria-label={t.tripSkeleton.pendingCount(pendingPlaces.length)}
+            >
+              {pendingPlaces.length}
             </span>
             <ChevronDown aria-hidden="true" className="plan-pending-chevron" />
           </summary>
@@ -918,20 +997,22 @@ export function TripSkeletonWorkspace({
                           </span>
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        className="plan-schedule-button"
-                        disabled={busyId !== null || blocked || targetDayId === null}
-                        onClick={() => {
-                          if (targetDayId === null) return;
-                          setError("");
-                          updateAssignmentErrorPlaceId(null);
-                          setAssignmentDayId(targetDayId);
-                        }}
-                      >
-                        {blocked ? <MapPinOff aria-hidden="true" /> : <CalendarPlus aria-hidden="true" />}
-                        {blocked ? t.tripSkeleton.completeLocation : t.tripSkeleton.arrangePending}
-                      </button>
+                      {blocked ? renderLocationEditor(place) : (
+                        <button
+                          type="button"
+                          className="plan-schedule-button"
+                          disabled={busyId !== null || targetDayId === null}
+                          onClick={() => {
+                            if (targetDayId === null) return;
+                            setError("");
+                            updateAssignmentErrorPlaceId(null);
+                            setAssignmentDayId(targetDayId);
+                          }}
+                        >
+                          <CalendarPlus aria-hidden="true" />
+                          {t.tripSkeleton.arrangePending}
+                        </button>
+                      )}
                     </li>
                   );
                 })}
@@ -940,119 +1021,11 @@ export function TripSkeletonWorkspace({
           </div>
         </details>
 
-        <div className="plan-days">
-          {skeleton.days.map((day, index) => {
-            const assignedPlaces = tripPlaces.filter((place) =>
-              !place.scheduled && place.assignedDayId === day.id
-            ).sort(byDayPosition);
-            const chronologicalEntries = [...day.entries].sort(
-              (left, right) => left.sortInstant.localeCompare(right.sortInstant),
-            );
-            const itemCount = assignedPlaces.length + day.entries.length;
-            return (
-              <section key={day.id} className="day-column" data-date={day.date}>
-                <header className="day-heading">
-                  <div>
-                    <h3>{formatPlanDate(day.date, locale)}</h3>
-                    <p>
-                      {itemCount > 0
-                        ? t.tripSkeleton.plannedEntries(itemCount)
-                        : t.tripSkeleton.noPlannedPlaces}
-                    </p>
-                  </div>
-                  <div className="plan-day-actions">
-                    <button
-                      type="button"
-                      className="plan-route-link"
-                      disabled={assignedPlaces.length === 0 || busyId !== null}
-                      onClick={() => setPlanningDay({
-                        id: day.id,
-                        date: day.date,
-                        label: t.tripSkeleton.dayLabel(index + 1),
-                      })}
-                    >
-                      <Route aria-hidden="true" />
-                      {t.tripSkeleton.optimizeRoute}
-                    </button>
-                    <button
-                      type="button"
-                      className="plan-outline-button"
-                      disabled={busyId !== null}
-                      onClick={() => {
-                        setError("");
-                        updateAssignmentErrorPlaceId(null);
-                        setAssignmentDayId(day.id);
-                      }}
-                    >
-                      <CalendarPlus aria-hidden="true" />
-                      {t.tripSkeleton.arrangeThisDay}
-                    </button>
-                  </div>
-                </header>
-                <ul className="plan-day-list">
-                  {itemCount === 0 ? (
-                    <li className="plan-no-plan">
-                      <CalendarDays aria-hidden="true" />
-                      <span>{t.tripSkeleton.emptyDay}</span>
-                      <button
-                        type="button"
-                        className="plan-row-button"
-                        disabled={busyId !== null}
-                        onClick={() => {
-                          setError("");
-                          updateAssignmentErrorPlaceId(null);
-                          setAssignmentDayId(day.id);
-                        }}
-                      >
-                        <Plus aria-hidden="true" />
-                        {t.tripSkeleton.addPlace}
-                      </button>
-                    </li>
-                  ) : null}
-                  {chronologicalEntries.map((entry) => {
-                    const item = itemsById.get(entry.itemId);
-                    return item ? (
-                      <li key={`${entry.itemId}-${entry.projection}`}>
-                        {renderItem(item, entry.projection === "continuation", day.date)}
-                      </li>
-                    ) : null;
-                  })}
-                  {assignedPlaces.map((place) => (
-                    <li key={place.id}>
-                      <button
-                        type="button"
-                        className="plan-item-row"
-                        aria-label={t.tripSkeleton.plannedWishlistPlace(place.name)}
-                        onClick={() => {
-                          setError("");
-                          setViewingAssignedPlaceId(place.id);
-                        }}
-                      >
-                        <span className="plan-item-copy">
-                          <span className="plan-place-name">
-                            <strong>{place.name}</strong>
-                            <span className="plan-kind-chip">
-                              {t.tripSkeleton.placeTypes[place.type]}
-                            </span>
-                          </span>
-                          <small>
-                            <time>{t.tripSkeleton.timePending}</time>
-                            {"・"}
-                            {place.durationMinutes
-                              ? t.tripSkeleton.plannedDuration(place.durationMinutes)
-                              : t.tripSkeleton.durationUnknown}
-                          </small>
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            );
-          })}
-        </div>
-
-        <details className="plan-management">
+        <details
+          className="plan-management"
+          open={managementOpen}
+          onToggle={(event) => setManagementOpen(event.currentTarget.open)}
+        >
           <summary>
             <span>
               <strong>{t.tripSkeleton.managementTitle}</strong>
@@ -1087,8 +1060,13 @@ export function TripSkeletonWorkspace({
               ) : null}
             </div>
 
-            <details className="plan-inventory" aria-labelledby="places-heading">
-              <summary id="places-heading">
+            <details
+              className="plan-inventory"
+              aria-labelledby="places-heading"
+              open={placeInventoryOpen}
+              onToggle={(event) => setPlaceInventoryOpen(event.currentTarget.open)}
+            >
+              <summary id="places-heading" ref={managementPlacesSummaryRef} tabIndex={-1}>
                 <MapPin aria-hidden="true" />
                 {t.tripSkeleton.places}
               </summary>
@@ -1228,6 +1206,124 @@ export function TripSkeletonWorkspace({
             </div>
           </div>
         </details>
+        <div className="plan-days">
+          {skeleton.days.map((day, index) => {
+            const assignedPlaces = tripPlaces.filter((place) =>
+              !place.scheduled && place.assignedDayId === day.id
+            ).sort(byDayPosition);
+            const chronologicalEntries = [...day.entries].sort(
+              (left, right) => left.sortInstant.localeCompare(right.sortInstant),
+            );
+            const itemCount = assignedPlaces.length + day.entries.length;
+            return (
+              <section key={day.id} className="day-column" data-date={day.date}>
+                <header className="day-heading">
+                  <div>
+                    <h3>{formatPlanDate(day.date, locale)}</h3>
+                    <p>
+                      {itemCount > 0
+                        ? t.tripSkeleton.plannedEntries(itemCount)
+                        : t.tripSkeleton.noPlannedPlaces}
+                    </p>
+                  </div>
+                  <div className="plan-day-actions">
+                    {assignedPlaces.length === 0 ? (
+                      <span className="plan-route-unavailable">
+                        {t.tripSkeleton.optimizeRouteNeedsPlace}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="plan-route-link"
+                        disabled={busyId !== null}
+                        onClick={() => setPlanningDay({
+                          id: day.id,
+                          date: day.date,
+                          label: t.tripSkeleton.dayLabel(index + 1),
+                        })}
+                      >
+                        <Route aria-hidden="true" />
+                        {t.tripSkeleton.optimizeRoute}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="plan-outline-button"
+                      disabled={busyId !== null}
+                      onClick={() => {
+                        setError("");
+                        updateAssignmentErrorPlaceId(null);
+                        setAssignmentDayId(day.id);
+                      }}
+                    >
+                      <CalendarPlus aria-hidden="true" />
+                      {t.tripSkeleton.arrangeThisDay}
+                    </button>
+                  </div>
+                </header>
+                <ul className="plan-day-list">
+                  {itemCount === 0 ? (
+                    <li className="plan-no-plan">
+                      <CalendarDays aria-hidden="true" />
+                      <span>{t.tripSkeleton.emptyDay}</span>
+                      <button
+                        type="button"
+                        className="plan-row-button"
+                        disabled={busyId !== null}
+                        onClick={() => {
+                          setError("");
+                          updateAssignmentErrorPlaceId(null);
+                          setAssignmentDayId(day.id);
+                        }}
+                      >
+                        <Plus aria-hidden="true" />
+                        {t.tripSkeleton.addPlace}
+                      </button>
+                    </li>
+                  ) : null}
+                  {chronologicalEntries.map((entry) => {
+                    const item = itemsById.get(entry.itemId);
+                    return item ? (
+                      <li key={`${entry.itemId}-${entry.projection}`}>
+                        {renderItem(item, entry.projection === "continuation", day.date)}
+                      </li>
+                    ) : null;
+                  })}
+                  {assignedPlaces.map((place) => (
+                    <li key={place.id}>
+                      <button
+                        type="button"
+                        className="plan-item-row"
+                        aria-label={t.tripSkeleton.plannedWishlistPlace(place.name)}
+                        onClick={() => {
+                          setError("");
+                          setViewingAssignedPlaceId(place.id);
+                        }}
+                      >
+                        <span className="plan-item-copy">
+                          <span className="plan-place-name">
+                            <strong>{place.name}</strong>
+                            <span className="plan-kind-chip">
+                              {t.tripSkeleton.placeTypes[place.type]}
+                            </span>
+                          </span>
+                          <small>
+                            <time>{t.tripSkeleton.timePending}</time>
+                            {"・"}
+                            {place.durationMinutes
+                              ? t.tripSkeleton.plannedDuration(place.durationMinutes)
+                              : t.tripSkeleton.durationUnknown}
+                          </small>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            );
+          })}
+        </div>
+
 
         {viewingItem && itemsById.get(viewingItem.itemId) ? (
           <PlaceDetailSheet
@@ -1244,12 +1340,12 @@ export function TripSkeletonWorkspace({
             appearance="workspace"
             open
             title={t.tripSkeleton.arrangeDay(formatPlanDate(assignmentDay.date, locale))}
+            description={t.tripSkeleton.arrangeSheetHelper}
             onClose={() => {
               setAssignmentDayId(null);
               updateAssignmentErrorPlaceId(null);
             }}
           >
-            <p className="plan-sheet-intro">{t.tripSkeleton.arrangeSheetHelper}</p>
             <div className="plan-assignment-days" aria-label={t.tripSkeleton.choosePlanDate}>
               {skeleton.days.map((day) => {
                 const label = formatPlanShortDate(day.date, locale);
@@ -1277,6 +1373,7 @@ export function TripSkeletonWorkspace({
               errorPlaceId={assignmentErrorPlaceId}
               error={error}
               assign={(place) => updateDayAssignment(assignmentDayId, place)}
+              editLocation={renderLocationEditor}
             />
           </PlaceDetailSheet>
         ) : null}
@@ -1289,34 +1386,73 @@ export function TripSkeletonWorkspace({
               setViewingAssignedPlaceId(null);
               updateAssignmentErrorPlaceId(null);
             }}
+            footer={(
+              <button
+                type="button"
+                className="plan-remove-button"
+                disabled={busyId !== null}
+                onClick={() => {
+                  if (!window.confirm(t.tripSkeleton.removeFromDayConfirm(viewingAssignedPlace.name))) return;
+                  void updateDayAssignment(null, viewingAssignedPlace);
+                }}
+              >
+                <CalendarMinus aria-hidden="true" />
+                {t.tripSkeleton.removeFromDay}
+              </button>
+            )}
           >
-            <p>{t.tripSkeleton.wishlistTimeUnset}</p>
-            <p>{viewingAssignedPlace.address ?? t.tripSkeleton.addressUnknown}</p>
-            <p>
-              {viewingAssignedPlace.durationMinutes
-                ? t.tripSkeleton.plannedDuration(viewingAssignedPlace.durationMinutes)
-                : t.tripSkeleton.durationUnknown}
-              ・
-              {viewingAssignedPlace.budgetAmountMinor !== null && viewingAssignedPlace.budgetCurrency
-                ? formatMinorAmount(
-                    viewingAssignedPlace.budgetAmountMinor,
-                    viewingAssignedPlace.budgetCurrency,
-                    locale,
-                  )
-                : t.tripSkeleton.costUnknown}
-            </p>
-            {viewingAssignedPlace.notes ? <p>{viewingAssignedPlace.notes}</p> : null}
+            <dl className="plan-assigned-detail">
+              <div className="plan-assigned-detail-row">
+                <CalendarClock aria-hidden="true" />
+                <div>
+                  <dt>{t.tripSkeleton.assignmentStatusLabel}</dt>
+                  <dd>{t.tripSkeleton.wishlistTimeUnset}</dd>
+                </div>
+              </div>
+              <div className="plan-assigned-detail-row">
+                <MapPin aria-hidden="true" />
+                <div>
+                  <dt>{t.tripSkeleton.assignmentAddressLabel}</dt>
+                  <dd>{viewingAssignedPlace.address ?? t.tripSkeleton.addressUnknown}</dd>
+                </div>
+              </div>
+              <div className="plan-assigned-detail-row">
+                <Clock3 aria-hidden="true" />
+                <div>
+                  <dt>{t.tripSkeleton.assignmentDurationLabel}</dt>
+                  <dd>
+                    {viewingAssignedPlace.durationMinutes
+                      ? t.tripSkeleton.plannedDuration(viewingAssignedPlace.durationMinutes)
+                      : t.tripSkeleton.durationUnknown}
+                  </dd>
+                </div>
+              </div>
+              <div className="plan-assigned-detail-row">
+                <Wallet aria-hidden="true" />
+                <div>
+                  <dt>{t.tripSkeleton.assignmentCostLabel}</dt>
+                  <dd>
+                    {viewingAssignedPlace.budgetAmountMinor !== null && viewingAssignedPlace.budgetCurrency
+                      ? formatMinorAmount(
+                          viewingAssignedPlace.budgetAmountMinor,
+                          viewingAssignedPlace.budgetCurrency,
+                          locale,
+                        )
+                      : t.tripSkeleton.costUnknown}
+                  </dd>
+                </div>
+              </div>
+              <div className="plan-assigned-detail-row plan-assigned-detail-notes">
+                <StickyNote aria-hidden="true" />
+                <div>
+                  <dt>{t.tripSkeleton.assignmentNotesLabel}</dt>
+                  <dd>{viewingAssignedPlace.notes ?? t.tripSkeleton.notesEmpty}</dd>
+                </div>
+              </div>
+            </dl>
             {assignmentErrorPlaceId === viewingAssignedPlace.id && error ? (
               <p role="alert" className="plan-row-error">{error}</p>
             ) : null}
-            <button
-              type="button"
-              className="plan-schedule-button"
-              disabled={busyId !== null}
-              onClick={() => void updateDayAssignment(null, viewingAssignedPlace)}
-            >
-              {t.tripSkeleton.removeFromDay}
-            </button>
           </PlaceDetailSheet>
         ) : null}
         <Dialog

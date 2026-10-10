@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import type {
   CreatePlaceInput,
   PlaceDto,
@@ -19,15 +19,21 @@ import {
 } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "./i18n";
 import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./ConflictPanel";
+import "./form-sheet.css";
 
 interface PlaceDialogProps {
   place?: PlaceDto;
   save(input: CreatePlaceInput | UpdatePlaceInput, conflictBase?: number): Promise<void>;
   load?(): Promise<PlaceDto | null>;
   editingChanged?(open: boolean): void;
+  focusLocationOnOpen?: boolean;
+  triggerLabel?: ReactNode;
+  triggerClassName?: string;
+  triggerDisabled?: boolean;
 }
 
 const placeTypes: PlaceType[] = [
@@ -43,9 +49,19 @@ function placeValues(place: PlaceDto): CreatePlaceInput {
   return { name: place.name, type: place.type, address: place.address, latitude: place.latitude, longitude: place.longitude, timeZone: place.timeZone, sourceUrl: place.sourceUrl, notes: place.notes };
 }
 
-export function PlaceDialog({ place, save, load, editingChanged }: PlaceDialogProps) {
+export function PlaceDialog({
+  place,
+  save,
+  load,
+  editingChanged,
+  focusLocationOnOpen = false,
+  triggerLabel,
+  triggerClassName,
+  triggerDisabled = false,
+}: PlaceDialogProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
+  const addressRef = useRef<HTMLInputElement>(null);
   const [name, setName] = useState(place?.name ?? "");
   const [type, setType] = useState<PlaceType>(place?.type ?? "other");
   const [address, setAddress] = useState(place?.address ?? "");
@@ -152,24 +168,48 @@ export function PlaceDialog({ place, save, load, editingChanged }: PlaceDialogPr
     <Dialog open={open} onOpenChange={changeOpen}>
       <DialogTrigger
         render={
-          <Button variant={place ? "outline" : "default"} size={place ? "sm" : "default"} />
+          <Button
+            className={triggerClassName}
+            variant={place ? "outline" : "default"}
+            size={place ? "sm" : "default"}
+            disabled={triggerDisabled}
+          />
         }
       >
-        {place ? <Pencil /> : <Plus />}
-        {place ? t.placeDialog.editTrigger(place.name) : t.placeDialog.addPlace}
+        {triggerLabel ?? (
+          <>
+            {place ? <Pencil /> : <Plus />}
+            {place ? t.placeDialog.editTrigger(place.name) : t.placeDialog.addPlace}
+          </>
+        )}
       </DialogTrigger>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] overflow-y-auto sm:max-w-2xl">
+      <DialogContent
+        className="form-sheet form-sheet--place"
+        initialFocus={focusLocationOnOpen ? () => addressRef.current : undefined}
+        placement="sheet"
+      >
         <DialogHeader>
           <DialogTitle>{place ? t.placeDialog.editPlace : t.placeDialog.addPlace}</DialogTitle>
           <DialogDescription>{t.placeDialog.description}</DialogDescription>
         </DialogHeader>
-        {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={submitting}
-          onAccept={() => { resolution.clear(); changeOpen(false); }}
-          onReapply={() => void persist(resolution.conflict!.attempted, resolution.conflict!.current!.version, resolution.conflict!.base.version)}
-          onEdit={() => { setBase(resolution.conflict!.current!); setExpectedVersion(resolution.conflict!.current!.version); resolution.resume(); setError(""); }}
-        /> : null}
-        {resolution.conflict && error ? <p role="alert" className="text-destructive">{error}</p> : null}
-        <form hidden={Boolean(resolution.conflict)} className="grid gap-4" onSubmit={(event) => event.preventDefault()}>
+        {resolution.conflict ? (
+          <div className="form-sheet__body">
+            <ConflictPanel
+              conflict={resolution.conflict}
+              busy={submitting}
+              onAccept={() => { resolution.clear(); changeOpen(false); }}
+              onReapply={() => void persist(resolution.conflict!.attempted, resolution.conflict!.current!.version, resolution.conflict!.base.version)}
+              onEdit={() => { setBase(resolution.conflict!.current!); setExpectedVersion(resolution.conflict!.current!.version); resolution.resume(); setError(""); }}
+            />
+            {error ? <p role="alert" className="text-destructive">{error}</p> : null}
+          </div>
+        ) : null}
+        <form
+          hidden={Boolean(resolution.conflict)}
+          className="form-sheet__form"
+          onSubmit={(event) => { event.preventDefault(); void submit(); }}
+        >
+          <div className="form-sheet__body grid gap-4">
           <div className="grid gap-4 sm:grid-cols-2">
             <Field>
               <FieldLabel htmlFor={`place-name-${place?.id ?? "new"}`}>{t.placeDialog.placeName}</FieldLabel>
@@ -183,22 +223,23 @@ export function PlaceDialog({ place, save, load, editingChanged }: PlaceDialogPr
             </Field>
             <Field>
               <FieldLabel htmlFor={`place-type-${place?.id ?? "new"}`}>{t.placeDialog.placeType}</FieldLabel>
-              <select
+              <NativeSelect
                 id={`place-type-${place?.id ?? "new"}`}
-                className="min-h-10 rounded-lg border border-input bg-transparent px-3"
+                className="w-full rounded-lg border border-input bg-transparent"
                 value={type}
                 onChange={(event) => setType(event.target.value as PlaceType)}
               >
                 {placeTypes.map((placeType) => (
                   <option key={placeType} value={placeType}>{t.placeDialog.placeTypes[placeType]}</option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
           </div>
           <Field>
             <FieldLabel htmlFor={`place-address-${place?.id ?? "new"}`}>{t.placeDialog.address}</FieldLabel>
             <Input
               id={`place-address-${place?.id ?? "new"}`}
+              ref={addressRef}
               value={address}
               onChange={(event) => setAddress(event.target.value)}
             />
@@ -251,13 +292,17 @@ export function PlaceDialog({ place, save, load, editingChanged }: PlaceDialogPr
             />
           </Field>
           {latitude === "" || longitude === "" ? (
-            <p className="flex items-center gap-2 rounded-lg bg-surface-subtle px-3 py-2 text-sm text-muted-foreground">
-              <MapPin className="size-4" /> {t.placeDialog.locationIncomplete}
+            <p className="flex items-start gap-1 rounded-lg bg-surface-subtle px-3 py-2 text-sm text-muted-foreground">
+              <MapPin className="mt-0.5 size-3.5 shrink-0" /> {t.placeDialog.locationIncomplete}
             </p>
           ) : null}
           {error ? <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-destructive">{error}</p> : null}
-          <DialogFooter>
-            <Button type="button" disabled={submitting} onClick={() => void submit()}>
+          </div>
+          <DialogFooter className="form-sheet__footer">
+            <Button type="button" variant="outline" disabled={submitting} onClick={() => changeOpen(false)}>
+              {t.travel.cancel}
+            </Button>
+            <Button type="submit" disabled={submitting}>
               {submitting ? t.placeDialog.saving : t.placeDialog.save}
             </Button>
           </DialogFooter>

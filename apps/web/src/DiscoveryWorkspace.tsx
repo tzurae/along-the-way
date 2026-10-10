@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, ExternalLink, Images, Search, X } from "lucide-react";
+import { Check, ExternalLink, Images, ListChecks, Pencil, RotateCw, Search, X } from "lucide-react";
 
 import {
   parseDiscoveryWorkspaceResponse,
@@ -17,7 +17,6 @@ import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
 import { VoteControl, VoteVoters } from "./VoteControl";
 import { ConflictPanel, useVersionConflict } from "./ConflictPanel";
-import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest } from "./PlaceThumbnail";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import "./pocket-discovery.css";
@@ -200,7 +199,7 @@ function resolvedQuestionAnswers(drafts: Record<string, QuestionDraft>): Discove
 
 function ResearchPanel({ first, open, onClose, children, footer }: { first: boolean; open: boolean; onClose: () => void; children: ReactNode; footer: ReactNode }) {
   if (first) return <section className="order-3 pd-first-run">{children}{footer}</section>;
-  return <PlaceDetailSheet appearance="workspace" open={open} title="修改需求" onClose={onClose} footer={footer}>{children}</PlaceDetailSheet>;
+  return <PlaceDetailSheet appearance="workspace" open={open} title="你的需求" onClose={onClose} footer={footer}>{children}</PlaceDetailSheet>;
 }
 
 
@@ -582,53 +581,53 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       ? proposal.tradeoffSentences.length > 0
       : proposal.tradeoffs.length > 0;
     return (
-      <div className="grid gap-4">
-        <PlaceDetailContent tripId={trip.id} reference={{ kind: "proposal", id: proposal.id }} request={request} />
-        <p className="text-sm text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</p>
-        {proposal.endorsements.length ? <div aria-label={t.proposal.recommendedByFor(proposal.name)}><strong>{t.proposal.recommendedBy}</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabel(endorsement, t)}</li>)}</ul></div> : null}
-        {proposal.recommendationSentences === null ? <p>{proposal.recommendation}</p> : null}
-        {proposal.recommendationSentences && proposal.recommendationSentences.length > 0
-          ? <ClaimSentenceList sentences={proposal.recommendationSentences} numberedEvidence={numberedEvidence} t={t} />
-          : null}
-        {proposal.status === "pending" && proposal.votingAvailable ? <VoteVoters voters={proposal.voters} /> : null}
-        <a className="inline-flex min-h-11 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" href={googleMapsPlaceUrl(proposal.name, proposal.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.proposal.viewPhotos}</a>
-        {proposal.matchedNeeds.length || hasTradeoffs || proposal.unknowns.length ? (
-          <div className="grid gap-3">
-            {proposal.matchedNeeds.length ? <div><strong>{t.proposal.matches}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.matchedNeeds.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
-            {hasTradeoffs ? (
-              <div>
-                <strong>{t.proposal.tradeoffs}</strong>
-                {proposal.tradeoffSentences !== null
-                  ? <ClaimSentenceList sentences={proposal.tradeoffSentences} numberedEvidence={numberedEvidence} t={t} />
-                  : <ul className="mt-1 list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul>}
-              </div>
-            ) : null}
-            {proposal.unknowns.length ? <div><strong>{t.proposal.unknowns}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.unknowns.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
-          </div>
+      <div className="pd-detail">
+        <section className="pd-detail-section">
+          <h3>{t.proposal.whyRecommended}</h3>
+          {proposal.recommendationSentences === null ? <p className="pd-reason-copy">{proposal.recommendation}</p> : null}
+          {proposal.recommendationSentences?.length
+            ? <ClaimSentenceList sentences={proposal.recommendationSentences} numberedEvidence={numberedEvidence} t={t} />
+            : null}
+          {proposal.endorsements.length ? <div className="mt-3" aria-label={t.proposal.recommendedByFor(proposal.name)}><strong>{t.proposal.recommendedBy}</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabel(endorsement, t)}</li>)}</ul></div> : null}
+        </section>
+        <section className="pd-detail-section">
+          <h3>{t.proposal.where}</h3>
+          <p className="text-sm">{proposal.address ?? t.proposal.unknownAddress}</p>
+          <a className="pd-secondary mt-3" href={googleMapsPlaceUrl(proposal.name, proposal.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.proposal.viewPhotos}</a>
+        </section>
+        {hasTradeoffs || proposal.unknowns.length ? (
+          <section className="pd-detail-section">
+            <h3>{t.proposal.cautions}</h3>
+            {hasTradeoffs ? proposal.tradeoffSentences !== null
+              ? <ClaimSentenceList sentences={proposal.tradeoffSentences} numberedEvidence={numberedEvidence} t={t} />
+              : <ul className="list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul> : null}
+            {proposal.unknowns.length ? <ul className="mt-2 list-disc pl-5 text-sm text-muted-foreground">{proposal.unknowns.map((item) => <li key={item}>{t.proposal.unknownPrefix(item)}</li>)}</ul> : null}
+          </section>
         ) : null}
-        <div>
-          <strong>{t.proposal.evidence}</strong>
-          <ul className="mt-1 grid gap-1">
-            {proposal.evidence.map((item, evidenceIndex) => {
-              const number = evidenceIndex + 1;
-              return (
-                <li key={item.id}>
-                  <a
-                    className="inline-flex items-center gap-1 break-all font-bold text-accent-strong underline underline-offset-2"
-                    href={item.sourceUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    aria-label={t.proposal.citationLabel(number, item.title)}
-                  >
-                    [{number}] {item.title}<ExternalLink aria-hidden="true" className="size-3" />
-                  </a>
-                  <span className="ml-2 text-xs text-muted-foreground">{item.attribution}・{t.proposal.observedAt(new Date(item.observedAt).toLocaleString(locale))}</span>
-                  {item.isStale ? <span className="ml-2 text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span> : null}
-                </li>
-              );
-            })}
-          </ul>
-        </div>
+        <section className="pd-detail-section">
+          <h3>{t.proposal.matchesYourNeeds}</h3>
+          <p className="text-sm">{proposal.matchedNeeds.length ? proposal.matchedNeeds.join("・") : t.proposal.noMatchesListed}</p>
+        </section>
+        {proposal.status === "pending" && proposal.votingAvailable ? <section className="pd-detail-section"><VoteVoters voters={proposal.voters} /></section> : null}
+        <section className="pd-detail-section">
+          <details className="pd-evidence-disclosure">
+            <summary>{t.proposal.sourceCount(proposal.evidence.length)}</summary>
+            <ul className="mt-3 grid gap-2">
+              {proposal.evidence.map((item, evidenceIndex) => {
+                const number = evidenceIndex + 1;
+                return (
+                  <li key={item.id}>
+                    <a className="pd-inline-link break-all font-bold text-accent-strong underline underline-offset-2" href={item.sourceUrl} target="_blank" rel="noreferrer" aria-label={t.proposal.citationLabel(number, item.title)}>
+                      <span>[{number}] {item.title}</span><ExternalLink aria-hidden="true" className="size-4" />
+                    </a>
+                    <span className="block text-xs text-muted-foreground">{item.attribution}・{t.proposal.observedAt(new Date(item.observedAt).toLocaleString(locale))}</span>
+                    {item.isStale ? <span className="text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span> : null}
+                  </li>
+                );
+              })}
+            </ul>
+          </details>
+        </section>
       </div>
     );
   }
@@ -685,7 +684,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     <section className="pd-workspace pd-discovery" data-selecting={selecting ? "true" : undefined} aria-labelledby="ai-discovery-heading">
       <div className="pd-pagehead">
         <h2 id="ai-discovery-heading">{t.header.title}</h2>
-        {selecting ? <div className="pd-row-actions"><span>已勾選 {(workspace?.proposals ?? []).filter(selectionChecked).length} 個</span><button className="pd-secondary" disabled={pending !== null} onClick={() => { setSelecting(false); setBulkConfirmation(false); }}>取消</button></div> : workspace?.latestRun ? <div className="pd-row-actions"><button className="pd-secondary" onClick={() => setResearchSettingsOpen(true)}>修改需求</button><button className="pd-secondary" disabled={pending !== null} onClick={beginSelection}>選擇</button></div> : null}
+        {selecting ? <div className="pd-row-actions"><span>已勾選 {(workspace?.proposals ?? []).filter(selectionChecked).length} 個</span><button className="pd-secondary" disabled={pending !== null} onClick={() => { setSelecting(false); setBulkConfirmation(false); }}>取消</button></div> : workspace?.latestRun ? <div className="pd-row-actions"><button className="pd-secondary" onClick={() => setResearchSettingsOpen(true)}><Pencil aria-hidden="true" className="size-4" /><span>{t.brief.editRequirements}</span></button><button className="pd-secondary" disabled={pending !== null} onClick={beginSelection}><ListChecks aria-hidden="true" className="size-4" /><span>{t.brief.choosePlaces}</span></button></div> : null}
       </div>
       {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={pending !== null}
         onAccept={() => {
@@ -763,46 +762,44 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                   {notice?.area === "questions" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
             </section>
           ) : null}
-          <ResearchPanel first={!workspace?.latestRun} open={researchSettingsOpen} onClose={() => setResearchSettingsOpen(false)} footer={<button className="pd-primary" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research(workspace?.latestRun ? "again" : "find")}><Search aria-hidden="true" className="size-4" />{researchLabel(workspace?.latestRun ? t.header.researchAgain : t.brief.findCandidates)}</button>}>
-            <div className="mt-4 grid gap-5">
-          <section className="rounded-panel bg-surface-subtle p-4 sm:p-5" aria-label={t.brief.areaLabel}>
-            <label className="grid gap-2 font-bold">{t.brief.prompt}
-              <textarea
-                className="min-h-32 rounded-xl border bg-surface p-3 font-normal"
-                value={briefDraft}
-                onChange={(event) => setBriefDraft(event.target.value)}
-                placeholder={t.brief.placeholder}
-              />
-            </label>
-            {notice?.area === "find" || notice?.area === "again" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
-            {!workspace?.modelAvailable ? <p className="mt-3 text-sm text-muted-foreground">{t.brief.modelUnavailable}</p> : null}
-            {!workspace?.placeProviderAvailable ? <p className="mt-2 text-sm text-muted-foreground">{t.brief.placesUnavailable}</p> : null}
-          </section>
-
-          {workspace?.brief?.structured ? (
-            <section className="rounded-panel border border-ink/10 p-4" aria-label={t.brief.interpretationLabel}>
-              <h3 className="font-display text-2xl">{t.brief.understood}</h3>
-              <dl className="mt-3 grid gap-3 sm:grid-cols-2">
-                <div><dt className="font-bold">{t.brief.interests}</dt><dd>{workspace.brief.structured.interests.join("、") || t.brief.unknown}</dd></div>
-                <div><dt className="font-bold">{t.brief.areas}</dt><dd>{workspace.brief.structured.areas.join("、") || t.brief.unknown}</dd></div>
-                <div><dt className="font-bold">{t.brief.pace}</dt><dd>{workspace.brief.structured.pace ?? t.brief.unknown}</dd></div>
-                <div><dt className="font-bold">{t.brief.budget}</dt><dd>{workspace.brief.structured.budget ?? t.brief.unknown}</dd></div>
-                <div className="sm:col-span-2"><dt className="font-bold">{t.brief.avoid}</dt><dd>{workspace.brief.structured.exclusions.join("、") || t.brief.nothingConfirmed}</dd></div>
-              </dl>
-            </section>
-          ) : null}
-
-          {workspace?.latestRun ? (
-            <section className="rounded-panel border border-ink/10 p-4" aria-label={t.searchPlan.areaLabel}>
-              <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-display text-2xl">{t.searchPlan.title}</h3><span className="text-sm text-muted-foreground">{workspace.latestRun.modelId}・{new Date(workspace.latestRun.generatedAt).toLocaleString(locale)}</span></div>
-              <dl className="mt-3 grid gap-3 sm:grid-cols-2">
-                {workspace.latestRun.searchPlan.categories.length ? <div><dt className="font-bold">{t.searchPlan.recommending}</dt><dd>{workspace.latestRun.searchPlan.categories.join("、")}{workspace.latestRun.searchPlan.defaultCategories ? <span className="block text-sm text-muted-foreground">{t.searchPlan.defaultExplanation}</span> : null}</dd></div> : null}
-                {workspace.latestRun.searchPlan.namedPlaces.length ? <div><dt className="font-bold">{t.searchPlan.namedPlaces}</dt><dd>{workspace.latestRun.searchPlan.namedPlaces.join("、")}</dd></div> : null}
-                {workspace.latestRun.searchPlan.alreadyArranged.length ? <div><dt className="font-bold">{t.searchPlan.alreadyArranged}</dt><dd>{workspace.latestRun.searchPlan.alreadyArranged.join("、")}</dd></div> : null}
-              </dl>
-              {workspace.latestRun.searchPlan.queries.length ? <details className="mt-3"><summary className="cursor-pointer font-bold">{t.searchPlan.checkedOnGoogleMaps(workspace.latestRun.searchPlan.queries.length)}</summary><ul className="mt-2 grid gap-2 sm:grid-cols-2">{workspace.latestRun.searchPlan.queries.map((query, index) => <li key={`${index}:${query}`} className="rounded-lg bg-surface-subtle p-3">{query}</li>)}</ul></details> : null}
-            </section>
-          ) : null}
+          <ResearchPanel
+            first={!workspace?.latestRun}
+            open={researchSettingsOpen}
+            onClose={() => setResearchSettingsOpen(false)}
+            footer={workspace?.latestRun ? (
+              <div className="pd-research-footer">
+                <span>{t.brief.updateConsequence}</span>
+                <button className="pd-primary" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research("again")}><RotateCw aria-hidden="true" className="size-4" />{researchLabel(t.brief.updateCandidates)}</button>
+              </div>
+            ) : <button className="pd-primary" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research("find")}><Search aria-hidden="true" className="size-4" />{researchLabel(t.brief.findCandidates)}</button>}
+          >
+            <div className="pd-brief-editor">
+              <section aria-label={t.brief.areaLabel}>
+                <label className="grid gap-2 font-bold">{t.brief.prompt}
+                  <textarea
+                    className="min-h-32 rounded-xl border bg-surface p-3 font-normal"
+                    value={briefDraft}
+                    onChange={(event) => setBriefDraft(event.target.value)}
+                    placeholder={t.brief.placeholder}
+                  />
+                </label>
+                <p className="pd-field-help">{t.brief.suggestionOnly}</p>
+                {notice?.area === "find" || notice?.area === "again" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
+                {!workspace?.latestRun && !workspace?.modelAvailable ? <p className="mt-3 text-sm text-muted-foreground">{t.brief.modelUnavailable}</p> : null}
+                {!workspace?.latestRun && !workspace?.placeProviderAvailable ? <p className="mt-2 text-sm text-muted-foreground">{t.brief.placesUnavailable}</p> : null}
+              </section>
+              {!workspace?.latestRun && workspace?.brief?.structured ? (
+                <section className="rounded-panel border border-ink/10 p-4" aria-label={t.brief.interpretationLabel}>
+                  <h3 className="font-display text-2xl">{t.brief.understood}</h3>
+                  <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <div><dt className="font-bold">{t.brief.interests}</dt><dd>{workspace.brief.structured.interests.join("、") || t.brief.unknown}</dd></div>
+                    <div><dt className="font-bold">{t.brief.areas}</dt><dd>{workspace.brief.structured.areas.join("、") || t.brief.unknown}</dd></div>
+                    <div><dt className="font-bold">{t.brief.pace}</dt><dd>{workspace.brief.structured.pace ?? t.brief.unknown}</dd></div>
+                    <div><dt className="font-bold">{t.brief.budget}</dt><dd>{workspace.brief.structured.budget ?? t.brief.unknown}</dd></div>
+                    <div className="sm:col-span-2"><dt className="font-bold">{t.brief.avoid}</dt><dd>{workspace.brief.structured.exclusions.join("、") || t.brief.nothingConfirmed}</dd></div>
+                  </dl>
+                </section>
+              ) : null}
             </div>
           </ResearchPanel>
 
@@ -823,21 +820,25 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                         if (selecting) changeSelection(proposal, !selectionChecked(proposal)); else openProposalDetail(proposal.id);
                       }}>
                       <div className="pd-row-main">
-                        {selecting && (proposal.status === "pending" || proposal.status === "accepted" && proposal.acceptedTripPlaceId) ? <label className="pd-selection-check"><input type="checkbox" aria-label={`選擇 ${proposal.name}`} checked={selectionChecked(proposal)} disabled={pending !== null} onChange={(event) => changeSelection(proposal, event.target.checked)} /></label> : null}
                         <PlaceThumbnail photo={previews.photos.get(proposal.id)} loading={previews.loading} />
                         <div className="pd-row-copy">
-                          <div className="pd-titleline"><button type="button" className="pd-titlebutton" disabled={selecting && pending !== null} data-proposal-detail-trigger={proposal.id} aria-label={selecting ? `選擇 ${proposal.name}` : t.proposal.viewDetail(proposal.name)} onClick={() => selecting ? changeSelection(proposal, !selectionChecked(proposal)) : openProposalDetail(proposal.id)}>{proposal.name}</button><span className="pd-chip">{proposal.category ?? t.placeType[proposal.type]}</span></div>
+                          <div className="pd-titleline">
+                            <button type="button" className="pd-titlebutton" disabled={selecting && pending !== null} data-proposal-detail-trigger={proposal.id} aria-label={selecting ? `選擇 ${proposal.name}` : t.proposal.viewDetail(proposal.name)} onClick={() => selecting ? changeSelection(proposal, !selectionChecked(proposal)) : openProposalDetail(proposal.id)}>{proposal.name}</button>
+                            <span className="pd-chip">{proposal.category ?? t.placeType[proposal.type]}</span>
+                            {selecting && (proposal.status === "pending" || proposal.status === "accepted" && proposal.acceptedTripPlaceId) ? <label className="pd-selection-check"><input type="checkbox" aria-label={`選擇 ${proposal.name}`} checked={selectionChecked(proposal)} disabled={pending !== null} onChange={(event) => changeSelection(proposal, event.target.checked)} /></label> : null}
+                          </div>
                           {proposal.endorsements.length ? <div className="pd-row-labels">{proposal.endorsements.map((endorsement) => <span key={endorsement} className="pd-state">{endorsementLabel(endorsement, t)}</span>)}</div> : null}
                           {repeatedName ? <p className="pd-row-note">{proposal.address ?? t.proposal.unknownAddress}</p> : null}
                           {firstSentence ? <p className="pd-row-note"><ClaimSentence sentence={firstSentence} numberedEvidence={numberedEvidence} t={t} /></p> : proposal.recommendationSentences === null ? <p className="pd-row-note">{proposal.recommendation}</p> : null}
                           {firstTradeoff ? <p className="pd-row-note">{firstTradeoff}</p> : null}
+                          <p className="pd-fit-line pd-fit-line--copy">{t.proposal.fitLine(proposal.matchedNeeds)}</p>
                           <PlacePhotoCredit photo={previews.photos.get(proposal.id)} />
                         </div>
                       </div>
-                      {!selecting ? <div className="pd-row-bottom">
-                        <div className="pd-row-actions">{proposalActions(proposal)}</div>
+                      <div className="pd-row-bottom">
+                        <p className="pd-fit-line pd-fit-line--bottom">{t.proposal.fitLine(proposal.matchedNeeds)}</p>
                         {proposal.status === "pending" && proposal.votingAvailable ? <VoteControl compact name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} /> : null}
-                      </div> : null}
+                      </div>
                     </article>
                   );
                 })}
@@ -847,7 +848,14 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
           {selecting ? <section className="pd-bulkbar" aria-label="套用所選地點">{notice?.area === "general" ? <p className="pd-notice" role="alert">{notice.text}</p> : null}{bulkConfirmation ? <p>將移除 {removingSelected.map((proposal) => proposal.name).join("、")}；票和天數安排會一起清除。</p> : null}<p>依序儲存；遇到錯誤會停止，已完成的變更會保留。</p><div className="pd-fixed-actions">{bulkConfirmation ? <button className="pd-secondary" disabled={pending !== null} onClick={() => setBulkConfirmation(false)}>返回選擇</button> : null}<button className="pd-primary" disabled={pending !== null || selectionChanges.length === 0} onClick={() => void applySelection()}>{bulkBusy ? "儲存中…" : `加入 ${selectionChanges.length - removingSelected.length}、移除 ${removingSelected.length} 個地點`}</button></div></section> : null}
 
           {selectedProposal ? (
-            <PlaceDetailSheet open title={selectedProposal.name} titleRef={detailTitleRef} onClose={closeProposalDetail} footer={
+            <PlaceDetailSheet
+              open
+              appearance="workspace"
+              title={selectedProposal.name}
+              description={<div className="pd-detail-badges"><span className="pd-chip">{selectedProposal.category ?? t.placeType[selectedProposal.type]}</span><span className="pd-state">{t.status[selectedProposal.status]}</span></div>}
+              titleRef={detailTitleRef}
+              onClose={closeProposalDetail}
+              footer={
               rejectConfirmation ? <div className="pd-confirm-footer"><p>{t.proposal.rejectConfirmTitle(rejectConfirmation.name)}</p><p>{t.proposal.rejectConfirmDescription}</p>{notice?.area === "general" ? <p role="alert">{notice.text}</p> : null}<div><button className="pd-secondary" disabled={pending !== null} onClick={() => setRejectConfirmation(null)}>{t.proposal.cancel}</button><button className="pd-danger-button" disabled={pending !== null} onClick={() => { const proposal = rejectConfirmation; void decideProposal(proposal, "reject").then((next) => { if (next) { setRejectConfirmation(null); closeProposalDetail(); } }); }}>{t.proposal.rejectConfirm}</button></div></div>
               : removeConfirmation ? <div className="pd-confirm-footer"><p>{tripPlacesT.workspace.confirmRemove(removeConfirmation.name)}</p>{notice?.area === "general" ? <p role="alert">{notice.text}</p> : null}<div><button className="pd-secondary" disabled={pending !== null} onClick={() => setRemoveConfirmation(null)}>保留地點</button><button className="pd-danger-button" disabled={pending !== null} onClick={() => void removeAcceptedProposal(removeConfirmation).then((removed) => { if (removed) closeProposalDetail(); })}>{tripPlacesT.workspace.remove}</button></div></div>
               : <div>{notice?.area === "general" ? <p className="pd-notice" role="alert">{notice.text}</p> : null}<div className="pd-fixed-actions">{selectedProposal.status === "pending" && selectedProposal.votingAvailable ? <VoteControl compact name={selectedProposal.name} voters={selectedProposal.voters} voteCount={selectedProposal.voteCount} ownVote={selectedProposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(selectedProposal, voted)} /> : null}{proposalActions(selectedProposal)}</div></div>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight, CircleAlert, ExternalLink, ImageOff, Maximize2, X } from "lucide-react";
 
 import {
@@ -115,7 +115,7 @@ function PhotoMetadata({ photo }: { photo: PlacePhotoDto }) {
       <dt className="font-bold">{t.placeDetail.workTitle}</dt><dd className="break-words">{photo.title}</dd>
       <dt className="font-bold">{t.placeDetail.description}</dt><dd className="whitespace-pre-wrap break-words">{photo.description}</dd>
       <dt className="font-bold">{t.placeDetail.author}</dt><dd className="break-words">{authorUrl ? <a className="underline underline-offset-2" href={authorUrl} target="_blank" rel="noreferrer">{photo.author}</a> : photo.author}</dd>
-      <dt className="font-bold">{t.placeDetail.source}</dt><dd className="break-words">{sourceUrl ? <a className="underline underline-offset-2" href={sourceUrl} target="_blank" rel="noreferrer">{photo.creditText}<ExternalLink aria-hidden="true" className="ml-1 inline size-3.5" /></a> : photo.creditText}</dd>
+      <dt className="font-bold">{t.placeDetail.source}</dt><dd className="break-words">{sourceUrl ? <a className="place-detail__inline-link underline underline-offset-2" href={sourceUrl} target="_blank" rel="noreferrer">{photo.creditText}<ExternalLink aria-hidden="true" className="size-3.5" /></a> : photo.creditText}</dd>
       <dt className="font-bold">{t.placeDetail.fileSource}</dt><dd className="break-all">{fileSourceUrl ? <a className="underline underline-offset-2" href={fileSourceUrl} target="_blank" rel="noreferrer">{fileSourceUrl}</a> : photo.fileSourceUrl}</dd>
       <dt className="font-bold">{t.placeDetail.suppliedBy}</dt><dd className="break-words">{photo.sourceName}</dd>
       <dt className="font-bold">{t.placeDetail.license}</dt><dd className="break-words">{licenseUrl ? <a className="underline underline-offset-2" href={licenseUrl} target="_blank" rel="noreferrer">{photo.licenseName}</a> : photo.licenseName}</dd>
@@ -261,12 +261,11 @@ function Gallery({ identity, photos }: { identity: string; photos: PlacePhotoDto
   );
 }
 
-function Detail({ detail }: { detail: PlaceDetailDto }) {
+function Detail({ detail, interlude, collapsible }: { detail: PlaceDetailDto; interlude?: ReactNode; collapsible: boolean }) {
   const { locale, t } = useI18n();
   const sources = useMemo(() => new Map(detail.sources.map((source) => [source.id, source])), [detail.sources]);
-  return (
-    <div className="place-detail-content" data-place-detail-content={`${detail.reference.kind}:${detail.reference.id}`}>
-      <Gallery identity={`${detail.reference.kind}:${detail.reference.id}`} photos={detail.photos} />
+  const article = (
+    <div className="place-detail__article">
       {detail.asOfDate ? <p className="place-detail__date">{t.placeDetail.contentForDate(formatDateOnly(detail.asOfDate, locale))}</p> : null}
       {detail.sections.length ? detail.sections.map((section) => (
         <section key={section.kind} className="place-detail__section" data-place-detail-section={section.kind}>
@@ -286,7 +285,7 @@ function Detail({ detail }: { detail: PlaceDetailDto }) {
               const href = safeExternalUrl(source.url);
               return (
                 <li key={source.id} className="place-detail__source">
-                  <p>{href ? <a href={href} target="_blank" rel="noreferrer">{source.title}<ExternalLink aria-hidden="true" className="ml-1 inline size-3.5" /></a> : source.title}</p>
+                  <p>{href ? <a className="place-detail__inline-link" href={href} target="_blank" rel="noreferrer">{source.title}<ExternalLink aria-hidden="true" className="size-3.5" /></a> : source.title}</p>
                   <p className="place-detail__source-meta">{t.placeDetail.checkedLabel(formatInstant(source.checkedAt, locale))}{source.publishedAt ? `・${t.placeDetail.publishedLabel(formatDateOrInstant(source.publishedAt, locale))}` : ""}</p>
                   <p className="place-detail__source-meta">{sourceValidity(source, locale, t.placeDetail)}{source.expiresAt ? `・${t.placeDetail.expiresAt(formatInstant(source.expiresAt, locale))}` : `・${t.placeDetail.referenceNotice}`}</p>
                 </li>
@@ -297,9 +296,28 @@ function Detail({ detail }: { detail: PlaceDetailDto }) {
       ) : null}
     </div>
   );
+  return (
+    <div className="place-detail-content" data-place-detail-content={`${detail.reference.kind}:${detail.reference.id}`}>
+      <Gallery identity={`${detail.reference.kind}:${detail.reference.id}`} photos={detail.photos} />
+      {interlude}
+      {collapsible ? (
+        <details className="place-detail__disclosure">
+          <summary><ChevronRight aria-hidden="true" className="size-4" />{t.placeDetail.moreInformation}</summary>
+          {article}
+        </details>
+      ) : article}
+    </div>
+  );
 }
 
-export function PlaceDetailContent({ tripId, reference, date, request }: { tripId: string; reference: PlaceDetailReference; date?: string | null; request: PlaceDetailRequest }) {
+export function PlaceDetailContent({ tripId, reference, date, request, interlude, collapsible = false }: {
+  tripId: string;
+  reference: PlaceDetailReference;
+  date?: string | null;
+  request: PlaceDetailRequest;
+  interlude?: ReactNode;
+  collapsible?: boolean;
+}) {
   const { t } = useI18n();
   const identity = `${reference.kind}:${reference.id}`;
   const [state, setState] = useState<{ identity: string; loading: boolean; detail: PlaceDetailDto | null; error: unknown }>({ identity, loading: true, detail: null, error: null });
@@ -325,14 +343,14 @@ export function PlaceDetailContent({ tripId, reference, date, request }: { tripI
     return () => controller.abort();
   }, [date, identity, reference.id, reference.kind, request, tripId]);
 
-  if (state.identity !== identity || state.loading) return <p className="place-detail__loading" role="status">{t.placeDetail.loading}</p>;
+  if (state.identity !== identity || state.loading) return <div className="place-detail-content"><p className="place-detail__loading" role="status">{t.placeDetail.loading}</p>{interlude}</div>;
   if (state.error) {
     const message = !navigator.onLine
       ? t.placeDetail.offlineUnavailable
       : state.error instanceof ApiRequestError && [401, 403, 404].includes(state.error.status ?? 0)
         ? t.placeDetail.accessDenied
         : t.placeDetail.unavailable;
-    return <p className="place-detail__error" role="alert">{message}</p>;
+    return <div className="place-detail-content"><p className="place-detail__error" role="alert">{message}</p>{interlude}</div>;
   }
-  return state.detail ? <Detail detail={state.detail} /> : null;
+  return state.detail ? <Detail detail={state.detail} interlude={interlude} collapsible={collapsible} /> : null;
 }
