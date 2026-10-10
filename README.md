@@ -44,6 +44,25 @@ bun run build
 Staging setup, HTTPS deployment, persistent data, and rollback are documented in
 [`docs/operations/staging.md`](docs/operations/staging.md).
 
+## Place details and reviewed photos
+
+Pocket-list, discovery and Today place references share the canonical detail API
+and an optional thumbnail/gallery surface. Photos are packaged, individually
+reviewed Wikimedia Commons works with per-work attribution, licence/version,
+verification revision and derivative notices—not scraped Google images or
+user-uploaded trip albums. Unknown places and same-name branches do not borrow
+another identity's content.
+
+Catalog publication is explicit and operator-only: run the curated manifest CLI
+with reviewed bindings to existing canonical identities. Startup does not match
+place names or seed real trips. Authenticated media routes enforce both trip
+membership and the selected reference; a filename hash is not a public URL.
+
+See [`docs/engineering/place-details-and-photos.md`](docs/engineering/place-details-and-photos.md)
+for API/reference contracts, source applicability, asset validation, import and
+failure behavior, and current isolated verification status. The acceptance source
+is the [place-details/photo specification](docs/superpowers/specs/2026-10-09-place-details-and-photos-design.md).
+
 ## Shared flights and lodging (Issue #74)
 
 `POST /api/trips` requires `name`, `startDate`, `endDate`, ordered `countryCodes`
@@ -205,6 +224,49 @@ the column. Known rollback limit: idempotent discovery replies stored by this
 release omit `confidence`, so after a rollback the previous release cannot
 replay them; retrying such a request with the same `Idempotency-Key` fails,
 while new requests work. Earlier field removals (#73, #76) share this limit.
+
+## Selected itinerary places and pending dates
+
+`TripPlaceDto.selectedForItinerary` is the shared itinerary selection, independent
+of votes, provider readiness, and whether the place currently has a date.
+`unplacedFromDate` is the nullable original local calendar date of a removed
+placement; it is not an inferred timestamp or a proposed replacement date.
+
+- A new Pocket candidate is unselected. Assigning a day selects it and clears
+  `unplacedFromDate`; accepting a whole-trip plan uses the same assignment writer.
+- Removing a day keeps the place selected and records the actual previous
+  `TripDay.date` before the legacy synchronization trigger deletes the assignment.
+  Removing an already unassigned candidate does not select it.
+- Formal timed-item create/update/delete synchronizes the same canonical place
+  identity transactionally. A remaining timed placement or day assignment clears
+  the prior date. Removing the last timed placement keeps selection and records
+  its original local date only when that date is unambiguous.
+- Plan's pending list contains selected places with neither a timed item nor a
+  day assignment. Its source picker separates these from never-selected Pocket
+  candidates. Missing coordinates remain visible but cannot be scheduled there.
+- Reassigning a pending place preserves its stable identity, selection and votes,
+  removes it from pending, and clears the old date. The default picker date is the
+  next available TripDay after a known original date, otherwise the first TripDay;
+  the member can choose another date.
+- Merge preserves either source's selection. A current placement clears prior
+  history; conflicting or unknown selected histories remain explicitly unknown
+  rather than inventing one original date. Archived places are excluded from the
+  active pending list.
+
+Migration `022_trip_place_selection` is additive: a defaulted selection column,
+a nullable date, and a validity constraint. Backfill selects only currently
+observable day assignments or timed placements. Already unassigned old records
+retain the current Pocket classification; lost historical selection and dates
+are not reconstructed. This is a tracking cutover, not a claim about past visits.
+Stored `tp:*` idempotent replies are normalized from their own placement snapshot,
+not current live state, with unknown prior dates left null. A reply-insert trigger
+keeps replies from retained binaries readable after a migration-free rollback.
+Fresh votes reconcile existing placements within the same trip-content transaction
+before storing their reply. This clears stale selection/history left by a retained
+writer even when voting is the first forward request; the vote itself does not
+select an unplaced candidate.
+Down removes the new schema and cannot retain the new selection/history data;
+it is not the deployment rollback procedure.
 
 ## Activity participants (Issue #21)
 
@@ -529,12 +591,16 @@ route observation is part of this formal read model, so transportation is labele
 unavailable rather than displaying generated route estimates or stale live traffic.
 
 Each successful, version-consistent read saves one localStorage snapshot per
-account and trip: `{ schemaVersion: 2, accountId, fetchedAt, model }`. The model
+account and trip: `{ schemaVersion: 3, accountId, fetchedAt, model }`. The model
 contains trip ID/name/version, the current member ID, resolved day zones, item
 IDs, separate untimed wishlist names, and allowlisted card fields. Participant
 labels use display name, falling back to email, only for participants in the stored
 formal items; unused profile emails are not copied. Invitations, change events,
 member profiles, drafts, credentials, provider keys and unsaved inputs are never copied.
+Compatible version-2 snapshots migrate with missing endpoint place references
+left unknown. If persisting that upgrade fails, the validated in-memory model
+remains readable and the original saved value is preserved. See the
+[feature migration details](docs/engineering/place-details-and-photos.md#ui失敗與-today-snapshot).
 Malformed, extra-field or incompatible snapshots are discarded. Storage failure
 is visible and does not prevent reading the online itinerary.
 

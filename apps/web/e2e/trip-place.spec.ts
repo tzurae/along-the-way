@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { isRecord } from "@along-the-way/contracts/private-trips";
+import { parseTripPlaceListResponse } from "@along-the-way/contracts/trip-places";
 import { fillTripFlights } from "./travel-support";
 
 const execFileAsync = promisify(execFile);
@@ -1054,4 +1056,85 @@ test("open create dialogs keep their input and use fresh creation preconditions"
   await expect(page.getByRole("heading", { name: "My preserved new activity", exact: true })).toBeVisible();
   const savedItems = (await (await page.request.get(`/api/trips/${tripId}/skeleton`)).json()).skeleton.items;
   expect(savedItems.filter((entry: { title: string }) => entry.title === "My preserved new activity")).toHaveLength(1);
+});
+
+test("photo composition and compact credits survive desktop and enlarged-text boundaries", async ({ page, request }) => {
+  test.setTimeout(120_000);
+  page.setDefaultTimeout(15_000);
+  const { tripId } = await prepareReviewWishlist(page, request, "photo-geometry");
+  const placeName = "照片版面驗收地點（非實際景點）";
+  await addManualPlace(page, { name: placeName, note: "隔離版面回歸；不是實際景點照片。" });
+  const listing = await page.request.get(`/api/trips/${tripId}/trip-places`);
+  expect(listing.ok()).toBe(true);
+  const place = parseTripPlaceListResponse(await listing.json()).tripPlaces.find((entry) => entry.name === placeName)!;
+  // Original test-only pixel: real photo provenance is verified separately through the catalog.
+  const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH9sAAAAASUVORK5CYII=", "base64");
+  const filename = `${createHash("sha256").update(pixel).digest("hex")}.png`;
+  const imageUrl = `/api/trips/${tripId}/place-photo-assets/${filename}?kind=trip-place&id=${place.id}`;
+  const author = `版面驗收作者（非真實景點攝影師）；${"同一測試署名；".repeat(80)}`;
+  const photo = {
+    id: "geometry-test-pixel", title: "原始測試像素", description: "單一測試像素，不是實際景點照片。",
+    sourceName: "本機版面驗收資料", sourceUrl: "https://example.test/original-test-pixel",
+    fileSourceUrl: "https://example.test/original-test-pixel.png", author, authorUrl: "https://example.test/test-author",
+    creditText: `${author}。作品來源：原始測試像素，CC0 1.0。`, licenseName: "CC0 1.0", licenseUrl: "https://creativecommons.org/publicdomain/zero/1.0/",
+    capturedAt: null, checkedAt: new Date().toISOString(), verificationUrl: "https://example.test/test-pixel-record",
+    locationEvidence: "不代表任何真實地點。", changes: "原始測試像素，未修改。",
+    notices: ["只驗證版面，不作為照片來源或授權查核證據。"],
+    originalWidth: 1, originalHeight: 1, width: 1, height: 1, imageUrl, thumbnailUrl: imageUrl,
+  };
+  await page.route(`**/api/trips/${tripId}/place-details?**`, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("kind") !== "trip-place" || url.searchParams.get("id") !== place.id) return route.fallback();
+    await route.fulfill({ json: { detail: {
+      reference: { kind: "trip-place", id: place.id }, canonicalPlaceId: place.placeId, name: placeName,
+      asOfDate: url.searchParams.get("date"), sections: [], sources: [], photos: [photo],
+    } } });
+  });
+  await page.route(`**/api/trips/${tripId}/place-photo-assets/${filename}?**`, (route) => route.fulfill({ contentType: "image/png", body: pixel }));
+  for (const [width, fontSize] of [[1440, 16], [1024, 32], [390, 32]] as const) {
+    await test.step(`${width}px viewport / ${fontSize}px root font`, async () => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.evaluate((size) => { document.documentElement.style.fontSize = `${size}px`; }, fontSize);
+      const detail = await expandWishlistPlace(page, placeName);
+      const credit = detail.locator('[data-photo-credit="geometry-test-pixel"]');
+      await expect.poll(async () => Math.round((await credit.boundingBox())?.height ?? 0)).toBe(56);
+      const information = detail.getByRole("button", { name: "查看「原始測試像素」的完整照片資訊", exact: true });
+      const creditBox = (await credit.boundingBox())!;
+      const informationBox = (await information.boundingBox())!;
+      expect(informationBox.height).toBeGreaterThanOrEqual(44);
+      expect(informationBox.y).toBeGreaterThanOrEqual(creditBox.y);
+      expect(informationBox.y + informationBox.height).toBeLessThanOrEqual(creditBox.y + creditBox.height + 0.5);
+      await information.click();
+      const viewer = page.locator('[data-photo-viewer="geometry-test-pixel"]');
+      const image = viewer.locator("img");
+      await image.evaluate((element) => (element as HTMLImageElement).decode());
+      // Fails when desktop constraints collapse the rendered image to zero width.
+      await expect.poll(async () => (await image.boundingBox())?.width ?? 0).toBeGreaterThanOrEqual(200);
+      const imageBox = (await image.boundingBox())!;
+      expect(imageBox.x).toBeGreaterThanOrEqual(0);
+      expect(imageBox.y).toBeGreaterThanOrEqual(0);
+      expect(imageBox.x + imageBox.width).toBeLessThanOrEqual(width);
+      expect(imageBox.y + imageBox.height).toBeLessThanOrEqual(900);
+      expect(await viewer.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      expect((await viewer.getByRole("link", { name: author, exact: true }).boundingBox())!.width).toBeGreaterThanOrEqual(100);
+      await page.keyboard.press("Escape");
+      await expect(viewer).toHaveCount(0);
+      await expect(information).toBeFocused();
+      await detail.getByRole("button", { name: /^關閉/ }).first().click();
+      await expect(detail).toHaveCount(0);
+    });
+  }
+  await test.step("reduced motion does not animate the photo viewer", async () => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const detail = await expandWishlistPlace(page, placeName);
+    await detail.getByRole("button", { name: "查看「原始測試像素」的完整照片資訊", exact: true }).click();
+    const viewer = page.locator('[data-photo-viewer="geometry-test-pixel"]');
+    await expect(viewer).toBeVisible();
+    expect(await viewer.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return style.animationName === "none" || style.animationDuration.split(",").every((duration) => parseFloat(duration) <= 0.001);
+    })).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(viewer).toHaveCount(0);
+  });
 });

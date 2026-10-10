@@ -18,6 +18,8 @@ import {
 import { parseTripSkeletonResponse } from "@along-the-way/contracts/trip-skeleton";
 
 import { createApp } from "../src/app";
+import { PostgresPlaceDetailModule } from "../src/place-details/postgres-place-detail-module";
+import { packagedPhotoRoot } from "../src/place-details/photo-assets";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
 import { runMigrations } from "../src/database/migrate";
 import { seedDatabase } from "../src/database/seed";
@@ -409,6 +411,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       policyVersion: "discovery-test-v2",
     });
     app = createApp({
+      placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
       collaboration: new PostgresCollaborationModule(database),
       dayPlans: unrelatedDayPlanModule,
       discovery,

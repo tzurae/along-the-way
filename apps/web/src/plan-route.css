@@ -1,0 +1,748 @@
+.trip-skeleton-shell.plan-workspace {
+  width: 100%;
+  max-width: 900px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.plan-pagehead {
+  margin: 0 2px 18px;
+}
+
+.plan-pagehead h2 {
+  margin: 0;
+  color: var(--color-ink-strong);
+  font-family: var(--font-display);
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+}
+
+.plan-pagehead p {
+  max-width: 62ch;
+  margin: 6px 0 0;
+  color: var(--muted-foreground);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.plan-page-error,
+.plan-row-error {
+  color: var(--destructive);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.plan-page-error {
+  margin-bottom: 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--destructive) 10%, transparent);
+  padding: 10px 12px;
+}
+
+.plan-pending {
+  margin-bottom: 26px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 32%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--color-accent) 7%, var(--color-surface));
+  box-shadow: 0 12px 30px -26px rgb(31 48 41 / 65%);
+}
+
+.plan-pending > summary {
+  display: grid;
+  min-height: 64px;
+  cursor: pointer;
+  list-style: none;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+}
+
+.plan-pending > summary::-webkit-details-marker,
+.plan-management > summary::-webkit-details-marker,
+.plan-travel-management > summary::-webkit-details-marker {
+  display: none;
+}
+
+.plan-pending-title {
+  min-width: 0;
+}
+
+.plan-pending-title strong {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.plan-pending-title span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+
+.plan-pending-chevron,
+.plan-management > summary > svg,
+.plan-travel-management > summary > svg {
+  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.plan-pending[open] .plan-pending-chevron,
+.plan-management[open] > summary > svg,
+.plan-travel-management[open] > summary > svg {
+  transform: rotate(180deg);
+}
+
+.plan-pending-body {
+  padding: 0 16px 14px;
+}
+
+.plan-pending-list {
+  border-top: 1px solid var(--border);
+}
+
+.plan-pending-empty {
+  display: flex;
+  min-height: 58px;
+  align-items: center;
+  gap: 9px;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.plan-pending-empty svg,
+.plan-source-empty svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.plan-days {
+  display: grid;
+  gap: 26px;
+}
+
+.plan-workspace .day-column {
+  min-width: 0;
+  scroll-margin-top: 74px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.plan-workspace .day-heading {
+  display: flex;
+  min-height: 0;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 0 2px 10px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.plan-workspace .day-heading h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.plan-workspace .day-heading p {
+  margin: 4px 0 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.plan-day-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.plan-route-link,
+.plan-outline-button,
+.plan-row-button,
+.plan-schedule-button {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.plan-route-link {
+  border: 0;
+  background: transparent;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.plan-route-link:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.plan-outline-button,
+.plan-row-button {
+  border: 1px solid var(--border);
+  background: var(--color-surface);
+  padding-inline: 14px;
+}
+
+.plan-outline-button:hover,
+.plan-row-button:hover {
+  border-color: color-mix(in srgb, var(--color-ink) 34%, transparent);
+}
+
+.plan-outline-button:disabled,
+.plan-row-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.plan-schedule-button:active:not(:disabled),
+.plan-outline-button:active:not(:disabled),
+.plan-row-button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.plan-route-link svg,
+.plan-outline-button svg,
+.plan-row-button svg,
+.plan-schedule-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.plan-day-list {
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--color-surface);
+  list-style: none;
+  padding: 2px 16px;
+}
+
+.plan-day-list > li + li {
+  border-top: 1px solid var(--border);
+}
+
+.plan-item-row {
+  display: flex;
+  width: 100%;
+  min-height: 74px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 12px 0;
+  text-align: left;
+}
+
+.plan-item-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.plan-item-copy strong {
+  font-size: 16px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.plan-item-copy small {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.plan-item-copy time {
+  color: var(--color-ink);
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+}
+
+.plan-place-name {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.plan-kind-chip {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-ink-strong) 8%, transparent);
+  color: var(--color-ink);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 3px 8px;
+}
+
+.plan-kind-chip svg {
+  width: 12px;
+  height: 12px;
+}
+
+.plan-kind-chip-fixed {
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  color: var(--color-accent-strong);
+}
+
+.plan-no-plan {
+  display: grid;
+  min-height: 74px;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted-foreground);
+  font-size: 14px;
+}
+
+.plan-no-plan > svg {
+  width: 18px;
+  height: 18px;
+}
+
+.plan-sheet-intro {
+  margin: 0 0 14px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.plan-assignment-days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 5px;
+  margin: 0 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--color-ink-strong) 4%, var(--color-surface));
+  padding: 4px;
+}
+
+.plan-assignment-days button {
+  min-width: 0;
+  min-height: 44px;
+  border: 0;
+  border-radius: 11px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  padding: 5px 2px;
+}
+
+.plan-assignment-days button span,
+.plan-assignment-days button small {
+  display: block;
+}
+
+.plan-assignment-days button small {
+  margin-top: 2px;
+  font-size: 10px;
+}
+
+.plan-assignment-days button[aria-pressed="true"] {
+  background: var(--color-surface);
+  color: var(--color-accent-strong);
+  box-shadow: 0 2px 8px -4px rgb(31 48 41 / 25%);
+}
+
+.plan-source {
+  padding: 17px 0;
+}
+
+.plan-source + .plan-source {
+  border-top: 1px solid var(--border);
+}
+
+.plan-source h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.plan-source > p {
+  margin: 4px 0 10px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.plan-source-list {
+  margin: 0;
+  list-style: none;
+  padding: 0;
+}
+
+.plan-source-row {
+  display: grid;
+  min-height: 64px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 0;
+}
+
+.plan-source-row + .plan-source-row {
+  border-top: 1px solid var(--border);
+}
+
+.plan-place-main {
+  min-width: 0;
+}
+
+.plan-place-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 9px;
+  margin-top: 4px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.plan-place-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 700;
+}
+
+.plan-place-status svg {
+  width: 15px;
+  height: 15px;
+}
+
+.plan-source-empty {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.plan-schedule-button {
+  border: 0;
+  background: var(--color-ink-strong);
+  color: var(--color-on-dark);
+  padding-inline: 13px;
+}
+
+.plan-schedule-button:disabled {
+  border: 1px solid color-mix(in srgb, var(--color-ink) 20%, transparent);
+  background: color-mix(in srgb, var(--color-ink) 7%, var(--color-surface));
+  color: var(--muted-foreground);
+  opacity: 1;
+}
+
+.plan-row-error {
+  grid-column: 1 / -1;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--destructive) 8%, transparent);
+  padding: 8px 10px;
+}
+
+.plan-management,
+.plan-travel-management {
+  margin-top: 28px;
+  border-top: 1px solid var(--border);
+}
+
+.plan-management > summary,
+.plan-travel-management > summary {
+  display: flex;
+  min-height: 54px;
+  cursor: pointer;
+  list-style: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 2px;
+  color: var(--muted-foreground);
+}
+
+.plan-management > summary span,
+.plan-travel-management > summary span {
+  min-width: 0;
+}
+
+.plan-management > summary strong,
+.plan-management > summary small,
+.plan-travel-management > summary strong,
+.plan-travel-management > summary small {
+  display: block;
+}
+
+.plan-management > summary strong,
+.plan-travel-management > summary strong {
+  color: var(--color-ink);
+  font-size: 14px;
+}
+
+.plan-management > summary small,
+.plan-travel-management > summary small {
+  margin-top: 2px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.plan-management > summary > svg,
+.plan-travel-management > summary > svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.plan-travel-management > summary::after {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  content: "";
+  transform: rotate(45deg);
+  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.plan-travel-management[open] > summary::after {
+  transform: rotate(225deg);
+}
+
+.plan-management-body {
+  display: grid;
+  gap: 14px;
+  padding: 4px 0 18px;
+}
+
+.plan-management-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.plan-inventory {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--color-surface);
+  padding: 12px 16px;
+}
+
+.plan-inventory > summary {
+  display: flex;
+  cursor: pointer;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.plan-inventory > summary svg {
+  width: 16px;
+  height: 16px;
+}
+
+.plan-inventory .place-grid,
+.plan-inventory > .grid {
+  margin-top: 16px;
+}
+
+.plan-management-context {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.plan-management-context section {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--color-surface);
+  padding: 14px;
+}
+
+.plan-management-context h3 {
+  color: var(--color-ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.plan-management-context ol {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.plan-management-context li > span {
+  display: block;
+}
+
+@media (min-width: 1024px) {
+  .plan-pagehead h2 {
+    font-size: 30px;
+  }
+}
+
+@media (max-width: 620px) {
+  .plan-workspace .day-heading {
+    align-items: flex-start;
+  }
+
+  .plan-day-actions {
+    flex-direction: column-reverse;
+    align-items: flex-end;
+    gap: 7px;
+  }
+
+  .plan-day-list {
+    padding-inline: 13px;
+  }
+
+  .plan-row-button {
+    padding-inline: 11px;
+  }
+
+  .plan-assignment-days {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .plan-source-row {
+    gap: 8px;
+  }
+
+  .plan-management-context {
+    grid-template-columns: 1fr;
+  }
+}
+[data-slot="dialog-content"].route-dialog, [data-slot="dialog-content"].trip-plan-dialog { display: flex; flex-direction: column; gap: 20px; width: min(960px, calc(100vw - 40px)); max-width: 960px; max-height: calc(100dvh - 48px); overflow-y: auto; border-radius: 24px; padding: 28px; background: var(--background); }
+.route-page-heading { text-align: left; padding-right: 24px; }
+.route-page-heading [data-slot="dialog-title"] { font-family: var(--font-display); font-size: 26px; line-height: 1.3; }
+.route-page-heading [data-slot="dialog-description"] { color: var(--muted-foreground); font-size: 13px; }
+.route-constraints { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 18px; background: var(--card); }
+.route-constraints-heading { display: flex; grid-column: 1 / -1; align-items: start; gap: 10px; }
+.route-constraints-heading > svg { width: 20px; height: 20px; color: var(--accent); }
+.route-constraints-heading small, .route-constraints-heading p { display: block; font-size: 13px; color: var(--muted-foreground); }
+.route-constraints-heading > div { display: grid; gap: 4px; font-size: 13px; }
+.route-constraints > label { display: grid; gap: 6px; min-width: 0; font-size: 13px; font-weight: 700; }
+.route-constraints > button { grid-column: 1 / -1; }
+.route-constraints > .route-endday-toggle { display: flex; grid-column: 1 / -1; align-items: center; gap: 8px; min-height: 44px; font-weight: 500; }
+.route-constraints .route-endday-toggle input { width: 18px; height: 18px; min-height: 18px; accent-color: var(--primary); }
+.route-end-of-day { display: flex; align-items: center; min-height: 44px; padding: 0 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--secondary); }
+.route-constraints input { min-height: 44px; border-radius: 12px; background: white; }
+.route-constraints button { border-radius: 999px; min-height: 44px; }
+.route-comparison, .trip-plan-content { display: grid; gap: 18px; }
+.route-summary { display: flex; gap: 12px; padding: 18px 20px; border-radius: 18px; background: var(--primary); color: var(--primary-foreground); }
+.route-summary > svg { width: 22px; flex: none; margin-top: 2px; }
+.route-summary strong { font-family: var(--font-display); font-size: 22px; line-height: 1.35; }
+.route-summary p { margin-top: 6px; font-size: 13px; opacity: .8; }
+.route-unknown, .route-error, .route-status, .route-optimal { padding: 14px 16px; border: 1px solid #d3755140; border-radius: 14px; background: #fff5e9; font-size: 14px; line-height: 1.55; }
+.route-unknown { display: flex; gap: 10px; }
+.route-unknown > svg { flex: none; width: 20px; color: var(--accent); }
+.route-unknown p { margin-top: 4px; color: var(--muted-foreground); }
+.route-evidence { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; }
+.route-evidence-label { color: var(--muted-foreground); }
+.route-evidence-chip { display: inline-flex; gap: 4px; align-items: center; padding: 5px 9px; border-radius: 999px; background: #1f30290d; }
+.route-evidence-chip svg { width: 13px; height: 13px; }
+.route-evidence-estimated { background: #d3755114; }
+.route-segments { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border-radius: 16px; background: #e8e2d8; }
+.route-segments button { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 46px; border-radius: 12px; font-weight: 700; color: var(--muted-foreground); }
+.route-segments button svg { width: 17px; }
+.route-segments button[aria-selected="true"] { background: var(--card); color: var(--primary); box-shadow: 0 2px 8px -4px #1f302940; }
+.route-segments button:disabled { opacity: .4; }
+.route-selection-mark { visibility: hidden; }
+[aria-selected="true"] .route-selection-mark { visibility: visible; }
+.route-versions, .trip-plan-days { display: grid; gap: 18px; }
+.route-version { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 20px; background: var(--card); }
+.route-versions .route-version[data-active="false"] { display: none; }
+.route-version-heading { display: flex; align-items: start; justify-content: space-between; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--border); }
+.route-version-heading h3 { font-family: var(--font-display); font-size: 20px; font-weight: 700; }
+.route-version-heading > span, .route-version-heading p { font-size: 12px; color: var(--muted-foreground); }
+.route-timeline { margin: 0; padding: 12px 16px; list-style: none; }
+.route-stop { display: grid; grid-template-columns: 44px 16px minmax(0, 1fr); gap: 8px; min-height: 76px; }
+.route-stop-time { padding-top: 12px; text-align: right; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--muted-foreground); }
+.route-stop-track { position: relative; display: grid; justify-content: center; align-content: start; padding-top: 16px; }
+.route-stop-track::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--border); }
+.route-stop-track::after { content: ""; position: relative; width: 8px; height: 8px; border: 2px solid var(--accent); border-radius: 50%; background: var(--card); }
+.route-stop-content { min-width: 0; padding: 10px 0 18px; }
+.route-stop-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 15px; }
+.route-fixed-note { display: inline-flex; align-items: center; gap: 4px; padding: 4px 7px; border-radius: 999px; background: #1f30290d; font-size: 11px; }
+.route-fixed-note svg { width: 12px; height: 12px; }
+.route-stop-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; color: var(--muted-foreground); font-size: 12px; }
+.route-stop-reason, .route-stop-evidence { margin-top: 6px; font-size: 12px; line-height: 1.5; color: #9a4a2c; }
+.route-stop-reason svg { display: inline; width: 13px; height: 13px; margin-right: 4px; }
+.route-stop-fixed .route-stop-track::after { border-color: var(--primary); background: var(--primary); }
+.route-stop-unknown .route-stop-track::after { border-style: dashed; }
+.route-unscheduled { margin: 0 16px 16px; padding: 14px; border: 1px dashed #d3755166; border-radius: 14px; background: #fff6eb; font-size: 13px; line-height: 1.55; }
+.route-unscheduled-heading { display: flex; gap: 8px; margin-bottom: 10px; }
+.route-unscheduled-heading > svg { width: 18px; height: 18px; flex: none; color: var(--accent); }
+.route-unscheduled h3, .route-unscheduled h4 { font-weight: 700; }
+.route-unscheduled ul { display: grid; gap: 8px; }
+.route-actionbar { position: sticky; bottom: -28px; z-index: 1; margin: 0 -28px -28px; padding: 14px 28px; border-top: 1px solid var(--border); background: #fffcf7f5; backdrop-filter: blur(12px); }
+.route-actionbar button { min-height: 46px; border-radius: 999px; }
+@media (min-width: 900px) { .route-segments { display: none; } .route-versions { grid-template-columns: repeat(2, minmax(0, 1fr)); } .route-versions .route-version[data-active="false"] { display: block; } .route-version[data-active="true"] { border-color: #d3755166; } }
+@media (max-width: 599px) { [data-slot="dialog-content"].route-dialog, [data-slot="dialog-content"].trip-plan-dialog { inset: 0; width: 100%; height: 100dvh; max-height: 100dvh; max-width: none; translate: none; transform: none; border-radius: 0; padding: 20px 12px; } .route-actionbar { bottom: -20px; margin: 0 -12px -20px; padding: 12px 14px calc(12px + env(safe-area-inset-bottom)); } .plan-workspace .day-heading .day-context ol { grid-template-columns: 1fr; } }
+.travel-workspace { display: grid; gap: 16px; min-width: 0; }
+.travel-pagehead { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.travel-pagehead h3 { font-family: var(--font-display); font-size: 26px; font-weight: 700; }
+.travel-pagehead button, .travel-card button { min-height: 44px; border-radius: 999px; }
+.travel-list { display: grid; gap: 14px; }
+.travel-card { display: grid; gap: 10px; padding: 18px; border: 1px solid var(--border); border-radius: 18px; background: var(--card); }
+.travel-card h4 { font-family: var(--font-display); font-size: 20px; }
+.travel-card > p { color: var(--muted-foreground); font-size: 13px; line-height: 1.55; }
+[data-slot="dialog-content"].travel-editor { width: min(760px, calc(100vw - 32px)); max-width: 760px; max-height: calc(100dvh - 32px); overflow-y: auto; border-radius: 22px; padding: 24px; }
+.travel-editor [data-slot="dialog-title"] { font-family: var(--font-display); font-size: 24px; }
+.travel-editor input, .travel-editor select { min-height: 44px; border-radius: 12px; background: white; }
+.travel-editor [data-slot="dialog-footer"] button { border-radius: 999px; min-height: 44px; }
+@media (max-width: 599px) { [data-slot="dialog-content"].travel-editor { inset: 8dvh 0 0; width: 100%; max-width: none; max-height: 92dvh; translate: none; transform: none; border-radius: 22px 22px 0 0; padding-bottom: calc(24px + env(safe-area-inset-bottom)); } }
+
+/* The approved Plan source sheet is 460px / min(86dvh, 760px), not Photo B or Today geometry. */
+[data-slot="dialog-content"].place-detail-sheet[data-appearance="workspace"]:has(.plan-assignment-days) {
+  inset: auto 0 0;
+  height: min(86dvh, 760px);
+  max-height: min(86dvh, 760px);
+}
+@media (min-width: 1024px) {
+  [data-slot="dialog-content"].place-detail-sheet[data-appearance="workspace"]:has(.plan-assignment-days) {
+    inset: 20px 20px 20px auto;
+    width: 460px;
+    height: auto;
+    max-height: none;
+  }
+}

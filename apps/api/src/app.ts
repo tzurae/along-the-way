@@ -40,6 +40,12 @@ import {
 import type { RateLimiter } from "./private-trips/postgres-rate-limiter";
 import type { TripSkeletonModule } from "./trip-skeleton/trip-skeleton-module";
 import type { TripPlaceModule } from "./trip-places/trip-place-module";
+import {
+  parsePlaceDetailDate,
+  parsePlaceDetailReference,
+  parsePlacePreviewIds,
+} from "@along-the-way/contracts/place-details";
+import type { PlaceDetailModule } from "./place-details/place-detail-module";
 
 const SESSION_COOKIE = "along_the_way_session";
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
@@ -49,6 +55,7 @@ interface AppDependencies {
   dayPlans: DayPlanModule;
   discovery: DiscoveryModule;
   identityAccess: IdentityAccessModule;
+  placeDetails: PlaceDetailModule;
   rateLimiter: RateLimiter;
   readiness: ReadinessProbe;
   siteAddress: string;
@@ -325,6 +332,7 @@ export function createApp({
   dayPlans,
   discovery,
   identityAccess,
+  placeDetails,
   rateLimiter,
   readiness,
   siteAddress,
@@ -549,6 +557,54 @@ export function createApp({
     return context.json({
       tripPlaces: await tripPlaces.list(user.id, uuidParam(context, "tripId")),
     });
+  });
+
+  app.get("/api/trips/:tripId/place-details", async (context) => {
+    const { user } = await authenticated(context);
+    let reference;
+    let date;
+    try {
+      reference = parsePlaceDetailReference({ kind: context.req.query("kind"), id: context.req.query("id") });
+      const requestedDate = context.req.query("date");
+      date = requestedDate === undefined ? null : parsePlaceDetailDate(requestedDate);
+    } catch {
+      throw new AppError("validation_error", "Invalid place detail reference or date");
+    }
+    context.header("Cache-Control", "private, no-store");
+    return context.json({ detail: await placeDetails.getDetail(user.id, uuidParam(context, "tripId"), reference, date) });
+  });
+
+  app.get("/api/trips/:tripId/place-previews", async (context) => {
+    const { user } = await authenticated(context);
+    let ids;
+    let kind;
+    try {
+      ids = parsePlacePreviewIds(context.req.query("ids"));
+      kind = parsePlaceDetailReference({ kind: context.req.query("kind"), id: ids[0] }).kind;
+    } catch {
+      throw new AppError("validation_error", "Invalid place preview references");
+    }
+    context.header("Cache-Control", "private, no-store");
+    return context.json({ previews: await placeDetails.getPreviews(user.id, uuidParam(context, "tripId"), kind, ids) });
+  });
+
+  app.get("/api/trips/:tripId/place-photo-assets/:filename", async (context) => {
+    const { user } = await authenticated(context);
+    let reference;
+    try {
+      reference = parsePlaceDetailReference({ kind: context.req.query("kind"), id: context.req.query("id") });
+    } catch {
+      throw new AppError("validation_error", "Invalid photo reference");
+    }
+    context.header("Cache-Control", "private, no-store");
+    context.header("X-Content-Type-Options", "nosniff");
+    const asset = await placeDetails.getPhotoAsset(user.id, uuidParam(context, "tripId"), reference, context.req.param("filename"));
+    return new Response(asset.bytes, { headers: {
+      "Content-Type": asset.mediaType,
+      "Content-Length": String(asset.bytes.byteLength),
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+    } });
   });
 
   app.get("/api/trips/:tripId/discovery", async (context) => {

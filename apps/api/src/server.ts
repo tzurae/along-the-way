@@ -14,6 +14,8 @@ import { TokenIssuer } from "./private-trips/token-issuer";
 import { PostgresTripSkeletonModule } from "./trip-skeleton/postgres-trip-skeleton-module";
 import { GooglePlacesProvider } from "./trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "./trip-places/postgres-trip-place-module";
+import { PostgresPlaceDetailModule } from "./place-details/postgres-place-detail-module";
+import { packagedPhotoRoot } from "./place-details/photo-assets";
 
 function requireSetting(name: string) {
   const value = process.env[name]?.trim();
@@ -64,6 +66,7 @@ const app = createApp({
   dayPlans,
   discovery,
   identityAccess,
+  placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
   rateLimiter,
   readiness,
   siteAddress,

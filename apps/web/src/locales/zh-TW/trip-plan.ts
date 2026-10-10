@@ -1,6 +1,6 @@
 export const tripPlan = {
   title: "排整趟行程",
-  description: "加入尚未排入任何一天的想去清單地點。已排入某一天的地點會留在原處。使用這個規劃前不會儲存任何內容，行程也不會變更。",
+  description: "加入尚未排入任何一天的口袋名單地點。已排入某一天的地點會留在原處。使用這個規劃前不會儲存任何內容，行程也不會變更。",
   couldNotPlan: "無法排整趟行程",
   couldNotUsePlan: "無法使用這個規劃",
   planning: "正在排整趟行程…",

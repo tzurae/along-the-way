@@ -24,6 +24,8 @@ function response(assignedDayId: string | null) {
       timeZone: null,
       status: "needs-location",
       scheduled: false,
+      selectedForItinerary: assignedDayId !== null,
+      unplacedFromDate: null,
       durationMinutes: 60,
       assignedDayId,
       dayPosition: assignedDayId === null ? null : 0,

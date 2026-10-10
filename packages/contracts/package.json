@@ -7,6 +7,7 @@
     "./day-plans": "./src/day-plans.ts",
     "./day-time-zone": "./src/day-time-zone.ts",
     "./discovery": "./src/discovery.ts",
+    "./place-details": "./src/place-details.ts",
     "./planning-observations": "./src/planning-observations.ts",
     "./private-trips": "./src/private-trips.ts",
     "./trip-places": "./src/trip-places.ts",

@@ -19,6 +19,7 @@ let gate: Promise<void> | null = null;
 let requests: string[] = [];
 let liveVersion = 0;
 let liveSources: Array<EventTarget & { url: string }> = [];
+let previewFails = false;
 const reply = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 
 beforeEach(() => {
@@ -28,7 +29,7 @@ beforeEach(() => {
   tripHistory = { events: [], nextCursor: null };
   dayVersion = 1;
   savedOrder = false; gate = null; requests = [];
-  liveVersion = 0; liveSources = [];
+  liveVersion = 0; liveSources = []; previewFails = false;
   history.replaceState({}, "", "/?trip=A&tab=today&day=2026-10-21");
   Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -49,6 +50,9 @@ beforeEach(() => {
     if (input.endsWith("/version")) return reply({ tripVersion: liveVersion, lastEventId: liveVersion ? "latest-event" : null });
     if (input.endsWith("/skeleton")) return reply({ skeleton: trip.id === "A" ? skeleton : todaySkeleton(trip) });
     if (input.endsWith("/trip-places")) return reply({ tripPlaces: trip.id === "A" ? todayWishlist(savedOrder) : [] });
+    if (input.includes("/place-previews?")) return previewFails
+      ? reply({ error: { code: "provider_unavailable", message: "Preview unavailable" } }, 503)
+      : reply({ previews: [] });
     if (input.endsWith("/place-order")) {
       savedOrder = true;
       return reply({ orderedTripPlaceIds: ["SECOND", "FIRST"], version: ++dayVersion });
@@ -92,6 +96,15 @@ async function travelHistory(direction: "back" | "forward") {
     history[direction](); await changed;
   });
 }
+
+it("keeps the core Today snapshot readable when optional place previews fail", async () => {
+  previewFails = true;
+  await mount();
+
+  expect(snapshot().model.days[0]!.wishlist.map((place) => place.name)).toEqual(["FIRST", "SECOND"]);
+  expect(document.getElementById("trip-panel-today")).toHaveTextContent("全團時間線");
+  expect(document.body).not.toHaveTextContent("離線資料");
+});
 
 it("purges an unselected revoked snapshot after an authorized trip-list refresh", async () => {
   const store = new TodaySnapshotStore(localStorage);

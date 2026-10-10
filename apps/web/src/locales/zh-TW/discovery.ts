@@ -22,7 +22,7 @@ export const discovery = {
     noSource: "沒有獨立來源推薦；至少需要兩個。",
     onePassed: "只有一個地點通過品質檢查。",
     nonePassed: "沒有地點通過品質檢查。",
-    inWishlist: "已在想去清單，不再推薦。",
+    inWishlist: "已在口袋名單，不再推薦。",
     rejectedBefore: "之前已設為不要再推薦。",
     permanentlyClosed: "Google Maps 顯示已永久歇業，不推薦。",
     temporarilyClosed: "Google Maps 顯示暫停營業中，不推薦；出發前可再確認是否恢復。",
@@ -31,8 +31,8 @@ export const discovery = {
   },
   status: {
     pending: "可供審查",
-    accepting: "正在加入想去清單…",
-    accepted: "已加入想去清單",
+    accepting: "正在加入口袋名單…",
+    accepted: "已加入口袋名單",
     rejected: "已設為不要再推薦",
   },
   feedbackStatus: {
@@ -54,7 +54,7 @@ export const discovery = {
     researching: "研究中…",
   },
   header: {
-    title: "讓 AI 尋找選項並說明原因",
+    title: "AI 建議",
     description: "只要說明一次旅程需求，AI 就會研究可信來源、在 Google Maps 確認每個地點，並只顯示至少有兩個獨立來源推薦的地點。",
     researchAgain: "重新研究",
     loading: "正在載入 AI 研究…",
@@ -115,7 +115,7 @@ export const discovery = {
     citationLabel: (number: number, title: string) => `佐證 ${number}：${title}`,
     inference: "AI 推論，未查證",
     staleEvidence: "已過期，請重新確認",
-    accept: "加入想去清單",
+    accept: "加入口袋名單",
     decline: "不要再推薦",
     nonePassed: "這次沒有地點通過品質檢查。",
     noneNew: "這次沒有新的候選地點；原因列在「缺少的內容」。",
@@ -132,8 +132,8 @@ export const discovery = {
   decided: {
     areaLabel: "之前的決定",
     title: "之前的決定",
-    description: "之前幾輪研究中加入想去清單或設為不要再推薦的地點。重新研究時不會再推薦。",
-    accepted: "已加入想去清單",
+    description: "之前幾輪研究中加入口袋名單或設為不要再推薦的地點。重新研究時不會再推薦。",
+    accepted: "已加入口袋名單",
     rejected: "已設為不要再推薦",
     decidedAt: (date: string) => `決定於 ${date}`,
   },

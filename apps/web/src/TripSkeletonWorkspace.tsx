@@ -1,9 +1,10 @@
-import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Temporal } from "@js-temporal/polyfill";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import {
   parseTripPlaceListResponse,
   type TripPlaceDto,
+  type TripPlaceListResponse,
 } from "@along-the-way/contracts/trip-places";
 import {
   parseItineraryItemResponse,
@@ -16,11 +17,12 @@ import {
   type ItineraryItemDto,
   type PlaceDto,
   type TripSkeletonDto,
+  type TripSkeletonResponse,
   type UpdateItineraryItemInput,
   type UpdatePlaceInput,
   type ZonedEndpointDto,
 } from "@along-the-way/contracts/trip-skeleton";
-import { CalendarDays, Lock, MapPin, Plane, Trash2, Unlock } from "lucide-react";
+import { CalendarClock, CalendarDays, CalendarPlus, ChevronDown, Lock, MapPin, MapPinOff, Plane, Plus, Route, Trash2, Unlock } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -37,6 +39,8 @@ import { PlaceDialog } from "./PlaceDialog";
 import { TripPlanDialog } from "./TripPlanDialog";
 import { useI18n, type Messages } from "./i18n";
 import { ApiRequestError } from "./api-error";
+import "./plan-route.css";
+import { PlaceDetailSheet } from "./PlaceDetailSheet";
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -53,6 +57,8 @@ interface TripSkeletonWorkspaceProps {
   placesRevision: number;
   onPlacesChanged(): void;
   onTravelEdit(type: "flight" | "lodging"): void;
+  arrangeDate?: string | null;
+  onArrangeOpened?(): void;
 }
 
 
@@ -112,6 +118,7 @@ function byEndpointInstant(
 ) {
   return left.endpoint.instant.localeCompare(right.endpoint.instant);
 }
+
 
 function itemDetails(item: ItineraryItemDto, t: Messages["tripSkeleton"]) {
   switch (item.type) {
@@ -183,11 +190,34 @@ function formatMinorAmount(amountMinor: number, currency: string, locale: string
   return formatter.format(amountMinor / (10 ** fractionDigits));
 }
 
-function formatDate(date: string, locale: string) {
-  return new Intl.DateTimeFormat(locale, {
-    dateStyle: "medium",
+
+function formatPlanDate(date: string, locale: string) {
+  const instant = new Date(`${date}T00:00:00Z`);
+  const calendarDate = new Intl.DateTimeFormat(locale, {
+    month: "long",
+    day: "numeric",
     timeZone: "UTC",
-  }).format(new Date(`${date}T00:00:00Z`));
+  }).format(instant);
+  const weekday = new Intl.DateTimeFormat(locale, {
+    weekday: "short",
+    timeZone: "UTC",
+  }).format(instant);
+  return `${calendarDate}（${weekday}）`;
+}
+
+function formatPlanShortDate(date: string, locale: string) {
+  const instant = new Date(`${date}T00:00:00Z`);
+  return {
+    date: new Intl.DateTimeFormat(locale, {
+      month: "numeric",
+      day: "numeric",
+      timeZone: "UTC",
+    }).format(instant),
+    weekday: new Intl.DateTimeFormat(locale, {
+      weekday: "short",
+      timeZone: "UTC",
+    }).format(instant),
+  };
 }
 
 /** Applied route order first; places without one keep their list order at the end. */
@@ -198,65 +228,135 @@ function byDayPosition(left: TripPlaceDto, right: TripPlaceDto) {
   return left.dayPosition - right.dayPosition;
 }
 
+function defaultAssignmentDayId(
+  place: TripPlaceDto,
+  days: TripSkeletonDto["days"],
+) {
+  if (days.length === 0) return null;
+  const priorDate = place.unplacedFromDate;
+  if (priorDate === null) return days[0]!.id;
+  let nextDay: TripSkeletonDto["days"][number] | undefined;
+  for (const day of days) {
+    if (
+      day.date > priorDate
+      && (nextDay === undefined || day.date < nextDay.date)
+    ) {
+      nextDay = day;
+    }
+  }
+  return nextDay?.id ?? days[0]!.id;
+}
+
 function DayAssignmentPicker({
   places,
-  busy,
+  busyPlaceId,
+  errorPlaceId,
+  error,
   assign,
 }: {
   places: TripPlaceDto[];
-  busy: boolean;
-  assign(places: TripPlaceDto[]): Promise<void>;
+  busyPlaceId: string | null;
+  errorPlaceId: string | null;
+  error: string;
+  assign(place: TripPlaceDto): Promise<void>;
 }) {
-  const { t } = useI18n();
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  // A place planned for one day must be removed there before another day can take it.
-  const selectable = places.filter((place) => !place.scheduled && place.assignedDayId === null);
+  const { t, locale } = useI18n();
+  const pending = places.filter((place) =>
+    place.selectedForItinerary && !place.scheduled && place.assignedDayId === null
+  );
+  const pocket = places.filter((place) =>
+    !place.selectedForItinerary && !place.scheduled && place.assignedDayId === null
+  );
+  const errorHasVisibleRow = errorPlaceId !== null
+    && (pending.some((place) => place.id === errorPlaceId)
+      || pocket.some((place) => place.id === errorPlaceId));
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const selected = selectable.filter((place) => selectedIds.includes(place.id));
-    if (selected.length === 0) return;
-    await assign(selected);
-    setSelectedIds([]);
+
+  function sourceRows(source: "pending" | "pocket", sourcePlaces: TripPlaceDto[]) {
+    return (
+      <ul className="plan-source-list">
+        {sourcePlaces.map((place) => {
+          const blocked = place.latitude === null || place.longitude === null;
+          const rowBusy = busyPlaceId === place.id;
+          return (
+            <li key={place.id} className="plan-source-row">
+              <div className="plan-place-main">
+                <div className="plan-place-name">
+                  <strong>{place.name}</strong>
+                  <span className="plan-kind-chip">{t.tripSkeleton.placeTypes[place.type]}</span>
+                </div>
+                <div className="plan-place-meta">
+                  <span className="plan-place-status">
+                    {blocked ? <MapPinOff aria-hidden="true" /> : <CalendarClock aria-hidden="true" />}
+                    {blocked
+                      ? t.tripSkeleton.locationRequired
+                      : source === "pending"
+                        ? t.tripSkeleton.pendingArrangement
+                        : t.tripSkeleton.notScheduled}
+                  </span>
+                  {source === "pending" ? (
+                    <span>
+                      {place.unplacedFromDate === null
+                        ? t.tripSkeleton.priorDateUnknown
+                        : t.tripSkeleton.priorDate(formatPlanDate(place.unplacedFromDate, locale))}
+                    </span>
+                  ) : null}
+                  <span>
+                    {place.durationMinutes
+                      ? t.tripSkeleton.plannedDuration(place.durationMinutes)
+                      : t.tripSkeleton.durationUnknown}
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="plan-schedule-button"
+                disabled={busyPlaceId !== null || blocked}
+                onClick={() => void assign(place)}
+              >
+                {blocked ? <MapPinOff aria-hidden="true" /> : <CalendarPlus aria-hidden="true" />}
+                {blocked
+                  ? t.tripSkeleton.completeLocation
+                  : rowBusy
+                    ? t.tripSkeleton.scheduling
+                    : t.tripSkeleton.scheduleThisDay}
+              </button>
+              {errorPlaceId === place.id && error ? (
+                <p role="alert" className="plan-row-error">{error}</p>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+    );
   }
 
   return (
-    <details className="rounded-xl border border-ink/10 bg-surface p-3">
-      <summary className="cursor-pointer font-bold">{t.tripSkeleton.addFromWishlist}</summary>
-      {selectable.length === 0 ? (
-        <p className="mt-3 text-sm text-muted-foreground">{t.tripSkeleton.noAvailableWishlistPlaces}</p>
-      ) : (
-        <form className="mt-3 grid gap-3" onSubmit={(event) => void submit(event)}>
-          <fieldset className="grid max-h-64 auto-rows-min gap-2 overflow-y-auto">
-            <legend className="sr-only">{t.tripSkeleton.wishlistPlacesToAdd}</legend>
-            {selectable.map((place) => (
-              <label key={place.id} className="flex min-h-11 items-start gap-3 rounded-lg border border-ink/10 p-3">
-                <input
-                  className="mt-1"
-                  type="checkbox"
-                  checked={selectedIds.includes(place.id)}
-                  onChange={(event) => setSelectedIds((current) =>
-                    event.target.checked
-                      ? [...current, place.id]
-                      : current.filter((id) => id !== place.id)
-                  )}
-                />
-                <span className="min-w-0 [overflow-wrap:anywhere]">
-                  <strong className="block">{place.name}</strong>
-                  <small className="text-muted-foreground">{place.address ?? t.tripSkeleton.addressUnknown}</small>
-                </span>
-              </label>
-            ))}
-          </fieldset>
-          <button
-            className="min-h-11 rounded-lg bg-accent px-4 font-bold text-ink-strong"
-            disabled={busy || selectedIds.length === 0}
-          >
-            {busy ? t.tripSkeleton.adding : t.tripSkeleton.addSelected(selectedIds.length)}
-          </button>
-        </form>
-      )}
-    </details>
+    <>
+      {errorPlaceId !== null && error && !errorHasVisibleRow ? (
+        <p role="alert" className="plan-row-error">{error}</p>
+      ) : null}
+      <section className="plan-source">
+        <h3>{t.tripSkeleton.pendingSourceTitle}</h3>
+        <p>{t.tripSkeleton.pendingSourceHelper}</p>
+        {pending.length === 0 ? (
+          <div className="plan-source-empty">
+            <CalendarDays aria-hidden="true" />
+            <span>{t.tripSkeleton.pendingSourceEmpty}</span>
+          </div>
+        ) : sourceRows("pending", pending)}
+      </section>
+      <section className="plan-source">
+        <h3>{t.tripSkeleton.pocketSourceTitle}</h3>
+        <p>{t.tripSkeleton.pocketSourceHelper}</p>
+        {pocket.length === 0 ? (
+          <div className="plan-source-empty">
+            <MapPin aria-hidden="true" />
+            <span>{t.tripSkeleton.noAvailableWishlistPlaces}</span>
+          </div>
+        ) : sourceRows("pocket", pocket)}
+      </section>
+    </>
   );
 }
 
@@ -267,6 +367,8 @@ export function TripSkeletonWorkspace({
   placesRevision,
   onPlacesChanged,
   onTravelEdit,
+  arrangeDate,
+  onArrangeOpened,
 }: TripSkeletonWorkspaceProps) {
   const { t, locale } = useI18n();
   const [skeleton, setSkeleton] = useState<TripSkeletonDto | null>(null);
@@ -276,11 +378,23 @@ export function TripSkeletonWorkspace({
   const [unlockingItem, setUnlockingItem] = useState<ItineraryItemDto | null>(null);
   const [planningDay, setPlanningDay] = useState<PlannedDay | null>(null);
   const [planningTrip, setPlanningTrip] = useState(false);
+  const [viewingItem, setViewingItem] = useState<{ itemId: string; continuation: boolean } | null>(null);
+  const [assignmentDayId, setAssignmentDayId] = useState<string | null>(null);
+  const [assignmentErrorPlaceId, setAssignmentErrorPlaceId] = useState<string | null>(null);
+  const assignmentErrorPlaceIdRef = useRef<string | null>(null);
+  const [viewingAssignedPlaceId, setViewingAssignedPlaceId] = useState<string | null>(null);
+  const viewingAssignedPlace = viewingAssignedPlaceId ? tripPlaces.find((place) => place.id === viewingAssignedPlaceId) : undefined;
   const placeCreateAttempt = useRef<CreateAttempt | null>(null);
   const itemCreateAttempt = useRef<CreateAttempt | null>(null);
   const actionKeys = useRef(new Map<string, string>());
   const editorOpen = useRef(false);
   const latestSkeleton = useRef<TripSkeletonDto | null>(null);
+  const loadGeneration = useRef(0);
+  const updateAssignmentErrorPlaceId = useCallback((placeId: string | null) => {
+    assignmentErrorPlaceIdRef.current = placeId;
+    setAssignmentErrorPlaceId(placeId);
+  }, []);
+
   const editingChanged = useCallback((open: boolean) => {
     editorOpen.current = open;
     if (!open && latestSkeleton.current) setSkeleton(latestSkeleton.current);
@@ -300,24 +414,29 @@ export function TripSkeletonWorkspace({
   }
 
   const load = useCallback(async () => {
+    const generation = ++loadGeneration.current;
     try {
       const [skeletonResponse, tripPlaceResponse] = await Promise.all([
-        request<ReturnType<typeof parseTripSkeletonResponse>>(
+        request<TripSkeletonResponse>(
           `/api/trips/${trip.id}/skeleton`,
           { parse: parseTripSkeletonResponse },
         ),
-        request<ReturnType<typeof parseTripPlaceListResponse>>(
+        request<TripPlaceListResponse>(
           `/api/trips/${trip.id}/trip-places`,
           { parse: parseTripPlaceListResponse },
         ),
       ]);
+      if (generation !== loadGeneration.current) return;
       latestSkeleton.current = skeletonResponse.skeleton;
       // Keep an open editor mounted if another member moves, locks or deletes its row.
       if (!editorOpen.current) setSkeleton(skeletonResponse.skeleton);
       setTripPlaces(tripPlaceResponse.tripPlaces);
-      setError("");
+      if (assignmentErrorPlaceIdRef.current === null) setError("");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : t.tripSkeleton.loadError);
+      if (generation !== loadGeneration.current) return;
+      if (assignmentErrorPlaceIdRef.current === null) {
+        setError(reason instanceof Error ? reason.message : t.tripSkeleton.loadError);
+      }
     }
   }, [request, t, trip.id]);
 
@@ -330,6 +449,16 @@ export function TripSkeletonWorkspace({
   useEffect(() => {
     void load();
   }, [load, placesRevision]);
+
+  useEffect(() => {
+    if (!arrangeDate || !skeleton) return;
+    const day = skeleton.days.find((entry) => entry.date === arrangeDate);
+    if (!day) return;
+    setAssignmentDayId(day.id);
+    updateAssignmentErrorPlaceId(null);
+    setError("");
+    onArrangeOpened?.();
+  }, [arrangeDate, skeleton, onArrangeOpened, updateAssignmentErrorPlaceId]);
 
   const placesById = useMemo(
     () => new Map(skeleton?.places.map((place) => [place.id, place]) ?? []),
@@ -502,49 +631,81 @@ export function TripSkeletonWorkspace({
     }
   }
 
-  async function updateDayAssignments(
+  async function updateDayAssignment(
     tripDayId: string | null,
-    places: TripPlaceDto[],
+    place: TripPlaceDto,
   ) {
-    if (places.length === 0) return;
-    const payload = {
-      assignments: places.map((place) => ({
-        tripPlaceId: place.id,
-        tripDayId,
-        expectedVersion: place.version,
-      })),
-    };
-    const identity = `day-assignments:${tripDayId ?? "none"}:${places
-      .map((place) => `${place.id}:${place.version}`)
-      .sort()
-      .join(",")}`;
-    setBusyId(`day-assignment:${tripDayId ?? places[0]!.id}`);
+    const operation = `day-assignment:${place.id}`;
+    setBusyId(operation);
     setError("");
+    updateAssignmentErrorPlaceId(null);
+    let removedOriginalDay = false;
     try {
-      const response = await request<ReturnType<typeof parseTripPlaceListResponse>>(
-        `/api/trips/${trip.id}/trip-place-day-assignments`,
-        {
-          method: "PUT",
-          headers: { "Idempotency-Key": actionKey(identity) },
-          body: JSON.stringify(payload),
-          parse: parseTripPlaceListResponse,
-        },
-      );
-      actionKeys.current.delete(identity);
-      setTripPlaces(response.tripPlaces);
+      async function assign(targetDayId: string | null, expectedVersion: number) {
+        const payload = {
+          assignments: [{
+            tripPlaceId: place.id,
+            tripDayId: targetDayId,
+            expectedVersion,
+          }],
+        };
+        const identity = `${operation}:${targetDayId ?? "none"}:${expectedVersion}`;
+        const response = await request<TripPlaceListResponse>(
+          `/api/trips/${trip.id}/trip-place-day-assignments`,
+          {
+            method: "PUT",
+            headers: { "Idempotency-Key": actionKey(identity) },
+            body: JSON.stringify(payload),
+            parse: parseTripPlaceListResponse,
+          },
+        );
+        actionKeys.current.delete(identity);
+        const updated = response.tripPlaces.find((entry) => entry.id === place.id);
+        if (!updated) throw new Error(t.tripSkeleton.plannedDayUpdateError);
+        // A mutation response is newer than every read already in flight.
+        loadGeneration.current += 1;
+        setTripPlaces(response.tripPlaces);
+        // A removed assignment no longer belongs to this sheet; keep another opened place untouched.
+        setViewingAssignedPlaceId((current) =>
+          response.tripPlaces.find((entry) => entry.id === current)?.assignedDayId ? current : null
+        );
+        return updated;
+      }
+
+      let current = place;
+      // The versioned API requires removal before moving between two assigned days.
+      // Do not remove an unassigned place, and use the server-returned version for step two.
+      if (current.assignedDayId && tripDayId && current.assignedDayId !== tripDayId) {
+        current = await assign(null, current.version);
+        removedOriginalDay = true;
+      }
+      if (current.assignedDayId !== tripDayId) {
+        await assign(tripDayId, current.version);
+      }
       onPlacesChanged();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : t.tripSkeleton.plannedDayUpdateError);
+      const failure = reason instanceof Error ? reason.message : t.tripSkeleton.plannedDayUpdateError;
+      const assignmentError = removedOriginalDay
+        ? t.tripSkeleton.removedBeforeReassignError(failure)
+        : failure;
+      if (reason instanceof ApiRequestError && reason.code === "conflict") {
+        await load();
+      }
+      // Keep the mutation failure visible after a conflict refresh replaces the stale row/version.
+      setError(assignmentError);
+      updateAssignmentErrorPlaceId(place.id);
+      if (removedOriginalDay) onPlacesChanged();
     } finally {
       setBusyId(null);
     }
   }
 
-  function renderItem(item: ItineraryItemDto, continuation = false) {
+  function itemDetail(item: ItineraryItemDto, continuation = false) {
     const start = itemEndpoint(item, "start");
     const end = displayedEndEndpoint(item, start);
     return (
       <article key={`${item.id}-${continuation ? "continuation" : "full"}`} className="itinerary-card" data-item-id={item.id}>
+        {error ? <p role="alert" className="pd-notice">{error}</p> : null}
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">
@@ -578,11 +739,11 @@ export function TripSkeletonWorkspace({
             {item.sourceUrl ? <a className="mt-2 inline-block text-sm font-semibold text-accent-strong underline" href={item.sourceUrl} rel="noreferrer" target="_blank">{t.tripSkeleton.officialSource}</a> : null}
             <div className="mt-4 flex flex-wrap gap-2">
               {item.lockedAt ? (
-                <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => setUnlockingItem(item)}><Unlock /> {t.tripSkeleton.unlock}</Button>
+                <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => { setError(""); setUnlockingItem(item); }}><Unlock /> {t.tripSkeleton.unlock}</Button>
               ) : (
                 <>
                   {item.type === "flight" || item.type === "lodging" ? (
-                    <Button size="sm" variant="outline" onClick={() => onTravelEdit(item.type as "flight" | "lodging")}>
+                    <Button size="sm" variant="outline" onClick={() => { setViewingItem(null); onTravelEdit(item.type as "flight" | "lodging"); }}>
                       {item.type === "flight" ? t.travel.editInOverview : t.travel.editInLodging}
                     </Button>
                   ) : <ItineraryItemDialog countryStops={trip.countryStops} members={trip.members} places={skeleton?.places ?? []} item={item} editingChanged={editingChanged}
@@ -604,6 +765,42 @@ export function TripSkeletonWorkspace({
           </>
         ) : null}
       </article>
+    );
+  }
+  function renderItem(item: ItineraryItemDto, continuation = false, dayDate?: string) {
+    const start = itemEndpoint(item, "start");
+    const end = continuation ? displayedEndEndpoint(item, start) : undefined;
+    const localEnd = end !== "unrepresentable" && end?.localDateTime.startsWith(`${dayDate}T`)
+      ? end
+      : undefined;
+    const displayedTime = continuation
+      ? localEnd?.localDateTime.slice(11, 16) ?? t.tripSkeleton.continues
+      : start?.localDateTime.slice(11, 16) ?? t.tripSkeleton.timePending;
+    return (
+      <button
+        key={`${item.id}-${continuation ? "continuation" : "full"}`}
+        className="plan-item-row"
+        data-item-id={item.id}
+        onClick={() => {
+          setError("");
+          setViewingItem({ itemId: item.id, continuation });
+        }}
+      >
+        <span className="plan-item-copy">
+          <span className="plan-place-name">
+            <strong>{item.title}</strong>
+            <span className={`plan-kind-chip${item.lockedAt ? " plan-kind-chip-fixed" : ""}`}>
+              {item.lockedAt ? <Lock aria-hidden="true" /> : null}
+              {item.lockedAt ? t.tripSkeleton.fixed : t.tripSkeleton.itemTypes[item.type]}
+            </span>
+          </span>
+          <small>
+            <time>{displayedTime}</time>
+            {item.lockedAt ? `・${t.tripSkeleton.itemTypes[item.type]}` : ""}
+            {continuation && localEnd ? `・${t.tripSkeleton.continues}` : ""}
+          </small>
+        </span>
+      </button>
     );
   }
 
@@ -664,280 +861,514 @@ export function TripSkeletonWorkspace({
   const unconfirmedDepartureBuffers = departureBufferConstraints.filter(
     (constraint) => constraint.status !== "confirmed",
   );
+  const assignmentDay = skeleton.days.find((day) => day.id === assignmentDayId);
+  const pendingPlaces = tripPlaces.filter((place) =>
+    place.selectedForItinerary && !place.scheduled && place.assignedDayId === null
+  );
 
 
   return (
     <>
-      <section className="trip-skeleton-shell" aria-labelledby="itinerary-heading">
-      <div className="workspace-heading">
-        <div>
-          <p className="eyebrow">{t.tripSkeleton.eyebrow}</p>
-          <h2 id="itinerary-heading" className="font-display text-3xl text-ink-strong">{t.tripSkeleton.heading}</h2>
-          <p className="mt-2 max-w-3xl text-muted-foreground">{t.tripSkeleton.introduction}</p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <PlaceDialog editingChanged={editingChanged} save={(input) => savePlace(input)} />
-          <ItineraryItemDialog editingChanged={editingChanged} countryStops={trip.countryStops} members={trip.members} places={skeleton.places} save={(input) => saveItem(input)} />
-        </div>
-      </div>
+      <section className="trip-skeleton-shell plan-workspace" aria-labelledby="itinerary-heading">
+        <header className="plan-pagehead">
+          <h2 id="itinerary-heading">{t.tripSkeleton.heading}</h2>
+          <p>{t.tripSkeleton.introduction}</p>
+        </header>
 
-      {error ? <p role="alert" className="mt-4 rounded-lg bg-destructive/10 px-3 py-2 text-destructive">{error}</p> : null}
+        {error && assignmentErrorPlaceId === null ? (
+          <p role="alert" className="plan-page-error">{error}</p>
+        ) : null}
 
-      <section className="mt-8" aria-labelledby="places-heading">
-        <h3 id="places-heading" className="section-heading"><MapPin /> {t.tripSkeleton.places}</h3>
-        {skeleton.places.length === 0 ? (
-          <p className="empty-state">{t.tripSkeleton.noPlaces}</p>
-        ) : (
-          <div className="place-grid">
-            {skeleton.places.map((place) => (
-              <article key={place.id} className="place-card">
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-wider text-accent-strong">{t.tripSkeleton.placeTypes[place.type]}</p>
-                  <h4 className="mt-1 font-display text-lg">{place.name}</h4>
-                  <p className="mt-2 text-sm text-muted-foreground">{place.address || t.tripSkeleton.noAddress}</p>
-                  <p className="mt-1 text-sm">{place.timeZone || t.tripSkeleton.noTimeZone}</p>
-                  {place.locationStatus !== "complete" ? <p className="mt-2 font-semibold text-accent-strong">{t.tripSkeleton.locationIncomplete}</p> : null}
-                </div>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {lockedPlaceIds.has(place.id) ? (
-                    <p className="flex items-center gap-2 text-sm font-semibold text-muted-foreground">
-                      <Lock className="size-4" /> {t.tripSkeleton.lockedPlace}
-                    </p>
-                  ) : (
-                    <PlaceDialog place={place} editingChanged={editingChanged}
-                      load={async () => (await readForConflict()).places.find((entry) => entry.id === place.id) ?? null}
-                      save={(input, conflictBase) => savePlace(input, place, conflictBase)} />
-                  )}
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busyId === place.id || lockedPlaceIds.has(place.id)}
-                    onClick={() => void deletePlace(place)}
-                  >
-                    <Trash2 /> {t.tripSkeleton.delete}
-                  </Button>
-                </div>
-              </article>
-            ))}
+        <details className="plan-pending" open>
+          <summary>
+            <span className="plan-pending-title">
+              <strong>{t.tripSkeleton.pendingTitle}</strong>
+              <span>{t.tripSkeleton.pendingCount(pendingPlaces.length)}</span>
+            </span>
+            <ChevronDown aria-hidden="true" className="plan-pending-chevron" />
+          </summary>
+          <div className="plan-pending-body">
+            {pendingPlaces.length === 0 ? (
+              <div className="plan-pending-empty">
+                <CalendarDays aria-hidden="true" />
+                <span>{t.tripSkeleton.pendingEmpty}</span>
+              </div>
+            ) : (
+              <ul className="plan-source-list plan-pending-list">
+                {pendingPlaces.map((place) => {
+                  const blocked = place.latitude === null || place.longitude === null;
+                  const targetDayId = defaultAssignmentDayId(place, skeleton.days);
+                  return (
+                    <li key={place.id} className="plan-source-row">
+                      <div className="plan-place-main">
+                        <div className="plan-place-name">
+                          <strong>{place.name}</strong>
+                          <span className="plan-kind-chip">{t.tripSkeleton.placeTypes[place.type]}</span>
+                        </div>
+                        <div className="plan-place-meta">
+                          <span>
+                            {place.unplacedFromDate === null
+                              ? t.tripSkeleton.priorDateUnknown
+                              : t.tripSkeleton.priorDate(formatPlanDate(place.unplacedFromDate, locale))}
+                          </span>
+                          <span>
+                            {place.durationMinutes
+                              ? t.tripSkeleton.plannedDuration(place.durationMinutes)
+                              : t.tripSkeleton.durationUnknown}
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="plan-schedule-button"
+                        disabled={busyId !== null || blocked || targetDayId === null}
+                        onClick={() => {
+                          if (targetDayId === null) return;
+                          setError("");
+                          updateAssignmentErrorPlaceId(null);
+                          setAssignmentDayId(targetDayId);
+                        }}
+                      >
+                        {blocked ? <MapPinOff aria-hidden="true" /> : <CalendarPlus aria-hidden="true" />}
+                        {blocked ? t.tripSkeleton.completeLocation : t.tripSkeleton.arrangePending}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </div>
-        )}
-      </section>
+        </details>
 
-      <section className="mt-10" aria-labelledby="trip-info-heading">
-        <h3 id="trip-info-heading" className="section-heading"><Plane /> {t.tripSkeleton.tripInformation}</h3>
-        {tripInformationItems.length === 0 ? <p className="empty-state">{t.tripSkeleton.noTripInformation}</p> : (
-          <div className="grid gap-3 lg:grid-cols-2">{tripInformationItems.map((item) => renderItem(item))}</div>
-        )}
-      </section>
-
-      <section className="mt-10" aria-labelledby="timeline-heading">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <h3 id="timeline-heading" className="section-heading"><CalendarDays /> {t.tripSkeleton.dailyTimeline}</h3>
-          {tripPlaces.some((place) =>
-            !place.scheduled && place.assignedDayId === null && place.latitude !== null && place.longitude !== null) ? (
-            <button
-              className="min-h-10 rounded-lg border border-accent px-3 font-bold"
-              disabled={busyId !== null}
-              onClick={() => setPlanningTrip(true)}
-            >
-              {t.tripSkeleton.planWholeTrip}
-            </button>
-          ) : null}
-        </div>
-        <div className="timeline-grid">
+        <div className="plan-days">
           {skeleton.days.map((day, index) => {
             const assignedPlaces = tripPlaces.filter((place) =>
               !place.scheduled && place.assignedDayId === day.id
             ).sort(byDayPosition);
-            const fullItems = day.entries.flatMap((entry) => {
-              const item = itemsById.get(entry.itemId);
-              return entry.projection === "full" && item ? [item] : [];
-            });
-            const knownCosts = new Map<string, number>();
-            for (const entry of [
-              ...assignedPlaces.map((place) => place.budgetAmountMinor === null || place.budgetCurrency === null
-                ? null
-                : { amountMinor: place.budgetAmountMinor, currency: place.budgetCurrency }),
-              ...fullItems.map((item) => item.money),
-            ]) {
-              if (entry) {
-                knownCosts.set(
-                  entry.currency,
-                  (knownCosts.get(entry.currency) ?? 0) + entry.amountMinor,
-                );
-              }
-            }
-            const unknownCostCount =
-              assignedPlaces.filter((place) => place.budgetAmountMinor === null).length
-              + fullItems.filter((item) => item.money === null).length;
-            const costSummary = [...knownCosts.entries()]
-              .map(([currency, amount]) => formatMinorAmount(amount, currency, locale))
-              .join("＋");
+            const chronologicalEntries = [...day.entries].sort(
+              (left, right) => left.sortInstant.localeCompare(right.sortInstant),
+            );
+            const itemCount = assignedPlaces.length + day.entries.length;
             return (
-            <section key={day.id} className="day-column" data-date={day.date}>
-              <header className="day-heading">
-                <p className="text-xs font-bold uppercase tracking-wider text-accent-strong">{t.tripSkeleton.dayLabel(index + 1)}</p>
-                <h4 className="font-display text-xl">{formatDate(day.date, locale)}</h4>
-                <p className="mt-2 text-sm font-semibold">
-                  {t.tripSkeleton.plannedEntries(assignedPlaces.length + day.entries.length)}
-                  {"・"}
-                  {costSummary || t.tripSkeleton.noKnownCost}
-                  {unknownCostCount > 0 ? `・${t.tripSkeleton.unknownCosts(unknownCostCount)}` : ""}
-                </p>
-                {index === 0 ? (
-                  <aside className="day-context" data-testid="arrival-priorities">
-                    <p className="font-bold">{t.tripSkeleton.arrivalPriorities}</p>
-                    <ol className="mt-2 grid gap-2">
-                      <li>
-                        <strong>{t.tripSkeleton.arrival}</strong>{" "}
-                        {arrivalItems.length > 0
-                          ? arrivalItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
-                            ))
-                          : t.tripSkeleton.noArrival}
-                      </li>
-                      <li>
-                        <strong>{t.tripSkeleton.luggageAndCheckIn}</strong>{" "}
-                        {checkInItems.length > 0
-                          ? checkInItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
-                            ))
-                          : t.tripSkeleton.noCheckIn}
-                      </li>
-                      <li>
-                        <strong>{t.tripSkeleton.remainingTime}</strong>{" "}
-                        {usableTimeItems.length > 0
-                          ? usableTimeItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
-                            ))
-                          : t.tripSkeleton.noFreeTime}
-                      </li>
-                    </ol>
-                  </aside>
-                ) : null}
-                {index === skeleton.days.length - 1 ? (
-                  <aside className="day-context" data-testid="departure-priorities">
-                    <p className="font-bold">{t.tripSkeleton.departurePriorities}</p>
-                    <ol className="mt-2 grid gap-2">
-                      <li>
-                        <strong>{t.tripSkeleton.checkoutAndLuggage}</strong>{" "}
-                        {checkOutItems.length > 0
-                          ? checkOutItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
-                            ))
-                          : t.tripSkeleton.noCheckout}
-                      </li>
-                      <li>
-                        <strong>{t.tripSkeleton.transferAndDeparture}</strong>{" "}
-                        {departureItems.length > 0
-                          ? departureItems.map(({ item, endpoint }) => (
-                              <span key={item.id} className="block">{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
-                            ))
-                          : t.tripSkeleton.noDeparture}
-                      </li>
-                      <li>
-                        <strong>{t.tripSkeleton.protectedBuffer}</strong>{" "}
-                        {confirmedDepartureBufferMinutes.length > 0
-                          ? t.tripSkeleton.minimumMinutes(Math.max(...confirmedDepartureBufferMinutes))
-                          : t.tripSkeleton.noConfirmedBuffer}
-                      </li>
-                      {unconfirmedDepartureBuffers.length > 0 ? (
-                        <li>
-                          <strong>{t.tripSkeleton.unconfirmedBuffers}</strong>{" "}
-                          {unconfirmedDepartureBuffers.map((constraint) => (
-                            <span key={constraint.id} className="block">
-                              {t.tripSkeleton.minimumBufferMinutes(constraint.minimumBufferMinutes!)}・{t.tripSkeleton.constraintStatuses[constraint.status]}
-                            </span>
-                          ))}
-                        </li>
-                      ) : null}
-                    </ol>
-                  </aside>
-                ) : null}
-              </header>
-              <div className="grid gap-3">
-                {day.entries.length === 0 && assignedPlaces.length === 0 ? (
-                  <p className="empty-state">{t.tripSkeleton.openDay}</p>
-                ) : null}
-                {assignedPlaces.length > 0 ? (
-                  <button
-                    className="min-h-10 rounded-lg border border-accent px-3 font-bold"
-                    disabled={busyId !== null}
-                    onClick={() => setPlanningDay({ id: day.id, date: day.date, label: t.tripSkeleton.dayLabel(index + 1) })}
-                  >
-                    {t.tripSkeleton.planThisDay}
-                  </button>
-                ) : null}
-                {assignedPlaces.map((place) => (
-                  <article key={place.id} className="itinerary-card" aria-label={t.tripSkeleton.plannedWishlistPlace(place.name)}>
-                    <p className="text-xs font-bold uppercase tracking-[0.14em] text-accent-strong">{t.tripSkeleton.wishlistTimeUnset}</p>
-                    <h5 className="mt-1 font-display text-xl text-ink-strong">{place.name}</h5>
-                    <p className="mt-2 text-sm text-muted-foreground">{place.address ?? t.tripSkeleton.addressUnknown}</p>
-                    <p className="mt-2 text-sm">
-                      {place.durationMinutes ? t.tripSkeleton.plannedDuration(place.durationMinutes) : t.tripSkeleton.durationUnknown}
-                      {"・"}
-                      {place.budgetAmountMinor !== null && place.budgetCurrency
-                        ? formatMinorAmount(place.budgetAmountMinor, place.budgetCurrency, locale)
-                        : t.tripSkeleton.costUnknown}
+              <section key={day.id} className="day-column" data-date={day.date}>
+                <header className="day-heading">
+                  <div>
+                    <h3>{formatPlanDate(day.date, locale)}</h3>
+                    <p>
+                      {itemCount > 0
+                        ? t.tripSkeleton.plannedEntries(itemCount)
+                        : t.tripSkeleton.noPlannedPlaces}
                     </p>
+                  </div>
+                  <div className="plan-day-actions">
                     <button
-                      className="mt-3 min-h-10 rounded-lg border px-3 font-bold"
-                      disabled={busyId !== null}
-                      onClick={() => void updateDayAssignments(null, [place])}
+                      type="button"
+                      className="plan-route-link"
+                      disabled={assignedPlaces.length === 0 || busyId !== null}
+                      onClick={() => setPlanningDay({
+                        id: day.id,
+                        date: day.date,
+                        label: t.tripSkeleton.dayLabel(index + 1),
+                      })}
                     >
-                      {t.tripSkeleton.removeFromDay}
+                      <Route aria-hidden="true" />
+                      {t.tripSkeleton.optimizeRoute}
                     </button>
-                  </article>
-                ))}
-                {day.entries.map((entry) => {
-                  const item = itemsById.get(entry.itemId);
-                  return item ? renderItem(item, entry.projection === "continuation") : null;
-                })}
-                <DayAssignmentPicker
-                  places={tripPlaces}
-                  busy={busyId !== null}
-                  assign={(places) => updateDayAssignments(day.id, places)}
-                />
-              </div>
-            </section>
+                    <button
+                      type="button"
+                      className="plan-outline-button"
+                      disabled={busyId !== null}
+                      onClick={() => {
+                        setError("");
+                        updateAssignmentErrorPlaceId(null);
+                        setAssignmentDayId(day.id);
+                      }}
+                    >
+                      <CalendarPlus aria-hidden="true" />
+                      {t.tripSkeleton.arrangeThisDay}
+                    </button>
+                  </div>
+                </header>
+                <ul className="plan-day-list">
+                  {itemCount === 0 ? (
+                    <li className="plan-no-plan">
+                      <CalendarDays aria-hidden="true" />
+                      <span>{t.tripSkeleton.emptyDay}</span>
+                      <button
+                        type="button"
+                        className="plan-row-button"
+                        disabled={busyId !== null}
+                        onClick={() => {
+                          setError("");
+                          updateAssignmentErrorPlaceId(null);
+                          setAssignmentDayId(day.id);
+                        }}
+                      >
+                        <Plus aria-hidden="true" />
+                        {t.tripSkeleton.addPlace}
+                      </button>
+                    </li>
+                  ) : null}
+                  {chronologicalEntries.map((entry) => {
+                    const item = itemsById.get(entry.itemId);
+                    return item ? (
+                      <li key={`${entry.itemId}-${entry.projection}`}>
+                        {renderItem(item, entry.projection === "continuation", day.date)}
+                      </li>
+                    ) : null;
+                  })}
+                  {assignedPlaces.map((place) => (
+                    <li key={place.id}>
+                      <button
+                        type="button"
+                        className="plan-item-row"
+                        aria-label={t.tripSkeleton.plannedWishlistPlace(place.name)}
+                        onClick={() => {
+                          setError("");
+                          setViewingAssignedPlaceId(place.id);
+                        }}
+                      >
+                        <span className="plan-item-copy">
+                          <span className="plan-place-name">
+                            <strong>{place.name}</strong>
+                            <span className="plan-kind-chip">
+                              {t.tripSkeleton.placeTypes[place.type]}
+                            </span>
+                          </span>
+                          <small>
+                            <time>{t.tripSkeleton.timePending}</time>
+                            {"・"}
+                            {place.durationMinutes
+                              ? t.tripSkeleton.plannedDuration(place.durationMinutes)
+                              : t.tripSkeleton.durationUnknown}
+                          </small>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
             );
           })}
         </div>
-      </section>
 
+        <details className="plan-management">
+          <summary>
+            <span>
+              <strong>{t.tripSkeleton.managementTitle}</strong>
+              <small>{t.tripSkeleton.managementHelper}</small>
+            </span>
+            <ChevronDown aria-hidden="true" />
+          </summary>
+          <div className="plan-management-body">
+            <div className="plan-management-actions">
+              <PlaceDialog editingChanged={editingChanged} save={(input) => savePlace(input)} />
+              <ItineraryItemDialog
+                editingChanged={editingChanged}
+                countryStops={trip.countryStops}
+                members={trip.members}
+                places={skeleton.places}
+                save={(input) => saveItem(input)}
+              />
+              {tripPlaces.some((place) =>
+                !place.scheduled
+                && place.assignedDayId === null
+                && place.latitude !== null
+                && place.longitude !== null
+              ) ? (
+                <button
+                  type="button"
+                  className="plan-outline-button"
+                  disabled={busyId !== null}
+                  onClick={() => setPlanningTrip(true)}
+                >
+                  {t.tripSkeleton.planWholeTrip}
+                </button>
+              ) : null}
+            </div>
 
-      <Dialog open={unlockingItem !== null} onOpenChange={(open) => { if (!open) setUnlockingItem(null); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{unlockingItem ? t.tripSkeleton.unlockTitle(unlockingItem.title) : ""}</DialogTitle>
-            <DialogDescription>{t.tripSkeleton.unlockDescription}</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setUnlockingItem(null)}>{t.tripSkeleton.keepLocked}</Button>
-            <Button disabled={!unlockingItem || busyId === unlockingItem.id} onClick={() => unlockingItem && void itemAction(unlockingItem, "unlock")}><Unlock /> {t.tripSkeleton.unlockItem}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            <details className="plan-inventory" aria-labelledby="places-heading">
+              <summary id="places-heading">
+                <MapPin aria-hidden="true" />
+                {t.tripSkeleton.places}
+              </summary>
+              {skeleton.places.length === 0 ? (
+                <p className="empty-state">{t.tripSkeleton.noPlaces}</p>
+              ) : (
+                <div className="place-grid">
+                  {skeleton.places.map((place) => (
+                    <article key={place.id} className="place-card">
+                      <div>
+                        <p className="text-xs font-bold uppercase tracking-wider text-accent-strong">
+                          {t.tripSkeleton.placeTypes[place.type]}
+                        </p>
+                        <h4 className="mt-1 font-display text-lg">{place.name}</h4>
+                        <p className="mt-2 text-sm text-muted-foreground">
+                          {place.address || t.tripSkeleton.noAddress}
+                        </p>
+                        <p className="mt-1 text-sm">{place.timeZone || t.tripSkeleton.noTimeZone}</p>
+                        {place.locationStatus !== "complete" ? (
+                          <p className="mt-2 font-semibold text-accent-strong">
+                            {t.tripSkeleton.locationIncomplete}
+                          </p>
+                        ) : null}
+                      </div>
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        {lockedPlaceIds.has(place.id) ? (
+                          <p className="flex items-center gap-2 text-sm font-semibold text-muted-foreground">
+                            <Lock className="size-4" /> {t.tripSkeleton.lockedPlace}
+                          </p>
+                        ) : (
+                          <PlaceDialog
+                            place={place}
+                            editingChanged={editingChanged}
+                            load={async () =>
+                              (await readForConflict()).places.find((entry) => entry.id === place.id) ?? null
+                            }
+                            save={(input, conflictBase) => savePlace(input, place, conflictBase)}
+                          />
+                        )}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busyId === place.id || lockedPlaceIds.has(place.id)}
+                          onClick={() => void deletePlace(place)}
+                        >
+                          <Trash2 /> {t.tripSkeleton.delete}
+                        </Button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </details>
 
-      <DayPlanDialog
-        tripId={trip.id}
-        day={planningDay}
-        request={request}
-        onClose={() => setPlanningDay(null)}
-        onOrderSaved={async () => { await load(); onPlacesChanged(); }}
-      />
+            <details className="plan-inventory" aria-labelledby="trip-info-heading">
+              <summary id="trip-info-heading">
+                <Plane aria-hidden="true" />
+                {t.tripSkeleton.tripInformation}
+              </summary>
+              {tripInformationItems.length === 0 ? (
+                <p className="empty-state">{t.tripSkeleton.noTripInformation}</p>
+              ) : (
+                <div className="grid gap-3 lg:grid-cols-2">
+                  {tripInformationItems.map((item) => renderItem(item))}
+                </div>
+              )}
+            </details>
 
-      <TripPlanDialog
-        tripId={trip.id}
-        open={planningTrip}
-        dayLabels={new Map(skeleton.days.map((day, index) => [day.id, t.tripSkeleton.dayLabel(index + 1)]))}
-        request={request}
-        onClose={() => setPlanningTrip(false)}
-        onApplied={() => {
-          setPlanningTrip(false);
-          onPlacesChanged();
-        }}
-      />
+            <div className="plan-management-context">
+              <section>
+                <h3>{t.tripSkeleton.arrivalPriorities}</h3>
+                <ol>
+                  <li>
+                    <strong>{t.tripSkeleton.arrival}</strong>{" "}
+                    {arrivalItems.length > 0
+                      ? arrivalItems.map(({ item, endpoint }) => (
+                          <span key={item.id}>{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
+                        ))
+                      : t.tripSkeleton.noArrival}
+                  </li>
+                  <li>
+                    <strong>{t.tripSkeleton.luggageAndCheckIn}</strong>{" "}
+                    {checkInItems.length > 0
+                      ? checkInItems.map(({ item, endpoint }) => (
+                          <span key={item.id}>{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
+                        ))
+                      : t.tripSkeleton.noCheckIn}
+                  </li>
+                  <li>
+                    <strong>{t.tripSkeleton.remainingTime}</strong>{" "}
+                    {usableTimeItems.length > 0
+                      ? usableTimeItems.map(({ item, endpoint }) => (
+                          <span key={item.id}>{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
+                        ))
+                      : t.tripSkeleton.noFreeTime}
+                  </li>
+                </ol>
+              </section>
+              <section>
+                <h3>{t.tripSkeleton.departurePriorities}</h3>
+                <ol>
+                  <li>
+                    <strong>{t.tripSkeleton.checkoutAndLuggage}</strong>{" "}
+                    {checkOutItems.length > 0
+                      ? checkOutItems.map(({ item, endpoint }) => (
+                          <span key={item.id}>{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
+                        ))
+                      : t.tripSkeleton.noCheckout}
+                  </li>
+                  <li>
+                    <strong>{t.tripSkeleton.transferAndDeparture}</strong>{" "}
+                    {departureItems.length > 0
+                      ? departureItems.map(({ item, endpoint }) => (
+                          <span key={item.id}>{item.title} · {localEndpoint(endpoint, placesById, t.tripSkeleton)}</span>
+                        ))
+                      : t.tripSkeleton.noDeparture}
+                  </li>
+                  <li>
+                    <strong>{t.tripSkeleton.protectedBuffer}</strong>{" "}
+                    {confirmedDepartureBufferMinutes.length > 0
+                      ? t.tripSkeleton.minimumMinutes(Math.max(...confirmedDepartureBufferMinutes))
+                      : t.tripSkeleton.noConfirmedBuffer}
+                  </li>
+                  {unconfirmedDepartureBuffers.length > 0 ? (
+                    <li>
+                      <strong>{t.tripSkeleton.unconfirmedBuffers}</strong>{" "}
+                      {unconfirmedDepartureBuffers.map((constraint) => (
+                        <span key={constraint.id}>
+                          {t.tripSkeleton.minimumBufferMinutes(constraint.minimumBufferMinutes!)}
+                          ・{t.tripSkeleton.constraintStatuses[constraint.status]}
+                        </span>
+                      ))}
+                    </li>
+                  ) : null}
+                </ol>
+              </section>
+            </div>
+          </div>
+        </details>
+
+        {viewingItem && itemsById.get(viewingItem.itemId) ? (
+          <PlaceDetailSheet
+            appearance="workspace"
+            open
+            title={itemsById.get(viewingItem.itemId)!.title}
+            onClose={() => setViewingItem(null)}
+          >
+            {itemDetail(itemsById.get(viewingItem.itemId)!, viewingItem.continuation)}
+          </PlaceDetailSheet>
+        ) : null}
+        {assignmentDayId !== null && assignmentDay ? (
+          <PlaceDetailSheet
+            appearance="workspace"
+            open
+            title={t.tripSkeleton.arrangeDay(formatPlanDate(assignmentDay.date, locale))}
+            onClose={() => {
+              setAssignmentDayId(null);
+              updateAssignmentErrorPlaceId(null);
+            }}
+          >
+            <p className="plan-sheet-intro">{t.tripSkeleton.arrangeSheetHelper}</p>
+            <div className="plan-assignment-days" aria-label={t.tripSkeleton.choosePlanDate}>
+              {skeleton.days.map((day) => {
+                const label = formatPlanShortDate(day.date, locale);
+                return (
+                  <button
+                    key={day.id}
+                    type="button"
+                    aria-pressed={assignmentDayId === day.id}
+                    disabled={busyId !== null}
+                    onClick={() => {
+                      setAssignmentDayId(day.id);
+                      setError("");
+                      updateAssignmentErrorPlaceId(null);
+                    }}
+                  >
+                    <span>{label.date}</span>
+                    <small>{label.weekday}</small>
+                  </button>
+                );
+              })}
+            </div>
+            <DayAssignmentPicker
+              places={tripPlaces}
+              busyPlaceId={busyId?.startsWith("day-assignment:") ? busyId.slice("day-assignment:".length) : null}
+              errorPlaceId={assignmentErrorPlaceId}
+              error={error}
+              assign={(place) => updateDayAssignment(assignmentDayId, place)}
+            />
+          </PlaceDetailSheet>
+        ) : null}
+        {viewingAssignedPlace ? (
+          <PlaceDetailSheet
+            appearance="workspace"
+            open
+            title={viewingAssignedPlace.name}
+            onClose={() => {
+              setViewingAssignedPlaceId(null);
+              updateAssignmentErrorPlaceId(null);
+            }}
+          >
+            <p>{t.tripSkeleton.wishlistTimeUnset}</p>
+            <p>{viewingAssignedPlace.address ?? t.tripSkeleton.addressUnknown}</p>
+            <p>
+              {viewingAssignedPlace.durationMinutes
+                ? t.tripSkeleton.plannedDuration(viewingAssignedPlace.durationMinutes)
+                : t.tripSkeleton.durationUnknown}
+              ・
+              {viewingAssignedPlace.budgetAmountMinor !== null && viewingAssignedPlace.budgetCurrency
+                ? formatMinorAmount(
+                    viewingAssignedPlace.budgetAmountMinor,
+                    viewingAssignedPlace.budgetCurrency,
+                    locale,
+                  )
+                : t.tripSkeleton.costUnknown}
+            </p>
+            {viewingAssignedPlace.notes ? <p>{viewingAssignedPlace.notes}</p> : null}
+            {assignmentErrorPlaceId === viewingAssignedPlace.id && error ? (
+              <p role="alert" className="plan-row-error">{error}</p>
+            ) : null}
+            <button
+              type="button"
+              className="plan-schedule-button"
+              disabled={busyId !== null}
+              onClick={() => void updateDayAssignment(null, viewingAssignedPlace)}
+            >
+              {t.tripSkeleton.removeFromDay}
+            </button>
+          </PlaceDetailSheet>
+        ) : null}
+        <Dialog
+          open={unlockingItem !== null}
+          onOpenChange={(open) => {
+            if (!open) setUnlockingItem(null);
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{unlockingItem ? t.tripSkeleton.unlockTitle(unlockingItem.title) : ""}</DialogTitle>
+              <DialogDescription>{t.tripSkeleton.unlockDescription}</DialogDescription>
+              {error ? <p role="alert" className="pd-notice">{error}</p> : null}
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setUnlockingItem(null)}>
+                {t.tripSkeleton.keepLocked}
+              </Button>
+              <Button
+                disabled={!unlockingItem || busyId === unlockingItem.id}
+                onClick={() => unlockingItem && void itemAction(unlockingItem, "unlock")}
+              >
+                <Unlock /> {t.tripSkeleton.unlockItem}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <DayPlanDialog
+          tripId={trip.id}
+          day={planningDay}
+          request={request}
+          onClose={() => setPlanningDay(null)}
+          onOrderSaved={async () => {
+            await load();
+            onPlacesChanged();
+          }}
+        />
+
+        <TripPlanDialog
+          tripId={trip.id}
+          open={planningTrip}
+          dayLabels={new Map(
+            skeleton.days.map((day, index) => [day.id, t.tripSkeleton.dayLabel(index + 1)])
+          )}
+          request={request}
+          onClose={() => setPlanningTrip(false)}
+          onApplied={() => {
+            setPlanningTrip(false);
+            onPlacesChanged();
+          }}
+        />
       </section>
     </>
   );

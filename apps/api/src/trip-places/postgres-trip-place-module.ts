@@ -20,6 +20,7 @@ import { reopenRemovedProposals } from "../discovery/reopen-removed-proposals";
 import { tripPlanBasis } from "../planning/trip-plan-basis";
 import { AppError } from "../private-trips/private-trip-module";
 import {
+  dateOnly,
   isoTimestamp,
   lockMutation,
   recordEvent,
@@ -531,6 +532,8 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
             longitude: facts.longitude,
             time_zone: facts.timeZone,
             duration_minutes: null,
+            selected_for_itinerary: false,
+            unplaced_from_date: null,
             budget_amount_minor: null,
             budget_currency: null,
             notes: originalNote,
@@ -849,6 +852,19 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     tripDayId: string | null,
     updatedAt: Date,
   ) {
+    // 007 deletes the assignment as soon as its desired-day source is deleted.
+    const previousAssignment = tripDayId === null
+      ? await transaction.selectFrom("trip_place_day_assignments as assignment")
+        .innerJoin("trip_days as day", "day.id", "assignment.trip_day_id")
+        .innerJoin("trip_places as place", "place.id", "assignment.trip_place_id")
+        .select(["day.date", sql<boolean>`exists (
+          select 1 from itinerary_endpoints as endpoint
+          where endpoint.trip_id = place.trip_id and endpoint.place_id = place.legacy_place_id
+        )`.as("scheduled")])
+        .where("assignment.trip_id", "=", tripId)
+        .where("assignment.trip_place_id", "=", tripPlaceId)
+        .executeTakeFirst()
+      : undefined;
     // The 007 synchronization trigger turns the desired-day row into the day assignment.
     await transaction.deleteFrom("trip_place_desired_days")
       .where("trip_place_id", "=", tripPlaceId)
@@ -865,6 +881,14 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       }).where("trip_place_id", "=", tripPlaceId).execute();
     }
     await transaction.updateTable("trip_places").set({
+      ...(tripDayId !== null
+        ? { selected_for_itinerary: true, unplaced_from_date: null }
+        : previousAssignment
+          ? {
+              selected_for_itinerary: true,
+              unplaced_from_date: previousAssignment.scheduled ? null : dateOnly(previousAssignment.date),
+            }
+          : {}),
       version: sql`version + 1`,
       updated_at: updatedAt,
     }).where("id", "=", tripPlaceId).execute();
@@ -905,6 +929,8 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       if (Number(members.count) < 2) {
         throw new AppError("voting_unavailable", "Voting needs at least two active trip members", 409);
       }
+      // Retained writers can place a row without synchronizing selection/history.
+      await this.reconcileLegacyPlaces(transaction, tripId);
       await this.lockTripPlace(transaction, tripId, tripPlaceId);
       if (input.voted) {
         await transaction.insertInto("trip_place_votes").values({
@@ -1024,6 +1050,15 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
           409,
         );
       }
+      const sourcePriorDate = source.unplaced_from_date === null ? null : dateOnly(source.unplaced_from_date);
+      const targetPriorDate = target.unplaced_from_date === null ? null : dateOnly(target.unplaced_from_date);
+      // A candidate contributes no placement history. Two selected histories must
+      // agree, including unknown dates; choosing either differing date would invent history.
+      const unplacedFromDate = scheduled || desiredDayIds.size === 1
+        ? null
+        : source.selected_for_itinerary && target.selected_for_itinerary
+          ? sourcePriorDate === targetPriorDate ? sourcePriorDate : null
+          : source.selected_for_itinerary ? sourcePriorDate : targetPriorDate;
 
       await transaction.updateTable("trip_place_contributions")
         .set({ trip_place_id: target.id })
@@ -1071,6 +1106,9 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         .returning("version")
         .executeTakeFirstOrThrow();
       await transaction.updateTable("trip_places").set({
+        selected_for_itinerary: source.selected_for_itinerary || target.selected_for_itinerary
+          || scheduled !== undefined || sourceAssignment !== undefined || targetAssignment !== undefined,
+        unplaced_from_date: unplacedFromDate,
         duration_minutes: target.duration_minutes ?? source.duration_minutes,
         budget_amount_minor: target.budget_amount_minor === null
           ? source.budget_amount_minor === null
@@ -1151,12 +1189,25 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       await this.requireMember(transaction, userId, tripId);
       const current = await this.lockTripPlace(transaction, tripId, tripPlaceId);
       this.expectedVersion(current.version, input.expectedVersion);
+      const previousAssignment = await transaction.selectFrom("trip_place_day_assignments as assignment")
+        .innerJoin("trip_days as day", "day.id", "assignment.trip_day_id")
+        .select(["day.date", sql<boolean>`exists (
+          select 1 from itinerary_endpoints as endpoint
+          where endpoint.trip_id = ${tripId} and endpoint.place_id = ${current.legacy_place_id}
+        )`.as("scheduled")])
+        .where("assignment.trip_id", "=", tripId)
+        .where("assignment.trip_place_id", "=", tripPlaceId)
+        .executeTakeFirst();
       // Migration 007 derives assignments from legacy day rows: delete sources first.
       for (const table of ["trip_place_desired_days", "trip_place_excluded_days", "trip_place_day_assignments", "trip_place_votes"] as const) {
         await transaction.deleteFrom(table).where("trip_place_id", "=", tripPlaceId).execute();
       }
       const removedAt = this.now();
       await transaction.updateTable("trip_places").set({
+        ...(previousAssignment ? {
+          selected_for_itinerary: true,
+          unplaced_from_date: previousAssignment.scheduled ? null : dateOnly(previousAssignment.date),
+        } : {}),
         archived_at: removedAt,
         version: sql`version + 1`,
         updated_at: removedAt,
@@ -1211,6 +1262,15 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     tripId: string,
   ) {
     await this.lockTripContent(transaction, tripId);
+    await PostgresTripPlaceModule.reconcileLegacyPlacesInTransaction(transaction, tripId, this.now);
+  }
+
+  /** Caller holds the trip content lock; timed writers need the same canonical identity before removal. */
+  static async reconcileLegacyPlacesInTransaction(
+    transaction: Transaction<AlongTheWayDatabase>,
+    tripId: string,
+    now: () => Date,
+  ) {
     await sql`
       select pg_advisory_xact_lock(
         hashtextextended(${"trip-place-legacy:" + tripId}, 0)
@@ -1230,7 +1290,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       for (const table of ["trip_place_desired_days", "trip_place_excluded_days", "trip_place_day_assignments", "trip_place_votes"] as const) {
         await transaction.deleteFrom(table).where("trip_place_id", "in", ids).execute();
       }
-      const archivedAt = this.now();
+      const archivedAt = now();
       await transaction.updateTable("trip_places").set({
         archived_at: archivedAt, version: sql`version + 1`, updated_at: archivedAt,
       }).where("trip_id", "=", tripId).where("id", "in", ids).execute();
@@ -1346,6 +1406,12 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         "origin.original_note",
         "origin.created_at",
       ])
+      .select((builder) => builder.exists(
+        builder.selectFrom("itinerary_endpoints as endpoint")
+          .select("endpoint.place_id")
+          .whereRef("endpoint.trip_id", "=", "legacy.trip_id")
+          .whereRef("endpoint.place_id", "=", "legacy.id"),
+      ).as("scheduled"))
       .where("legacy.trip_id", "=", tripId)
       .where("legacy.travel_only", "=", false)
       .where("tripPlace.id", "is", null)
@@ -1381,6 +1447,8 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         longitude: legacy.longitude,
         time_zone: legacy.time_zone,
         duration_minutes: null,
+        selected_for_itinerary: Boolean(legacy.scheduled),
+        unplaced_from_date: null,
         budget_amount_minor: null,
         budget_currency: null,
         notes: legacy.notes,
@@ -1409,7 +1477,24 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         legacy,
       );
     }
-    await reopenRemovedProposals(transaction, tripId, this.now());
+    // Reconcile only observable current placements from retained writers, not lost history.
+    await sql`
+      update trip_places as place
+      set selected_for_itinerary = true, unplaced_from_date = null,
+        version = place.version + 1, updated_at = ${now()}
+      where place.trip_id = ${tripId}
+        and (not place.selected_for_itinerary or place.unplaced_from_date is not null)
+        and (
+          exists (
+            select 1 from trip_place_day_assignments as assignment
+            where assignment.trip_id = place.trip_id and assignment.trip_place_id = place.id
+          ) or exists (
+            select 1 from itinerary_endpoints as endpoint
+            where endpoint.trip_id = place.trip_id and endpoint.place_id = place.legacy_place_id
+          )
+        )
+    `.execute(transaction);
+    await reopenRemovedProposals(transaction, tripId, now());
   }
 
   private async readList(executor: DatabaseExecutor, userId: string, tripId: string) {
@@ -1429,6 +1514,8 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         "tripPlace.longitude",
         "tripPlace.time_zone",
         "tripPlace.duration_minutes",
+        "tripPlace.selected_for_itinerary",
+        "tripPlace.unplaced_from_date",
         "tripPlace.budget_amount_minor",
         "tripPlace.budget_currency",
         "tripPlace.notes",
@@ -1548,6 +1635,8 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         timeZone: resolvedTimeZone,
         status,
         scheduled: isScheduled,
+        selectedForItinerary: row.selected_for_itinerary,
+        unplacedFromDate: row.unplaced_from_date === null ? null : dateOnly(row.unplaced_from_date),
         durationMinutes: row.duration_minutes,
         assignedDayId: assignmentByPlaceId.get(row.id)?.trip_day_id ?? null,
         dayPosition: assignmentByPlaceId.get(row.id)?.day_position ?? null,

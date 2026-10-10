@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createTodayModel, dayItems, localDate, parallelItemIds, personalState, tripClock, type TodayItem, type TodayModel } from "../src/today-model";
 import { resolveDayTimeZone } from "@along-the-way/contracts/day-time-zone";
 import type { TripSkeletonDto } from "@along-the-way/contracts/trip-skeleton";
-import { todayActivity, todaySkeleton, todayTrip, todayUser } from "./today-fixtures";
+import { todayActivity, todaySkeleton, todayTrip, todayUser, todayWishlist } from "./today-fixtures";
 
 function activity(id: string, member: string | null, start: string, end: string): TodayItem {
   return { id, title: id, type: "activity", start, end, endpoints: [], participants: member ? [{ id: member, name: member }] : null, locked: false, constraints: [], facts: [], notes: null, sourceUrl: null };
@@ -127,5 +127,19 @@ describe("formal interval membership across local days", () => {
     const readModel = createTodayModel(trip, todaySkeleton(trip, [item]), [], todayUser.id);
     expect(readModel.items[0]!.participants).toEqual([{ id: "member", name: todayUser.email }, { id: "named", name: "旅伴" }]);
     expect(JSON.stringify(readModel)).not.toContain("named@example.test");
+  });
+});
+
+describe("Today place detail identities", () => {
+  it("keeps itinerary and TripPlace identities distinct when their display names are equal", () => {
+    const trip = todayTrip();
+    const item = todayActivity();
+    const skeleton = todaySkeleton(trip, [item]);
+    const wishlist = todayWishlist();
+    wishlist[0]!.name = skeleton.places[0]!.name;
+    const readModel = createTodayModel(trip, skeleton, wishlist, todayUser.id);
+
+    expect(readModel.items[0]!.endpoints[0]!.place).toMatchObject({ id: "place", name: "Park" });
+    expect(readModel.days[0]!.wishlist[0]).toEqual({ id: "FIRST", name: "Park" });
   });
 });

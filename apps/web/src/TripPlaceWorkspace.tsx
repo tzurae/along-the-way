@@ -1,12 +1,13 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarCheck,
+  ChevronRight,
   CircleAlert,
   CircleCheck,
   CloudOff,
   Images,
   MapPinOff,
-  X,
+  Plus,
 } from "lucide-react";
 
 import type { TripDto } from "@along-the-way/contracts/private-trips";
@@ -25,6 +26,10 @@ import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
 import { VoteControl, VoteVoters } from "./VoteControl";
+import { PlaceDetailContent } from "./PlaceDetailContent";
+import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews } from "./PlaceThumbnail";
+import { PlaceDetailSheet } from "./PlaceDetailSheet";
+import "./pocket-discovery.css";
 import {
   Dialog,
   DialogContent,
@@ -53,6 +58,15 @@ function statusLabel(status: TripPlaceDto["status"], t: Messages["tripPlaces"]) 
     case "provider-unavailable": return t.status.providerUnavailable;
     case "scheduled": return t.status.scheduled;
   }
+}
+
+function itineraryMembershipLabel(
+  place: TripPlaceDto,
+  t: Messages["tripPlaces"],
+) {
+  return place.selectedForItinerary
+    ? t.workspace.selectedForItinerary
+    : t.workspace.pocketCandidate;
 }
 
 const placeTypeValues: PlaceType[] = [
@@ -116,18 +130,6 @@ function nullableNumber(value: FormDataEntryValue | null) {
   return Number.isFinite(parsed) ? parsed : Number.NaN;
 }
 
-function useLargeScreen() {
-  const [large, setLarge] = useState(() => typeof window.matchMedia === "function" && window.matchMedia("(min-width: 1024px)").matches);
-  useEffect(() => {
-    if (typeof window.matchMedia !== "function") return;
-    const query = window.matchMedia("(min-width: 1024px)");
-    const changed = () => setLarge(query.matches);
-    changed();
-    query.addEventListener("change", changed);
-    return () => query.removeEventListener("change", changed);
-  }, []);
-  return large;
-}
 
 function AddPlacePanel({
   tripId,
@@ -141,7 +143,7 @@ function AddPlacePanel({
   changed(): Promise<void>;
 }) {
   const { locale, t: { tripPlaces: t } } = useI18n();
-  const [mode, setMode] = useState<"url" | "search" | "manual">("url");
+  const [mode, setMode] = useState<"url" | "search" | "manual">("search");
   const [url, setUrl] = useState("");
   const [query, setQuery] = useState("");
   const [note, setNote] = useState("");
@@ -242,83 +244,81 @@ function AddPlacePanel({
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-ink-strong/45 p-3" role="presentation">
-      <section
-        aria-labelledby="add-wishlist-place"
-        aria-modal="true"
-        className="my-auto w-full max-w-3xl rounded-card bg-surface p-5 shadow-feedback sm:p-7"
-        role="dialog"
-      >
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h3 id="add-wishlist-place" className="font-display text-3xl text-ink-strong">{t.add.title}</h3>
-          </div>
-          <button className="min-h-11 rounded-lg border px-4 font-bold" onClick={close}>{t.add.close}</button>
-        </div>
-        <div className="mt-5 grid grid-cols-3 gap-2" role="tablist" aria-label={t.add.methodLabel}>
-          {([
-            ["url", t.add.googleMapsLink],
-            ["search", t.add.search],
-            ["manual", t.add.manual],
-          ] as const).map(([value, label]) => (
-            <button
-              key={value}
-              className={`min-h-12 rounded-xl border px-3 font-bold ${mode === value ? "border-accent-strong bg-surface-subtle text-accent-strong" : "border-ink/15"}`}
-              role="tab"
-              aria-selected={mode === value}
-              onClick={() => {
-                setMode(value);
-                setCandidates([]);
-                setMessage("");
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+    <PlaceDetailSheet open appearance="workspace" title={t.add.title} onClose={close}>
+      <p className="pd-add-intro">加入後會成為全家都能表態的候選地點。</p>
+      <div className="pd-tabs" role="tablist" aria-label={t.add.methodLabel}>
+        {([
+          ["search", t.add.search],
+          ["url", t.add.googleMapsLink],
+          ["manual", t.add.manual],
+        ] as const).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            aria-selected={mode === value}
+            disabled={busy}
+            onClick={() => {
+              setMode(value);
+              setCandidates([]);
+              setMessage("");
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
-        {mode === "manual" ? (
-          <form className="mt-6 grid gap-4 sm:grid-cols-2" onSubmit={addManual}>
-            <label className="grid gap-1 font-semibold sm:col-span-2">{t.add.placeName}<input className="min-h-11 rounded-lg border px-3" name="name" required maxLength={200} /></label>
-            <label className="grid gap-1 font-semibold">{t.add.placeType}<select className="min-h-11 rounded-lg border px-3" name="type">{placeTypeValues.map((value) => <option key={value} value={value}>{t.placeType[value]}</option>)}</select></label>
-            <label className="grid gap-1 font-semibold">{t.add.addressIfKnown}<input className="min-h-11 rounded-lg border px-3" name="address" /></label>
-            <label className="grid gap-1 font-semibold">{t.add.latitudeIfKnown}<input className="min-h-11 rounded-lg border px-3" name="latitude" type="number" min="-90" max="90" step="any" /></label>
-            <label className="grid gap-1 font-semibold">{t.add.longitudeIfKnown}<input className="min-h-11 rounded-lg border px-3" name="longitude" type="number" min="-180" max="180" step="any" /></label>
-            <label className="grid gap-1 font-semibold">{t.add.timeZoneIfKnown}<input className="min-h-11 rounded-lg border px-3" name="timeZone" placeholder={t.add.timeZonePlaceholder} /></label>
-            <label className="grid gap-1 font-semibold">{t.add.sourceLinkIfAny}<input className="min-h-11 rounded-lg border px-3" name="sourceUrl" type="url" /></label>
-            <label className="grid gap-1 font-semibold sm:col-span-2">{t.add.originalNote}<textarea className="min-h-24 rounded-lg border p-3" name="originalNote" /></label>
-            <button className="min-h-12 rounded-xl bg-ink-strong px-5 font-bold text-on-dark sm:col-span-2" disabled={busy}>{busy ? t.add.adding : t.add.addManualPlace}</button>
-          </form>
-        ) : (
-          <form className="mt-6 grid gap-4" onSubmit={discover}>
-            {mode === "url" ? (
-              <label className="grid gap-1 font-semibold">{t.add.googleMapsUrl}<input className="min-h-12 rounded-lg border px-3" type="url" required value={url} onChange={(event) => setUrl(event.target.value)} /></label>
-            ) : (
-              <label className="grid gap-1 font-semibold">{t.add.searchGoogleMaps}<input className="min-h-12 rounded-lg border px-3" required maxLength={300} value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-            )}
-            <label className="grid gap-1 font-semibold">{t.add.originalNote}<textarea className="min-h-20 rounded-lg border p-3" value={note} onChange={(event) => setNote(event.target.value)} /></label>
-            <button className="min-h-12 rounded-xl bg-ink-strong px-5 font-bold text-on-dark" disabled={busy}>{busy ? t.add.checking : mode === "url" ? t.add.resolveLink : t.add.searchPlaces}</button>
-          </form>
-        )}
+      {mode === "manual" ? (
+        <form className="pd-form" onSubmit={addManual}>
+          <p className="pd-add-intro">適合加入住家、朋友推薦，或暫時在地圖上找不到的地點。</p>
+          <label>{t.add.placeName}<input name="name" required maxLength={200} /></label>
+          <label>{t.add.placeType}<select name="type">{placeTypeValues.map((value) => <option key={value} value={value}>{t.placeType[value]}</option>)}</select></label>
+          <label>{t.add.originalNote}<textarea name="originalNote" /></label>
+          <details>
+            <summary className="cursor-pointer font-bold">位置與來源（選填）</summary>
+            <div className="pd-form mt-3">
+              <label>{t.add.addressIfKnown}<input name="address" /></label>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label>{t.add.latitudeIfKnown}<input name="latitude" type="number" min="-90" max="90" step="any" /></label>
+                <label>{t.add.longitudeIfKnown}<input name="longitude" type="number" min="-180" max="180" step="any" /></label>
+              </div>
+              <label>{t.add.timeZoneIfKnown}<input name="timeZone" placeholder={t.add.timeZonePlaceholder} /></label>
+              <label>{t.add.sourceLinkIfAny}<input name="sourceUrl" type="url" /></label>
+            </div>
+          </details>
+          <button className="pd-primary" disabled={busy}><Plus aria-hidden="true" className="size-4" />{busy ? t.add.adding : t.add.addManualPlace}</button>
+        </form>
+      ) : (
+        <form className="pd-form" onSubmit={discover}>
+          <p className="pd-add-intro">{mode === "url" ? "貼上 Google Maps 分享連結，確認找到的地點後再加入。" : "用地點名稱或地區搜尋，再選擇正確的結果。"}</p>
+          {mode === "url" ? (
+            <label>{t.add.googleMapsUrl}<input type="url" required value={url} onChange={(event) => setUrl(event.target.value)} /></label>
+          ) : (
+            <label>{t.add.searchGoogleMaps}<input required maxLength={300} value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+          )}
+          <label>{t.add.originalNote}<textarea value={note} onChange={(event) => setNote(event.target.value)} /></label>
+          <button className="pd-primary" disabled={busy}>{busy ? t.add.checking : mode === "url" ? t.add.resolveLink : t.add.searchPlaces}</button>
+        </form>
+      )}
 
-        {candidates.length > 0 ? (
-          <section className="mt-6" aria-labelledby="provider-candidates">
-            <h4 id="provider-candidates" className="font-display text-2xl">{t.add.confirmTitle}</h4>
-            {resolvedUrl ? <p className="mt-1 break-all text-sm text-muted-foreground">{t.add.resolvedTo(resolvedUrl)}</p> : null}
-            <p className="mt-1 text-sm text-muted-foreground">{t.add.resultsProvidedBy(attribution)}</p>
-            <ul className="mt-3 grid gap-3">
-              {candidates.map((candidate) => (
-                <li key={candidate.providerPlaceId} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-ink/10 p-4">
-                  <span><strong className="block">{candidate.name}</strong><small className="text-muted-foreground">{candidate.address ?? t.add.addressUnavailable}・{t.add.observedAt(new Date(candidate.observedAt).toLocaleString(locale))}</small></span>
-                  <button className="min-h-11 rounded-lg bg-accent px-4 font-bold text-ink-strong" disabled={busy} onClick={() => void confirm(candidate)}>{t.add.addThisPlace}</button>
-                </li>
-              ))}
-            </ul>
-          </section>
-        ) : null}
-        {message ? <p className="mt-5 rounded-xl bg-surface-subtle p-4" role="alert">{message}</p> : null}
-      </section>
-    </div>
+      {candidates.length > 0 ? (
+        <section className="mt-5" aria-labelledby="provider-candidates">
+          <h3 id="provider-candidates" className="pd-section-title">{t.add.confirmTitle}</h3>
+          {resolvedUrl ? <p className="pd-add-intro break-all">{t.add.resolvedTo(resolvedUrl)}</p> : null}
+          <p className="pd-add-intro">{t.add.resultsProvidedBy(attribution)}</p>
+          <ul className="pd-result-list">
+            {candidates.map((candidate) => (
+              <li key={candidate.providerPlaceId}>
+                <span><strong>{candidate.name}</strong><small>{candidate.address ?? t.add.addressUnavailable}・{t.add.observedAt(new Date(candidate.observedAt).toLocaleString(locale))}</small></span>
+                <button className="pd-primary pd-accent" disabled={busy} onClick={() => void confirm(candidate)}>{t.add.addThisPlace}</button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+      {message ? <p className="pd-notice mt-4" role="alert">{message}</p> : null}
+    </PlaceDetailSheet>
   );
 }
 
@@ -428,13 +428,91 @@ function PlanningEditor({ tripId, place, available, request, changed, editingCha
   </details>;
 }
 
+function PlaceDayPicker({ trip, place, available, request, changed }: {
+  trip: TripDto;
+  place: TripPlaceDto;
+  available: boolean;
+  request<T>(url: string, options?: RequestOptions): Promise<T>;
+  changed(): Promise<void>;
+}) {
+  const { locale, t } = useI18n();
+  const [dayId, setDayId] = useState(place.assignedDayId ?? "");
+  const [base, setBase] = useState({ dayId: place.assignedDayId ?? "", version: place.version });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const keys = useRef<RetryKeys>(new Map());
+  useEffect(() => {
+    if (!busy && dayId === base.dayId && (place.version !== base.version || (place.assignedDayId ?? "") !== base.dayId)) {
+      setDayId(place.assignedDayId ?? "");
+      setBase({ dayId: place.assignedDayId ?? "", version: place.version });
+    }
+  }, [place.assignedDayId, place.version, busy, dayId, base.dayId, base.version]);
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    if (busy || !available || place.scheduled) return;
+    const targetDay = dayId || null;
+    const operation = `day-assignment:${place.id}`;
+    setBusy(true);
+    setError("");
+    let removedOriginalDay = false;
+    try {
+      async function assign(tripDayId: string | null, expectedVersion: number) {
+        const payload = { assignments: [{ tripPlaceId: place.id, tripDayId, expectedVersion }] };
+        const response = await request<ReturnType<typeof parseTripPlaceListResponse>>(`/api/trips/${trip.id}/trip-place-day-assignments`, {
+          method: "PUT",
+          headers: { "Idempotency-Key": retryKey(keys.current, operation, payload) },
+          body: JSON.stringify(payload),
+          parse: parseTripPlaceListResponse,
+        });
+        clearRetryKey(keys.current, operation);
+        const updated = response.tripPlaces.find((entry) => entry.id === place.id);
+        if (!updated) throw new Error(t.tripPlaces.errors.requestFailed);
+        return updated;
+      }
+      let version = base.version;
+      // The existing API requires remove-before-reassign; each step uses its real returned version.
+      if (base.dayId && targetDay && base.dayId !== targetDay) {
+        const removed = await assign(null, version);
+        version = removed.version;
+        removedOriginalDay = true;
+        setBase({ dayId: "", version });
+      }
+      const updated = await assign(targetDay, version);
+      setDayId(updated.assignedDayId ?? "");
+      setBase({ dayId: updated.assignedDayId ?? "", version: updated.version });
+      await changed();
+    } catch (reason) {
+      const failure = errorMessage(reason, t.tripSkeleton.plannedDayUpdateError);
+      setError(removedOriginalDay ? `原日期已移出，尚未排入新日期。${failure}` : failure);
+      await changed();
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (place.scheduled) return null;
+  const located = place.latitude !== null && place.longitude !== null;
+  return <section className="pd-detail-section">
+    <h3>排入行程</h3>
+    <form onSubmit={(event) => void save(event)}>
+      <fieldset className="pd-daypicker" disabled={busy || !available || !located}>
+        <legend className="sr-only">選擇行程日期</legend>
+        <label><input type="radio" name={`day-${place.id}`} value="" checked={!dayId} onChange={() => setDayId("")} /><span>{place.selectedForItinerary ? t.tripPlaces.workspace.pendingArrangement : t.tripPlaces.workspace.notPlanned}</span></label>
+        {trip.days.map((day, index) => <label key={day.id}><input type="radio" name={`day-${place.id}`} value={day.id} checked={dayId === day.id} onChange={() => setDayId(day.id)} /><span>{t.tripSkeleton.dayLabel(index + 1)}<small>{new Intl.DateTimeFormat(locale, { timeZone: "UTC", month: "numeric", day: "numeric" }).format(new Date(`${day.date}T12:00:00Z`))}</small></span></label>)}
+      </fieldset>
+      {!located ? <p className="pd-subhead">先確認地圖位置，才能排入行程。</p> : null}
+      <button className="pd-primary mt-3" disabled={busy || !available || !located || dayId === base.dayId}>{busy ? "安排中…" : dayId ? "排入行程" : "移出這一天"}</button>
+      {error ? <div className="pd-notice mt-3" role="alert">{error}<button type="button" className="pd-secondary mt-2" disabled={busy} onClick={() => { setDayId(place.assignedDayId ?? ""); setBase({ dayId: place.assignedDayId ?? "", version: place.version }); setError(""); }}>重新載入日期</button></div> : null}
+    </form>
+  </section>;
+}
+
 export function TripPlaceWorkspace({
   trip,
   request,
   placesRevision,
   onPlacesChanged,
 }: TripPlaceWorkspaceProps) {
-  const { locale, t: { tripPlaces: t } } = useI18n();
+  const { locale, t: { tripPlaces: t, app: appText } } = useI18n();
   const [readModel, setReadModel] = useState<{ current: TripPlaceDto[]; retained: TripPlaceDto[] }>({ current: [], retained: [] });
   const places = readModel.current;
   const [adding, setAdding] = useState(false);
@@ -446,44 +524,55 @@ export function TripPlaceWorkspace({
   const pendingVoteIds = useRef(new Set<string>());
   const retryKeys = useRef<RetryKeys>(new Map());
   const editingPlaceIds = useRef(new Set<string>());
-  const largeScreen = useLargeScreen();
+  const readGeneration = useRef(0);
   const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
   const detailTitleRef = useRef<HTMLHeadingElement>(null);
+  const detailReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const [mergeConfirmation, setMergeConfirmation] = useState<{ source: TripPlaceDto; target: TripPlaceDto } | null>(null);
   const [merging, setMerging] = useState(false);
-  useEffect(() => {
-    if (!selectedPlaceId) return;
-    const frame = window.requestAnimationFrame(() => detailTitleRef.current?.focus());
-    return () => window.cancelAnimationFrame(frame);
-  }, [largeScreen, selectedPlaceId]);
+  const [removalConfirmation, setRemovalConfirmation] = useState<TripPlaceDto | null>(null);
+  const [removing, setRemoving] = useState(false);
 
   function openDetail(placeId: string) {
     if (placeId === selectedPlaceId) {
       window.requestAnimationFrame(() => detailTitleRef.current?.focus());
       return;
     }
+    detailReturnPosition.current = { x: window.scrollX, y: window.scrollY };
     setSelectedPlaceId(placeId);
   }
 
-  const refreshPlaces = useCallback(async () => {
-    const response = await request<unknown>(`/api/trips/${trip.id}/trip-places`);
-    const current = parseTripPlaceListResponse(response).tripPlaces;
-    const currentIds = new Set(current.map((place) => place.id));
-    setReadModel((previous) => ({
-      current,
-      retained: [...previous.current, ...previous.retained].filter((place) => editingPlaceIds.current.has(place.id) && !currentIds.has(place.id)),
-    }));
+  const refreshPlaces = useCallback(async (generation = ++readGeneration.current) => {
+    try {
+      const response = await request<unknown>(`/api/trips/${trip.id}/trip-places`);
+      if (generation !== readGeneration.current) return false;
+      const current = parseTripPlaceListResponse(response).tripPlaces;
+      const currentIds = new Set(current.map((place) => place.id));
+      setReadModel((previous) => ({
+        current,
+        retained: [...previous.current, ...previous.retained].filter((place) => editingPlaceIds.current.has(place.id) && !currentIds.has(place.id)),
+      }));
+      setLoading(false);
+      return true;
+    } catch (error) {
+      if (generation !== readGeneration.current) return false;
+      setLoading(false);
+      throw error;
+    }
   }, [request, trip.id]);
 
   const load = useCallback(async () => {
+    const generation = ++readGeneration.current;
     setLoading(true);
     try {
-      await refreshPlaces();
-      setMessage("");
+      const accepted = await refreshPlaces(generation);
+      if (accepted) setMessage("");
     } catch (error) {
-      setMessage(errorMessage(error, t.errors.requestFailed));
+      if (generation === readGeneration.current) {
+        setMessage(errorMessage(error, t.errors.requestFailed));
+      }
     } finally {
-      setLoading(false);
+      if (generation === readGeneration.current) setLoading(false);
     }
   }, [refreshPlaces, t.errors.requestFailed]);
 
@@ -498,10 +587,14 @@ export function TripPlaceWorkspace({
 
   function closeDetail() {
     const placeId = selectedPlaceId;
+    const position = detailReturnPosition.current;
+    detailReturnPosition.current = null;
     setSelectedPlaceId(null);
+    setRemovalConfirmation(null);
     if (placeId) {
       window.requestAnimationFrame(() => {
-        document.querySelector<HTMLElement>(`[data-place-detail-trigger="${placeId}"]`)?.focus();
+        document.querySelector<HTMLElement>(`[data-place-detail-trigger="${placeId}"]`)?.focus({ preventScroll: true });
+        if (position) window.scrollTo({ left: position.x, top: position.y, behavior: "instant" });
       });
     }
   }
@@ -556,14 +649,14 @@ export function TripPlaceWorkspace({
           parse: parseTripPlaceResponse,
         },
       );
-      await refreshPlaces();
+      const refreshed = await refreshPlaces();
       clearRetryKey(retryKeys.current, operation);
       setVoteDrafts((current) => {
         const next = { ...current };
         delete next[place.id];
         return next;
       });
-      setMessage("");
+      if (refreshed) setMessage("");
       setFailedVotes((current) => {
         const next = { ...current };
         delete next[place.id];
@@ -591,7 +684,9 @@ export function TripPlaceWorkspace({
   }
 
   async function remove(place: TripPlaceDto) {
-    if (!window.confirm(t.workspace.confirmRemove(place.name))) return;
+    if (removing) return;
+    setRemoving(true);
+    setMessage("");
     const operation = `remove:${place.id}`;
     const payload = { expectedVersion: place.version };
     try {
@@ -604,8 +699,11 @@ export function TripPlaceWorkspace({
       editingPlaceIds.current.delete(place.id);
       await load();
       onPlacesChanged();
+      setRemovalConfirmation(null);
     } catch (error) {
       setMessage(errorMessage(error, t.errors.requestFailed));
+    } finally {
+      setRemoving(false);
     }
   }
 
@@ -650,24 +748,27 @@ export function TripPlaceWorkspace({
     }
   }
 
-  const highestVoteCount = places.reduce((highest, place) => Math.max(highest, place.voteCount), 0);
   const listedPlaces = [...places, ...readModel.retained];
-  const showVotes = places.some((place) => place.votingAvailable);
   const placeNameCounts = new Map<string, number>();
   for (const place of listedPlaces) {
     placeNameCounts.set(place.name, (placeNameCounts.get(place.name) ?? 0) + 1);
   }
   const selectedPlace = listedPlaces.find((place) => place.id === selectedPlaceId) ?? null;
-  const showTableColumns = selectedPlace === null;
+  const previews = usePlacePreviews({
+    tripId: trip.id,
+    kind: "trip-place",
+    ids: listedPlaces.map((place) => place.id),
+    request,
+  });
 
   function quickActions(place: TripPlaceDto) {
     if (!placesById.has(place.id) || !place.votingAvailable) return null;
     const voteDraft = voteDrafts[place.id];
     return (
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="pd-row-actions">
         <VoteControl compact name={place.name} voters={place.voters} voteCount={place.voteCount} ownVote={place.ownVote} votingAvailable disabled={Boolean(pendingVotes[place.id])} onChange={(voted) => void setVote(place, voted)} />
         {failedVotes[place.id] && voteDraft !== undefined ? (
-          <button className="min-h-11 whitespace-nowrap rounded-lg border px-3 font-bold outline-none hover:bg-surface focus:ring-4 focus:ring-focus/30" disabled={pendingVotes[place.id]} onClick={() => void setVote(place, voteDraft)}>{t.vote.retry}</button>
+          <button className="pd-secondary" disabled={pendingVotes[place.id]} onClick={() => void setVote(place, voteDraft)}>{t.vote.retry}</button>
         ) : null}
       </div>
     );
@@ -682,17 +783,27 @@ export function TripPlaceWorkspace({
         : t.workspace.manualEntry;
     const duplicateSuggestions = duplicateSuggestionsByPlace.get(place.id) ?? [];
     return (
-      <div className="grid gap-4">
-        <div>
-          <p className="text-sm text-muted-foreground">{t.workspace.factsSource(factsLabel)}{place.aiProposalId ? `・${t.workspace.aiProposal}` : ""}</p>
-          <p className="mt-1 text-sm text-muted-foreground">{place.address ?? t.workspace.unknownAddress}</p>
-        </div>
-        {place.providerObservedAt ? <p className="text-sm text-muted-foreground">{t.workspace.providerObserved(new Date(place.providerObservedAt).toLocaleString(locale))}{place.providerFactsExpired ? `・${t.workspace.expiredFacts}` : ""}</p> : null}
-        {place.provider === "google" && place.providerPlaceId ? <a className="inline-flex min-h-11 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
-        {place.sourceUrl ? <a className="w-fit break-all text-sm font-bold text-accent-strong underline underline-offset-2" href={place.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
-        {place.notes ? <p className="whitespace-pre-wrap break-words text-sm">{place.notes}</p> : null}
-        {quickActions(place)}
-        {available && place.votingAvailable ? <VoteVoters voters={place.voters} /> : null}
+      <div className="pd-detail">
+        <PlaceDetailContent tripId={trip.id} reference={{ kind: "trip-place", id: place.id }} request={request} />
+        <section className="pd-detail-section pt-1">
+          <div className="pd-detail-badges">
+            <span className="pd-chip">{t.placeType[place.type]}</span>
+            <span className="pd-state">{itineraryMembershipLabel(place, t)}</span>
+            {place.status !== "ready" ? <span className="pd-state"><StatusIcon status={place.status} />{statusLabel(place.status, t)}</span> : null}
+          </div>
+          <p className="mt-3 text-sm text-muted-foreground">{place.address ?? t.workspace.unknownAddress}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{t.workspace.factsSource(factsLabel)}{place.aiProposalId ? `・${t.workspace.aiProposal}` : ""}</p>
+        </section>
+        <section className="pd-detail-section">
+          <h3>地點與資料來源</h3>
+          {place.providerObservedAt ? <p className="text-sm text-muted-foreground">{t.workspace.providerObserved(new Date(place.providerObservedAt).toLocaleString(locale))}{place.providerFactsExpired ? `・${t.workspace.expiredFacts}` : ""}</p> : null}
+          <div className="pd-source-links mt-3">
+            {place.provider === "google" && place.providerPlaceId ? <a className="pd-secondary" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
+            {place.sourceUrl ? <a className="inline-flex min-h-11 items-center break-all text-sm font-bold text-accent-strong underline underline-offset-2" href={place.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
+          </div>
+        </section>
+        {place.notes ? <section className="pd-detail-section"><h3>地點與成員備註</h3><p className="whitespace-pre-wrap break-words text-sm">{place.notes}</p></section> : null}
+        {available && place.votingAvailable ? <section className="pd-detail-section"><VoteVoters voters={place.voters} /></section> : null}
         {available ? duplicateSuggestions.map((suggestion) => {
           const other = placesById.get(suggestion.otherTripPlaceId);
           return (
@@ -729,6 +840,7 @@ export function TripPlaceWorkspace({
             </section>
           );
         }) : null}
+        <PlaceDayPicker key={`day:${place.id}`} trip={trip} place={place} available={available} request={request} changed={changedPlaces} />
         <PlanningEditor key={place.id} tripId={trip.id} place={place} available={available} request={request} changed={changedPlaces}
           editingChanged={(editing) => {
             if (editing) editingPlaceIds.current.add(place.id);
@@ -737,126 +849,74 @@ export function TripPlaceWorkspace({
               setReadModel((current) => ({ ...current, retained: current.retained.filter((entry) => entry.id !== place.id) }));
             }
           }} />
-        {available ? <button className="min-h-11 w-fit rounded-lg border px-3 text-sm font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={() => void remove(place)}>{t.workspace.remove}</button> : null}
       </div>
     );
   }
 
   return (
-    <section className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8" aria-labelledby="shared-wishlist-heading">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h2 id="shared-wishlist-heading" className="font-display text-3xl text-ink-strong sm:text-4xl">{t.workspace.title}</h2>
-          <p className="mt-2 max-w-3xl text-muted-foreground">{t.workspace.description}</p>
-        </div>
-        <button className="min-h-12 rounded-xl bg-accent px-5 font-bold text-ink-strong outline-none hover:bg-accent/80 focus:ring-4 focus:ring-focus/30" onClick={() => setAdding(true)}>{t.workspace.addPlace}</button>
+    <section className="pd-workspace" aria-labelledby="shared-wishlist-heading">
+      <div className="pd-pagehead">
+        <h2 id="shared-wishlist-heading">{appText.placesSegments.wishlist}</h2>
+        <button className="pd-primary" onClick={() => setAdding(true)}><Plus aria-hidden="true" className="size-4" />{t.workspace.addPlace}</button>
       </div>
-
-      {message ? <p className="mt-4 rounded-xl bg-surface-subtle p-4" role="alert">{message}</p> : null}
-      {loading && places.length === 0 ? <p className="mt-6" role="status">{t.workspace.loading}</p> : null}
-      {!loading && places.length === 0 && readModel.retained.length === 0 ? <p className="mt-6 rounded-xl border border-dashed border-ink/20 p-6 text-center text-muted-foreground">{t.workspace.empty}</p> : null}
-
+      {message ? <p className="pd-notice" role="alert">{message}</p> : null}
+      {loading && places.length === 0 ? <p className="pd-subhead" role="status">{t.workspace.loading}</p> : null}
+      {!loading && places.length === 0 && readModel.retained.length === 0 ? <p className="pd-empty">{t.workspace.empty}</p> : null}
       {listedPlaces.length > 0 ? (
-        <div
-          className={`mt-6 grid min-w-0 gap-5 ${selectedPlace ? "lg:grid-cols-[minmax(0,1fr)_24rem]" : ""}`}
-          data-detail-open={selectedPlace ? "true" : "false"}
-        >
-          <div data-wishlist-table-wrapper className="min-w-0 overflow-hidden rounded-panel border border-ink/10">
-            <table className={`block w-full border-separate border-spacing-0 text-left ${showTableColumns ? "xl:table" : ""}`} aria-label={t.workspace.tableLabel}>
-              <thead className={`table w-full table-fixed bg-surface-subtle text-sm ${showTableColumns ? "xl:table-header-group" : ""}`}>
-                <tr>
-                  <th className={`px-3 py-3 font-bold ${showTableColumns ? "xl:min-w-64 xl:px-4" : ""}`} scope="col">{t.workspace.columns.place}</th>
-                  <th className={`hidden px-3 py-3 font-bold ${showTableColumns ? "xl:table-cell xl:w-44" : ""}`} scope="col">{t.workspace.columns.type}</th>
-                  <th className={`hidden px-3 py-3 font-bold ${showTableColumns ? "xl:table-cell xl:w-40" : ""}`} scope="col">{t.workspace.columns.planned}</th>
-                  {showVotes ? <th className={`w-0 p-0 ${showTableColumns ? "xl:w-48 xl:px-3 xl:py-3" : ""}`} scope="col"><span className={`sr-only ${showTableColumns ? "xl:not-sr-only" : ""}`}>{t.workspace.columns.votes}</span></th> : null}
-                </tr>
-              </thead>
-              {listedPlaces.map((place) => {
-                const available = placesById.has(place.id);
-                const tint = place.votingAvailable && place.voteCount > 0
-                  ? place.voteCount === highestVoteCount && highestVoteCount >= 2 ? "bg-accent/20" : "bg-accent/10"
-                  : "bg-surface-subtle";
-                const typeLabel = t.placeType[place.type];
-                const assignedDate = place.assignedDayId
-                  ? trip.days.find((day) => day.id === place.assignedDayId)?.date ?? t.workspace.unavailableTripDay
-                  : null;
-                const plannedLabel = assignedDate
-                  ? assignedDate
-                  : place.status === "scheduled" ? t.status.scheduled : t.workspace.notPlanned;
-                const duplicateSuggestions = duplicateSuggestionsByPlace.get(place.id) ?? [];
-                const actionStatus = duplicateSuggestions.length > 0 ? "possible-duplicate" : place.status;
-                const needsAction = actionStatus === "needs-location"
-                  || actionStatus === "possible-duplicate"
-                  || actionStatus === "provider-unavailable";
-                const repeatedName = (placeNameCounts.get(place.name) ?? 0) > 1;
-                const rowLabel = repeatedName
-                  ? t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress)
-                  : place.name;
-                const selected = selectedPlaceId === place.id;
-                return (
-                  <tbody key={place.id} data-wishlist-place={place.name} className={`block w-full ${showTableColumns ? "xl:table-row-group" : ""}`}>
-                    <tr
-                      aria-label={rowLabel}
-                      aria-current={selected ? "true" : undefined}
-                      className={`grid w-full cursor-pointer grid-cols-1 ${tint} ${selected ? "ring-2 ring-inset ring-accent-strong" : ""} ${showTableColumns ? "xl:table-row" : ""}`}
-                      onClick={(event) => {
-                        if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select")) return;
-                        openDetail(place.id);
-                      }}
-                    >
-                      <th className={`py-3 px-3 align-top ${showTableColumns ? "xl:table-cell xl:min-w-64 xl:px-4 xl:py-4" : ""}`} scope="row">
-                        <button
-                          type="button"
-                          data-place-detail-trigger={place.id}
-                          className="inline-flex min-h-11 items-start text-left text-xl font-semibold text-ink-strong underline-offset-4 outline-none hover:underline focus-visible:rounded focus-visible:ring-4 focus-visible:ring-focus/30"
-                          aria-label={t.workspace.viewDetail(place.name)}
-                          onClick={() => openDetail(place.id)}
-                        >
-                          {place.name}
-                        </button>
-                        {repeatedName ? <span className="mt-1 block text-sm font-normal text-muted-foreground">{place.address ?? t.workspace.unknownAddress}</span> : null}
-                        {available && needsAction ? (
-                          <span className="mt-1 flex w-fit items-center gap-1 rounded-full border border-ink/15 bg-surface px-2 py-1 text-xs font-bold">
-                            <StatusIcon status={actionStatus} />{statusLabel(actionStatus, t)}
-                          </span>
-                        ) : null}
-                        <p className={`mt-1 text-sm font-normal text-muted-foreground ${showTableColumns ? "xl:hidden" : ""}`}>{t.workspace.rowSummary(typeLabel, available ? plannedLabel : null)}</p>
-                      </th>
-                      <td className={`hidden px-3 py-4 align-top ${showTableColumns ? "xl:table-cell" : ""}`}>{typeLabel}</td>
-                      <td className={`hidden px-3 py-4 align-top font-semibold tabular-nums ${showTableColumns ? "xl:table-cell" : ""}`}>{available ? plannedLabel : null}</td>
-                      {showVotes ? (
-                        <td className={`align-top ${showTableColumns ? "xl:table-cell xl:px-3 xl:py-2" : ""} ${available && place.votingAvailable ? "px-3 pb-3" : showTableColumns ? "p-0 xl:p-2" : "p-0"}`}>
-                          {quickActions(place)}
-                        </td>
-                      ) : null}
-                    </tr>
-                  </tbody>
-                );
-              })}
-            </table>
-          </div>
-
-          {largeScreen && selectedPlace ? (
-            <aside className="max-h-[calc(100dvh-2rem)] self-start overflow-y-auto rounded-panel border border-ink/10 bg-surface p-5 lg:sticky lg:top-4" aria-label={t.workspace.detailTitle(selectedPlace.name)} aria-live="polite">
-              <div className="mb-4 flex items-start justify-between gap-3">
-                <h3 ref={detailTitleRef} tabIndex={-1} className="rounded font-display text-2xl outline-none focus:ring-4 focus:ring-focus/30">{t.workspace.detailTitle(selectedPlace.name)}</h3>
-                <button type="button" className="flex size-11 shrink-0 items-center justify-center rounded-lg border outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" aria-label={t.workspace.closeDetail} onClick={closeDetail}><X aria-hidden="true" className="size-4" /></button>
-              </div>
-              {placeDetail(selectedPlace)}
-            </aside>
-          ) : null}
+        <div className="pd-list" aria-label={t.workspace.tableLabel}>
+          {listedPlaces.map((place) => {
+            const available = placesById.has(place.id);
+            const assignedDate = place.assignedDayId ? trip.days.find((day) => day.id === place.assignedDayId)?.date ?? t.workspace.unavailableTripDay : null;
+            const plannedLabel = assignedDate ?? (place.status === "scheduled"
+              ? t.status.scheduled
+              : place.selectedForItinerary
+                ? t.workspace.pendingArrangement
+                : t.workspace.notPlanned);
+            const duplicates = duplicateSuggestionsByPlace.get(place.id) ?? [];
+            const actionStatus = duplicates.length > 0 ? "possible-duplicate" : place.status;
+            const needsAction = actionStatus === "needs-location" || actionStatus === "possible-duplicate" || actionStatus === "provider-unavailable";
+            const repeatedName = (placeNameCounts.get(place.name) ?? 0) > 1;
+            return (
+              <article key={place.id} data-wishlist-place={place.name} className="pd-row"
+                aria-label={repeatedName ? t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress) : place.name}
+                aria-current={selectedPlaceId === place.id ? "true" : undefined}
+                onClick={(event) => {
+                  if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select")) return;
+                  openDetail(place.id);
+                }}>
+                <div className="pd-row-main">
+                  <PlaceThumbnail photo={previews.photos.get(place.id)} loading={previews.loading} />
+                  <div className="pd-row-copy">
+                    <div className="pd-titleline">
+                      <button type="button" data-place-detail-trigger={place.id} className="pd-titlebutton" aria-label={t.workspace.viewDetail(place.name)} onClick={() => openDetail(place.id)}>{place.name}</button>
+                      <ChevronRight aria-hidden="true" className="size-4 shrink-0" />
+                    </div>
+                    <div className="pd-row-labels">
+                      <span className="pd-chip">{t.placeType[place.type]}</span>
+                      <span className="pd-state">{itineraryMembershipLabel(place, t)}</span>
+                      {available && needsAction ? <span className="pd-state"><StatusIcon status={actionStatus} />{statusLabel(actionStatus, t)}</span> : null}
+                    </div>
+                    {repeatedName ? <p className="pd-row-note">{place.address ?? t.workspace.unknownAddress}</p> : null}
+                    <p className="pd-row-note">{place.notes && place.notes !== place.address ? place.notes : repeatedName ? null : place.address}</p>
+                    <PlacePhotoCredit photo={previews.photos.get(place.id)} />
+                  </div>
+                </div>
+                <div className="pd-row-bottom">
+                  <span className="pd-state">{available ? plannedLabel : null}</span>
+                  {quickActions(place)}
+                </div>
+              </article>
+            );
+          })}
         </div>
       ) : null}
-
-      {!largeScreen && selectedPlace ? (
-        <Dialog open onOpenChange={(open) => { if (!open) closeDetail(); }}>
-          <DialogContent className="bottom-0 left-0 top-auto max-h-[85dvh] w-full max-w-none translate-x-0 translate-y-0 content-start overflow-y-auto rounded-b-none rounded-t-2xl p-5">
-            <DialogHeader>
-              <DialogTitle ref={detailTitleRef} tabIndex={-1} className="rounded pr-10 font-display text-2xl outline-none focus:ring-4 focus:ring-focus/30">{t.workspace.detailTitle(selectedPlace.name)}</DialogTitle>
-            </DialogHeader>
-            {placeDetail(selectedPlace)}
-          </DialogContent>
-        </Dialog>
+      {selectedPlace ? (
+        <PlaceDetailSheet open title={selectedPlace.name} titleRef={detailTitleRef} onClose={closeDetail} footer={
+          removalConfirmation ? <div className="pd-confirm-footer"><p>{t.workspace.confirmRemove(removalConfirmation.name)}</p>{message ? <p role="alert">{message}</p> : null}<div><button className="pd-secondary" disabled={removing} onClick={() => setRemovalConfirmation(null)}>保留地點</button><button className="pd-danger-button" disabled={removing} onClick={() => void remove(removalConfirmation)}>{removing ? "移除中…" : t.workspace.remove}</button></div></div>
+          : <div>{message ? <p className="pd-notice" role="alert">{message}</p> : null}<div className="pd-fixed-actions">{quickActions(selectedPlace)}{placesById.has(selectedPlace.id) ? <button className="pd-danger-link" disabled={removing} onClick={() => { setMessage(""); setRemovalConfirmation(selectedPlace); }}>{t.workspace.remove}</button> : null}</div></div>
+        }>
+          {placeDetail(selectedPlace)}
+        </PlaceDetailSheet>
       ) : null}
 
       <Dialog open={mergeConfirmation !== null} onOpenChange={(open) => { if (!open && !merging) setMergeConfirmation(null); }}>

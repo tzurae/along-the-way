@@ -5,6 +5,7 @@ import {
   type TripPlanResponse,
 } from "@along-the-way/contracts/day-plans";
 import { parseTripPlaceListResponse } from "@along-the-way/contracts/trip-places";
+import { CalendarDays, Check, Clock3, Route, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -108,80 +109,129 @@ export function TripPlanDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
-      <DialogContent className="h-dvh w-screen max-w-none overflow-y-auto rounded-none content-start sm:h-auto sm:max-h-[90vh] sm:w-full sm:max-w-2xl sm:rounded-xl">
-        <DialogHeader>
+      <DialogContent className="trip-plan-dialog max-[599px]:translate-x-0 max-[599px]:translate-y-0">
+        <DialogHeader className="route-page-heading">
           <DialogTitle>{t.tripPlan.title}</DialogTitle>
           <DialogDescription>{t.tripPlan.description}</DialogDescription>
         </DialogHeader>
 
-        {error ? <p role="alert" className="text-sm font-semibold text-destructive">{error}</p> : null}
-        {busy === "planning" ? <p role="status" className="text-sm">{t.tripPlan.planning}</p> : null}
+        {error ? <p role="alert" className="route-error">{error}</p> : null}
+        {busy === "planning" ? <p role="status" className="route-status">{t.tripPlan.planning}</p> : null}
 
         {plan ? (
-          <div className="grid gap-5">
-            {plan.days.length === 0 ? <p className="empty-state">{t.tripPlan.noDayGetsNewPlace}</p> : null}
-            {plan.days.map((day) => (
-              <section
-                key={day.timetable.dayId}
-                className="grid gap-2"
-                aria-label={t.tripPlan.planFor(day.timetable.date)}
-              >
-                <h3 className="font-display text-lg text-ink-strong">
-                  {dayLabels.get(day.timetable.dayId) ?? t.tripPlan.dayFallback}・{day.timetable.date}
-                </h3>
-                <p className="text-sm">
-                  <strong>{t.tripPlan.adds}</strong>{" "}
-                  {day.addedTripPlaceIds.map((id) => names.get(id) ?? id).join("、")}
-                  {"・"}
-                  {t.tripPlan.loadSummary(
-                    loadLabel(day.timetable.load.level, t.timetable),
-                    span(day.timetable.load.busyMinutes, t.timetable),
-                    span(day.timetable.load.windowMinutes, t.timetable),
-                  )}
-                </p>
-                <ol className="grid gap-2" aria-label={t.tripPlan.draftTimetableFor(day.timetable.date)}>
-                  {day.timetable.rows.map((row, index) => (
-                    <TimetableRow
-                      key={`${row.kind}-${index}`}
-                      row={row}
-                    />
-                  ))}
-                </ol>
-                {day.timetable.unscheduled.length > 0 ? (
-                  <div className="text-sm text-muted-foreground">
-                    <p>{t.tripPlan.alreadyOnDayButNotFitting}</p>
-                    <ul className="mt-1 grid gap-1">
-                      {day.timetable.unscheduled.map((place) => (
-                        <li key={place.tripPlaceId}>
-                          {place.name}（{reasonLabel(place.reason, t.timetable)}）
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
-              </section>
-            ))}
+          <div className="trip-plan-content">
+            <section className="route-summary">
+              <Route />
+              <div>
+                <strong>
+                  {plan.days.length > 0
+                    ? `${plan.days.length} 天會加入地點`
+                    : t.tripPlan.noDayGetsNewPlace}
+                </strong>
+                <span>
+                  {plan.unplaced.length > 0
+                    ? `${plan.unplaced.length} 個地點這次排不進去。`
+                    : "固定事項與已排入某一天的地點都會保留。"}
+                </span>
+              </div>
+            </section>
+
+            {plan.days.length === 0 ? <p className="route-optimal">{t.tripPlan.noDayGetsNewPlace}</p> : null}
+            <div className="trip-plan-days">
+              {plan.days.map((day) => (
+                <section
+                  key={day.timetable.dayId}
+                  className="route-version trip-plan-day"
+                  aria-label={t.tripPlan.planFor(day.timetable.date)}
+                >
+                  <header className="route-version-heading">
+                    <div>
+                      <h3>
+                        {dayLabels.get(day.timetable.dayId) ?? t.tripPlan.dayFallback}
+                        <span>{day.timetable.date}</span>
+                      </h3>
+                      <p>
+                        <CalendarDays />
+                        {t.tripPlan.adds} {day.addedTripPlaceIds.map((id) => names.get(id) ?? id).join("、")}
+                      </p>
+                    </div>
+                    <span>
+                      {t.tripPlan.loadSummary(
+                        loadLabel(day.timetable.load.level, t.timetable),
+                        span(day.timetable.load.busyMinutes, t.timetable),
+                        span(day.timetable.load.windowMinutes, t.timetable),
+                      )}
+                    </span>
+                  </header>
+                  <ol className="route-timeline" aria-label={t.tripPlan.draftTimetableFor(day.timetable.date)}>
+                    {day.timetable.rows.map((row, index) => (
+                      <TimetableRow key={`${row.kind}-${index}`} row={row} />
+                    ))}
+                  </ol>
+                  {day.timetable.unscheduled.length > 0 ? (
+                    <section className="route-unscheduled">
+                      <div className="route-unscheduled-heading">
+                        <TriangleAlert />
+                        <div>
+                          <h4>{t.tripPlan.alreadyOnDayButNotFitting}</h4>
+                          <p>沒有刪除，仍留在這一天的口袋名單。</p>
+                        </div>
+                      </div>
+                      <ul>
+                        {day.timetable.unscheduled.map((place) => (
+                          <li key={place.tripPlaceId}>
+                            <strong>{place.name}</strong>
+                            <span>{reasonLabel(place.reason, t.timetable)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  ) : null}
+                </section>
+              ))}
+            </div>
+
             {plan.unplaced.length > 0 ? (
-              <section aria-label={t.tripPlan.notAdded}>
-                <p className="font-bold">{t.tripPlan.notAdded}</p>
-                <ul className="mt-1 grid gap-1 text-sm">
+              <section className="route-unscheduled" aria-label={t.tripPlan.notAdded}>
+                <div className="route-unscheduled-heading">
+                  <TriangleAlert />
+                  <div>
+                    <h3>{t.tripPlan.notAdded}</h3>
+                    <p>這些地點沒有被刪除，仍保留在口袋名單。</p>
+                  </div>
+                </div>
+                <ul>
                   {plan.unplaced.map((place) => (
                     <li key={place.tripPlaceId}>
-                      <strong>{place.name}</strong>・{reasonLabel(place.reason, t.timetable)}
-                      {place.date ? t.tripPlan.onDate(place.date) : ""}
+                      <strong>{place.name}</strong>
+                      <span>
+                        {reasonLabel(place.reason, t.timetable)}
+                        {place.date ? t.tripPlan.onDate(place.date) : ""}
+                      </span>
                     </li>
                   ))}
                 </ul>
               </section>
             ) : null}
+
+            <div className="route-evidence" aria-label="時間資料說明">
+              <span className="route-evidence-label">時間依據</span>
+              <span className="route-evidence-chip"><Check /> 確定：固定行程與營業時間</span>
+              <span className="route-evidence-chip route-evidence-estimated">
+                <Clock3 /> 估計：路線與停留時間
+              </span>
+            </div>
           </div>
         ) : null}
 
-        <DialogFooter>
+        <DialogFooter className="route-actionbar">
           {error ? (
-            <Button variant="outline" size="lg" disabled={busy !== null} onClick={() => void draft()}>{t.tripPlan.planAgain}</Button>
+            <Button variant="outline" size="lg" disabled={busy !== null} onClick={() => void draft()}>
+              {t.tripPlan.planAgain}
+            </Button>
           ) : null}
           <Button size="lg" disabled={busy !== null || !plan || plan.days.length === 0} onClick={() => void applyPlan()}>
+            <Check />
             {busy === "saving" ? t.tripPlan.saving : t.tripPlan.useThisPlan}
           </Button>
         </DialogFooter>

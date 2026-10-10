@@ -18,6 +18,8 @@ import { parseTripResponse } from "@along-the-way/contracts/private-trips";
 import { parseTripPlaceListResponse } from "@along-the-way/contracts/trip-places";
 
 import { createApp } from "../src/app";
+import { PostgresPlaceDetailModule } from "../src/place-details/postgres-place-detail-module";
+import { packagedPhotoRoot } from "../src/place-details/photo-assets";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
 import { runMigrations } from "../src/database/migrate";
 import { seedDatabase } from "../src/database/seed";
@@ -128,6 +130,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       now,
     });
     app = createApp({
+      placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
       collaboration: new PostgresCollaborationModule(database),
       dayPlans: unrelatedDayPlanModule,
       discovery: unrelatedDiscoveryModule,

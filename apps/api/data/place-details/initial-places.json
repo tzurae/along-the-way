@@ -1,0 +1,963 @@
+{
+  "version": 1,
+  "places": [
+    {
+      "key": "kiyomizu",
+      "name": "清水寺",
+      "sections": [
+        {
+          "kind": "intro",
+          "title": "景點介紹",
+          "blocks": [
+            {
+              "text": "清水寺位於京都東山一帶，境內不只有清水舞臺，還有仁王門、三重塔、阿彌陀堂、奧之院與音羽瀑布等堂宇和景點。現存本堂於 1633 年重建，是建在音羽山斷崖上的木造建築；參觀時可以把重點放在建築結構、堂宇之間的視線，以及寺院與城市景觀的關係。",
+              "style": "paragraph",
+              "sourceIds": ["kiyomizu-map"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "sights",
+          "title": "主要看點",
+          "blocks": [
+            {
+              "text": "本堂與清水舞臺：本堂由傳統木造結構支撐，舞臺向山崖外伸出，是觀察寺院建築與東山地形關係的核心位置。",
+              "style": "bullet",
+              "sourceIds": ["kiyomizu-map"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "奧之院：位在音羽瀑布正上方，現存建築同樣於 1633 年重建，也有懸造舞臺；從此處可回望本堂一帶。",
+              "style": "bullet",
+              "sourceIds": ["kiyomizu-map"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "音羽瀑布與三重塔：瀑布是清水寺開創與寺名由來的重要場所；三重塔高約 30 公尺，現存建築於 1632 年重建，是境內醒目的地標。",
+              "style": "bullet",
+              "sourceIds": ["kiyomizu-map"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "location",
+          "title": "地址",
+          "blocks": [
+            {
+              "text": "〒605-0862 日本京都府京都市東山區清水一丁目 294。",
+              "style": "paragraph",
+              "sourceIds": ["kiyomizu-access"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "transport",
+          "title": "交通方式",
+          "blocks": [
+            {
+              "text": "從京都站可搭京都市巴士 206 或 100 系統至「五条坂」，下車後步行約 10 分鐘；從四条河原町或京阪祇園四条站可搭 207 系統至「清水道」，下車後步行約 10 分鐘。巴士路線與行車時間可能調整，出發前仍需查看當日交通資訊。",
+              "style": "bullet",
+              "sourceIds": ["kiyomizu-access"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "從京阪「清水五条」站步行約 25 分鐘。官網提醒，進入境內應走清水坂、由仁王門前入山，或走茶碗坂上方的防災道路入口；地圖服務有時會導向無法入山的路線。",
+              "style": "bullet",
+              "sourceIds": ["kiyomizu-access"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "hours",
+          "title": "開放時間參考",
+          "blocks": [
+            {
+              "text": "官網 2026 年時段表列示：9 月 1 日至 11 月 20 日為 06:00–18:00。這是有年份的公開時段參考，不保證其他年份或實際到訪日完全相同。",
+              "style": "bullet",
+              "sourceIds": ["kiyomizu-daytime-autumn-2026"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "2026 年秋季夜間特別參觀列為 11 月 21 日至 11 月 30 日，延長至 21:30，21:00 停止受理。相簿中的夜景是歷史照片，不能據此推定任何日期都有夜間開放。",
+              "style": "bullet",
+              "sourceIds": ["kiyomizu-night-autumn-2026"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "fees",
+          "title": "門票參考",
+          "blocks": [
+            {
+              "text": "JR 東海「そうだ 京都、行こう。」景點頁在本次查核時列示參觀費 500 日圓；該頁也要求向設施確認最新資訊。寺院官網的交通與 FAQ 頁沒有列出一般票的完整現行金額，因此請在出發前再次確認。",
+              "style": "bullet",
+              "sourceIds": ["kiyomizu-fee-reference"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "寺院 FAQ 列示一般參觀費沒有團體折扣，並另有教育行程引率教師及持障礙者手帳者的免票條件；是否符合資格以及當日所需文件，以寺院最新規定為準。",
+              "style": "bullet",
+              "sourceIds": ["kiyomizu-faq"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "notices",
+          "title": "參觀注意事項",
+          "blocks": [
+            {
+              "text": "境內禁止使用無人機、單腳架與三腳架拍攝；不要長時間占用同一位置，或阻擋其他參拜者通行。未經許可的營利或營業相關拍攝也不被允許。",
+              "style": "bullet",
+              "sourceIds": ["kiyomizu-faq"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "除有蓋的水壺或瓶裝飲料外，境內禁止攜入飲食與邊走邊吃；垃圾需自行帶走，境內全面禁煙。",
+              "style": "bullet",
+              "sourceIds": ["kiyomizu-faq"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "使用輪椅或嬰兒車者可先查看官網的無障礙參拜路線；寺院沒有提供輪椅租借。櫻花與紅葉見頃受天候影響，歷史照片不代表當日景況。",
+              "style": "bullet",
+              "sourceIds": ["kiyomizu-faq"],
+              "certainty": "sourced"
+            }
+          ]
+        }
+      ],
+      "sources": [
+        {
+          "id": "kiyomizu-map",
+          "title": "音羽山清水寺：境內案內",
+          "url": "https://www.kiyomizudera.or.jp/map.php",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": null,
+          "validFrom": null,
+          "validUntil": null,
+          "expiresAt": null
+        },
+        {
+          "id": "kiyomizu-access",
+          "title": "音羽山清水寺：交通與入山方式",
+          "url": "https://www.kiyomizudera.or.jp/access.php",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": null,
+          "validFrom": null,
+          "validUntil": null,
+          "expiresAt": null
+        },
+        {
+          "id": "kiyomizu-daytime-autumn-2026",
+          "title": "音羽山清水寺：2026 年 9 月至 11 月 20 日參觀時段",
+          "url": "https://www.kiyomizudera.or.jp/access.php",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": null,
+          "validFrom": "2026-09-01",
+          "validUntil": "2026-11-20",
+          "expiresAt": null
+        },
+        {
+          "id": "kiyomizu-night-autumn-2026",
+          "title": "音羽山清水寺：2026 年秋季夜間特別參觀時段",
+          "url": "https://www.kiyomizudera.or.jp/access.php",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": null,
+          "validFrom": "2026-11-21",
+          "validUntil": "2026-11-30",
+          "expiresAt": null
+        },
+        {
+          "id": "kiyomizu-faq",
+          "title": "音羽山清水寺：常見問題與參拜規則",
+          "url": "https://www.kiyomizudera.or.jp/faq.php",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": null,
+          "validFrom": null,
+          "validUntil": null,
+          "expiresAt": null
+        },
+        {
+          "id": "kiyomizu-fee-reference",
+          "title": "JR 東海「そうだ 京都、行こう。」：清水寺景點資訊",
+          "url": "https://souda-kyoto.jp/guide/spot/kiyomizudera.html",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": null,
+          "validFrom": null,
+          "validUntil": null,
+          "expiresAt": null
+        }
+      ],
+      "photos": [
+        {
+          "id": "commons-53618736",
+          "title": "清水寺三重塔夜景",
+          "description": "2016 年 11 月 18 日拍攝的清水寺三重塔夜間影像。這是歷史景色，不代表目前夜間開放日期、燈光安排或紅葉狀況。",
+          "sourceName": "Wikimedia Commons",
+          "sourceUrl": "https://commons.wikimedia.org/wiki/File:Kiyomizu-dera,_Kyoto,_November_2016_-07.jpg",
+          "fileSourceUrl": "https://upload.wikimedia.org/wikipedia/commons/6/6b/Kiyomizu-dera%2C_Kyoto%2C_November_2016_-07.jpg",
+          "author": "Martin Falbisoner",
+          "authorUrl": "https://commons.wikimedia.org/wiki/User:Martin_Falbisoner",
+          "creditText": "Martin Falbisoner，作品來源 Wikimedia Commons，CC BY-SA 4.0",
+          "licenseName": "Creative Commons Attribution-ShareAlike 4.0 International",
+          "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+          "capturedAt": "2016-11-18",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "verificationUrl": "https://commons.wikimedia.org/w/index.php?title=File:Kiyomizu-dera,_Kyoto,_November_2016_-07.jpg&oldid=824728699",
+          "locationEvidence": "作品頁說明指向京都清水寺，物件座標為 34.995000, 135.785000，分類明確列為清水寺三重塔夜間影像；頁面作者欄記載 Martin Falbisoner 為自行創作。",
+          "changes": "採用 Wikimedia Commons 產生的 960×1280 與 250×333 JPEG 等比例縮放版本，下載後未再編修。清單預覽可由介面以 CSS 居中裁切顯示；放大檢視使用完整構圖。",
+          "notices": [
+            "使用時須適當署名、連結授權條款並標示修改；若另行改作，須依 CC BY-SA 4.0 以相同授權分享。",
+            "照片為 2016 年歷史影像，不代表查閱或到訪當日景觀。Wikimedia Commons 也不保證所有權利資料無誤，其他非著作權限制仍可能適用。"
+          ],
+          "originalWidth": 2942,
+          "originalHeight": 3922,
+          "image": {
+            "filename": "84a515a6d78255026b497c2a57e32bf3cfb7d5874ffc56c8b9e8f871838093c5.jpg",
+            "sha256": "84a515a6d78255026b497c2a57e32bf3cfb7d5874ffc56c8b9e8f871838093c5",
+            "width": 960,
+            "height": 1280,
+            "mediaType": "image/jpeg"
+          },
+          "thumbnail": {
+            "filename": "556e998aeb41c4a1ac5ac6a731b0298bb97d848864c8b4f35ac4ea31b3e11782.jpg",
+            "sha256": "556e998aeb41c4a1ac5ac6a731b0298bb97d848864c8b4f35ac4ea31b3e11782",
+            "width": 250,
+            "height": 333,
+            "mediaType": "image/jpeg"
+          }
+        },
+        {
+          "id": "commons-53593907",
+          "title": "從奧之院方向望向清水寺本堂",
+          "description": "2016 年 11 月 16 日從奧之院方向拍攝的清水寺本堂與舞臺秋景；紅葉色彩只反映拍攝當時。",
+          "sourceName": "Wikimedia Commons",
+          "sourceUrl": "https://commons.wikimedia.org/wiki/File:Kiyomizu-dera,_Kyoto,_November_2016_-01.jpg",
+          "fileSourceUrl": "https://upload.wikimedia.org/wikipedia/commons/8/83/Kiyomizu-dera%2C_Kyoto%2C_November_2016_-01.jpg",
+          "author": "Martin Falbisoner",
+          "authorUrl": "https://commons.wikimedia.org/wiki/User:Martin_Falbisoner",
+          "creditText": "Martin Falbisoner，作品來源 Wikimedia Commons，CC BY-SA 4.0",
+          "licenseName": "Creative Commons Attribution-ShareAlike 4.0 International",
+          "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+          "capturedAt": "2016-11-16",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "verificationUrl": "https://commons.wikimedia.org/w/index.php?title=File:Kiyomizu-dera,_Kyoto,_November_2016_-01.jpg&oldid=1017025418",
+          "locationEvidence": "作品頁說明與分類明確標示清水寺本堂秋景及從奧之院方向所見視角，物件座標為 34.995000, 135.785000；頁面作者欄記載 Martin Falbisoner 為自行創作。",
+          "changes": "採用 Wikimedia Commons 產生的 1280×788 與 330×203 JPEG 等比例縮放版本，下載後未再編修。原始 Commons 檔案歷史已記載作者先前的裁切與色彩調整；本產品未追加像素編修。清單預覽可由介面以 CSS 居中裁切顯示。",
+          "notices": [
+            "使用時須適當署名、連結授權條款並標示修改；若另行改作，須依 CC BY-SA 4.0 以相同授權分享。",
+            "照片為 2016 年歷史影像，不代表查閱或到訪當日紅葉狀況。"
+          ],
+          "originalWidth": 5852,
+          "originalHeight": 3601,
+          "image": {
+            "filename": "ac02cc5c3cd33820485bb2f7b5b91283c69325cd02fe4ae3d35106fc9a3241d2.jpg",
+            "sha256": "ac02cc5c3cd33820485bb2f7b5b91283c69325cd02fe4ae3d35106fc9a3241d2",
+            "width": 1280,
+            "height": 788,
+            "mediaType": "image/jpeg"
+          },
+          "thumbnail": {
+            "filename": "93b6758736eb5fc0da12f82e8fef8d6942616b3dba2e425cc8fae9755f13a6a8.jpg",
+            "sha256": "93b6758736eb5fc0da12f82e8fef8d6942616b3dba2e425cc8fae9755f13a6a8",
+            "width": 330,
+            "height": 203,
+            "mediaType": "image/jpeg"
+          }
+        },
+        {
+          "id": "commons-93859358",
+          "title": "清水寺阿彌陀堂內的阿彌陀如來像",
+          "description": "2019 年 6 月 9 日拍攝的清水寺阿彌陀堂內部與金色阿彌陀如來坐像。",
+          "sourceName": "Wikimedia Commons",
+          "sourceUrl": "https://commons.wikimedia.org/wiki/File:Interior_view_of_the_Buddhist_temple_Amidado_with_a_golden_statue_of_the_Buddha_seated_Kiyomizu-dera_Kyoto_Japan.jpg",
+          "fileSourceUrl": "https://upload.wikimedia.org/wikipedia/commons/f/f4/Interior_view_of_the_Buddhist_temple_Amidado_with_a_golden_statue_of_the_Buddha_seated_Kiyomizu-dera_Kyoto_Japan.jpg",
+          "author": "Basile Morin",
+          "authorUrl": "https://commons.wikimedia.org/wiki/User:Basile_Morin",
+          "creditText": "Basile Morin，作品來源 Wikimedia Commons，CC BY-SA 4.0",
+          "licenseName": "Creative Commons Attribution-ShareAlike 4.0 International",
+          "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+          "capturedAt": "2019-06-09",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "verificationUrl": "https://commons.wikimedia.org/w/index.php?title=File:Interior_view_of_the_Buddhist_temple_Amidado_with_a_golden_statue_of_the_Buddha_seated_Kiyomizu-dera_Kyoto_Japan.jpg&oldid=1283326472",
+          "locationEvidence": "作品頁逐字說明為京都清水寺阿彌陀堂內部，拍攝座標為 34.994670, 135.785543，分類亦指向清水寺阿彌陀堂的阿彌陀如來像；作者欄為 Basile Morin 的自行創作。",
+          "changes": "採用 Wikimedia Commons 產生的 1280×1024 與 330×264 JPEG 等比例縮放版本，下載後未再編修。清單預覽可由介面以 CSS 居中裁切顯示；放大檢視使用完整構圖。",
+          "notices": [
+            "使用時須適當署名、連結授權條款並標示修改；若另行改作，須依 CC BY-SA 4.0 以相同授權分享。",
+            "照片拍攝於 2019 年，不代表目前堂內陳設或現場攝影規則。到訪時應遵守寺院當日指示。"
+          ],
+          "originalWidth": 5025,
+          "originalHeight": 4020,
+          "image": {
+            "filename": "0b24b8782c66046359f53f0b555455c42da17e82b8dfab9338fdebbda1137c13.jpg",
+            "sha256": "0b24b8782c66046359f53f0b555455c42da17e82b8dfab9338fdebbda1137c13",
+            "width": 1280,
+            "height": 1024,
+            "mediaType": "image/jpeg"
+          },
+          "thumbnail": {
+            "filename": "b54bd1ba7050d40afb412161ab1f93e4f15a222bedb90f3fd22be0522d7ff1ef.jpg",
+            "sha256": "b54bd1ba7050d40afb412161ab1f93e4f15a222bedb90f3fd22be0522d7ff1ef",
+            "width": 330,
+            "height": 264,
+            "mediaType": "image/jpeg"
+          }
+        }
+      ]
+    },
+    {
+      "key": "tofukuji",
+      "name": "東福寺",
+      "sections": [
+        {
+          "kind": "intro",
+          "title": "景點介紹",
+          "blocks": [
+            {
+              "text": "東福寺由攝政九條道家發願興建，自 1236 年起歷時約 19 年完成。參觀重點可以分成本坊庭園、通天橋與開山堂，以及三門、禪堂等境內建築；即使不在紅葉季，也能把時間留給禪寺建築與四面庭園的構成。",
+              "style": "paragraph",
+              "sourceIds": ["tofukuji-history", "tofukuji-guide"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "sights",
+          "title": "主要看點",
+          "blocks": [
+            {
+              "text": "東福寺本坊庭園：重森三玲於 1939 年完成方丈四周的東、南、西、北四庭。北庭以苔與板石形成逐漸疏開的市松紋，南庭以石組與苔山表現四座仙島與京都五山。",
+              "style": "bullet",
+              "sourceIds": ["tofukuji-honbo"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "通天橋：橋廊連接方丈與開山堂，跨過洗玉澗溪谷；沿途景觀會隨新綠與紅葉季節改變。",
+              "style": "bullet",
+              "sourceIds": ["tofukuji-guide"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "三門與禪堂：三門是國寶，禪堂是 1347 年重建的重要文化財。官網介紹的是建築與文化財身分，是否開放內部仍應另看當日公告。",
+              "style": "bullet",
+              "sourceIds": ["tofukuji-guide"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "location",
+          "title": "地址",
+          "blocks": [
+            {
+              "text": "日本京都府京都市東山區本町十五丁目 778。",
+              "style": "paragraph",
+              "sourceIds": ["tofukuji-access"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "transport",
+          "title": "交通方式",
+          "blocks": [
+            {
+              "text": "搭 JR 奈良線或京阪本線至「東福寺」站，下車後步行約 10 分鐘；從京阪「鳥羽街道」站步行也約 10 分鐘。",
+              "style": "bullet",
+              "sourceIds": ["tofukuji-access"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "搭京都市巴士至「東福寺」站後步行約 4 分鐘。官網提醒秋季人潮密集，優先使用公共交通；各起點所列車程只是官網參考，不是即時路況。",
+              "style": "bullet",
+              "sourceIds": ["tofukuji-access"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "hours",
+          "title": "開放時間參考",
+          "blocks": [
+            {
+              "text": "官網查核時列示：4 月 1 日至 10 月 31 日，以及 11 月 1 日至 11 月 13 日，參觀時段為 09:00–16:00，16:00 停止受理，16:30 閉門。公開時間可能更新，出發前請重新確認。",
+              "style": "bullet",
+              "sourceIds": ["tofukuji-guide"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "官網目前把 11 月 14 日至 12 月 6 日列為秋季時段：通天橋 08:30 開放，本坊庭園 09:00 開放，兩者均 16:00 停止受理、16:30 閉門；12 月 7 日至翌年 3 月 31 日為 09:00–15:30，16:00 閉門。秋季日期可能逐年調整。",
+              "style": "bullet",
+              "sourceIds": ["tofukuji-guide"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "fees",
+          "title": "門票參考",
+          "blocks": [
+            {
+              "text": "東福寺本坊庭園成人票在官網列為 500 日圓，並明示此價格適用至 2026 年 10 月 31 日；這不是其後日期的票價保證。",
+              "style": "bullet",
+              "sourceIds": ["tofukuji-fee-before"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "官網公告本坊庭園成人票自 2026 年 11 月 1 日起調整為 600 日圓。實際到訪前仍需核對是否有後續修正。",
+              "style": "bullet",
+              "sourceIds": ["tofukuji-fee-after"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "通常期間通天橋與開山堂成人 600 日圓，本坊庭園與通天橋共通票成人 1,000 日圓；官網列示的 11 月 14 日至 12 月 6 日秋季期間，通天橋與開山堂成人 1,000 日圓，且不販售共通票。庭園與通天橋是不同參觀區域，購票前應先確認想看的範圍。",
+              "style": "bullet",
+              "sourceIds": ["tofukuji-guide"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "notices",
+          "title": "參觀注意事項",
+          "blocks": [
+            {
+              "text": "參觀後不可再次入場。境內請避免飲食，也不要使用三腳架拍攝；未經許可的商業拍攝不被允許。",
+              "style": "bullet",
+              "sourceIds": ["tofukuji-guide"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "秋季特別公開期間，寺方可能因人流管理而請遊客停止在通天橋或臥雲橋上拍攝；應以現場指示為準。",
+              "style": "bullet",
+              "sourceIds": ["tofukuji-guide"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "官網交通頁列出紅葉期間 10 月 25 日至 12 月 10 日停車場關閉。交通管制與停車狀況可能調整，秋季到訪宜在出發前確認最新公告。",
+              "style": "bullet",
+              "sourceIds": ["tofukuji-access"],
+              "certainty": "sourced"
+            }
+          ]
+        }
+      ],
+      "sources": [
+        {
+          "id": "tofukuji-history",
+          "title": "東福寺：創建與沿革",
+          "url": "https://tofukuji.jp/history/",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": "2022-04-26T05:17:05Z",
+          "validFrom": null,
+          "validUntil": null,
+          "expiresAt": null
+        },
+        {
+          "id": "tofukuji-guide",
+          "title": "東福寺：參觀指南、時間、費用與注意事項",
+          "url": "https://tofukuji.jp/guide/",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": "2026-07-08T07:52:27Z",
+          "validFrom": null,
+          "validUntil": null,
+          "expiresAt": null
+        },
+        {
+          "id": "tofukuji-fee-before",
+          "title": "東福寺：本坊庭園成人票 2026 年調整前價格",
+          "url": "https://tofukuji.jp/guide/",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": "2026-07-08T07:52:27Z",
+          "validFrom": null,
+          "validUntil": "2026-10-31",
+          "expiresAt": null
+        },
+        {
+          "id": "tofukuji-fee-after",
+          "title": "東福寺：2026 年 11 月 1 日起本坊庭園成人票",
+          "url": "https://tofukuji.jp/guide/",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": "2026-07-08T07:52:27Z",
+          "validFrom": "2026-11-01",
+          "validUntil": null,
+          "expiresAt": null
+        },
+        {
+          "id": "tofukuji-access",
+          "title": "東福寺：交通指南",
+          "url": "https://tofukuji.jp/access/",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": "2021-10-28T07:31:47Z",
+          "validFrom": null,
+          "validUntil": null,
+          "expiresAt": null
+        },
+        {
+          "id": "tofukuji-honbo",
+          "title": "東福寺：本坊庭園（方丈）",
+          "url": "https://tofukuji.jp/guide/honbo/",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": "2021-11-10T09:30:42Z",
+          "validFrom": null,
+          "validUntil": null,
+          "expiresAt": null
+        }
+      ],
+      "photos": [
+        {
+          "id": "commons-61103282",
+          "title": "東福寺本坊南庭與庫裏",
+          "description": "2017 年 7 月 12 日拍攝的東福寺本坊庭園南庭，畫面包含石組、白砂與庫裏一帶。",
+          "sourceName": "Wikimedia Commons",
+          "sourceUrl": "https://commons.wikimedia.org/wiki/File:Honbo_Garden,_Tofukuji_17.jpg",
+          "fileSourceUrl": "https://upload.wikimedia.org/wikipedia/commons/c/cb/Honbo_Garden%2C_Tofukuji_17.jpg",
+          "author": "Immanuel Giel",
+          "authorUrl": "https://commons.wikimedia.org/wiki/User:Immanuel_Giel",
+          "creditText": "Immanuel Giel，作品來源 Wikimedia Commons，CC BY-SA 4.0",
+          "licenseName": "Creative Commons Attribution-ShareAlike 4.0 International",
+          "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+          "capturedAt": "2017-07-12",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "verificationUrl": "https://commons.wikimedia.org/w/index.php?title=File:Honbo_Garden,_Tofukuji_17.jpg&oldid=1207456241",
+          "locationEvidence": "作品頁說明為 Honbo Garden, Tofukuji，分類明確列為東福寺南庭與庫裏；作者欄記載 Immanuel Giel 為自行創作。",
+          "changes": "採用 Wikimedia Commons 產生的 1280×960 與 330×247 JPEG 等比例縮放版本，下載後未再編修。清單預覽可由介面以 CSS 居中裁切顯示；放大檢視使用完整構圖。",
+          "notices": [
+            "使用時須適當署名、連結授權條款並標示修改；若另行改作，須依 CC BY-SA 4.0 以相同授權分享。",
+            "照片拍攝於 2017 年，不代表目前植栽、維護或開放範圍。"
+          ],
+          "originalWidth": 3072,
+          "originalHeight": 2304,
+          "image": {
+            "filename": "30ee1d528e7c6632f3c29d4137407b378c352911d49dfb4d73b24511dd91465a.jpg",
+            "sha256": "30ee1d528e7c6632f3c29d4137407b378c352911d49dfb4d73b24511dd91465a",
+            "width": 1280,
+            "height": 960,
+            "mediaType": "image/jpeg"
+          },
+          "thumbnail": {
+            "filename": "a6d5b50552ef066857f2d667e0b7396a01cf4096749c59d3f2c0e52f5ee87c79.jpg",
+            "sha256": "a6d5b50552ef066857f2d667e0b7396a01cf4096749c59d3f2c0e52f5ee87c79",
+            "width": 330,
+            "height": 247,
+            "mediaType": "image/jpeg"
+          }
+        },
+        {
+          "id": "commons-61103283",
+          "title": "東福寺本坊南庭的另一視角",
+          "description": "2017 年 7 月 12 日拍攝的東福寺本坊南庭，以較低視角呈現石組與白砂。",
+          "sourceName": "Wikimedia Commons",
+          "sourceUrl": "https://commons.wikimedia.org/wiki/File:Honbo_Garden,_Tofukuji_18.jpg",
+          "fileSourceUrl": "https://upload.wikimedia.org/wikipedia/commons/f/f7/Honbo_Garden%2C_Tofukuji_18.jpg",
+          "author": "Immanuel Giel",
+          "authorUrl": "https://commons.wikimedia.org/wiki/User:Immanuel_Giel",
+          "creditText": "Immanuel Giel，作品來源 Wikimedia Commons，CC BY-SA 4.0",
+          "licenseName": "Creative Commons Attribution-ShareAlike 4.0 International",
+          "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+          "capturedAt": "2017-07-12",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "verificationUrl": "https://commons.wikimedia.org/w/index.php?title=File:Honbo_Garden,_Tofukuji_18.jpg&oldid=1129590252",
+          "locationEvidence": "作品頁說明為 Honbo Garden, Tofukuji，分類明確列為東福寺南庭；作者欄記載 Immanuel Giel 為自行創作。",
+          "changes": "採用 Wikimedia Commons 產生的 1280×960 與 330×247 JPEG 等比例縮放版本，下載後未再編修。清單預覽可由介面以 CSS 居中裁切顯示；放大檢視使用完整構圖。",
+          "notices": [
+            "使用時須適當署名、連結授權條款並標示修改；若另行改作，須依 CC BY-SA 4.0 以相同授權分享。",
+            "照片拍攝於 2017 年，不代表目前植栽、維護或開放範圍。"
+          ],
+          "originalWidth": 3072,
+          "originalHeight": 2304,
+          "image": {
+            "filename": "290e2c38b6cba0dcbc659dd407a3584e0dc3ebfe54746c63c85f8129dc4c4886.jpg",
+            "sha256": "290e2c38b6cba0dcbc659dd407a3584e0dc3ebfe54746c63c85f8129dc4c4886",
+            "width": 1280,
+            "height": 960,
+            "mediaType": "image/jpeg"
+          },
+          "thumbnail": {
+            "filename": "3f572376d7a9c9fa6d374ab24d5bf383a23c9efaf5e43878492481cf548f8070.jpg",
+            "sha256": "3f572376d7a9c9fa6d374ab24d5bf383a23c9efaf5e43878492481cf548f8070",
+            "width": 330,
+            "height": 247,
+            "mediaType": "image/jpeg"
+          }
+        },
+        {
+          "id": "commons-61103303",
+          "title": "東福寺本坊西庭",
+          "description": "2017 年 7 月 12 日拍攝的東福寺本坊西庭，呈現以杜鵑修剪與白砂構成的大市松紋。",
+          "sourceName": "Wikimedia Commons",
+          "sourceUrl": "https://commons.wikimedia.org/wiki/File:Honbo_Garden,_Tofukuji_35.jpg",
+          "fileSourceUrl": "https://upload.wikimedia.org/wikipedia/commons/4/4b/Honbo_Garden%2C_Tofukuji_35.jpg",
+          "author": "Immanuel Giel",
+          "authorUrl": "https://commons.wikimedia.org/wiki/User:Immanuel_Giel",
+          "creditText": "Immanuel Giel，作品來源 Wikimedia Commons，CC BY-SA 4.0",
+          "licenseName": "Creative Commons Attribution-ShareAlike 4.0 International",
+          "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+          "capturedAt": "2017-07-12",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "verificationUrl": "https://commons.wikimedia.org/w/index.php?title=File:Honbo_Garden,_Tofukuji_35.jpg&oldid=1086177786",
+          "locationEvidence": "作品頁說明為 Honbo Garden, Tofukuji，分類明確列為東福寺西庭；作者欄記載 Immanuel Giel 為自行創作。",
+          "changes": "採用 Wikimedia Commons 產生的 1280×960 與 330×247 JPEG 等比例縮放版本，下載後未再編修。清單預覽可由介面以 CSS 居中裁切顯示；放大檢視使用完整構圖。",
+          "notices": [
+            "使用時須適當署名、連結授權條款並標示修改；若另行改作，須依 CC BY-SA 4.0 以相同授權分享。",
+            "照片拍攝於 2017 年，不代表目前植栽、維護或開放範圍。"
+          ],
+          "originalWidth": 3072,
+          "originalHeight": 2304,
+          "image": {
+            "filename": "5847b4fef18f15feb778c14c23447839be8ebf4671012b02801e1a1f6a8b3d20.jpg",
+            "sha256": "5847b4fef18f15feb778c14c23447839be8ebf4671012b02801e1a1f6a8b3d20",
+            "width": 1280,
+            "height": 960,
+            "mediaType": "image/jpeg"
+          },
+          "thumbnail": {
+            "filename": "9b7e75dae19508dfac71bfab3c38dce6e2ecab52270b2d7390eec36c63600ee7.jpg",
+            "sha256": "9b7e75dae19508dfac71bfab3c38dce6e2ecab52270b2d7390eec36c63600ee7",
+            "width": 330,
+            "height": 247,
+            "mediaType": "image/jpeg"
+          }
+        }
+      ]
+    },
+    {
+      "key": "eikando",
+      "name": "永觀堂",
+      "sections": [
+        {
+          "kind": "intro",
+          "title": "景點介紹",
+          "blocks": [
+            {
+              "text": "永觀堂的正式寺名是禪林寺，通稱來自第七世永觀律師。寺院以回首阿彌陀本尊與秋季紅葉聞名，參觀內容包含多處堂宇與庭園；可以把重點放在本尊、山坡上的建築動線，以及池泉與季節植栽，而不只把它視為單一賞楓拍照點。",
+              "style": "paragraph",
+              "sourceIds": ["eikando-overview", "eikando-mikaeri"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "sights",
+          "title": "主要看點",
+          "blocks": [
+            {
+              "text": "回首阿彌陀：永觀堂本尊是一尊高 77 公分、回首姿態的阿彌陀如來立像，作品年代約為平安後期至鎌倉初期。",
+              "style": "bullet",
+              "sourceIds": ["eikando-mikaeri"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "諸堂與庭園：一般期間可參觀多處堂宇與庭園，但畫仙堂、庫裏、浴室與永觀堂會館不在一般參觀範圍內；法會或其他行事也可能使部分堂宇暫停開放。",
+              "style": "bullet",
+              "sourceIds": ["eikando-guide"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "多寶塔：秋季寺寶展公告提醒，多寶塔可能因天候或人潮關閉；不要把照片中的可見範圍當成到訪日一定能進入的保證。",
+              "style": "bullet",
+              "sourceIds": ["eikando-autumn-day-2026"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "location",
+          "title": "地址",
+          "blocks": [
+            {
+              "text": "〒606-8445 日本京都府京都市左京區永觀堂町 48。",
+              "style": "paragraph",
+              "sourceIds": ["eikando-address-publication"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "transport",
+          "title": "交通方式",
+          "blocks": [
+            {
+              "text": "從 JR 京都站搭京都市巴士 5 系統，在「南禅寺永観堂道」站下車，步行約 3 分鐘。",
+              "style": "bullet",
+              "sourceIds": ["eikando-access"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "地下鐵東西線「蹴上」站步行約 15 分鐘；從京阪「神宮丸太町」站可搭 204 或 93 系統，在「東天王町」下車後步行約 8 分鐘。所列時間是官網步行參考，不是即時路線結果。",
+              "style": "bullet",
+              "sourceIds": ["eikando-access"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "hours",
+          "title": "開放時間參考",
+          "blocks": [
+            {
+              "text": "秋季寺寶展以外的一般期間，官網查核時列為全年無休，09:00–16:00 受理，17:00 閉門；寺內行事可能限制部分堂宇。這是公開資訊參考，出發前仍須確認。",
+              "style": "bullet",
+              "sourceIds": ["eikando-guide"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "2026 年秋季寺寶展列為 11 月 11 日至 12 月 6 日，日間 09:00–16:00 受理、17:00 閉門。此期間之外不能沿用活動時段。",
+              "style": "bullet",
+              "sourceIds": ["eikando-autumn-day-2026"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "2026 年夜間點燈列為 11 月 20 日至 12 月 6 日，17:30–20:30 受理、21:00 閉門。相簿中的秋夜照片是歷史影像，不能用來推定其他日期也有點燈。",
+              "style": "bullet",
+              "sourceIds": ["eikando-autumn-night-2026"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "fees",
+          "title": "門票參考",
+          "blocks": [
+            {
+              "text": "一般期間個人票在官網查核時列為：一般 1,000 日圓、大學或專門學校生 800 日圓、中高校生 600 日圓、小學生 200 日圓。這些是查核時的公開金額，不是永久保證。",
+              "style": "bullet",
+              "sourceIds": ["eikando-guide"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "2026 年秋季寺寶展一般個人票列為 1,500 日圓，適用於 11 月 11 日至 12 月 6 日；活動日期以外不要沿用此票價。",
+              "style": "bullet",
+              "sourceIds": ["eikando-autumn-day-2026"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "2026 年夜間點燈中高校生以上列為 1,000 日圓，適用於 11 月 20 日至 12 月 6 日。日間寺寶展與夜間點燈採清場入替，不能持日間票連續參觀至夜間。",
+              "style": "bullet",
+              "sourceIds": ["eikando-autumn-night-2026"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "notices",
+          "title": "參觀注意事項",
+          "blocks": [
+            {
+              "text": "堂內文化財禁止攝影；境內禁止使用單腳架與三腳架，堂內禁止使用自拍棒。境內禁止飲食、吸煙與攜帶寵物。",
+              "style": "bullet",
+              "sourceIds": ["eikando-guide"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "寺方請參觀者自備鞋袋或塑膠袋，以減少一次性塑膠垃圾。寺寶展與點燈票在當天購買，且只在當日有效。",
+              "style": "bullet",
+              "sourceIds": ["eikando-autumn-day-2026", "eikando-autumn-night-2026"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "2026 年 11 月 11 日至 12 月 6 日，官網列示臥龍廊停止通行、千佛堂關閉；多寶塔也可能受天候與人潮影響。這些限制有明確活動期間，其他日期仍應以最新公告為準。",
+              "style": "bullet",
+              "sourceIds": ["eikando-autumn-day-2026"],
+              "certainty": "sourced"
+            }
+          ]
+        }
+      ],
+      "sources": [
+        {
+          "id": "eikando-overview",
+          "title": "永觀堂禪林寺：寺院介紹",
+          "url": "https://www.eikando.or.jp/eikando.html",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": null,
+          "validFrom": null,
+          "validUntil": null,
+          "expiresAt": null
+        },
+        {
+          "id": "eikando-mikaeri",
+          "title": "永觀堂禪林寺：回首阿彌陀",
+          "url": "https://www.eikando.or.jp/mikaeriamida.html",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": null,
+          "validFrom": null,
+          "validUntil": null,
+          "expiresAt": null
+        },
+        {
+          "id": "eikando-address-publication",
+          "title": "永觀堂禪林寺官方刊物：寺院地址",
+          "url": "https://www.eikando.or.jp/mikaeri/2021.pdf",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": null,
+          "validFrom": null,
+          "validUntil": null,
+          "expiresAt": null
+        },
+        {
+          "id": "eikando-access",
+          "title": "永觀堂禪林寺：交通指南",
+          "url": "https://www.eikando.or.jp/keiroannai.html",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": null,
+          "validFrom": null,
+          "validUntil": null,
+          "expiresAt": null
+        },
+        {
+          "id": "eikando-guide",
+          "title": "永觀堂禪林寺：一般參觀指南",
+          "url": "https://www.eikando.or.jp/haikan.html",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": null,
+          "validFrom": null,
+          "validUntil": null,
+          "expiresAt": null
+        },
+        {
+          "id": "eikando-autumn-day-2026",
+          "title": "永觀堂禪林寺：2026 年秋季寺寶展",
+          "url": "https://www.eikando.or.jp/haikan.html",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": null,
+          "validFrom": "2026-11-11",
+          "validUntil": "2026-12-06",
+          "expiresAt": null
+        },
+        {
+          "id": "eikando-autumn-night-2026",
+          "title": "永觀堂禪林寺：2026 年夜間點燈",
+          "url": "https://www.eikando.or.jp/haikan.html",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "publishedAt": null,
+          "validFrom": "2026-11-20",
+          "validUntil": "2026-12-06",
+          "expiresAt": null
+        }
+      ],
+      "photos": [
+        {
+          "id": "commons-53849698",
+          "title": "永觀堂放生池秋景",
+          "description": "2016 年 11 月 22 日拍攝的永觀堂放生池、庭園與秋季紅葉。照片反映拍攝當時，不代表其他日期的葉色。",
+          "sourceName": "Wikimedia Commons",
+          "sourceUrl": "https://commons.wikimedia.org/wiki/File:Eikan-do_Zenrin-ji,_November_2016_-03.jpg",
+          "fileSourceUrl": "https://upload.wikimedia.org/wikipedia/commons/4/4a/Eikan-do_Zenrin-ji%2C_November_2016_-03.jpg",
+          "author": "Martin Falbisoner",
+          "authorUrl": "https://commons.wikimedia.org/wiki/User:Martin_Falbisoner",
+          "creditText": "Martin Falbisoner，作品來源 Wikimedia Commons，CC BY-SA 4.0",
+          "licenseName": "Creative Commons Attribution-ShareAlike 4.0 International",
+          "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+          "capturedAt": "2016-11-22",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "verificationUrl": "https://commons.wikimedia.org/w/index.php?title=File:Eikan-do_Zenrin-ji,_November_2016_-03.jpg&oldid=1225427615",
+          "locationEvidence": "作品頁說明為京都 Eikan-do Zenrin-ji，物件座標為 35.014525, 135.795292，分類明確列為永觀堂放生池秋景；作者欄為 Martin Falbisoner 的自行創作。",
+          "changes": "採用 Wikimedia Commons 產生的 1280×853 與 330×220 JPEG 等比例縮放版本，下載後未再編修。清單預覽可由介面以 CSS 居中裁切顯示；放大檢視使用完整構圖。",
+          "notices": [
+            "使用時須適當署名、連結授權條款並標示修改；若另行改作，須依 CC BY-SA 4.0 以相同授權分享。",
+            "照片為 2016 年歷史影像，不代表查閱或到訪當日紅葉狀況。"
+          ],
+          "originalWidth": 5816,
+          "originalHeight": 3877,
+          "image": {
+            "filename": "b13a03c29d259b7035db615ab8b7a4ba7203e6983d4b446f310af94d75fa6ad3.jpg",
+            "sha256": "b13a03c29d259b7035db615ab8b7a4ba7203e6983d4b446f310af94d75fa6ad3",
+            "width": 1280,
+            "height": 853,
+            "mediaType": "image/jpeg"
+          },
+          "thumbnail": {
+            "filename": "d3156e441a772c8667571d8ddcf4629fbfc311be8ad28fad42b9e940aa704b93.jpg",
+            "sha256": "d3156e441a772c8667571d8ddcf4629fbfc311be8ad28fad42b9e940aa704b93",
+            "width": 330,
+            "height": 220,
+            "mediaType": "image/jpeg"
+          }
+        },
+        {
+          "id": "commons-1415461",
+          "title": "永觀堂多寶塔夜景",
+          "description": "2006 年 11 月 29 日拍攝的永觀堂禪林寺多寶塔與夜間秋景；夜間開放與點燈日期需另查當年公告。",
+          "sourceName": "Wikimedia Commons",
+          "sourceUrl": "https://commons.wikimedia.org/wiki/File:Eikando_Zenrinji-temple_Tahoto.JPG",
+          "fileSourceUrl": "https://upload.wikimedia.org/wikipedia/commons/0/0e/Eikando_Zenrinji-temple_Tahoto.JPG",
+          "author": "Tomomarusan",
+          "authorUrl": "https://commons.wikimedia.org/wiki/User:Tomomarusan",
+          "creditText": "Tomomarusan，作品來源 Wikimedia Commons，本產品選用 CC BY 2.5",
+          "licenseName": "Creative Commons Attribution 2.5 Generic",
+          "licenseUrl": "https://creativecommons.org/licenses/by/2.5/",
+          "capturedAt": "2006-11-29",
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "verificationUrl": "https://commons.wikimedia.org/w/index.php?title=File:Eikando_Zenrinji-temple_Tahoto.JPG&oldid=1101467967",
+          "locationEvidence": "作品頁摘要以日文標示為永觀堂禪林寺多寶塔，分類亦明確列為永觀堂多寶塔與夜間秋景；作者與自行創作來源均記為 Tomomarusan。",
+          "changes": "採用 Wikimedia Commons 產生的 1280×851 與 330×219 JPEG 等比例縮放版本，下載後未再編修。清單預覽可由介面以 CSS 居中裁切顯示；放大檢視使用完整構圖。",
+          "notices": [
+            "作品頁同時提供 GFDL、CC BY-SA 3.0 與 CC BY 2.5；本產品選用 CC BY 2.5，須適當署名、連結授權並標示修改。",
+            "照片為 2006 年歷史影像，不代表目前點燈安排、紅葉狀況或多寶塔開放情形。"
+          ],
+          "originalWidth": 3008,
+          "originalHeight": 2000,
+          "image": {
+            "filename": "138a941de991388ab7f415145d8f129301e61df889b5279d59ea8af82edb8ca8.jpg",
+            "sha256": "138a941de991388ab7f415145d8f129301e61df889b5279d59ea8af82edb8ca8",
+            "width": 1280,
+            "height": 851,
+            "mediaType": "image/jpeg"
+          },
+          "thumbnail": {
+            "filename": "05894cc09cc71e9bcf8d6ef799252f32a7fbeeda64cbbf3e03a81b77402e8b2c.jpg",
+            "sha256": "05894cc09cc71e9bcf8d6ef799252f32a7fbeeda64cbbf3e03a81b77402e8b2c",
+            "width": 330,
+            "height": 219,
+            "mediaType": "image/jpeg"
+          }
+        },
+        {
+          "id": "commons-195976308",
+          "title": "永觀堂池泉庭園秋景",
+          "description": "永觀堂池泉庭園的秋季景色，山坡樹間可見塔。作品頁只記載拍攝時間早於 2026 年 3 月 11 日，沒有提供可安全寫入的確切拍攝日。",
+          "sourceName": "Wikimedia Commons（原始發表於 Flickr）",
+          "sourceUrl": "https://commons.wikimedia.org/wiki/File:Eikando,_Kyoto_-_Eikando7376.jpg",
+          "fileSourceUrl": "https://upload.wikimedia.org/wikipedia/commons/5/53/Eikando%2C_Kyoto_-_Eikando7376.jpg",
+          "author": "lumoplank",
+          "authorUrl": "https://www.flickr.com/people/199350666@N08/",
+          "creditText": "lumoplank，作品來源 Wikimedia Commons／Flickr，CC0 1.0",
+          "licenseName": "Creative Commons CC0 1.0 Universal Public Domain Dedication",
+          "licenseUrl": "https://creativecommons.org/publicdomain/zero/1.0/",
+          "capturedAt": null,
+          "checkedAt": "2026-10-09T13:05:55Z",
+          "verificationUrl": "https://commons.wikimedia.org/w/index.php?title=File:Eikando,_Kyoto_-_Eikando7376.jpg&oldid=1281834641",
+          "locationEvidence": "作品頁說明為永觀堂禪林寺池泉庭園秋景，拍攝位置座標為 35.014705, 135.793808，分類列為永觀堂放生池與建築；作者欄連到 lumoplank 的 Flickr 個人頁。",
+          "changes": "採用 Wikimedia Commons 產生的 1280×853 與 330×220 JPEG 等比例縮放版本，下載後未再編修。清單預覽可由介面以 CSS 居中裁切顯示；放大檢視使用完整構圖。",
+          "notices": [
+            "作品頁記載原作由 lumoplank 以 CC0 釋出，FlickreviewR 2 已於 2026 年 7 月 21 日核對 Flickr 授權。本產品仍保留作者與來源以維持可追溯性。",
+            "沒有從作品發布日推測拍攝日；capturedAt 保持為空。照片中的秋景不代表到訪當日狀況。"
+          ],
+          "originalWidth": 5268,
+          "originalHeight": 3512,
+          "image": {
+            "filename": "1664c93d7f699a74fa4e69fe8720f39ea4f13156d0063affafc78754e9ab1253.jpg",
+            "sha256": "1664c93d7f699a74fa4e69fe8720f39ea4f13156d0063affafc78754e9ab1253",
+            "width": 1280,
+            "height": 853,
+            "mediaType": "image/jpeg"
+          },
+          "thumbnail": {
+            "filename": "6a08c78a54d757f3db303c736bdd2f8c3de2a3fc284d4408471bdb3af8d78d97.jpg",
+            "sha256": "6a08c78a54d757f3db303c736bdd2f8c3de2a3fc284d4408471bdb3af8d78d97",
+            "width": 330,
+            "height": 220,
+            "mediaType": "image/jpeg"
+          }
+        }
+      ]
+    }
+  ]
+}

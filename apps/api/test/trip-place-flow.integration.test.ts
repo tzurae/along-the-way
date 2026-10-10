@@ -29,6 +29,8 @@ import {
 } from "@along-the-way/contracts/trip-skeleton";
 
 import { createApp } from "../src/app";
+import { PostgresPlaceDetailModule } from "../src/place-details/postgres-place-detail-module";
+import { packagedPhotoRoot } from "../src/place-details/photo-assets";
 import { PostgresCollaborationModule } from "../src/private-trips/postgres-collaboration-module";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
 import { runMigrations } from "../src/database/migrate";
@@ -296,6 +298,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     const tripSkeleton = new PostgresTripSkeletonModule({ database, now });
     collaboration = new PostgresCollaborationModule(database);
     app = createApp({
+      placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
       collaboration,
       dayPlans: new PostgresDayPlanModule({
         database,

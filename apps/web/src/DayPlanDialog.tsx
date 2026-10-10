@@ -9,6 +9,7 @@ import {
   type DayWindowDto,
   type DayPlaceOrderResponse,
 } from "@along-the-way/contracts/day-plans";
+import { Check, Clock3, HelpCircle, ListOrdered, Route, Sparkles, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -61,8 +62,10 @@ export function DayPlanDialog({
   const { t } = useI18n();
   const [timetable, setTimetable] = useState<DayTimetableDto | null>(null);
   const [order, setOrder] = useState<DayTimetableOrder>("current");
+  const [comparisons, setComparisons] = useState<Partial<Record<DayTimetableOrder, DayTimetableDto>>>({});
   const [start, setStart] = useState("09:00");
   const [end, setEnd] = useState("19:00");
+  const [endOfDay, setEndOfDay] = useState(false);
   const [busy, setBusy] = useState<"planning" | "saving" | null>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -80,8 +83,15 @@ export function DayPlanDialog({
   };
   // Only the latest request may update the dialog; an answer for a day closed meanwhile is dropped.
   const latestRequest = useRef(0);
+  // A save may finish on the server after closing; its continuations must not enter a new dialog.
+  const dialogEpoch = useRef(0);
+  function close() {
+    dialogEpoch.current += 1;
+    latestRequest.current += 1;
+    onClose();
+  }
 
-  const plan = useCallback(async (dayId: string, nextOrder: DayTimetableOrder) => {
+  const plan = useCallback(async (dayId: string, nextOrder: DayTimetableOrder, activate = true) => {
     const ticket = ++latestRequest.current;
     setBusy("planning");
     setError("");
@@ -92,13 +102,18 @@ export function DayPlanDialog({
         parse: parseDayTimetableResponse,
       });
       if (ticket !== latestRequest.current) return;
-      setTimetable(response.timetable);
-      setOrder(nextOrder);
-      setStart(clock(response.timetable.window.startMinute));
-      setEnd(clock(response.timetable.window.endMinute));
-      const { version, startMinute, endMinute } = response.timetable.window;
-      setBase({ input: { startMinute, endMinute }, version });
-      setOrderStale(false);
+      setComparisons((current) => ({ ...current, [nextOrder]: response.timetable }));
+      if (activate) {
+        setTimetable(response.timetable);
+        setOrder(nextOrder);
+        setStart(clock(response.timetable.window.startMinute));
+        setEndOfDay(response.timetable.window.endMinute === 1440);
+        if (response.timetable.window.endMinute !== 1440) setEnd(clock(response.timetable.window.endMinute));
+        const { version, startMinute, endMinute } = response.timetable.window;
+        setBase({ input: { startMinute, endMinute }, version });
+        setOrderStale(false);
+      }
+      return response.timetable;
     } catch (reason) {
       if (ticket !== latestRequest.current) return;
       setError(reason instanceof Error ? reason.message : t.dayPlan.couldNotPlan);
@@ -109,18 +124,26 @@ export function DayPlanDialog({
 
   useEffect(() => {
     latestRequest.current += 1;
+    const epoch = ++dialogEpoch.current;
     setTimetable(null);
+    setComparisons({});
     setOrder("current");
     setBusy(null);
     setNotice("");
     setError("");
     setBase(null);
     resolution.clear();
-    if (day) void plan(day.id, "current");
+    if (day) {
+      void (async () => {
+        if (await plan(day.id, "current") && epoch === dialogEpoch.current) await plan(day.id, "suggested");
+      })();
+    }
+    return () => { dialogEpoch.current += 1; latestRequest.current += 1; };
   }, [day, plan]);
 
   async function saveWindow(input: DayWindowDto, expectedVersion: number, conflictBase = resolution.conflictBaseVersion) {
     if (!day || !base) return;
+    const epoch = dialogEpoch.current;
     const identity = `window:${day.id}:${expectedVersion}:${JSON.stringify(input)}`;
     setBusy("saving");
     setError("");
@@ -132,26 +155,33 @@ export function DayPlanDialog({
         parse: parseDayWindowResponse,
       });
       keys.current.delete(identity);
+      if (epoch !== dialogEpoch.current) { await onOrderSaved(); return; }
       resolution.clear();
-      await plan(day.id, order);
+      if (await plan(day.id, order) && epoch === dialogEpoch.current) {
+        await plan(day.id, order === "current" ? "suggested" : "current", false);
+      }
       await onOrderSaved();
     } catch (reason) {
+      if (epoch !== dialogEpoch.current) return;
       try {
-        if (await resolution.capture(reason, base, input, async () => {
+        const captured = await resolution.capture(reason, base, input, async () => {
           try {
             const { window } = await request<DayWindowResponse>(`/api/trips/${tripId}/days/${day.id}/window`, { parse: parseDayWindowResponse });
+            if (epoch !== dialogEpoch.current) throw new DOMException("Dialog closed", "AbortError");
             return { input: { startMinute: window.startMinute, endMinute: window.endMinute }, version: window.version };
           } catch (loadError) {
+            if (epoch !== dialogEpoch.current) throw loadError;
             if (loadError instanceof ApiRequestError && loadError.status === 404) return null;
             throw loadError;
           }
-        })) return;
+        });
+        if (epoch !== dialogEpoch.current || captured) return;
         setError(reason instanceof Error ? reason.message : t.dayPlan.couldNotSaveHours);
       } catch {
-        setError(t.collaboration.loadError);
+        if (epoch === dialogEpoch.current) setError(t.collaboration.loadError);
       }
     } finally {
-      setBusy(null);
+      if (epoch === dialogEpoch.current) setBusy(null);
     }
   }
 
@@ -159,7 +189,7 @@ export function DayPlanDialog({
     event.preventDefault();
     if (!day || !base) return;
     const startMinute = minuteOf(start);
-    const endMinute = minuteOf(end);
+    const endMinute = endOfDay ? 1440 : minuteOf(end);
     if (startMinute === null || endMinute === null || startMinute >= endMinute) {
       setError(t.dayPlan.endMustBeAfterStart);
       return;
@@ -172,6 +202,7 @@ export function DayPlanDialog({
 
   async function saveOrder() {
     if (!day || !timetable) return;
+    const epoch = dialogEpoch.current;
     const orderedTripPlaceIds = timetable.orderedTripPlaceIds;
     const identity = `order:${day.id}:${timetable.window.version}:${orderedTripPlaceIds.join(",")}`;
     setBusy("saving");
@@ -183,19 +214,23 @@ export function DayPlanDialog({
         body: JSON.stringify({ orderedTripPlaceIds, expectedVersion: timetable.window.version }),
       });
       keys.current.delete(identity);
+      if (epoch !== dialogEpoch.current) { await onOrderSaved(); return; }
       // The draft already uses this order, which is now the day's own.
+      const savedTimetable = { ...timetable, order: "current" as const, window: { ...timetable.window, version: saved.version } };
       setOrder("current");
-      setTimetable({ ...timetable, order: "current", window: { ...timetable.window, version: saved.version } });
+      setTimetable(savedTimetable);
+      setComparisons((current) => ({ ...current, current: savedTimetable }));
       if (base) setBase({ ...base, version: saved.version });
       setNotice(t.dayPlan.orderSaved);
       await onOrderSaved();
     } catch (reason) {
+      if (epoch !== dialogEpoch.current) return;
       if (reason instanceof ApiRequestError && reason.code === "conflict") {
         setOrderStale(true);
         setError(t.collaboration.replanDay);
       } else setError(reason instanceof Error ? reason.message : t.dayPlan.couldNotSaveOrder);
     } finally {
-      setBusy(null);
+      if (epoch === dialogEpoch.current) setBusy(null);
     }
   }
 
@@ -204,102 +239,224 @@ export function DayPlanDialog({
         row.kind !== "start" && row.travel?.attribution ? [row.travel.attribution] : []))]
     : [];
   const hoursChecked = timetable?.rows.some((row) => row.kind === "visit" && row.hours === "listed") ?? false;
+  const unknownLegCount = timetable?.rows.filter((row) =>
+    row.kind !== "start" && row.travel?.durationMinutes === null).length ?? 0;
+
+  function selectDisplayedOrder(nextOrder: DayTimetableOrder) {
+    const selected = comparisons[nextOrder];
+    if (!selected) return;
+    setOrder(nextOrder);
+    setTimetable(selected);
+    setStart(clock(selected.window.startMinute));
+    setEndOfDay(selected.window.endMinute === 1440);
+    if (selected.window.endMinute !== 1440) setEnd(clock(selected.window.endMinute));
+    setBase({
+      input: { startMinute: selected.window.startMinute, endMinute: selected.window.endMinute },
+      version: selected.window.version,
+    });
+    setNotice("");
+    setOrderStale(false);
+  }
+
+  function timetableVersion(kind: DayTimetableOrder) {
+    const version = comparisons[kind];
+    if (!version) return null;
+    const suggested = kind === "suggested";
+    return (
+      <section
+        className="route-version"
+        data-active={order === kind}
+        aria-label={suggested ? t.dayPlan.suggestedOrderDescription : t.dayPlan.currentOrderDescription}
+      >
+        <header className="route-version-heading">
+          <h3>{suggested ? "建議順序" : "目前順序"}</h3>
+          <span>{suggested ? "還沒套用" : version.date}</span>
+        </header>
+        {version.rows.length > 0 ? (
+          <ol className="route-timeline" aria-label={t.dayPlan.draftTimetable}>
+            {version.rows.map((row, index) => (
+              <TimetableRow key={`${row.kind}-${index}`} row={row} />
+            ))}
+          </ol>
+        ) : (
+          <p className="route-optimal">{t.dayPlan.nothingFits}</p>
+        )}
+        {version.unscheduled.length > 0 ? (
+          <section className="route-unscheduled" aria-label={t.dayPlan.notInDraft}>
+            <div className="route-unscheduled-heading">
+              <TriangleAlert />
+              <div>
+                <h4>{t.dayPlan.notInDraft}</h4>
+                <p>沒有刪除，仍留在這一天的口袋名單。</p>
+              </div>
+            </div>
+            <ul>
+              {version.unscheduled.map((place) => (
+                <li key={place.tripPlaceId}>
+                  <strong>{place.name}</strong>
+                  <span>{reasonLabel(place.reason, t.timetable)}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+      </section>
+    );
+  }
 
   return (
-    <Dialog open={day !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className="h-dvh w-screen max-w-none overflow-y-auto rounded-none content-start sm:h-auto sm:max-h-[90vh] sm:w-full sm:max-w-2xl sm:rounded-xl">
-        <DialogHeader>
+    <Dialog open={day !== null} onOpenChange={(open) => { if (!open) close(); }}>
+      <DialogContent className="route-dialog max-[599px]:translate-x-0 max-[599px]:translate-y-0" showCloseButton>
+        <DialogHeader className="route-page-heading">
           <DialogTitle>{t.dayPlan.title(day?.label ?? "", day?.date ?? "")}</DialogTitle>
-          <DialogDescription>{t.dayPlan.draftNotice}</DialogDescription>
+          <DialogDescription>
+            {timetable
+              ? `${describeStartAndEnd(timetable, t.timetable)} ${t.dayPlan.draftNotice}`
+              : t.dayPlan.draftNotice}
+          </DialogDescription>
         </DialogHeader>
 
         {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={busy !== null}
           formatValue={(_path, value) => typeof value === "number" ? clock(value) : undefined}
-          onAccept={() => { resolution.clear(); if (day && resolution.conflict?.current) void plan(day.id, order); else onClose(); }}
+          onAccept={() => { resolution.clear(); if (day && resolution.conflict?.current) void plan(day.id, order); else close(); }}
           onReapply={() => { const conflict = resolution.conflict; if (conflict?.current) void saveWindow(conflict.attempted, conflict.current.version, conflict.base.version); }}
           onEdit={() => { if (resolution.conflict?.current) setBase(resolution.conflict.current); resolution.resume(); }}
         /> : null}
-        <form hidden={Boolean(resolution.conflict)} className="flex flex-wrap items-end gap-3" onSubmit={(event) => void replan(event)}>
-          <label className="grid gap-1 text-sm font-semibold">
-            {t.dayPlan.start}
-            <input className="min-h-10 rounded-lg border px-2" type="time" value={start} required onChange={(event) => setStart(event.target.value)} />
+
+        <form
+          hidden={Boolean(resolution.conflict)}
+          className="route-constraints"
+          onSubmit={(event) => void replan(event)}
+        >
+          <div className="route-constraints-heading">
+            <Clock3 />
+            <div>
+              <strong>可安排時間</strong>
+              <span>固定行程與已確認限制會保留不動。</span>
+            </div>
+          </div>
+          <label>
+            <span>{t.dayPlan.start}</span>
+            <input type="time" value={start} required onChange={(event) => setStart(event.target.value)} />
           </label>
-          <label className="grid gap-1 text-sm font-semibold">
-            {t.dayPlan.end}
-            <input className="min-h-10 rounded-lg border px-2" type="time" value={end} required onChange={(event) => setEnd(event.target.value)} />
+          <label>
+            <span>{t.dayPlan.end}</span>
+            <input type="time" value={end} hidden={endOfDay} disabled={endOfDay} required={!endOfDay} onChange={(event) => setEnd(event.target.value)} />
+            {endOfDay ? <span className="route-end-of-day">當天結束（24:00）</span> : null}
           </label>
-          <Button type="submit" variant="outline" size="lg" disabled={busy !== null || !timetable}>{t.dayPlan.rePlan}</Button>
+          <label className="route-endday-toggle">
+            <input type="checkbox" checked={endOfDay} onChange={(event) => setEndOfDay(event.target.checked)} />
+            <span>安排到當天結束（24:00）</span>
+          </label>
+          <Button type="submit" variant="outline" size="lg" disabled={busy !== null || !timetable}>
+            {t.dayPlan.rePlan}
+          </Button>
         </form>
 
-        {error ? <p role="alert" className="text-sm font-semibold text-destructive">{error}</p> : null}
-        {busy === "planning" ? <p role="status" className="text-sm">{t.dayPlan.planning}</p> : null}
-        {notice ? <p role="status" className="text-sm font-semibold">{notice}</p> : null}
+        {error ? <p role="alert" className="route-error">{error}</p> : null}
+        {busy === "planning" ? <p role="status" className="route-status">{t.dayPlan.planning}</p> : null}
+        {notice ? <p role="status" className="route-status">{notice}</p> : null}
 
         {timetable ? (
-          <div className="grid gap-4">
-            <p className="font-bold" data-testid="day-load">
-              {t.dayPlan.loadSummary(
-                loadLabel(timetable.load.level, t.timetable),
-                span(timetable.load.busyMinutes, t.timetable),
-                span(timetable.load.windowMinutes, t.timetable),
-              )}
-            </p>
-            <p className="text-sm text-muted-foreground">
-              {timetable.order === "suggested"
-                ? t.dayPlan.suggestedOrderDescription
-                : t.dayPlan.currentOrderDescription}
-              {describeStartAndEnd(timetable, t.timetable)}
-            </p>
-            {timetable.rows.length > 0 ? (
-              <ol className="grid gap-2" aria-label={t.dayPlan.draftTimetable}>
-                {timetable.rows.map((row, index) => (
-                  <TimetableRow
-                    key={`${row.kind}-${index}`}
-                    row={row}
-                  />
-                ))}
-              </ol>
-            ) : (
-              <p className="empty-state">{t.dayPlan.nothingFits}</p>
-            )}
-            {timetable.unscheduled.length > 0 ? (
-              <section aria-label={t.dayPlan.notInDraft}>
-                <p className="font-bold">{t.dayPlan.notInDraft}</p>
-                <ul className="mt-1 grid gap-1 text-sm">
-                  {timetable.unscheduled.map((place) => (
-                    <li key={place.tripPlaceId}>
-                      <strong>{place.name}</strong>・{reasonLabel(place.reason, t.timetable)}
-                    </li>
-                  ))}
-                </ul>
-              </section>
+          <div className="route-comparison">
+            <section className="route-summary" data-testid="day-load">
+              <Route />
+              <div>
+                <strong>
+                  {t.dayPlan.loadSummary(
+                    loadLabel(timetable.load.level, t.timetable),
+                    span(timetable.load.busyMinutes, t.timetable),
+                    span(timetable.load.windowMinutes, t.timetable),
+                  )}
+                </strong>
+                <span>
+                  {timetable.unscheduled.length > 0
+                    ? `${timetable.unscheduled.length} 個地點排不進去；先比較，再決定要不要改。`
+                    : "固定事項不會移動；先比較，再決定要不要改。"}
+                </span>
+              </div>
+            </section>
+
+            {unknownLegCount > 0 ? (
+              <aside className="route-unknown">
+                <HelpCircle />
+                <div>
+                  <strong>{unknownLegCount} 段交通時間查不到</strong>
+                  <span>資料不完整的路段不顯示推測的抵達時間。</span>
+                </div>
+              </aside>
             ) : null}
-            {attributions.length > 0 || hoursChecked ? (
-              <p className="text-xs text-muted-foreground">
-                {attributions.length > 0 ? t.dayPlan.routeTimes(attributions.join("、")) : ""}
-                {hoursChecked ? ` ${t.dayPlan.openingHoursAttribution}` : ""}
-              </p>
-            ) : null}
+
+            <div className="route-evidence" aria-label="時間資料說明">
+              <span className="route-evidence-label">時間依據</span>
+              {hoursChecked ? <span className="route-evidence-chip"><Check /> 確定：營業時間</span> : null}
+              <span className="route-evidence-chip route-evidence-estimated">
+                <Clock3 /> 估計：路線與停留時間
+              </span>
+              {attributions.length > 0 ? (
+                <span className="route-evidence-source">{t.dayPlan.routeTimes(attributions.join("、"))}</span>
+              ) : null}
+            </div>
+
+            <div className="route-segments" role="tablist" aria-label="比較順序">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={order === "suggested"}
+                disabled={!comparisons.suggested}
+                onClick={() => selectDisplayedOrder("suggested")}
+              >
+                <Sparkles />
+                <span>建議</span>
+                <Check className="route-selection-mark" />
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={order === "current"}
+                disabled={!comparisons.current}
+                onClick={() => selectDisplayedOrder("current")}
+              >
+                <ListOrdered />
+                <span>目前</span>
+                <Check className="route-selection-mark" />
+              </button>
+            </div>
+
+            <div className="route-versions">
+              {timetableVersion("current")}
+              {timetableVersion("suggested")}
+            </div>
           </div>
         ) : null}
 
-        <DialogFooter hidden={Boolean(resolution.conflict)}>
+        <DialogFooter hidden={Boolean(resolution.conflict) || !timetable} className="route-actionbar">
           {order === "suggested" ? (
             <>
-              <Button variant="outline" size="lg" disabled={busy !== null || !day} onClick={() => day && void plan(day.id, "current")}>
-                {t.dayPlan.backToCurrentOrder}
+              <Button
+                variant="outline"
+                size="lg"
+                disabled={busy !== null || !comparisons.current}
+                onClick={() => selectDisplayedOrder("current")}
+              >
+                <ListOrdered /> {t.dayPlan.backToCurrentOrder}
               </Button>
               <Button
                 size="lg"
                 disabled={busy !== null || orderStale || !timetable || timetable.orderedTripPlaceIds.length === 0}
                 onClick={() => void saveOrder()}
               >
-                {busy === "saving" ? t.dayPlan.saving : t.dayPlan.useThisOrder}
+                <Check /> {busy === "saving" ? t.dayPlan.saving : t.dayPlan.useThisOrder}
               </Button>
             </>
           ) : (
-            <Button variant="outline" size="lg" disabled={busy !== null || !day} onClick={() => day && void plan(day.id, "suggested")}>
-              {t.dayPlan.trySuggestedOrder}
+            <Button
+              variant="outline"
+              size="lg"
+              disabled={busy !== null || !comparisons.suggested}
+              onClick={() => selectDisplayedOrder("suggested")}
+            >
+              <Sparkles /> {t.dayPlan.trySuggestedOrder}
             </Button>
           )}
         </DialogFooter>

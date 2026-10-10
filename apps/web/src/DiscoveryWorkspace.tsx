@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, ExternalLink, Images, Search, X } from "lucide-react";
 
 import {
@@ -17,20 +17,15 @@ import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
 import { VoteControl, VoteVoters } from "./VoteControl";
 import { ConflictPanel, useVersionConflict } from "./ConflictPanel";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { PlaceDetailContent } from "./PlaceDetailContent";
+import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest } from "./PlaceThumbnail";
+import { PlaceDetailSheet } from "./PlaceDetailSheet";
+import "./pocket-discovery.css";
 
-type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
 
 interface DiscoveryWorkspaceProps {
   trip: TripDto;
-  request: Request;
+  request: PlaceDetailRequest;
   placesRevision: number;
   onPlacesChanged(): void;
 }
@@ -59,18 +54,6 @@ function shouldStartFreshRequest(error: unknown) {
   return error.code === "model_unavailable" || error.code === "provider_unavailable";
 }
 
-function useLargeScreen() {
-  const [large, setLarge] = useState(() => typeof window.matchMedia === "function" && window.matchMedia("(min-width: 1024px)").matches);
-  useEffect(() => {
-    if (typeof window.matchMedia !== "function") return;
-    const query = window.matchMedia("(min-width: 1024px)");
-    const changed = () => setLarge(query.matches);
-    changed();
-    query.addEventListener("change", changed);
-    return () => query.removeEventListener("change", changed);
-  }, []);
-  return large;
-}
 
 // Where an outcome is reported: next to the control that caused it, or at the top.
 type NoticeArea = "general" | "find" | "again" | "feedback" | "questions";
@@ -215,6 +198,11 @@ function resolvedQuestionAnswers(drafts: Record<string, QuestionDraft>): Discove
   });
 }
 
+function ResearchPanel({ first, open, onClose, children, footer }: { first: boolean; open: boolean; onClose: () => void; children: ReactNode; footer: ReactNode }) {
+  if (first) return <section className="order-3 pd-first-run">{children}{footer}</section>;
+  return <PlaceDetailSheet appearance="workspace" open={open} title="修改需求" onClose={onClose} footer={footer}>{children}</PlaceDetailSheet>;
+}
+
 
 export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChanged }: DiscoveryWorkspaceProps) {
   const { locale, t: { discovery: t, tripPlaces: tripPlacesT } } = useI18n();
@@ -225,24 +213,28 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const [editingFeedbackId, setEditingFeedbackId] = useState<string | null>(null);
   const [feedbackEditDraft, setFeedbackEditDraft] = useState<FeedbackEditDraft | null>(null);
   const [loading, setLoading] = useState(true);
-  const [pending, setPending] = useState<string | null>(null);
+  const [operationPending, setPending] = useState<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const pending = operationPending ?? (bulkBusy ? "bulk-selection" : null);
+  const [selecting, setSelecting] = useState(false);
+  const [selectionDraft, setSelectionDraft] = useState<Map<string, { proposal: CandidateProposalDto; selected: boolean }>>(() => new Map());
+  const [bulkConfirmation, setBulkConfirmation] = useState(false);
   const [notice, setNotice] = useState<{ area: NoticeArea; text: string } | null>(null);
-  const largeScreen = useLargeScreen();
   const [selectedProposalId, setSelectedProposalId] = useState<string | null>(null);
   const detailTitleRef = useRef<HTMLHeadingElement>(null);
+  const detailReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const [rejectConfirmation, setRejectConfirmation] = useState<CandidateProposalDto | null>(null);
-  const [researchSettingsOpen, setResearchSettingsOpen] = useState(true);
-  useEffect(() => {
-    if (!selectedProposalId) return;
-    const frame = window.requestAnimationFrame(() => detailTitleRef.current?.focus());
-    return () => window.cancelAnimationFrame(frame);
-  }, [largeScreen, selectedProposalId]);
+  const [removeConfirmation, setRemoveConfirmation] = useState<CandidateProposalDto | null>(null);
+  const [researchSettingsOpen, setResearchSettingsOpen] = useState(false);
 
   function openProposalDetail(proposalId: string) {
     if (proposalId === selectedProposalId) {
       window.requestAnimationFrame(() => detailTitleRef.current?.focus());
       return;
     }
+    detailReturnPosition.current = { x: window.scrollX, y: window.scrollY };
+    setRejectConfirmation(null);
+    setRemoveConfirmation(null);
     setSelectedProposalId(proposalId);
   }
 
@@ -253,16 +245,18 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const conflictLatest = useRef<DiscoveryWorkspaceDto | null>(null);
   const resolution = useVersionConflict<Record<string, unknown>>();
   const conflictAction = useRef<{ operation: string; path: string; payload: Record<string, unknown>; area: NoticeArea; after?: () => void; method?: "POST" | "PUT" } | null>(null);
-  useEffect(() => {
-    setResearchSettingsOpen(!workspace?.latestRun);
-  }, [workspace?.latestRun?.generatedAt]);
 
   function closeProposalDetail() {
     const proposalId = selectedProposalId;
+    const position = detailReturnPosition.current;
+    detailReturnPosition.current = null;
     setSelectedProposalId(null);
+    setRejectConfirmation(null);
+    setRemoveConfirmation(null);
     if (proposalId) {
       window.requestAnimationFrame(() => {
-        document.querySelector<HTMLElement>(`[data-proposal-detail-trigger="${proposalId}"]`)?.focus();
+        document.querySelector<HTMLElement>(`[data-proposal-detail-trigger="${proposalId}"]`)?.focus({ preventScroll: true });
+        if (position) window.scrollTo({ left: position.x, top: position.y, behavior: "instant" });
       });
     }
   }
@@ -417,9 +411,10 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
         brief = saved.brief;
       }
     }
-    await mutate("generate", `/api/trips/${trip.id}/discovery/generate`, {
+    const researched = await mutate("generate", `/api/trips/${trip.id}/discovery/generate`, {
       expectedBriefVersion: brief.version,
     }, area);
+    if (researched) setResearchSettingsOpen(false);
   }
 
   async function decideProposal(proposal: CandidateProposalDto, decision: "accept" | "reject") {
@@ -444,7 +439,6 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
 
   async function removeAcceptedProposal(proposal: CandidateProposalDto) {
     if (pending || !proposal.acceptedTripPlaceId) return;
-    if (!window.confirm(tripPlacesT.workspace.confirmRemove(proposal.name))) return;
     const operation = `remove-accepted:${proposal.id}`;
     setPending(operation);
     setNotice(null);
@@ -470,6 +464,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       ).discovery;
       setWorkspace(refreshed);
       onPlacesChanged();
+      return refreshed;
     } catch (error) {
       setNotice({ area: "general", text: errorMessage(error, t.errors.failed) });
     } finally {
@@ -482,7 +477,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       return (
         <div className="flex flex-wrap gap-2 2xl:flex-nowrap">
           <button className="flex min-h-11 items-center gap-2 whitespace-nowrap rounded-lg bg-accent px-3 font-bold text-ink-strong outline-none hover:bg-accent/80 focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={pending !== null} onClick={() => void decideProposal(proposal, "accept")}><Check aria-hidden="true" className="size-4" />{t.proposal.accept}</button>
-          <button className="flex min-h-11 items-center gap-2 whitespace-nowrap rounded-lg border px-3 font-bold outline-none hover:bg-surface focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={pending !== null} onClick={() => setRejectConfirmation(proposal)}><X aria-hidden="true" className="size-4" />{t.proposal.decline}</button>
+          <button className="flex min-h-11 items-center gap-2 whitespace-nowrap rounded-lg border px-3 font-bold outline-none hover:bg-surface focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={pending !== null} onClick={() => { openProposalDetail(proposal.id); setRejectConfirmation(proposal); }}><X aria-hidden="true" className="size-4" />{t.proposal.decline}</button>
         </div>
       );
     }
@@ -490,7 +485,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       return (
         <div className="flex flex-wrap items-center gap-2 2xl:flex-nowrap">
           <span className="whitespace-nowrap font-bold">{t.status.accepted}</span>
-          {proposal.acceptedTripPlaceId ? <button className="min-h-11 whitespace-nowrap rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void removeAcceptedProposal(proposal)}>{tripPlacesT.workspace.remove}</button> : null}
+          {proposal.acceptedTripPlaceId ? <button className="min-h-11 whitespace-nowrap rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => { openProposalDetail(proposal.id); setRemoveConfirmation(proposal); }}>{tripPlacesT.workspace.remove}</button> : null}
         </div>
       );
     }
@@ -567,15 +562,17 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       "questions",
     );
   }
-  const showProposalVotes = workspace?.proposals.some(
-    (proposal) => proposal.status === "pending" && proposal.votingAvailable,
-  ) ?? false;
   const selectedProposal = workspace?.proposals.find((proposal) => proposal.id === selectedProposalId) ?? null;
-  const showTableColumns = selectedProposal === null;
   const proposalNameCounts = new Map<string, number>();
   for (const proposal of workspace?.proposals ?? []) {
     proposalNameCounts.set(proposal.name, (proposalNameCounts.get(proposal.name) ?? 0) + 1);
   }
+  const previews = usePlacePreviews({
+    tripId: trip.id,
+    kind: "proposal",
+    ids: workspace?.proposals.map((proposal) => proposal.id) ?? [],
+    request,
+  });
 
   function proposalDetail(proposal: CandidateProposalDto) {
     const numberedEvidence = new Map(
@@ -586,22 +583,17 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       : proposal.tradeoffs.length > 0;
     return (
       <div className="grid gap-4">
+        <PlaceDetailContent tripId={trip.id} reference={{ kind: "proposal", id: proposal.id }} request={request} />
         <p className="text-sm text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</p>
         {proposal.endorsements.length ? <div aria-label={t.proposal.recommendedByFor(proposal.name)}><strong>{t.proposal.recommendedBy}</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabel(endorsement, t)}</li>)}</ul></div> : null}
         {proposal.recommendationSentences === null ? <p>{proposal.recommendation}</p> : null}
         {proposal.recommendationSentences && proposal.recommendationSentences.length > 0
           ? <ClaimSentenceList sentences={proposal.recommendationSentences} numberedEvidence={numberedEvidence} t={t} />
           : null}
-        {proposal.status === "pending" && proposal.votingAvailable ? (
-          <>
-            <VoteControl compact name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} />
-            <VoteVoters voters={proposal.voters} />
-          </>
-        ) : null}
-        {proposalActions(proposal)}
+        {proposal.status === "pending" && proposal.votingAvailable ? <VoteVoters voters={proposal.voters} /> : null}
         <a className="inline-flex min-h-11 w-fit items-center gap-2 rounded-lg border bg-surface px-3 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" href={googleMapsPlaceUrl(proposal.name, proposal.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.proposal.viewPhotos}</a>
         {proposal.matchedNeeds.length || hasTradeoffs || proposal.unknowns.length ? (
-          <div className="grid gap-3 sm:grid-cols-3">
+          <div className="grid gap-3">
             {proposal.matchedNeeds.length ? <div><strong>{t.proposal.matches}</strong><ul className="mt-1 list-disc pl-5 text-sm">{proposal.matchedNeeds.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
             {hasTradeoffs ? (
               <div>
@@ -640,13 +632,60 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       </div>
     );
   }
+  const selectionChecked = (proposal: CandidateProposalDto) => selectionDraft.get(proposal.id)?.selected ?? proposal.status === "accepted";
+  const selectionChanges = (workspace?.proposals ?? []).filter((proposal) => {
+    const intent = selectionDraft.get(proposal.id);
+    return intent && intent.selected !== (proposal.status === "accepted");
+  });
+  const removingSelected = selectionChanges.filter((proposal) => proposal.status === "accepted");
+  function beginSelection() {
+    setSelectionDraft(new Map());
+    setBulkConfirmation(false);
+    setSelecting(true);
+  }
+  function changeSelection(proposal: CandidateProposalDto, checked: boolean) {
+    if (pending || proposal.status !== "pending" && !(proposal.status === "accepted" && proposal.acceptedTripPlaceId)) return;
+    setBulkConfirmation(false);
+    setSelectionDraft((previous) => {
+      const next = new Map(previous);
+      if (checked === (proposal.status === "accepted")) next.delete(proposal.id);
+      else next.set(proposal.id, { proposal, selected: checked });
+      return next;
+    });
+  }
+  async function applySelection() {
+    if (pending || !workspace) return;
+    if (removingSelected.length && !bulkConfirmation) { setBulkConfirmation(true); return; }
+    setBulkBusy(true);
+    try {
+      // Reuse versioned individual mutations; never claim an atomic bulk transaction.
+      let current = workspace;
+      for (const change of selectionChanges) {
+        const proposal = current.proposals.find((candidate) => candidate.id === change.id);
+        const intent = selectionDraft.get(change.id)!;
+        if (!proposal || proposal.version !== intent.proposal.version || proposal.status !== intent.proposal.status || proposal.acceptedTripPlaceId !== intent.proposal.acceptedTripPlaceId) {
+          setNotice({ area: "general", text: "地點資料已更新。請取消選擇，重新確認目前的名單。" });
+          return;
+        }
+        const next = intent.selected ? await decideProposal(intent.proposal, "accept") : await removeAcceptedProposal(intent.proposal);
+        if (!next) return;
+        if ((next.proposals.find((candidate) => candidate.id === change.id)?.status === "accepted") !== intent.selected) {
+          setNotice({ area: "general", text: "地點狀態已更新，這項變更尚未套用。請取消選擇並重新確認。" });
+          return;
+        }
+        current = next;
+      }
+      setSelecting(false);
+      setBulkConfirmation(false);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
   return (
-    <section className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8" aria-labelledby="ai-discovery-heading">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h2 id="ai-discovery-heading" className="font-display text-3xl text-ink-strong sm:text-4xl">{t.header.title}</h2>
-          <p className="mt-2 max-w-3xl text-muted-foreground">{t.header.description}</p>
-        </div>
+    <section className="pd-workspace pd-discovery" data-selecting={selecting ? "true" : undefined} aria-labelledby="ai-discovery-heading">
+      <div className="pd-pagehead">
+        <h2 id="ai-discovery-heading">{t.header.title}</h2>
+        {selecting ? <div className="pd-row-actions"><span>已勾選 {(workspace?.proposals ?? []).filter(selectionChecked).length} 個</span><button className="pd-secondary" disabled={pending !== null} onClick={() => { setSelecting(false); setBulkConfirmation(false); }}>取消</button></div> : workspace?.latestRun ? <div className="pd-row-actions"><button className="pd-secondary" onClick={() => setResearchSettingsOpen(true)}>修改需求</button><button className="pd-secondary" disabled={pending !== null} onClick={beginSelection}>選擇</button></div> : null}
       </div>
       {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={pending !== null}
         onAccept={() => {
@@ -724,8 +763,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                   {notice?.area === "questions" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
             </section>
           ) : null}
-          <details className="order-3 rounded-panel border border-ink/10 p-4" open={researchSettingsOpen} onToggle={(event) => setResearchSettingsOpen(event.currentTarget.open)}>
-            <summary className="cursor-pointer font-display text-2xl">{t.brief.researchSettings}</summary>
+          <ResearchPanel first={!workspace?.latestRun} open={researchSettingsOpen} onClose={() => setResearchSettingsOpen(false)} footer={<button className="pd-primary" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research(workspace?.latestRun ? "again" : "find")}><Search aria-hidden="true" className="size-4" />{researchLabel(workspace?.latestRun ? t.header.researchAgain : t.brief.findCandidates)}</button>}>
             <div className="mt-4 grid gap-5">
           <section className="rounded-panel bg-surface-subtle p-4 sm:p-5" aria-label={t.brief.areaLabel}>
             <label className="grid gap-2 font-bold">{t.brief.prompt}
@@ -736,10 +774,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                 placeholder={t.brief.placeholder}
               />
             </label>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button className="flex min-h-11 items-center gap-2 rounded-xl bg-accent px-4 font-bold text-ink-strong" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research(workspace?.latestRun ? "again" : "find")}><Search aria-hidden="true" className="size-4" />{researchLabel(workspace?.latestRun ? t.header.researchAgain : t.brief.findCandidates)}</button>
-            </div>
-            {notice?.area === "find" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
+            {notice?.area === "find" || notice?.area === "again" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
             {!workspace?.modelAvailable ? <p className="mt-3 text-sm text-muted-foreground">{t.brief.modelUnavailable}</p> : null}
             {!workspace?.placeProviderAvailable ? <p className="mt-2 text-sm text-muted-foreground">{t.brief.placesUnavailable}</p> : null}
           </section>
@@ -769,127 +804,58 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
             </section>
           ) : null}
             </div>
-          </details>
+          </ResearchPanel>
 
           {workspace?.proposals.length ? (
             <section className="order-2" aria-label={t.proposal.shortlistLabel}>
-              <h3 className="font-display text-3xl">{t.proposal.shortlistTitle}</h3>
-              <div
-                className={`mt-4 grid min-w-0 gap-5 ${selectedProposal ? "lg:grid-cols-[minmax(0,1fr)_24rem]" : ""}`}
-                data-detail-open={selectedProposal ? "true" : "false"}
-              >
-                <div data-discovery-table-wrapper className="min-w-0 overflow-hidden rounded-panel border border-ink/10">
-                  <table className={`block w-full border-separate border-spacing-0 text-left ${showTableColumns ? "xl:table" : ""}`} aria-label={t.proposal.shortlistLabel}>
-                    <thead className={`table w-full table-fixed bg-surface-subtle text-sm ${showTableColumns ? "xl:table-header-group" : ""}`}>
-                      <tr>
-                        <th className={`px-3 py-3 font-bold ${showTableColumns ? "xl:min-w-64 xl:px-4" : ""}`} scope="col">{t.proposal.columns.place}</th>
-                        <th className={`hidden w-36 px-3 py-3 font-bold ${showTableColumns ? "xl:table-cell" : ""}`} scope="col">{t.proposal.columns.category}</th>
-                        {showProposalVotes ? <th className={`w-0 p-0 ${showTableColumns ? "xl:w-40 xl:px-3 xl:py-3" : ""}`} scope="col"><span className={`sr-only ${showTableColumns ? "xl:not-sr-only" : ""}`}>{t.proposal.columns.votes}</span></th> : null}
-                        <th className={`w-0 p-0 ${showTableColumns ? "xl:w-80 xl:px-3 xl:py-3" : ""}`} scope="col"><span className={`sr-only ${showTableColumns ? "xl:not-sr-only" : ""}`}>{t.proposal.columns.actions}</span></th>
-                      </tr>
-                    </thead>
-                    {workspace.proposals.map((proposal) => {
-                      const category = proposal.category ?? t.placeType[proposal.type];
-                      const firstSentence = proposal.recommendationSentences?.[0];
-                      const firstTradeoff = proposal.tradeoffSentences !== null
-                        ? proposal.tradeoffSentences[0]?.text ?? null
-                        : proposal.tradeoffs[0] ?? null;
-                      const numberedEvidence = new Map(
-                        proposal.evidence.map((item, index) => [item.id, { item, number: index + 1 }] as const),
-                      );
-                      const repeatedName = (proposalNameCounts.get(proposal.name) ?? 0) > 1;
-                      const rowLabel = repeatedName
-                        ? t.proposal.proposalAtAddress(proposal.name, proposal.address ?? t.proposal.unknownAddress)
-                        : t.proposal.ariaLabel(proposal.name);
-                      const selected = proposal.id === selectedProposalId;
-                      return (
-                        <tbody key={proposal.id} data-discovery-proposal={proposal.name} className={`block w-full ${showTableColumns ? "xl:table-row-group" : ""}`}>
-                          <tr
-                            aria-label={rowLabel}
-                            aria-current={selected ? "true" : undefined}
-                            className={`grid w-full cursor-pointer grid-cols-1 bg-surface-subtle ${selected ? "ring-2 ring-inset ring-accent-strong" : ""} ${showTableColumns ? "xl:table-row" : ""}`}
-                            onClick={(event) => {
-                              if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select")) return;
-                              openProposalDetail(proposal.id);
-                            }}
-                          >
-                            <th className={`px-3 py-3 align-top ${showTableColumns ? "xl:table-cell xl:min-w-64 xl:px-4 xl:py-4" : ""}`} scope="row">
-                              <button
-                                type="button"
-                                data-proposal-detail-trigger={proposal.id}
-                                className="inline-flex min-h-11 items-start text-left text-xl font-semibold text-ink-strong underline-offset-4 outline-none hover:underline focus-visible:rounded focus-visible:ring-4 focus-visible:ring-focus/30"
-                                aria-label={t.proposal.viewDetail(proposal.name)}
-                                onClick={() => openProposalDetail(proposal.id)}
-                              >
-                                {proposal.name}
-                              </button>
-                              {repeatedName ? <span className="mt-1 block text-sm font-normal text-muted-foreground">{proposal.address ?? t.proposal.unknownAddress}</span> : null}
-                              {firstSentence ? (
-                                <p className="mt-1 text-sm font-semibold"><ClaimSentence sentence={firstSentence} numberedEvidence={numberedEvidence} t={t} /></p>
-                              ) : proposal.recommendationSentences === null ? (
-                                <p className="mt-1 line-clamp-2 text-sm font-semibold text-muted-foreground">{proposal.recommendation}</p>
-                              ) : null}
-                              <p className={`mt-1 line-clamp-1 text-sm font-normal text-muted-foreground ${showTableColumns ? "xl:hidden" : ""}`}>{t.proposal.rowSummary(category, firstTradeoff)}</p>
-                            </th>
-                            <td className={`hidden px-3 py-4 align-top ${showTableColumns ? "xl:table-cell" : ""}`}>{category}</td>
-                            {showProposalVotes ? (
-                              <td className={`align-top ${showTableColumns ? "xl:table-cell xl:px-3 xl:py-3" : ""} ${proposal.status === "pending" && proposal.votingAvailable ? "px-3 pb-3" : showTableColumns ? "p-0 xl:p-3" : "p-0"}`}>
-                                {proposal.status === "pending" && proposal.votingAvailable ? (
-                                  <VoteControl compact name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} />
-                                ) : null}
-                              </td>
-                            ) : null}
-                            <td className={`px-3 pb-3 align-top ${showTableColumns ? "xl:table-cell xl:px-3 xl:py-3" : ""}`}>{proposalActions(proposal)}</td>
-                          </tr>
-                        </tbody>
-                      );
-                    })}
-                  </table>
-                </div>
-                {largeScreen && selectedProposal ? (
-                  <aside className="max-h-[calc(100dvh-2rem)] self-start overflow-y-auto rounded-panel border border-ink/10 bg-surface p-5 lg:sticky lg:top-4" aria-label={t.proposal.detailTitle(selectedProposal.name)} aria-live="polite">
-                    <div className="mb-4 flex items-start justify-between gap-3">
-                      <h4 ref={detailTitleRef} tabIndex={-1} className="rounded font-display text-2xl outline-none focus:ring-4 focus:ring-focus/30">{t.proposal.detailTitle(selectedProposal.name)}</h4>
-                      <button type="button" className="flex size-11 shrink-0 items-center justify-center rounded-lg border outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" aria-label={t.proposal.closeDetail} onClick={closeProposalDetail}><X aria-hidden="true" className="size-4" /></button>
-                    </div>
-                    {proposalDetail(selectedProposal)}
-                  </aside>
-                ) : null}
+              <h3 className="sr-only">{t.proposal.shortlistTitle}</h3>
+              <div className="pd-list mt-4" aria-label={t.proposal.shortlistLabel}>
+                {workspace.proposals.map((proposal) => {
+                  const firstSentence = proposal.recommendationSentences?.[0];
+                  const firstTradeoff = proposal.tradeoffSentences !== null ? proposal.tradeoffSentences[0]?.text ?? null : proposal.tradeoffs[0] ?? null;
+                  const numberedEvidence = new Map(proposal.evidence.map((item, index) => [item.id, { item, number: index + 1 }] as const));
+                  const repeatedName = (proposalNameCounts.get(proposal.name) ?? 0) > 1;
+                  return (
+                    <article key={proposal.id} data-discovery-proposal={proposal.name} className="pd-row" aria-current={proposal.id === selectedProposalId ? "true" : undefined}
+                      aria-label={repeatedName ? t.proposal.proposalAtAddress(proposal.name, proposal.address ?? t.proposal.unknownAddress) : t.proposal.ariaLabel(proposal.name)}
+                      onClick={(event) => {
+                        if (event.target instanceof Element && event.target.closest("button, a, input, label, textarea, select")) return;
+                        if (selecting) changeSelection(proposal, !selectionChecked(proposal)); else openProposalDetail(proposal.id);
+                      }}>
+                      <div className="pd-row-main">
+                        {selecting && (proposal.status === "pending" || proposal.status === "accepted" && proposal.acceptedTripPlaceId) ? <label className="pd-selection-check"><input type="checkbox" aria-label={`選擇 ${proposal.name}`} checked={selectionChecked(proposal)} disabled={pending !== null} onChange={(event) => changeSelection(proposal, event.target.checked)} /></label> : null}
+                        <PlaceThumbnail photo={previews.photos.get(proposal.id)} loading={previews.loading} />
+                        <div className="pd-row-copy">
+                          <div className="pd-titleline"><button type="button" className="pd-titlebutton" disabled={selecting && pending !== null} data-proposal-detail-trigger={proposal.id} aria-label={selecting ? `選擇 ${proposal.name}` : t.proposal.viewDetail(proposal.name)} onClick={() => selecting ? changeSelection(proposal, !selectionChecked(proposal)) : openProposalDetail(proposal.id)}>{proposal.name}</button><span className="pd-chip">{proposal.category ?? t.placeType[proposal.type]}</span></div>
+                          {proposal.endorsements.length ? <div className="pd-row-labels">{proposal.endorsements.map((endorsement) => <span key={endorsement} className="pd-state">{endorsementLabel(endorsement, t)}</span>)}</div> : null}
+                          {repeatedName ? <p className="pd-row-note">{proposal.address ?? t.proposal.unknownAddress}</p> : null}
+                          {firstSentence ? <p className="pd-row-note"><ClaimSentence sentence={firstSentence} numberedEvidence={numberedEvidence} t={t} /></p> : proposal.recommendationSentences === null ? <p className="pd-row-note">{proposal.recommendation}</p> : null}
+                          {firstTradeoff ? <p className="pd-row-note">{firstTradeoff}</p> : null}
+                          <PlacePhotoCredit photo={previews.photos.get(proposal.id)} />
+                        </div>
+                      </div>
+                      {!selecting ? <div className="pd-row-bottom">
+                        <div className="pd-row-actions">{proposalActions(proposal)}</div>
+                        {proposal.status === "pending" && proposal.votingAvailable ? <VoteControl compact name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} /> : null}
+                      </div> : null}
+                    </article>
+                  );
+                })}
               </div>
             </section>
           ) : workspace?.latestRun ? <p className="order-2 rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.length ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}
+          {selecting ? <section className="pd-bulkbar" aria-label="套用所選地點">{notice?.area === "general" ? <p className="pd-notice" role="alert">{notice.text}</p> : null}{bulkConfirmation ? <p>將移除 {removingSelected.map((proposal) => proposal.name).join("、")}；票和天數安排會一起清除。</p> : null}<p>依序儲存；遇到錯誤會停止，已完成的變更會保留。</p><div className="pd-fixed-actions">{bulkConfirmation ? <button className="pd-secondary" disabled={pending !== null} onClick={() => setBulkConfirmation(false)}>返回選擇</button> : null}<button className="pd-primary" disabled={pending !== null || selectionChanges.length === 0} onClick={() => void applySelection()}>{bulkBusy ? "儲存中…" : `加入 ${selectionChanges.length - removingSelected.length}、移除 ${removingSelected.length} 個地點`}</button></div></section> : null}
 
-          {!largeScreen && selectedProposal ? (
-            <Dialog open onOpenChange={(open) => { if (!open) closeProposalDetail(); }}>
-              <DialogContent className="bottom-0 left-0 top-auto max-h-[85dvh] w-full max-w-none translate-x-0 translate-y-0 content-start overflow-y-auto rounded-b-none rounded-t-2xl p-5">
-                <DialogHeader>
-                  <DialogTitle ref={detailTitleRef} tabIndex={-1} className="rounded pr-10 font-display text-2xl outline-none focus:ring-4 focus:ring-focus/30">{t.proposal.detailTitle(selectedProposal.name)}</DialogTitle>
-                </DialogHeader>
-                {proposalDetail(selectedProposal)}
-              </DialogContent>
-            </Dialog>
+          {selectedProposal ? (
+            <PlaceDetailSheet open title={selectedProposal.name} titleRef={detailTitleRef} onClose={closeProposalDetail} footer={
+              rejectConfirmation ? <div className="pd-confirm-footer"><p>{t.proposal.rejectConfirmTitle(rejectConfirmation.name)}</p><p>{t.proposal.rejectConfirmDescription}</p>{notice?.area === "general" ? <p role="alert">{notice.text}</p> : null}<div><button className="pd-secondary" disabled={pending !== null} onClick={() => setRejectConfirmation(null)}>{t.proposal.cancel}</button><button className="pd-danger-button" disabled={pending !== null} onClick={() => { const proposal = rejectConfirmation; void decideProposal(proposal, "reject").then((next) => { if (next) { setRejectConfirmation(null); closeProposalDetail(); } }); }}>{t.proposal.rejectConfirm}</button></div></div>
+              : removeConfirmation ? <div className="pd-confirm-footer"><p>{tripPlacesT.workspace.confirmRemove(removeConfirmation.name)}</p>{notice?.area === "general" ? <p role="alert">{notice.text}</p> : null}<div><button className="pd-secondary" disabled={pending !== null} onClick={() => setRemoveConfirmation(null)}>保留地點</button><button className="pd-danger-button" disabled={pending !== null} onClick={() => void removeAcceptedProposal(removeConfirmation).then((removed) => { if (removed) closeProposalDetail(); })}>{tripPlacesT.workspace.remove}</button></div></div>
+              : <div>{notice?.area === "general" ? <p className="pd-notice" role="alert">{notice.text}</p> : null}<div className="pd-fixed-actions">{selectedProposal.status === "pending" && selectedProposal.votingAvailable ? <VoteControl compact name={selectedProposal.name} voters={selectedProposal.voters} voteCount={selectedProposal.voteCount} ownVote={selectedProposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(selectedProposal, voted)} /> : null}{proposalActions(selectedProposal)}</div></div>
+            }>
+              {proposalDetail(selectedProposal)}
+            </PlaceDetailSheet>
           ) : null}
 
-          <Dialog open={rejectConfirmation !== null} onOpenChange={(open) => { if (!open && pending === null) setRejectConfirmation(null); }}>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>{rejectConfirmation ? t.proposal.rejectConfirmTitle(rejectConfirmation.name) : ""}</DialogTitle>
-                <DialogDescription>{t.proposal.rejectConfirmDescription}</DialogDescription>
-              </DialogHeader>
-              <DialogFooter>
-                <button type="button" className="min-h-11 rounded-lg bg-accent px-4 font-bold text-ink-strong outline-none hover:bg-accent/80 focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={pending !== null} onClick={() => {
-                  const proposal = rejectConfirmation;
-                  if (!proposal) return;
-                  void decideProposal(proposal, "reject").then((next) => {
-                    if (!next) return;
-                    setRejectConfirmation(null);
-                    if (selectedProposalId === proposal.id) closeProposalDetail();
-                  });
-                }}>{t.proposal.rejectConfirm}</button>
-                <button type="button" className="min-h-11 rounded-lg border px-4 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={pending !== null} onClick={() => setRejectConfirmation(null)}>{t.proposal.cancel}</button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
 
           {workspace?.decided.length ? (
             <section className="order-4 rounded-panel border border-ink/10 p-4" aria-label={t.decided.areaLabel}>
