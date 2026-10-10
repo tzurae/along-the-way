@@ -17,6 +17,7 @@ import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
 import { VoteControl, VoteVoters } from "./VoteControl";
 import { ConflictPanel, useVersionConflict } from "./ConflictPanel";
+import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest } from "./PlaceThumbnail";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import "./pocket-discovery.css";
@@ -598,7 +599,12 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       ? proposal.tradeoffSentences.length > 0
       : proposal.tradeoffs.length > 0;
     return (
-      <div className="pd-detail">
+      <PlaceDetailContent
+        tripId={trip.id}
+        reference={{ kind: "proposal", id: proposal.id }}
+        request={request}
+        collapsible
+        interlude={<div className="pd-detail">
         <section className="pd-detail-section">
           <h3>{t.proposal.whyRecommended}</h3>
           {proposal.recommendationSentences === null ? <p className="pd-reason-copy">{proposal.recommendation}</p> : null}
@@ -649,7 +655,8 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
             </details>
           )}
         </section>
-      </div>
+        </div>}
+      />
     );
   }
   const selectionChecked = (proposal: CandidateProposalDto) => selectionDraft.get(proposal.id)?.selected ?? proposal.status === "accepted";
