@@ -2,6 +2,25 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { parseTripChangeNotification } from "@along-the-way/contracts/private-trips";
 import { ApiRequestError } from "./api-error";
 
+function retryAfterMilliseconds(error: unknown) {
+  if (!(error instanceof ApiRequestError)) return undefined;
+  const retryable = error as ApiRequestError & {
+    readonly retryAfter?: string | number;
+    readonly retryAfterSeconds?: number;
+  };
+  if (typeof retryable.retryAfterSeconds === "number" && Number.isFinite(retryable.retryAfterSeconds)) {
+    return Math.max(0, retryable.retryAfterSeconds * 1_000);
+  }
+  if (typeof retryable.retryAfter === "number" && Number.isFinite(retryable.retryAfter)) {
+    return Math.max(0, retryable.retryAfter * 1_000);
+  }
+  if (typeof retryable.retryAfter !== "string") return undefined;
+  const seconds = Number(retryable.retryAfter);
+  if (retryable.retryAfter.trim() !== "" && Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
+  const date = Date.parse(retryable.retryAfter);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
+}
+
 export function useTripLiveUpdates({ tripId, request, onChanged, onRevoked }: {
   tripId: string | undefined;
   request<T>(url: string, options?: RequestInit): Promise<T>;
@@ -11,69 +30,101 @@ export function useTripLiveUpdates({ tripId, request, onChanged, onRevoked }: {
   const callbacks = useRef({ onChanged, onRevoked });
   callbacks.current = { onChanged, onRevoked };
   const [connected, setConnected] = useState(false);
-  const projectionRetry = useRef<((failedTripId: string) => void) | null>(null);
-  const retryReadModels = useCallback((failedTripId: string) => projectionRetry.current?.(failedTripId), []);
+  const projectionRetry = useRef<((failedTripId: string, error?: unknown) => void) | null>(null);
+  const retryReadModels = useCallback((failedTripId: string, error?: unknown) => projectionRetry.current?.(failedTripId, error), []);
   useEffect(() => {
     if (!tripId) { setConnected(false); return; }
     let stopped = false;
     let source: EventSource | null = null;
-    let reconnect: ReturnType<typeof setTimeout> | undefined;
-    let projectionTimer: ReturnType<typeof setTimeout> | undefined;
+    let reconnect: number | undefined;
+    let projectionTimer: number | undefined;
+    let projectionRetryAt = 0;
     let projectionBackoff = 1_000;
     let projectionDirty = false;
+    let projectionFailed = false;
+    let projectionFailureGeneration = 0;
     let backoff = 1_000;
     let version = 0;
     let lastEventId: string | null = null;
     let checking = false;
-    let pending = false;
     let live = false;
     const controller = new AbortController();
-    function scheduleProjectionRetry() {
-      if (stopped || projectionTimer !== undefined) return;
-      projectionTimer = setTimeout(() => { projectionTimer = undefined; void check(); }, projectionBackoff);
+
+    function setProjectionTimer(delay: number) {
+      projectionRetryAt = Date.now() + delay;
+      projectionTimer = window.setTimeout(() => {
+        projectionTimer = undefined;
+        projectionRetryAt = 0;
+        if (checking) {
+          scheduleProjectionRetry();
+          return;
+        }
+        void check();
+      }, delay);
+    }
+
+    function scheduleProjectionRetry(error?: unknown) {
+      if (stopped) return;
+      const retryAfter = retryAfterMilliseconds(error);
+      if (projectionTimer !== undefined) {
+        if (retryAfter === undefined) return;
+        const requestedRetryAt = Date.now() + retryAfter;
+        if (requestedRetryAt <= projectionRetryAt) return;
+        window.clearTimeout(projectionTimer);
+        setProjectionTimer(Math.max(0, requestedRetryAt - Date.now()));
+        return;
+      }
+      const delay = Math.max(projectionBackoff, retryAfter ?? 0);
+      setProjectionTimer(delay);
       projectionBackoff = Math.min(projectionBackoff * 2, 30_000);
     }
-    projectionRetry.current = (failedTripId) => {
+
+    projectionRetry.current = (failedTripId, error) => {
       if (stopped || failedTripId !== tripId) return;
       projectionDirty = true;
-      scheduleProjectionRetry();
+      projectionFailed = true;
+      projectionFailureGeneration += 1;
+      scheduleProjectionRetry(error);
     };
 
     async function check() {
       if (stopped || !navigator.onLine) return;
-      if (checking) { pending = true; return; }
+      if (checking || projectionTimer !== undefined) {
+        projectionDirty = true;
+        return;
+      }
       checking = true;
       try {
         do {
-          pending = false;
+          projectionDirty = false;
           const current = await request<{ tripVersion: number; lastEventId: string | null }>(`/api/trips/${tripId}/version`, { signal: controller.signal, cache: "no-store" });
           if (stopped) return;
-          if (Number.isSafeInteger(current.tripVersion) && (current.tripVersion > version || projectionDirty)) {
-            const retrying = projectionDirty;
-            projectionDirty = false;
+          if (Number.isSafeInteger(current.tripVersion) && (current.tripVersion > version || projectionFailed)) {
+            const failureGeneration = projectionFailureGeneration;
             await callbacks.current.onChanged();
             if (stopped) return;
-            if (!retrying) projectionBackoff = 1_000;
+            if (failureGeneration !== projectionFailureGeneration || projectionTimer !== undefined) break;
+            projectionFailed = false;
+            projectionBackoff = 1_000;
             if (current.tripVersion >= version) {
               version = current.tripVersion;
-              // This is a notification cursor, not a projection acknowledgement.
-              // Failed child reads explicitly retry even at the same version.
               lastEventId = current.lastEventId;
             }
           }
-        } while (pending && !stopped);
+        } while (projectionDirty && !projectionFailed && projectionTimer === undefined && !stopped);
       } catch (error) {
         if (!stopped && error instanceof ApiRequestError && ["unauthenticated", "trip_not_found", "forbidden"].includes(error.code)) {
           stopped = true;
           source?.close();
-          clearTimeout(reconnect);
-          clearTimeout(projectionTimer);
+          window.clearTimeout(reconnect);
+          window.clearTimeout(projectionTimer);
           setConnected(false);
           callbacks.current.onRevoked();
         }
         else if (!stopped) {
           projectionDirty = true;
-          scheduleProjectionRetry();
+          projectionFailed = true;
+          scheduleProjectionRetry(error);
         }
         // Reading and ordinary saves remain available when only the live path fails.
       } finally { checking = false; }
@@ -88,6 +139,7 @@ export function useTripLiveUpdates({ tripId, request, onChanged, onRevoked }: {
         try {
           parseTripChangeNotification(JSON.parse((event as MessageEvent<string>).data));
           backoff = 1_000;
+          projectionDirty = true;
           void check();
         } catch { /* Ignore malformed hints; focus and fallback still read the authoritative version. */ }
       });
@@ -97,7 +149,7 @@ export function useTripLiveUpdates({ tripId, request, onChanged, onRevoked }: {
         setConnected(false);
         void check();
         if (!stopped) {
-          reconnect = setTimeout(connect, backoff);
+          reconnect = window.setTimeout(connect, backoff);
           backoff = Math.min(backoff * 2, 30_000);
         }
       };
@@ -105,18 +157,18 @@ export function useTripLiveUpdates({ tripId, request, onChanged, onRevoked }: {
     function regain() {
       if (document.visibilityState === "hidden") return;
       void check();
-      if (!live && navigator.onLine && !stopped) { clearTimeout(reconnect); connect(); }
+      if (!live && navigator.onLine && !stopped) { window.clearTimeout(reconnect); connect(); }
     }
-    function offline() { source?.close(); live = false; setConnected(false); clearTimeout(reconnect); }
+    function offline() { source?.close(); live = false; setConnected(false); window.clearTimeout(reconnect); }
     void check().then(() => { if (!stopped) connect(); });
-    const fallback = setInterval(() => { if (!live) void check(); }, 60_000);
+    const fallback = window.setInterval(() => { if (!live) void check(); }, 60_000);
     window.addEventListener("focus", regain);
     window.addEventListener("online", regain);
     window.addEventListener("offline", offline);
     document.addEventListener("visibilitychange", regain);
     return () => {
       stopped = true; projectionRetry.current = null;
-      controller.abort(); source?.close(); clearTimeout(reconnect); clearTimeout(projectionTimer); clearInterval(fallback);
+      controller.abort(); source?.close(); window.clearTimeout(reconnect); window.clearTimeout(projectionTimer); window.clearInterval(fallback);
       window.removeEventListener("focus", regain); window.removeEventListener("online", regain); window.removeEventListener("offline", offline);
       document.removeEventListener("visibilitychange", regain);
     };

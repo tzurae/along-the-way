@@ -261,7 +261,7 @@ function Gallery({ identity, photos }: { identity: string; photos: PlacePhotoDto
   );
 }
 
-function Detail({ detail, interlude, collapsible }: { detail: PlaceDetailDto; interlude?: ReactNode; collapsible: boolean }) {
+function DetailArticle({ detail, collapsible }: { detail: PlaceDetailDto; collapsible: boolean }) {
   const { locale, t } = useI18n();
   const sources = useMemo(() => new Map(detail.sources.map((source) => [source.id, source])), [detail.sources]);
   const article = (
@@ -296,18 +296,12 @@ function Detail({ detail, interlude, collapsible }: { detail: PlaceDetailDto; in
       ) : null}
     </div>
   );
-  return (
-    <div className="place-detail-content" data-place-detail-content={`${detail.reference.kind}:${detail.reference.id}`}>
-      <Gallery identity={`${detail.reference.kind}:${detail.reference.id}`} photos={detail.photos} />
-      {interlude}
-      {collapsible ? (
-        <details className="place-detail__disclosure">
-          <summary><ChevronRight aria-hidden="true" className="size-4" />{t.placeDetail.moreInformation}</summary>
-          {article}
-        </details>
-      ) : article}
-    </div>
-  );
+  return collapsible ? (
+    <details className="place-detail__disclosure">
+      <summary><ChevronRight aria-hidden="true" className="size-4" />{t.placeDetail.moreInformation}</summary>
+      {article}
+    </details>
+  ) : article;
 }
 
 export function PlaceDetailContent({ tripId, reference, date, request, interlude, collapsible = false }: {
@@ -343,14 +337,23 @@ export function PlaceDetailContent({ tripId, reference, date, request, interlude
     return () => controller.abort();
   }, [date, identity, reference.id, reference.kind, request, tripId]);
 
-  if (state.identity !== identity || state.loading) return <div className="place-detail-content"><p className="place-detail__loading" role="status">{t.placeDetail.loading}</p>{interlude}</div>;
-  if (state.error) {
-    const message = !navigator.onLine
+  const loading = state.identity !== identity || state.loading;
+  const detail = !loading && !state.error ? state.detail : null;
+  const errorMessage = !loading && state.error
+    ? !navigator.onLine
       ? t.placeDetail.offlineUnavailable
       : state.error instanceof ApiRequestError && [401, 403, 404].includes(state.error.status ?? 0)
         ? t.placeDetail.accessDenied
-        : t.placeDetail.unavailable;
-    return <div className="place-detail-content"><p className="place-detail__error" role="alert">{message}</p>{interlude}</div>;
-  }
-  return state.detail ? <Detail detail={state.detail} interlude={interlude} collapsible={collapsible} /> : null;
+        : t.placeDetail.unavailable
+    : null;
+
+  return (
+    <div className="place-detail-content" data-place-detail-content={detail ? `${detail.reference.kind}:${detail.reference.id}` : undefined}>
+      {loading ? <p className="place-detail__loading" role="status">{t.placeDetail.loading}</p> : null}
+      {errorMessage ? <p className="place-detail__error" role="alert">{errorMessage}</p> : null}
+      {detail ? <Gallery identity={`${detail.reference.kind}:${detail.reference.id}`} photos={detail.photos} /> : null}
+      {interlude}
+      {detail ? <DetailArticle detail={detail} collapsible={collapsible} /> : null}
+    </div>
+  );
 }

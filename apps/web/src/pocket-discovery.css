@@ -95,6 +95,26 @@
   line-height: 1.5;
 }
 
+.pd-read-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.pd-read-error p {
+  flex: 1 1 18rem;
+  margin: 0;
+}
+
+.pd-read-error .pd-secondary {
+  min-height: 44px;
+  padding-inline: 0.875rem;
+  border-radius: 0.75rem;
+  font-weight: 700;
+}
+
 .pd-list {
   overflow: hidden;
   border: 1px solid var(--border);
@@ -241,15 +261,16 @@
 }
 
 .pd-vote-button {
+  position: relative;
+  isolation: isolate;
   display: inline-flex;
   min-width: 51px;
-  height: 30px;
+  height: 44px;
   align-items: center;
   justify-content: center;
   gap: 5px;
   padding-inline: 10px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
+  border: 0;
   background: transparent;
   color: var(--muted-foreground);
   font-size: 13px;
@@ -257,14 +278,27 @@
   font-variant-numeric: tabular-nums;
 }
 
+.pd-vote-button::before {
+  position: absolute;
+  z-index: -1;
+  inset: 7px 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  content: "";
+}
+
 .pd-vote-button > svg {
   flex: none;
 }
 
 .pd-vote-button[aria-pressed="true"] {
+  color: var(--color-on-dark);
+}
+
+.pd-vote-button[aria-pressed="true"]::before {
   border-color: var(--color-accent);
   background: var(--color-accent);
-  color: var(--color-on-dark);
 }
 
 .pd-vote-button:disabled {
@@ -583,6 +617,18 @@
   line-height: 1.5;
 }
 
+.pd-field-error {
+  margin: 0;
+  color: var(--destructive);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.pd-form input[aria-invalid="true"] {
+  border-color: var(--destructive);
+}
+
 .pd-form .native-select {
   width: 100%;
 }
@@ -818,6 +864,21 @@
   list-style: none;
 }
 
+.pd-evidence-disclosure > summary {
+  cursor: pointer;
+}
+
+.pd-evidence-chevron {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.pd-evidence-disclosure[open] > summary .pd-evidence-chevron {
+  transform: rotate(90deg);
+}
+
 .pd-research-footer .pd-primary {
   margin-left: auto;
 }
@@ -831,5 +892,11 @@
   .pd-research-footer .pd-primary {
     width: 100%;
     margin-left: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pd-evidence-chevron {
+    transition: none;
   }
 }

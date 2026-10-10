@@ -521,7 +521,7 @@ function SegmentControl<T extends string>({ label, id, items, active, onSelect }
 
 export function App() {
   const { t } = useI18n();
-  const projectionFailure = useRef<(tripId: string) => void>(() => {});
+  const projectionFailure = useRef<(tripId: string, reason?: unknown) => void>(() => {});
   const accountId = useRef<string | null>(null);
   const readOnly = useRef(false);
   const reconnecting = useRef(false);
@@ -557,7 +557,7 @@ export function App() {
       }
       const projection = /^\/api\/trips\/([^/?]+)(?:\/([^/?]+))?/.exec(url);
       if (isRead && projection && !optionalPlaceRead && projection[2] !== "version" && projection[2] !== "events" && !readOnly.current) {
-        projectionFailure.current(projection[1]!);
+        projectionFailure.current(projection[1]!, reason);
       }
       throw reason;
     }

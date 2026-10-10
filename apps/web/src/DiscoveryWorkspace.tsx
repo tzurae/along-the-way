@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, ExternalLink, Images, ListChecks, Pencil, RotateCw, Search, X } from "lucide-react";
+import { Check, ChevronRight, ExternalLink, Images, ListChecks, Pencil, RotateCw, Search, X } from "lucide-react";
 
 import {
   parseDiscoveryWorkspaceResponse,
@@ -108,6 +108,23 @@ function shortfallText(shortfall: DiscoveryShortfallDto, t: Messages["discovery"
       return t.shortfall.outsideTrip;
     case "no_location":
       return t.shortfall.noLocation;
+  }
+}
+
+function discoveryRunFailureReason(errorCode: string | null, t: Messages["discovery"]) {
+  switch (errorCode?.toLowerCase()) {
+    case "model_unavailable":
+      return t.runFailure.modelUnavailable;
+    case "provider_unavailable":
+      return t.runFailure.providerUnavailable;
+    case "research_in_progress":
+      return t.runFailure.researchInProgress;
+    case "research_limit_reached":
+      return t.runFailure.researchLimitReached;
+    case "conflict":
+      return t.runFailure.conflict;
+    default:
+      return t.runFailure.unknown;
   }
 }
 
@@ -610,23 +627,27 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
         </section>
         {proposal.status === "pending" && proposal.votingAvailable ? <section className="pd-detail-section"><VoteVoters voters={proposal.voters} /></section> : null}
         <section className="pd-detail-section">
-          <details className="pd-evidence-disclosure">
-            <summary>{t.proposal.sourceCount(proposal.evidence.length)}</summary>
-            <ul className="mt-3 grid gap-2">
-              {proposal.evidence.map((item, evidenceIndex) => {
-                const number = evidenceIndex + 1;
-                return (
-                  <li key={item.id}>
-                    <a className="pd-inline-link break-all font-bold text-accent-strong underline underline-offset-2" href={item.sourceUrl} target="_blank" rel="noreferrer" aria-label={t.proposal.citationLabel(number, item.title)}>
-                      <span>[{number}] {item.title}</span><ExternalLink aria-hidden="true" className="size-4" />
-                    </a>
-                    <span className="block text-xs text-muted-foreground">{item.attribution}・{t.proposal.observedAt(new Date(item.observedAt).toLocaleString(locale))}</span>
-                    {item.isStale ? <span className="text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span> : null}
-                  </li>
-                );
-              })}
-            </ul>
-          </details>
+          {proposal.evidence.length === 0 ? (
+            <p className="text-sm text-muted-foreground">{t.proposal.noEvidence}</p>
+          ) : (
+            <details className="pd-evidence-disclosure">
+              <summary><ChevronRight aria-hidden="true" className="pd-evidence-chevron" />{t.proposal.sourceCount(proposal.evidence.length)}</summary>
+              <ul className="mt-3 grid gap-2">
+                {proposal.evidence.map((item, evidenceIndex) => {
+                  const number = evidenceIndex + 1;
+                  return (
+                    <li key={item.id}>
+                      <a className="pd-inline-link break-all font-bold text-accent-strong underline underline-offset-2" href={item.sourceUrl} target="_blank" rel="noreferrer" aria-label={t.proposal.citationLabel(number, item.title)}>
+                        <span>[{number}] {item.title}</span><ExternalLink aria-hidden="true" className="size-4" />
+                      </a>
+                      <span className="block text-xs text-muted-foreground">{item.attribution}・{t.proposal.observedAt(new Date(item.observedAt).toLocaleString(locale))}</span>
+                      {item.isStale ? <span className="text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span> : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            </details>
+          )}
         </section>
       </div>
     );
@@ -637,6 +658,9 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     return intent && intent.selected !== (proposal.status === "accepted");
   });
   const removingSelected = selectionChanges.filter((proposal) => proposal.status === "accepted");
+  const hasSelectableProposals = (workspace?.proposals ?? []).some((proposal) =>
+    proposal.status === "pending" || proposal.status === "accepted" && proposal.acceptedTripPlaceId !== null
+  );
   function beginSelection() {
     setSelectionDraft(new Map());
     setBulkConfirmation(false);
@@ -684,7 +708,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     <section className="pd-workspace pd-discovery" data-selecting={selecting ? "true" : undefined} aria-labelledby="ai-discovery-heading">
       <div className="pd-pagehead">
         <h2 id="ai-discovery-heading">{t.header.title}</h2>
-        {selecting ? <div className="pd-row-actions"><span>已勾選 {(workspace?.proposals ?? []).filter(selectionChecked).length} 個</span><button className="pd-secondary" disabled={pending !== null} onClick={() => { setSelecting(false); setBulkConfirmation(false); }}>取消</button></div> : workspace?.latestRun ? <div className="pd-row-actions"><button className="pd-secondary" onClick={() => setResearchSettingsOpen(true)}><Pencil aria-hidden="true" className="size-4" /><span>{t.brief.editRequirements}</span></button><button className="pd-secondary" disabled={pending !== null} onClick={beginSelection}><ListChecks aria-hidden="true" className="size-4" /><span>{t.brief.choosePlaces}</span></button></div> : null}
+        {selecting ? <div className="pd-row-actions"><span>已勾選 {(workspace?.proposals ?? []).filter(selectionChecked).length} 個</span><button className="pd-secondary" disabled={pending !== null} onClick={() => { setSelecting(false); setBulkConfirmation(false); }}>取消</button></div> : workspace?.latestRun?.status === "completed" ? <div className="pd-row-actions"><button className="pd-secondary" onClick={() => setResearchSettingsOpen(true)}><Pencil aria-hidden="true" className="size-4" /><span>{t.brief.editRequirements}</span></button>{hasSelectableProposals ? <button className="pd-secondary" disabled={pending !== null} onClick={beginSelection}><ListChecks aria-hidden="true" className="size-4" /><span>{t.brief.choosePlaces}</span></button> : null}</div> : null}
       </div>
       {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={pending !== null}
         onAccept={() => {
@@ -803,6 +827,17 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
             </div>
           </ResearchPanel>
 
+          {workspace?.latestRun?.status === "failed" ? (
+            <section className="order-1 rounded-panel border border-destructive/30 bg-surface p-4" role="alert" aria-labelledby="discovery-run-failed-heading">
+              <h3 id="discovery-run-failed-heading" className="font-display text-2xl">{t.runFailure.title}</h3>
+              <p className="mt-1 text-sm">{discoveryRunFailureReason(workspace.latestRun.errorCode, t)}</p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button className="pd-secondary" disabled={pending !== null} onClick={() => setResearchSettingsOpen(true)}><Pencil aria-hidden="true" className="size-4" />{t.brief.editRequirements}</button>
+                <button className="pd-primary" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research("again")}><RotateCw aria-hidden="true" className="size-4" />{researchLabel(t.runFailure.regenerate)}</button>
+              </div>
+            </section>
+          ) : null}
+
           {workspace?.proposals.length ? (
             <section className="order-2" aria-label={t.proposal.shortlistLabel}>
               <h3 className="sr-only">{t.proposal.shortlistTitle}</h3>
@@ -825,6 +860,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                           <div className="pd-titleline">
                             <button type="button" className="pd-titlebutton" disabled={selecting && pending !== null} data-proposal-detail-trigger={proposal.id} aria-label={selecting ? `選擇 ${proposal.name}` : t.proposal.viewDetail(proposal.name)} onClick={() => selecting ? changeSelection(proposal, !selectionChecked(proposal)) : openProposalDetail(proposal.id)}>{proposal.name}</button>
                             <span className="pd-chip">{proposal.category ?? t.placeType[proposal.type]}</span>
+                            {proposal.status !== "pending" ? <span className="pd-state">{t.status[proposal.status]}</span> : null}
                             {selecting && (proposal.status === "pending" || proposal.status === "accepted" && proposal.acceptedTripPlaceId) ? <label className="pd-selection-check"><input type="checkbox" aria-label={`選擇 ${proposal.name}`} checked={selectionChecked(proposal)} disabled={pending !== null} onChange={(event) => changeSelection(proposal, event.target.checked)} /></label> : null}
                           </div>
                           {proposal.endorsements.length ? <div className="pd-row-labels">{proposal.endorsements.map((endorsement) => <span key={endorsement} className="pd-state">{endorsementLabel(endorsement, t)}</span>)}</div> : null}
@@ -844,7 +880,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                 })}
               </div>
             </section>
-          ) : workspace?.latestRun ? <p className="order-2 rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.length ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}
+          ) : workspace?.latestRun?.status === "completed" ? <p className="order-2 rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.length ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}
           {selecting ? <section className="pd-bulkbar" aria-label="套用所選地點">{notice?.area === "general" ? <p className="pd-notice" role="alert">{notice.text}</p> : null}{bulkConfirmation ? <p>將移除 {removingSelected.map((proposal) => proposal.name).join("、")}；票和天數安排會一起清除。</p> : null}<p>依序儲存；遇到錯誤會停止，已完成的變更會保留。</p><div className="pd-fixed-actions">{bulkConfirmation ? <button className="pd-secondary" disabled={pending !== null} onClick={() => setBulkConfirmation(false)}>返回選擇</button> : null}<button className="pd-primary" disabled={pending !== null || selectionChanges.length === 0} onClick={() => void applySelection()}>{bulkBusy ? "儲存中…" : `加入 ${selectionChanges.length - removingSelected.length}、移除 ${removingSelected.length} 個地點`}</button></div></section> : null}
 
           {selectedProposal ? (
@@ -873,7 +909,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
             </section>
           ) : null}
 
-          {workspace?.latestRun?.shortfalls.length ? (
+          {workspace?.latestRun?.status === "completed" && workspace.latestRun.shortfalls.length ? (
             <section className="order-4 rounded-panel border border-ink/10 p-4" aria-label={t.missing.areaLabel}>
               <h3 className="font-display text-2xl">{t.missing.title}</h3>
               <p className="mt-1 text-sm text-muted-foreground">{t.missing.description}</p>
