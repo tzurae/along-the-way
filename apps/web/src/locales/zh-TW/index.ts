@@ -7,6 +7,7 @@ import { errors } from "./errors";
 import { itemDialog } from "./item-dialog";
 import { placeDialog } from "./place-dialog";
 import { placeDetail } from "./place-detail";
+import { schedule } from "./schedule";
 import { timetable } from "./timetable";
 import { tripPlaces } from "./trip-places";
 import { tripPlan } from "./trip-plan";
@@ -25,6 +26,7 @@ export const zhTW = {
   itemDialog,
   placeDetail,
   placeDialog,
+  schedule,
   timetable,
   tripPlaces,
   tripPlan,

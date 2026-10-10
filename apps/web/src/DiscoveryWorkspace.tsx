@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Check, ChevronRight, ExternalLink, Images, ListChecks, Pencil, RotateCw, Search, X } from "lucide-react";
+import { Ban, CalendarCheck, CalendarPlus, Check, ChevronRight, ExternalLink, Images, MapPinOff, Pencil, RotateCw, Search } from "lucide-react";
 
 import {
   parseDiscoveryWorkspaceResponse,
@@ -12,7 +12,8 @@ import {
   type DiscoveryWorkspaceDto,
 } from "@along-the-way/contracts/discovery";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
-import { parseTripPlaceListResponse } from "@along-the-way/contracts/trip-places";
+import { parseTripPlaceListResponse, type TripPlaceDto } from "@along-the-way/contracts/trip-places";
+import { ApiRequestError } from "./api-error";
 import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
 import { VoteControl, VoteVoters } from "./VoteControl";
@@ -20,6 +21,10 @@ import { ConflictPanel, useVersionConflict } from "./ConflictPanel";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest } from "./PlaceThumbnail";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
+import { SchedulePlacesSheet } from "./SchedulePlacesSheet";
+import { SelectionBar } from "./SelectionBar";
+import { useScheduleToast } from "./ScheduleToast";
+import { assignPlacesToDay } from "./schedule-assignments";
 import "./pocket-discovery.css";
 
 
@@ -222,8 +227,9 @@ function ResearchPanel({ first, open, onClose, children, footer }: { first: bool
 
 
 export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChanged }: DiscoveryWorkspaceProps) {
-  const { locale, t: { discovery: t, tripPlaces: tripPlacesT } } = useI18n();
+  const { locale, t: { discovery: t, schedule: scheduleT } } = useI18n();
   const [workspace, setWorkspace] = useState<DiscoveryWorkspaceDto | null>(null);
+  const [tripPlaces, setTripPlaces] = useState<TripPlaceDto[]>([]);
   const [briefDraft, setBriefDraft] = useState("");
   const [feedbackDraft, setFeedbackDraft] = useState("");
   const [questionDrafts, setQuestionDrafts] = useState<Record<string, QuestionDraft>>({});
@@ -232,17 +238,25 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const [loading, setLoading] = useState(true);
   const [operationPending, setPending] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
-  const pending = operationPending ?? (bulkBusy ? "bulk-selection" : null);
+  const pending = operationPending ?? (bulkBusy ? "schedule-selection" : null);
   const [selecting, setSelecting] = useState(false);
-  const [selectionDraft, setSelectionDraft] = useState<Map<string, { proposal: CandidateProposalDto; selected: boolean }>>(() => new Map());
-  const [bulkConfirmation, setBulkConfirmation] = useState(false);
+  const [selectedProposalIds, setSelectedProposalIds] = useState<Set<string>>(() => new Set());
+  const [scheduleProposalIds, setScheduleProposalIds] = useState<string[]>([]);
+  const [scheduleInitialDayId, setScheduleInitialDayId] = useState<string | null>(null);
+  const [scheduleAllowUnscheduled, setScheduleAllowUnscheduled] = useState(false);
+  const [scheduleError, setScheduleError] = useState("");
+  const [changedProposalIds, setChangedProposalIds] = useState<Set<string>>(() => new Set());
+  const changedRowsTimer = useRef<number | null>(null);
   const [notice, setNotice] = useState<{ area: NoticeArea; text: string } | null>(null);
   const [selectedProposalId, setSelectedProposalId] = useState<string | null>(null);
   const detailTitleRef = useRef<HTMLHeadingElement>(null);
   const detailReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const [rejectConfirmation, setRejectConfirmation] = useState<CandidateProposalDto | null>(null);
-  const [removeConfirmation, setRemoveConfirmation] = useState<CandidateProposalDto | null>(null);
   const [researchSettingsOpen, setResearchSettingsOpen] = useState(false);
+  const scheduleToast = useScheduleToast();
+  useEffect(() => () => {
+    if (changedRowsTimer.current !== null) window.clearTimeout(changedRowsTimer.current);
+  }, []);
 
   function openProposalDetail(proposalId: string) {
     if (proposalId === selectedProposalId) {
@@ -251,7 +265,6 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     }
     detailReturnPosition.current = { x: window.scrollX, y: window.scrollY };
     setRejectConfirmation(null);
-    setRemoveConfirmation(null);
     setSelectedProposalId(proposalId);
   }
 
@@ -269,7 +282,6 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     detailReturnPosition.current = null;
     setSelectedProposalId(null);
     setRejectConfirmation(null);
-    setRemoveConfirmation(null);
     if (proposalId) {
       window.requestAnimationFrame(() => {
         document.querySelector<HTMLElement>(`[data-proposal-detail-trigger="${proposalId}"]`)?.focus({ preventScroll: true });
@@ -311,7 +323,12 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      apply(await request(`/api/trips/${trip.id}/discovery`));
+      const [discovery, places] = await Promise.all([
+        request<unknown>(`/api/trips/${trip.id}/discovery`),
+        request<unknown>(`/api/trips/${trip.id}/trip-places`),
+      ]);
+      apply(discovery);
+      setTripPlaces(parseTripPlaceListResponse(places).tripPlaces);
       setNotice(null);
     } catch (error) {
       setNotice({ area: "general", text: errorMessage(error, t.errors.failed) });
@@ -324,16 +341,20 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     void load();
   }, [load]);
 
-  // Wishlist and member changes made in other tabs only refresh the projection; unsaved brief
+  // Place and member changes made in other tabs only refresh projections; unsaved brief
   // and question drafts typed here must survive them.
   const refreshSignal = `${placesRevision}:${trip.members.length}`;
   const lastRefreshSignal = useRef(refreshSignal);
   useEffect(() => {
     if (lastRefreshSignal.current === refreshSignal) return;
     lastRefreshSignal.current = refreshSignal;
-    void request(`/api/trips/${trip.id}/discovery`)
-      .then((value) => setWorkspace(parseDiscoveryWorkspaceResponse(value).discovery))
-      .catch((error: unknown) => setNotice({ area: "general", text: errorMessage(error, t.errors.failed) }));
+    void Promise.all([
+      request<unknown>(`/api/trips/${trip.id}/discovery`),
+      request<unknown>(`/api/trips/${trip.id}/trip-places`),
+    ]).then(([discovery, places]) => {
+      setWorkspace(parseDiscoveryWorkspaceResponse(discovery).discovery);
+      setTripPlaces(parseTripPlaceListResponse(places).tripPlaces);
+    }).catch((error: unknown) => setNotice({ area: "general", text: errorMessage(error, t.errors.failed) }));
   }, [refreshSignal, request, t.errors.failed, trip.id]);
 
   async function mutate(
@@ -454,59 +475,40 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     );
   }
 
-  async function removeAcceptedProposal(proposal: CandidateProposalDto) {
-    if (pending || !proposal.acceptedTripPlaceId) return;
-    const operation = `remove-accepted:${proposal.id}`;
-    setPending(operation);
-    setNotice(null);
-    try {
-      const tripPlaces = parseTripPlaceListResponse(
-        await request<unknown>(`/api/trips/${trip.id}/trip-places`),
-      ).tripPlaces;
-      const acceptedPlace = tripPlaces.find((place) => place.id === proposal.acceptedTripPlaceId);
-      if (acceptedPlace) {
-        const payload = { expectedVersion: acceptedPlace.version };
-        await request(`/api/trips/${trip.id}/trip-places/${acceptedPlace.id}/remove`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Idempotency-Key": retryKey(retryKeys.current, operation, payload),
-          },
-          body: JSON.stringify(payload),
-        });
-        clearRetryKey(retryKeys.current, operation);
-      }
-      const refreshed = parseDiscoveryWorkspaceResponse(
-        await request(`/api/trips/${trip.id}/discovery`),
-      ).discovery;
-      setWorkspace(refreshed);
-      onPlacesChanged();
-      return refreshed;
-    } catch (error) {
-      setNotice({ area: "general", text: errorMessage(error, t.errors.failed) });
-    } finally {
-      setPending(null);
-    }
-  }
-
   function proposalActions(proposal: CandidateProposalDto) {
-    if (proposal.status === "pending") {
-      return (
-        <div className="flex flex-wrap gap-2 2xl:flex-nowrap">
-          <button className="flex min-h-11 items-center gap-2 whitespace-nowrap rounded-lg bg-accent px-3 font-bold text-ink-strong outline-none hover:bg-accent/80 focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={pending !== null} onClick={() => void decideProposal(proposal, "accept")}><Check aria-hidden="true" className="size-4" />{t.proposal.accept}</button>
-          <button className="flex min-h-11 items-center gap-2 whitespace-nowrap rounded-lg border px-3 font-bold outline-none hover:bg-surface focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={pending !== null} onClick={() => { openProposalDetail(proposal.id); setRejectConfirmation(proposal); }}><X aria-hidden="true" className="size-4" />{t.proposal.decline}</button>
-        </div>
-      );
-    }
-    if (proposal.status === "accepted") {
-      return (
-        <div className="flex flex-wrap items-center gap-2 2xl:flex-nowrap">
-          <span className="whitespace-nowrap font-bold">{t.status.accepted}</span>
-          {proposal.acceptedTripPlaceId ? <button className="min-h-11 whitespace-nowrap rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => { openProposalDetail(proposal.id); setRemoveConfirmation(proposal); }}>{tripPlacesT.workspace.remove}</button> : null}
-        </div>
-      );
-    }
-    return <span className="font-bold">{t.status[proposal.status]}</span>;
+    const place = acceptedPlaceFor(proposal);
+    const located = proposalIsLocated(proposal);
+    const canSchedule = trip.role === "owner"
+      && (proposal.status === "pending" || proposal.status === "accepted")
+      && Boolean(proposal.status === "pending" || place);
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {proposal.status === "pending" ? (
+          <button
+            className="pd-danger-button"
+            disabled={pending !== null}
+            onClick={() => {
+              openProposalDetail(proposal.id);
+              setRejectConfirmation(proposal);
+            }}
+          >
+            <Ban aria-hidden="true" className="size-4" />
+            {t.proposal.decline}
+          </button>
+        ) : <span className="font-bold">{t.status[proposal.status]}</span>}
+        {canSchedule && located ? (
+          <button
+            type="button"
+            className="schedule-primary-button"
+            disabled={pending !== null}
+            onClick={() => openProposalSchedule(proposal)}
+          >
+            <CalendarPlus aria-hidden="true" className="size-4" />
+            {place?.assignedDayId ? scheduleT.changeDate : scheduleT.pageAction}
+          </button>
+        ) : null}
+      </div>
+    );
   }
 
 
@@ -659,63 +661,256 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       />
     );
   }
-  const selectionChecked = (proposal: CandidateProposalDto) => selectionDraft.get(proposal.id)?.selected ?? proposal.status === "accepted";
-  const selectionChanges = (workspace?.proposals ?? []).filter((proposal) => {
-    const intent = selectionDraft.get(proposal.id);
-    return intent && intent.selected !== (proposal.status === "accepted");
+  const tripPlacesById = new Map(tripPlaces.map((place) => [place.id, place]));
+  const acceptedPlaceFor = (proposal: CandidateProposalDto) =>
+    proposal.acceptedTripPlaceId ? tripPlacesById.get(proposal.acceptedTripPlaceId) ?? null : null;
+  const proposalIsLocated = (proposal: CandidateProposalDto) => {
+    const place = acceptedPlaceFor(proposal);
+    return (place?.latitude ?? proposal.latitude) !== null && (place?.longitude ?? proposal.longitude) !== null;
+  };
+  const proposalDayId = (proposal: CandidateProposalDto) => acceptedPlaceFor(proposal)?.assignedDayId ?? null;
+  const proposalCanBeSelected = (proposal: CandidateProposalDto) => {
+    if (!proposalIsLocated(proposal)) return false;
+    if (proposal.status === "pending") return true;
+    const place = acceptedPlaceFor(proposal);
+    return proposal.status === "accepted" && Boolean(place && !place.scheduled && !place.assignedDayId);
+  };
+  const sheetProposals = scheduleProposalIds.flatMap((id) => {
+    const proposal = workspace?.proposals.find((candidate) => candidate.id === id);
+    return proposal ? [proposal] : [];
   });
-  const removingSelected = selectionChanges.filter((proposal) => proposal.status === "accepted");
-  const hasSelectableProposals = (workspace?.proposals ?? []).some((proposal) =>
-    proposal.status === "pending" || proposal.status === "accepted" && proposal.acceptedTripPlaceId !== null
-  );
+  const hasSelectableProposals = (workspace?.proposals ?? []).some(proposalCanBeSelected);
+  const missingLocationProposalCount = (workspace?.proposals ?? []).filter((proposal) =>
+    (proposal.status === "pending" || proposal.status === "accepted") && !proposalIsLocated(proposal)
+  ).length;
+
+  function formatScheduledDay(dayId: string) {
+    const day = trip.days.find((candidate) => candidate.id === dayId);
+    if (!day) return dayId;
+    const [, month, date] = day.date.split("-");
+    const weekday = new Intl.DateTimeFormat(locale, {
+      weekday: "short",
+      timeZone: "UTC",
+    }).format(new Date(`${day.date}T12:00:00Z`));
+    return `${Number(month)}/${Number(date)}（${weekday}）`;
+  }
+
   function beginSelection() {
-    setSelectionDraft(new Map());
-    setBulkConfirmation(false);
+    setSelectedProposalIds(new Set());
+    setScheduleError("");
     setSelecting(true);
   }
+
   function changeSelection(proposal: CandidateProposalDto, checked: boolean) {
-    if (pending || proposal.status !== "pending" && !(proposal.status === "accepted" && proposal.acceptedTripPlaceId)) return;
-    setBulkConfirmation(false);
-    setSelectionDraft((previous) => {
-      const next = new Map(previous);
-      if (checked === (proposal.status === "accepted")) next.delete(proposal.id);
-      else next.set(proposal.id, { proposal, selected: checked });
+    if (pending || !proposalCanBeSelected(proposal)) return;
+    setSelectedProposalIds((previous) => {
+      const next = new Set(previous);
+      if (checked) next.add(proposal.id);
+      else next.delete(proposal.id);
       return next;
     });
   }
-  async function applySelection() {
-    if (pending || !workspace) return;
-    if (removingSelected.length && !bulkConfirmation) { setBulkConfirmation(true); return; }
+
+  function openSchedule(ids: string[], initialDayId: string | null = null, allowUnscheduled = false) {
+    if (ids.length === 0) return;
+    setScheduleProposalIds(ids);
+    setScheduleInitialDayId(initialDayId);
+    setScheduleAllowUnscheduled(allowUnscheduled);
+    setScheduleError("");
+  }
+
+  function openProposalSchedule(proposal: CandidateProposalDto) {
+    const dayId = proposalDayId(proposal);
+    setSelectedProposalId(null);
+    setRejectConfirmation(null);
+    openSchedule([proposal.id], dayId, dayId !== null);
+  }
+
+  function closeSchedule() {
+    if (bulkBusy) return;
+    setScheduleProposalIds([]);
+    setScheduleInitialDayId(null);
+    setScheduleAllowUnscheduled(false);
+    setScheduleError("");
+  }
+
+  async function readSchedulingState() {
+    const [discoveryValue, placesValue] = await Promise.all([
+      request<unknown>(`/api/trips/${trip.id}/discovery`),
+      request<unknown>(`/api/trips/${trip.id}/trip-places`),
+    ]);
+    const nextWorkspace = parseDiscoveryWorkspaceResponse(discoveryValue).discovery;
+    const nextPlaces = parseTripPlaceListResponse(placesValue).tripPlaces;
+    setWorkspace(nextWorkspace);
+    setTripPlaces(nextPlaces);
+    return { nextWorkspace, nextPlaces };
+  }
+
+  function scheduleFailure(
+    proposalIds: string[],
+    currentWorkspace: DiscoveryWorkspaceDto,
+    currentPlaces: TripPlaceDto[],
+    targetDayId: string | null,
+    error: unknown,
+  ) {
+    const placesById = new Map(currentPlaces.map((place) => [place.id, place]));
+    const unscheduledNames = proposalIds.flatMap((id) => {
+      const proposal = currentWorkspace.proposals.find((candidate) => candidate.id === id);
+      if (!proposal?.acceptedTripPlaceId) return [];
+      const place = placesById.get(proposal.acceptedTripPlaceId);
+      return !place || (targetDayId !== null && place.assignedDayId === null)
+        ? [proposal.name]
+        : [];
+    });
+    setNotice(null);
+    setScheduleError(unscheduledNames.length
+      ? t.scheduling.partialFailure(unscheduledNames)
+      : error instanceof ApiRequestError
+        ? t.scheduling.failed(error.message)
+        : t.scheduling.requestFailed);
+  }
+
+  function finishSchedule(
+    proposalIds: string[],
+    currentWorkspace: DiscoveryWorkspaceDto,
+    dayId: string | null,
+  ) {
+    onPlacesChanged();
+    const scheduledNames = proposalIds.flatMap((id) => {
+      const proposal = currentWorkspace.proposals.find((candidate) => candidate.id === id);
+      return proposal ? [proposal.name] : [];
+    });
+    closeSchedule();
+    setSelecting(false);
+    setSelectedProposalIds(new Set());
+    setChangedProposalIds(new Set(proposalIds));
+    if (changedRowsTimer.current !== null) window.clearTimeout(changedRowsTimer.current);
+    changedRowsTimer.current = window.setTimeout(() => {
+      setChangedProposalIds(new Set());
+      changedRowsTimer.current = null;
+    }, 1_400);
+    if (dayId) {
+      const label = formatScheduledDay(dayId);
+      const day = trip.days.find((candidate) => candidate.id === dayId);
+      scheduleToast.show(scheduleT.toastScheduled(scheduledNames.length, label), day ? {
+        label: scheduleT.viewItinerary,
+        href: `?trip=${encodeURIComponent(trip.id)}&tab=itinerary&segment=daily&day=${encodeURIComponent(day.date)}`,
+      } : undefined);
+    } else if (scheduledNames[0]) {
+      scheduleToast.show(scheduleT.toastUnscheduled(scheduledNames[0]));
+    }
+  }
+
+  async function confirmSchedule(dayId: string | null) {
+    if (bulkBusy || scheduleProposalIds.length === 0) return;
+    const proposalIds = [...scheduleProposalIds];
     setBulkBusy(true);
+    setScheduleError("");
+    let currentWorkspace = workspace;
+    let currentPlaces = tripPlaces;
     try {
-      // Reuse versioned individual mutations; never claim an atomic bulk transaction.
-      let current = workspace;
-      for (const change of selectionChanges) {
-        const proposal = current.proposals.find((candidate) => candidate.id === change.id);
-        const intent = selectionDraft.get(change.id)!;
-        if (!proposal || proposal.version !== intent.proposal.version || proposal.status !== intent.proposal.status || proposal.acceptedTripPlaceId !== intent.proposal.acceptedTripPlaceId) {
-          setNotice({ area: "general", text: "地點資料已更新。請取消選擇，重新確認目前的名單。" });
-          return;
+      const fresh = await readSchedulingState();
+      currentWorkspace = fresh.nextWorkspace;
+      currentPlaces = fresh.nextPlaces;
+      for (const proposalId of proposalIds) {
+        const proposal = currentWorkspace.proposals.find((candidate) => candidate.id === proposalId);
+        if (!proposal) throw new Error(t.scheduling.proposalChanged);
+        if (proposal.status === "pending") {
+          const next = await decideProposal(proposal, "accept");
+          if (!next) throw new Error(t.scheduling.acceptFailed);
+          currentWorkspace = next;
+        } else if (proposal.status !== "accepted" || !proposal.acceptedTripPlaceId) {
+          throw new Error(t.scheduling.proposalChanged);
         }
-        const next = intent.selected ? await decideProposal(intent.proposal, "accept") : await removeAcceptedProposal(intent.proposal);
-        if (!next) return;
-        if ((next.proposals.find((candidate) => candidate.id === change.id)?.status === "accepted") !== intent.selected) {
-          setNotice({ area: "general", text: "地點狀態已更新，這項變更尚未套用。請取消選擇並重新確認。" });
-          return;
-        }
-        current = next;
       }
-      setSelecting(false);
-      setBulkConfirmation(false);
+      const placesValue = await request<unknown>(`/api/trips/${trip.id}/trip-places`);
+      currentPlaces = parseTripPlaceListResponse(placesValue).tripPlaces;
+      setTripPlaces(currentPlaces);
+      const items = proposalIds.map((proposalId) => {
+        const proposal = currentWorkspace!.proposals.find((candidate) => candidate.id === proposalId);
+        const place = proposal?.acceptedTripPlaceId
+          ? currentPlaces.find((candidate) => candidate.id === proposal.acceptedTripPlaceId)
+          : null;
+        if (!proposal || !place || place.latitude === null || place.longitude === null) {
+          throw new Error(t.scheduling.placeUnavailable);
+        }
+        return {
+          tripPlaceId: place.id,
+          version: place.version,
+          currentDayId: place.assignedDayId,
+        };
+      });
+      const assigned = await assignPlacesToDay({
+        request,
+        tripId: trip.id,
+        dayId,
+        items,
+      });
+      setTripPlaces(assigned.tripPlaces);
+      finishSchedule(proposalIds, currentWorkspace, dayId);
+    } catch (error) {
+      try {
+        const fresh = await readSchedulingState();
+        currentWorkspace = fresh.nextWorkspace;
+        currentPlaces = fresh.nextPlaces;
+      } catch {
+        // Keep the latest successfully read state; retry always reconciles before accepting.
+      }
+      if (!currentWorkspace) {
+        setScheduleError(error instanceof ApiRequestError
+          ? t.scheduling.failed(error.message)
+          : t.scheduling.requestFailed);
+        return;
+      }
+      const placesById = new Map(currentPlaces.map((place) => [place.id, place]));
+      const completed = proposalIds.every((proposalId) => {
+        const proposal = currentWorkspace!.proposals.find((candidate) => candidate.id === proposalId);
+        const place = proposal?.acceptedTripPlaceId ? placesById.get(proposal.acceptedTripPlaceId) : null;
+        return place?.assignedDayId === dayId;
+      });
+      if (completed) {
+        finishSchedule(proposalIds, currentWorkspace, dayId);
+        return;
+      }
+      scheduleFailure(proposalIds, currentWorkspace, currentPlaces, dayId, error);
     } finally {
       setBulkBusy(false);
     }
   }
   return (
     <section className="pd-workspace pd-discovery" data-selecting={selecting ? "true" : undefined} aria-labelledby="ai-discovery-heading">
-      <div className="pd-pagehead">
-        <h2 id="ai-discovery-heading">{t.header.title}</h2>
-        {selecting ? <div className="pd-row-actions"><span>已勾選 {(workspace?.proposals ?? []).filter(selectionChecked).length} 個</span><button className="pd-secondary" disabled={pending !== null} onClick={() => { setSelecting(false); setBulkConfirmation(false); }}>取消</button></div> : workspace?.latestRun?.status === "completed" ? <div className="pd-row-actions"><button className="pd-secondary" onClick={() => setResearchSettingsOpen(true)}><Pencil aria-hidden="true" className="size-4" /><span>{t.brief.editRequirements}</span></button>{hasSelectableProposals ? <button className="pd-secondary" disabled={pending !== null} onClick={beginSelection}><ListChecks aria-hidden="true" className="size-4" /><span>{t.brief.choosePlaces}</span></button> : null}</div> : null}
+      <div className={`pd-pagehead${selecting ? " pd-pagehead--selecting" : ""}`}>
+        <h2 id="ai-discovery-heading" className="schedule-page-title">{selecting ? scheduleT.selectedCount(selectedProposalIds.size) : t.header.title}</h2>
+        {selecting ? (
+          <div className="schedule-head-buttons">
+            <button
+              className="schedule-secondary-button"
+              disabled={pending !== null}
+              onClick={() => {
+                setSelecting(false);
+                setSelectedProposalIds(new Set());
+                setScheduleError("");
+              }}
+            >
+              {scheduleT.cancel}
+            </button>
+          </div>
+        ) : (
+          <div className="schedule-head-buttons">
+            {trip.role === "owner" ? (
+              <button className="schedule-primary-button" disabled={pending !== null || loading} onClick={beginSelection}>
+                <CalendarPlus aria-hidden="true" className="size-4" />
+                <span>{scheduleT.pageAction}</span>
+              </button>
+            ) : null}
+            {workspace?.latestRun?.status === "completed" ? (
+              <button className="schedule-secondary-button" onClick={() => setResearchSettingsOpen(true)}>
+                <Pencil aria-hidden="true" className="size-4" />
+                <span>{t.brief.editRequirements}</span>
+              </button>
+            ) : null}
+          </div>
+        )}
       </div>
       {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={pending !== null}
         onAccept={() => {
@@ -851,36 +1046,103 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
               <div className="pd-list mt-4" aria-label={t.proposal.shortlistLabel}>
                 {workspace.proposals.map((proposal) => {
                   const firstSentence = proposal.recommendationSentences?.[0];
-                  const firstTradeoff = proposal.tradeoffSentences !== null ? proposal.tradeoffSentences[0]?.text ?? null : proposal.tradeoffs[0] ?? null;
                   const numberedEvidence = new Map(proposal.evidence.map((item, index) => [item.id, { item, number: index + 1 }] as const));
                   const repeatedName = (proposalNameCounts.get(proposal.name) ?? 0) > 1;
+                  const selectable = proposalCanBeSelected(proposal);
+                  const selected = selectedProposalIds.has(proposal.id);
+                  const assignedDayId = proposalDayId(proposal);
+                  const located = proposalIsLocated(proposal);
+                  const selectionLabel = scheduleT.selectPlace(proposal.name);
+                  const scheduleMeta = assignedDayId ? (
+                    <span className="pd-schedule-meta schedule-status-pill">
+                      <CalendarCheck aria-hidden="true" />
+                      {scheduleT.scheduledOn(formatScheduledDay(assignedDayId))}
+                    </span>
+                  ) : !located ? (
+                    <span className="pd-schedule-meta">
+                      <MapPinOff aria-hidden="true" />
+                      {t.scheduling.missingLocationUnavailable}
+                    </span>
+                  ) : null;
+                  const classes = [
+                    "pd-row",
+                    selecting ? "pd-row--selecting" : "",
+                    selectable ? "pd-row--selectable" : "",
+                    selected ? "pd-row--selected" : "",
+                    assignedDayId ? "schedule-row--scheduled" : "",
+                    changedProposalIds.has(proposal.id) ? "schedule-row--changed" : "",
+                  ].filter(Boolean).join(" ");
                   return (
-                    <article key={proposal.id} data-discovery-proposal={proposal.name} className="pd-row" aria-current={proposal.id === selectedProposalId ? "true" : undefined}
+                    <article
+                      key={proposal.id}
+                      data-discovery-proposal={proposal.name}
+                      className={classes}
+                      aria-current={!selecting && proposal.id === selectedProposalId ? "true" : undefined}
                       aria-label={repeatedName ? t.proposal.proposalAtAddress(proposal.name, proposal.address ?? t.proposal.unknownAddress) : t.proposal.ariaLabel(proposal.name)}
                       onClick={(event) => {
                         if (event.target instanceof Element && event.target.closest("button, a, input, label, textarea, select")) return;
-                        if (selecting) changeSelection(proposal, !selectionChecked(proposal)); else openProposalDetail(proposal.id);
-                      }}>
+                        if (selecting) changeSelection(proposal, !selected);
+                        else openProposalDetail(proposal.id);
+                      }}
+                    >
+                      {selecting && selectable ? (
+                        <button
+                          type="button"
+                          role="checkbox"
+                          aria-checked={selected}
+                          aria-label={selectionLabel}
+                          className="schedule-selection-check schedule-selection-check--desktop"
+                          disabled={pending !== null}
+                          onClick={() => changeSelection(proposal, !selected)}
+                        >
+                          <Check aria-hidden="true" size={16} strokeWidth={3} />
+                        </button>
+                      ) : null}
                       <div className="pd-row-main">
                         <PlaceThumbnail photo={previews.photos.get(proposal.id)} loading={previews.loading} />
                         <div className="pd-row-copy">
                           <div className="pd-titleline">
-                            <button type="button" className="pd-titlebutton" disabled={selecting && pending !== null} data-proposal-detail-trigger={proposal.id} aria-label={selecting ? `選擇 ${proposal.name}` : t.proposal.viewDetail(proposal.name)} onClick={() => selecting ? changeSelection(proposal, !selectionChecked(proposal)) : openProposalDetail(proposal.id)}>{proposal.name}</button>
+                            {selecting ? (
+                              <span className="pd-titlebutton">{proposal.name}</span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="pd-titlebutton"
+                                data-proposal-detail-trigger={proposal.id}
+                                aria-label={t.proposal.viewDetail(proposal.name)}
+                                onClick={() => openProposalDetail(proposal.id)}
+                              >
+                                {proposal.name}
+                              </button>
+                            )}
                             <span className="pd-chip">{proposal.category ?? t.placeType[proposal.type]}</span>
-                            {proposal.status !== "pending" ? <span className="pd-state">{t.status[proposal.status]}</span> : null}
-                            {selecting && (proposal.status === "pending" || proposal.status === "accepted" && proposal.acceptedTripPlaceId) ? <label className="pd-selection-check"><input type="checkbox" aria-label={`選擇 ${proposal.name}`} checked={selectionChecked(proposal)} disabled={pending !== null} onChange={(event) => changeSelection(proposal, event.target.checked)} /></label> : null}
+                            {selecting && selectable ? (
+                              <button
+                                type="button"
+                                role="checkbox"
+                                aria-checked={selected}
+                                aria-label={selectionLabel}
+                                className="schedule-selection-check schedule-selection-check--mobile"
+                                disabled={pending !== null}
+                                onClick={() => changeSelection(proposal, !selected)}
+                              >
+                                <Check aria-hidden="true" size={16} strokeWidth={3} />
+                              </button>
+                            ) : null}
                           </div>
-                          {proposal.endorsements.length ? <div className="pd-row-labels">{proposal.endorsements.map((endorsement) => <span key={endorsement} className="pd-state">{endorsementLabel(endorsement, t)}</span>)}</div> : null}
                           {repeatedName ? <p className="pd-row-note">{proposal.address ?? t.proposal.unknownAddress}</p> : null}
                           {firstSentence ? <p className="pd-row-note"><ClaimSentence sentence={firstSentence} numberedEvidence={numberedEvidence} t={t} /></p> : proposal.recommendationSentences === null ? <p className="pd-row-note">{proposal.recommendation}</p> : null}
-                          {firstTradeoff ? <p className="pd-row-note">{firstTradeoff}</p> : null}
-                          <p className="pd-fit-line pd-fit-line--copy">{t.proposal.fitLine(proposal.matchedNeeds)}</p>
+                          <div className="pd-row-status">
+                            {scheduleMeta}
+                            <p className="pd-fit-line">{t.proposal.fitLine(proposal.matchedNeeds)}</p>
+                          </div>
                           <PlacePhotoCredit photo={previews.photos.get(proposal.id)} />
+                          {proposal.status === "pending" && proposal.votingAvailable ? (
+                            <div className="pd-row-bottom">
+                              <VoteControl compact name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} />
+                            </div>
+                          ) : null}
                         </div>
-                      </div>
-                      <div className="pd-row-bottom">
-                        <p className="pd-fit-line pd-fit-line--bottom">{t.proposal.fitLine(proposal.matchedNeeds)}</p>
-                        {proposal.status === "pending" && proposal.votingAvailable ? <VoteControl compact name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} /> : null}
                       </div>
                     </article>
                   );
@@ -888,19 +1150,25 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
               </div>
             </section>
           ) : workspace?.latestRun?.status === "completed" ? <p className="order-2 rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.length ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}
-          {selecting ? <section className="pd-bulkbar" aria-label="套用所選地點">{notice?.area === "general" ? <p className="pd-notice" role="alert">{notice.text}</p> : null}{bulkConfirmation ? <p>將移除 {removingSelected.map((proposal) => proposal.name).join("、")}；票和天數安排會一起清除。</p> : null}<p>依序儲存；遇到錯誤會停止，已完成的變更會保留。</p><div className="pd-fixed-actions">{bulkConfirmation ? <button className="pd-secondary" disabled={pending !== null} onClick={() => setBulkConfirmation(false)}>返回選擇</button> : null}<button className="pd-primary" disabled={pending !== null || selectionChanges.length === 0} onClick={() => void applySelection()}>{bulkBusy ? "儲存中…" : `加入 ${selectionChanges.length - removingSelected.length}、移除 ${removingSelected.length} 個地點`}</button></div></section> : null}
 
           {selectedProposal ? (
             <PlaceDetailSheet
               open
               appearance="workspace"
               title={selectedProposal.name}
-              description={<div className="pd-detail-badges"><span className="pd-chip">{selectedProposal.category ?? t.placeType[selectedProposal.type]}</span><span className="pd-state">{t.status[selectedProposal.status]}</span></div>}
+              description={<div className="pd-detail-badges">
+                <span className="pd-chip">{selectedProposal.category ?? t.placeType[selectedProposal.type]}</span>
+                {proposalDayId(selectedProposal) ? (
+                  <span className="schedule-status-pill">
+                    <CalendarCheck aria-hidden="true" className="size-[15px]" />
+                    {scheduleT.scheduledOn(formatScheduledDay(proposalDayId(selectedProposal)!))}
+                  </span>
+                ) : selectedProposal.status === "rejected" ? <span className="pd-state">{t.status.rejected}</span> : null}
+              </div>}
               titleRef={detailTitleRef}
               onClose={closeProposalDetail}
               footer={
               rejectConfirmation ? <div className="pd-confirm-footer"><p>{t.proposal.rejectConfirmTitle(rejectConfirmation.name)}</p><p>{t.proposal.rejectConfirmDescription}</p>{notice?.area === "general" ? <p role="alert">{notice.text}</p> : null}<div><button className="pd-secondary" disabled={pending !== null} onClick={() => setRejectConfirmation(null)}>{t.proposal.cancel}</button><button className="pd-danger-button" disabled={pending !== null} onClick={() => { const proposal = rejectConfirmation; void decideProposal(proposal, "reject").then((next) => { if (next) { setRejectConfirmation(null); closeProposalDetail(); } }); }}>{t.proposal.rejectConfirm}</button></div></div>
-              : removeConfirmation ? <div className="pd-confirm-footer"><p>{tripPlacesT.workspace.confirmRemove(removeConfirmation.name)}</p>{notice?.area === "general" ? <p role="alert">{notice.text}</p> : null}<div><button className="pd-secondary" disabled={pending !== null} onClick={() => setRemoveConfirmation(null)}>保留地點</button><button className="pd-danger-button" disabled={pending !== null} onClick={() => void removeAcceptedProposal(removeConfirmation).then((removed) => { if (removed) closeProposalDetail(); })}>{tripPlacesT.workspace.remove}</button></div></div>
               : <div>{notice?.area === "general" ? <p className="pd-notice" role="alert">{notice.text}</p> : null}<div className="pd-fixed-actions">{selectedProposal.status === "pending" && selectedProposal.votingAvailable ? <VoteControl compact name={selectedProposal.name} voters={selectedProposal.voters} voteCount={selectedProposal.voteCount} ownVote={selectedProposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(selectedProposal, voted)} /> : null}{proposalActions(selectedProposal)}</div></div>
             }>
               {proposalDetail(selectedProposal)}
@@ -970,6 +1238,27 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
           </section>
         </div>
       ) : null}
+      <SelectionBar
+        count={selectedProposalIds.size}
+        actionLabel={scheduleT.chooseDate}
+        hint={!hasSelectableProposals && missingLocationProposalCount > 0
+          ? t.scheduling.missingLocationHint(missingLocationProposalCount)
+          : undefined}
+        onAction={() => openSchedule([...selectedProposalIds])}
+        visible={selecting}
+      />
+      <SchedulePlacesSheet
+        open={scheduleProposalIds.length > 0}
+        trip={trip}
+        places={sheetProposals.map((proposal) => ({ id: proposal.id, name: proposal.name }))}
+        initialDayId={scheduleInitialDayId}
+        allowUnscheduled={scheduleAllowUnscheduled}
+        busy={bulkBusy}
+        error={scheduleError || undefined}
+        onConfirm={confirmSchedule}
+        onClose={closeSchedule}
+      />
+      {scheduleToast.toast}
     </section>
   );
 }

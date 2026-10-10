@@ -1,8 +1,9 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarCheck,
+  CalendarClock,
   CalendarPlus,
-  ChevronRight,
+  Check,
   CircleAlert,
   CircleCheck,
   CloudOff,
@@ -11,6 +12,7 @@ import {
   MapPinOff,
   Pencil,
   Plus,
+  X,
 } from "lucide-react";
 
 import type { TripDto } from "@along-the-way/contracts/private-trips";
@@ -33,6 +35,10 @@ import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews } from "./PlaceThumbnail";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import { NativeSelect } from "./components/ui/native-select";
+import { SchedulePlacesSheet } from "./SchedulePlacesSheet";
+import { SelectionBar } from "./SelectionBar";
+import { useScheduleToast } from "./ScheduleToast";
+import { assignPlacesToDay } from "./schedule-assignments";
 import "./pocket-discovery.css";
 import {
   Dialog,
@@ -47,6 +53,32 @@ interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
 }
 
+
+interface ScheduleContext {
+  placeIds: string[];
+}
+
+function formatScheduleDate(date: string, locale: string) {
+  const instant = new Date(`${date}T12:00:00Z`);
+  const calendarDate = new Intl.DateTimeFormat(locale, {
+    month: "numeric",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(instant);
+  const weekday = new Intl.DateTimeFormat(locale, {
+    weekday: "short",
+    timeZone: "UTC",
+  }).format(instant);
+  return `${calendarDate}（${weekday}）`;
+}
+
+function canSelectForSchedule(place: TripPlaceDto, available: boolean) {
+  return available
+    && place.latitude !== null
+    && place.longitude !== null
+    && !place.scheduled
+    && place.assignedDayId === null;
+}
 interface TripPlaceWorkspaceProps {
   trip: TripDto;
   request<T>(url: string, options?: RequestOptions): Promise<T>;
@@ -54,15 +86,6 @@ interface TripPlaceWorkspaceProps {
   onPlacesChanged(): void;
 }
 
-function statusLabel(status: TripPlaceDto["status"], t: Messages["tripPlaces"]) {
-  switch (status) {
-    case "ready": return t.status.ready;
-    case "needs-location": return t.status.needsLocation;
-    case "possible-duplicate": return t.status.possibleDuplicate;
-    case "provider-unavailable": return t.status.providerUnavailable;
-    case "scheduled": return t.status.scheduled;
-  }
-}
 
 function itineraryMembershipLabel(
   place: TripPlaceDto,
@@ -114,18 +137,6 @@ function clearRetryKey(store: RetryKeys, operation: string) {
 function errorCode(error: unknown) {
   if (typeof error !== "object" || error === null || !("code" in error)) return null;
   return typeof error.code === "string" ? error.code : null;
-}
-function StatusIcon({ status }: { status: TripPlaceDto["status"] }) {
-  const Icon = status === "scheduled"
-    ? CalendarCheck
-    : status === "possible-duplicate"
-      ? CircleAlert
-      : status === "needs-location"
-        ? MapPinOff
-        : status === "provider-unavailable"
-          ? CloudOff
-          : CircleCheck;
-  return <Icon aria-hidden="true" className="size-3.5 shrink-0" />;
 }
 
 function nullableNumber(value: FormDataEntryValue | null) {
@@ -369,8 +380,8 @@ function planningValues(place: TripPlaceDto): PlanningInput {
   };
 }
 
-function PlanningEditors({ trip, place, available, request, changed, editingChanged }: {
-  trip: TripDto;
+function PlanningEditors({ tripId, place, available, request, changed, editingChanged }: {
+  tripId: string;
   place: TripPlaceDto;
   available: boolean;
   request: TripPlaceWorkspaceProps["request"];
@@ -439,7 +450,7 @@ function PlanningEditors({ trip, place, available, request, changed, editingChan
     const operation = `planning:${place.id}`;
     const payload = { ...normalized, expectedVersion: version };
     try {
-      const response = await request<{ tripPlace: TripPlaceDto }>(`/api/trips/${trip.id}/trip-places/${place.id}/planning`, {
+      const response = await request<{ tripPlace: TripPlaceDto }>(`/api/trips/${tripId}/trip-places/${place.id}/planning`, {
         method: "PATCH",
         headers: { "Idempotency-Key": retryKey(retryKeys.current, operation, payload), ...(conflictBase ? { "Conflict-Base-Version": String(conflictBase) } : {}) },
         body: JSON.stringify(payload),
@@ -458,7 +469,7 @@ function PlanningEditors({ trip, place, available, request, changed, editingChan
           return;
         }
         if (await resolution.capture(error, base, normalized, async () => {
-          const latest = parseTripPlaceListResponse(await request(`/api/trips/${trip.id}/trip-places`)).tripPlaces.find((entry) => entry.id === place.id);
+          const latest = parseTripPlaceListResponse(await request(`/api/trips/${tripId}/trip-places`)).tripPlaces.find((entry) => entry.id === place.id);
           return latest ? { input: planningValues(latest), version: latest.version } : null;
         })) {
           editingChanged(true);
@@ -542,8 +553,6 @@ function PlanningEditors({ trip, place, available, request, changed, editingChan
       {reasonMessage ? <p className="pd-notice mt-3" role="alert">{reasonMessage}</p> : null}
     </section>
 
-    <PlaceDayPicker key={`day:${place.id}`} trip={trip} place={place} available={available} request={request} changed={changed} />
-
     <details open={available ? undefined : true} className="rounded-xl border border-ink/10 p-3" onToggle={(event) => {
       if (available && event.currentTarget.open && !planningDirty && !reasonEditing && !conflict) {
         const snapshot = { input: planningValues(place), version: place.version };
@@ -570,97 +579,6 @@ function PlanningEditors({ trip, place, available, request, changed, editingChan
   </>;
 }
 
-function PlaceDayPicker({ trip, place, available, request, changed, onSaved }: {
-  trip: TripDto;
-  place: TripPlaceDto;
-  available: boolean;
-  request<T>(url: string, options?: RequestOptions): Promise<T>;
-  changed(): Promise<void>;
-  onSaved?(): void;
-}) {
-  const { locale, t } = useI18n();
-  const [dayId, setDayId] = useState(place.assignedDayId ?? "");
-  const [base, setBase] = useState({ dayId: place.assignedDayId ?? "", version: place.version });
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const keys = useRef<RetryKeys>(new Map());
-  useEffect(() => {
-    if (!busy && dayId === base.dayId && (place.version !== base.version || (place.assignedDayId ?? "") !== base.dayId)) {
-      setDayId(place.assignedDayId ?? "");
-      setBase({ dayId: place.assignedDayId ?? "", version: place.version });
-    }
-  }, [place.assignedDayId, place.version, busy, dayId, base.dayId, base.version]);
-  async function save(event: FormEvent) {
-    event.preventDefault();
-    if (busy || !available || place.scheduled) return;
-    const targetDay = dayId || null;
-    const operation = `day-assignment:${place.id}`;
-    setBusy(true);
-    setError("");
-    let removedOriginalDay = false;
-    try {
-      async function assign(tripDayId: string | null, expectedVersion: number) {
-        const payload = { assignments: [{ tripPlaceId: place.id, tripDayId, expectedVersion }] };
-        const response = await request<ReturnType<typeof parseTripPlaceListResponse>>(`/api/trips/${trip.id}/trip-place-day-assignments`, {
-          method: "PUT",
-          headers: { "Idempotency-Key": retryKey(keys.current, operation, payload) },
-          body: JSON.stringify(payload),
-          parse: parseTripPlaceListResponse,
-        });
-        clearRetryKey(keys.current, operation);
-        const updated = response.tripPlaces.find((entry) => entry.id === place.id);
-        if (!updated) throw new Error(t.tripPlaces.errors.requestFailed);
-        return updated;
-      }
-      let version = base.version;
-      // The existing API requires remove-before-reassign; each step uses its real returned version.
-      if (base.dayId && targetDay && base.dayId !== targetDay) {
-        const removed = await assign(null, version);
-        version = removed.version;
-        removedOriginalDay = true;
-        setBase({ dayId: "", version });
-      }
-      const updated = await assign(targetDay, version);
-      setDayId(updated.assignedDayId ?? "");
-      setBase({ dayId: updated.assignedDayId ?? "", version: updated.version });
-      await changed();
-      onSaved?.();
-    } catch (reason) {
-      const failure = errorMessage(reason, t.tripSkeleton.plannedDayUpdateError);
-      setError(removedOriginalDay ? `原日期已移出，尚未排入新日期。${failure}` : failure);
-      await changed();
-    } finally {
-      setBusy(false);
-    }
-  }
-  if (place.scheduled) return null;
-  const located = place.latitude !== null && place.longitude !== null;
-  if (!located) {
-    return <section className="pd-detail-section">
-      <h3>{t.tripPlaces.workspace.scheduleTitle}</h3>
-      <div className="pd-location-warning" role="status">
-        <MapPinOff aria-hidden="true" className="size-4" />
-        <div>
-          <strong>{t.tripPlaces.workspace.locationMissing}</strong>
-          <p>{t.tripPlaces.workspace.locationMissingHelp}</p>
-          <a className="pd-secondary pd-location-action" href={`?trip=${encodeURIComponent(trip.id)}&tab=itinerary&segment=daily&manage=places`}><MapPin aria-hidden="true" className="size-4" />{t.tripPlaces.workspace.addLocation}</a>
-        </div>
-      </div>
-    </section>;
-  }
-  return <section className="pd-detail-section">
-    <h3>{t.tripPlaces.workspace.scheduleTitle}</h3>
-    <form onSubmit={(event) => void save(event)}>
-      <fieldset className="pd-daypicker" disabled={busy || !available}>
-        <legend className="sr-only">{t.tripPlaces.workspace.chooseDay}</legend>
-        <label><input type="radio" name={`day-${place.id}`} value="" checked={!dayId} onChange={() => setDayId("")} /><span>{place.selectedForItinerary ? t.tripPlaces.workspace.pendingArrangement : t.tripPlaces.workspace.notPlanned}</span></label>
-        {trip.days.map((day, index) => <label key={day.id}><input type="radio" name={`day-${place.id}`} value={day.id} checked={dayId === day.id} onChange={() => setDayId(day.id)} /><span>{t.tripSkeleton.dayLabel(index + 1)}<small>{new Intl.DateTimeFormat(locale, { timeZone: "UTC", month: "numeric", day: "numeric" }).format(new Date(`${day.date}T12:00:00Z`))}</small></span></label>)}
-      </fieldset>
-      {dayId !== base.dayId ? <button className="pd-primary mt-3" disabled={busy || !available}>{busy ? t.tripPlaces.workspace.scheduling : dayId ? t.tripPlaces.workspace.addToSchedule : t.tripPlaces.workspace.removeFromDay}</button> : null}
-      {error ? <div className="pd-notice mt-3" role="alert">{error}<button type="button" className="pd-secondary mt-2" disabled={busy} onClick={() => { setDayId(place.assignedDayId ?? ""); setBase({ dayId: place.assignedDayId ?? "", version: place.version }); setError(""); }}>{t.tripPlaces.workspace.reloadDay}</button></div> : null}
-    </form>
-  </section>;
-}
 
 export function TripPlaceWorkspace({
   trip,
@@ -668,7 +586,8 @@ export function TripPlaceWorkspace({
   placesRevision,
   onPlacesChanged,
 }: TripPlaceWorkspaceProps) {
-  const { locale, t: { tripPlaces: t, app: appText } } = useI18n();
+  const { locale, t: { tripPlaces: t, app: appText, schedule } } = useI18n();
+  const { toast, show: showScheduleToast } = useScheduleToast();
   const [readModel, setReadModel] = useState<{ current: TripPlaceDto[]; retained: TripPlaceDto[] }>({ current: [], retained: [] });
   const places = readModel.current;
   const [adding, setAdding] = useState(false);
@@ -683,10 +602,14 @@ export function TripPlaceWorkspace({
   const editingPlaceIds = useRef(new Set<string>());
   const readGeneration = useRef(0);
   const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
-  const [schedulingPlaceId, setSchedulingPlaceId] = useState<string | null>(null);
+  const [selecting, setSelecting] = useState(false);
+  const [selectedPlaceIds, setSelectedPlaceIds] = useState<Set<string>>(() => new Set());
+  const [scheduleContext, setScheduleContext] = useState<ScheduleContext | null>(null);
+  const [scheduleBusy, setScheduleBusy] = useState(false);
+  const [scheduleError, setScheduleError] = useState("");
+  const [highlightedPlaceIds, setHighlightedPlaceIds] = useState<Set<string>>(() => new Set());
   const detailTitleRef = useRef<HTMLHeadingElement>(null);
   const detailReturnPosition = useRef<{ x: number; y: number } | null>(null);
-  const scheduleReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const [mergeConfirmation, setMergeConfirmation] = useState<{ source: TripPlaceDto; target: TripPlaceDto } | null>(null);
   const [merging, setMerging] = useState(false);
   const [removalConfirmation, setRemovalConfirmation] = useState<TripPlaceDto | null>(null);
@@ -701,23 +624,38 @@ export function TripPlaceWorkspace({
     setSelectedPlaceId(placeId);
   }
 
-  function openSchedule(placeId: string) {
-    scheduleReturnPosition.current = { x: window.scrollX, y: window.scrollY };
-    setSchedulingPlaceId(placeId);
+  function startSelection() {
+    setSelectedPlaceIds(new Set());
+    setSelecting(true);
+  }
+
+  function cancelSelection() {
+    setSelectedPlaceIds(new Set());
+    setSelecting(false);
+  }
+
+  function openScheduleForPlace(place: TripPlaceDto) {
+    setScheduleError("");
+    setRemovalConfirmation(null);
+    setSelectedPlaceId(null);
+    setScheduleContext({ placeIds: [place.id] });
   }
 
   function closeSchedule() {
-    const placeId = schedulingPlaceId;
-    const position = scheduleReturnPosition.current;
-    scheduleReturnPosition.current = null;
-    setSchedulingPlaceId(null);
-    if (placeId) {
-      window.requestAnimationFrame(() => {
-        document.querySelector<HTMLElement>(`[data-place-schedule-trigger="${placeId}"]`)?.focus({ preventScroll: true });
-        if (position) window.scrollTo({ left: position.x, top: position.y, behavior: "instant" });
-      });
-    }
+    const returnToSelection = selecting;
+    const returnPlaceId = scheduleContext?.placeIds.length === 1 ? scheduleContext.placeIds[0] : null;
+    setScheduleError("");
+    setScheduleContext(null);
+    window.requestAnimationFrame(() => {
+      const target = returnToSelection
+        ? document.querySelector<HTMLElement>(".schedule-selection-bar .schedule-primary-button")
+        : returnPlaceId
+          ? document.querySelector<HTMLElement>(`[data-place-detail-trigger="${returnPlaceId}"]`)
+          : null;
+      target?.focus({ preventScroll: true });
+    });
   }
+
 
   const refreshPlaces = useCallback(async (generation = ++readGeneration.current) => {
     try {
@@ -763,6 +701,12 @@ export function TripPlaceWorkspace({
     const retained = readModel.retained[0];
     if (retained) setSelectedPlaceId(retained.id);
   }, [readModel.retained]);
+
+  useEffect(() => {
+    if (highlightedPlaceIds.size === 0) return;
+    const timer = window.setTimeout(() => setHighlightedPlaceIds(new Set()), 1_400);
+    return () => window.clearTimeout(timer);
+  }, [highlightedPlaceIds]);
 
   function closeDetail() {
     const placeId = selectedPlaceId;
@@ -933,13 +877,90 @@ export function TripPlaceWorkspace({
     placeNameCounts.set(place.name, (placeNameCounts.get(place.name) ?? 0) + 1);
   }
   const selectedPlace = listedPlaces.find((place) => place.id === selectedPlaceId) ?? null;
-  const schedulingPlace = listedPlaces.find((place) => place.id === schedulingPlaceId) ?? null;
+  const schedulePlaces = scheduleContext
+    ? scheduleContext.placeIds.flatMap((placeId) => {
+        const place = listedPlaces.find((entry) => entry.id === placeId);
+        return place ? [place] : [];
+      })
+    : [];
+  const scheduledPlace = schedulePlaces.length === 1 ? schedulePlaces[0]! : null;
+  const missingLocationCount = listedPlaces.filter((place) => place.latitude === null || place.longitude === null).length;
   const previews = usePlacePreviews({
     tripId: trip.id,
     kind: "trip-place",
     ids: listedPlaces.map((place) => place.id),
     request,
   });
+
+  function dayLabel(dayId: string | null) {
+    if (!dayId) return null;
+    const day = trip.days.find((entry) => entry.id === dayId);
+    return day ? formatScheduleDate(day.date, locale) : t.workspace.unavailableTripDay;
+  }
+
+  function togglePlaceSelection(place: TripPlaceDto) {
+    if (!canSelectForSchedule(place, placesById.has(place.id))) return;
+    setSelectedPlaceIds((current) => {
+      const next = new Set(current);
+      if (next.has(place.id)) next.delete(place.id);
+      else next.add(place.id);
+      return next;
+    });
+  }
+
+  function openSelectionSchedule() {
+    if (selectedPlaceIds.size === 0) return;
+    setScheduleError("");
+    setScheduleContext({ placeIds: [...selectedPlaceIds] });
+  }
+
+  async function confirmSchedule(dayId: string | null) {
+    if (scheduleBusy || schedulePlaces.length === 0) return;
+    setScheduleBusy(true);
+    setScheduleError("");
+    try {
+      const response = await assignPlacesToDay({
+        request,
+        tripId: trip.id,
+        dayId,
+        items: schedulePlaces.map((place) => ({
+          tripPlaceId: place.id,
+          version: place.version,
+          currentDayId: place.assignedDayId,
+        })),
+      });
+      ++readGeneration.current;
+      const currentIds = new Set(response.tripPlaces.map((place) => place.id));
+      setReadModel((previous) => ({
+        current: response.tripPlaces,
+        retained: previous.retained.filter((place) => editingPlaceIds.current.has(place.id) && !currentIds.has(place.id)),
+      }));
+      setHighlightedPlaceIds(new Set(schedulePlaces.map((place) => place.id)));
+      setSelectedPlaceIds(new Set());
+      setSelecting(false);
+      setScheduleContext(null);
+      onPlacesChanged();
+      if (dayId) {
+        const day = trip.days.find((entry) => entry.id === dayId);
+        const label = day ? formatScheduleDate(day.date, locale) : t.workspace.unavailableTripDay;
+        showScheduleToast(schedule.toastScheduled(schedulePlaces.length, label), day ? {
+          label: schedule.viewItinerary,
+          href: `?trip=${encodeURIComponent(trip.id)}&tab=itinerary&segment=daily&day=${encodeURIComponent(day.date)}`,
+        } : undefined);
+      } else if (scheduledPlace) {
+        showScheduleToast(schedule.toastUnscheduled(scheduledPlace.name));
+      }
+    } catch (error) {
+      setScheduleError(error instanceof ApiRequestError ? error.message : t.errors.requestFailed);
+      try {
+        await refreshPlaces();
+      } catch {
+        // Keep the assignment error visible in the schedule sheet.
+      }
+    } finally {
+      setScheduleBusy(false);
+    }
+  }
 
   function voteActions(place: TripPlaceDto) {
     if (!placesById.has(place.id) || !place.votingAvailable) return null;
@@ -956,25 +977,6 @@ export function TripPlaceWorkspace({
     const actions = voteActions(place);
     return actions ? <div className="pd-row-actions">{actions}</div> : null;
   }
-
-  function scheduleAction(place: TripPlaceDto) {
-    if (!placesById.has(place.id) || place.scheduled) return null;
-    const located = place.latitude !== null && place.longitude !== null;
-    if (!located) {
-      return <a className="pd-secondary pd-row-schedule-action" href={`?trip=${encodeURIComponent(trip.id)}&tab=itinerary&segment=daily&manage=places`} onClick={(event) => event.stopPropagation()}><MapPin aria-hidden="true" />{t.workspace.addLocation}</a>;
-    }
-    return <button type="button" data-place-schedule-trigger={place.id} className="pd-secondary pd-row-schedule-action" onClick={(event) => {
-      event.stopPropagation();
-      openSchedule(place.id);
-    }}><CalendarPlus aria-hidden="true" />{place.assignedDayId ? t.workspace.changeDay : t.workspace.addToSchedule}</button>;
-  }
-
-  function rowActions(place: TripPlaceDto) {
-    const schedule = scheduleAction(place);
-    const votes = voteActions(place);
-    return schedule || votes ? <div className="pd-row-actions">{schedule}{votes}</div> : null;
-  }
-
   function placeDetail(place: TripPlaceDto) {
     const available = placesById.has(place.id);
     const factsLabel = place.factsSource === "provider"
@@ -990,7 +992,7 @@ export function TripPlaceWorkspace({
         request={request}
         collapsible
         interlude={<div className="pd-detail">
-          <PlanningEditors key={place.id} trip={trip} place={place} available={available} request={request} changed={changedPlaces}
+          <PlanningEditors key={place.id} tripId={trip.id} place={place} available={available} request={request} changed={changedPlaces}
             editingChanged={(editing) => {
               if (editing) editingPlaceIds.current.add(place.id);
               else {
@@ -1048,11 +1050,77 @@ export function TripPlaceWorkspace({
     );
   }
 
+  function selectionCheckbox(place: TripPlaceDto, placement: "desktop" | "mobile") {
+    const eligible = canSelectForSchedule(place, placesById.has(place.id));
+    const selected = selectedPlaceIds.has(place.id);
+    return (
+      <button
+        type="button"
+        className={`schedule-selection-check schedule-selection-check--${placement}`}
+        role="checkbox"
+        aria-checked={selected}
+        aria-label={schedule.selectPlace(place.name)}
+        disabled={!eligible}
+        onClick={(event) => {
+          event.stopPropagation();
+          togglePlaceSelection(place);
+        }}
+      >
+        <Check aria-hidden="true" />
+      </button>
+    );
+  }
+
+  function detailScheduleAction(place: TripPlaceDto) {
+    if (!placesById.has(place.id)) return null;
+    if (place.latitude === null || place.longitude === null) {
+      return (
+        <a className="schedule-secondary-button" href={`?trip=${encodeURIComponent(trip.id)}&tab=itinerary&segment=daily&manage=places`}>
+          <MapPin aria-hidden="true" />
+          {schedule.addLocation}
+        </a>
+      );
+    }
+    if (place.scheduled) return null;
+    return (
+      <button type="button" className="schedule-primary-button" onClick={() => openScheduleForPlace(place)}>
+        <CalendarPlus aria-hidden="true" />
+        {place.assignedDayId ? schedule.changeDate : schedule.pageAction}
+      </button>
+    );
+  }
+
+
+
   return (
-    <section className="pd-workspace" aria-labelledby="shared-wishlist-heading">
-      <div className="pd-pagehead">
-        <h2 id="shared-wishlist-heading">{appText.placesSegments.wishlist}</h2>
-        <button className="pd-primary" onClick={() => setAdding(true)}><Plus aria-hidden="true" className="size-4" />{t.workspace.addPlace}</button>
+    <section className="pd-workspace" data-selecting={selecting || undefined} aria-labelledby="shared-wishlist-heading">
+      <div className={`pd-pagehead${selecting ? " pd-pagehead--selecting" : ""}`}>
+        {selecting ? (
+          <>
+            <h2 id="shared-wishlist-heading" className="schedule-page-title">{schedule.selectedCount(selectedPlaceIds.size)}</h2>
+            <button type="button" className="schedule-secondary-button" onClick={cancelSelection}>
+              <X aria-hidden="true" />
+              {schedule.cancel}
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="pd-pagehead-copy">
+              <h2 id="shared-wishlist-heading" className="schedule-page-title">{appText.placesSegments.wishlist}</h2>
+              <p>{t.workspace.helper}</p>
+            </div>
+            <div className="schedule-head-buttons">
+              <button type="button" className="schedule-primary-button" onClick={startSelection}>
+                <CalendarPlus aria-hidden="true" />
+                {schedule.pageAction}
+              </button>
+              <button type="button" className="schedule-secondary-button" onClick={() => setAdding(true)}>
+                <Plus aria-hidden="true" />
+                {t.workspace.addPlace}
+              </button>
+            </div>
+          </>
+        )}
       </div>
       {readError ? <div className="pd-notice pd-read-error" role="alert"><p>{readError}</p><button type="button" className="pd-secondary" disabled={loading} onClick={() => void load()}>{t.workspace.reload}</button></div> : null}
       {message ? <p className="pd-notice" role="alert">{message}</p> : null}
@@ -1072,45 +1140,62 @@ export function TripPlaceWorkspace({
         <div className="pd-list" aria-label={t.workspace.tableLabel}>
           {listedPlaces.map((place) => {
             const available = placesById.has(place.id);
-            const assignedDate = place.assignedDayId ? trip.days.find((day) => day.id === place.assignedDayId)?.date ?? t.workspace.unavailableTripDay : null;
-            const plannedLabel = assignedDate ?? (place.status === "scheduled"
-              ? t.status.scheduled
-              : place.selectedForItinerary
-                ? t.workspace.pendingArrangement
-                : t.workspace.notPlanned);
-            const duplicates = duplicateSuggestionsByPlace.get(place.id) ?? [];
-            const actionStatus = duplicates.length > 0 ? "possible-duplicate" : place.status;
-            const needsAction = actionStatus === "needs-location" || actionStatus === "possible-duplicate" || actionStatus === "provider-unavailable";
+            const located = place.latitude !== null && place.longitude !== null;
+            const scheduled = place.scheduled || place.assignedDayId !== null;
+            const selected = selectedPlaceIds.has(place.id);
+            const eligible = canSelectForSchedule(place, available);
             const repeatedName = (placeNameCounts.get(place.name) ?? 0) > 1;
+            const votes = voteActions(place);
+            const sideVotes = voteActions(place);
+            const classes = [
+              "pd-row",
+              selecting ? "pd-row--selecting" : "",
+              eligible ? "pd-row--selectable" : "",
+              selected ? "pd-row--selected" : "",
+              scheduled ? "schedule-row--scheduled" : "",
+              highlightedPlaceIds.has(place.id) ? "schedule-row--changed" : "",
+            ].filter(Boolean).join(" ");
             return (
-              <article key={place.id} data-wishlist-place={place.name} className="pd-row"
+              <article key={place.id} data-wishlist-place={place.name} className={classes}
                 aria-label={repeatedName ? t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress) : place.name}
-                aria-current={selectedPlaceId === place.id ? "true" : undefined}
+                aria-current={!selecting && selectedPlaceId === place.id ? "true" : undefined}
                 onClick={(event) => {
                   if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select")) return;
+                  if (selecting) {
+                    if (eligible) togglePlaceSelection(place);
+                    return;
+                  }
                   openDetail(place.id);
                 }}>
+                {selecting ? selectionCheckbox(place, "desktop") : null}
                 <div className="pd-row-main">
                   <PlaceThumbnail photo={previews.photos.get(place.id)} loading={previews.loading} />
                   <div className="pd-row-copy">
                     <div className="pd-titleline">
-                      <button type="button" data-place-detail-trigger={place.id} className="pd-titlebutton" aria-label={t.workspace.viewDetail(place.name)} onClick={() => openDetail(place.id)}>{place.name}</button>
-                      <ChevronRight aria-hidden="true" className="size-4 shrink-0" />
-                    </div>
-                    <div className="pd-row-labels">
+                      {selecting
+                        ? <span className="pd-titlebutton">{place.name}</span>
+                        : <button type="button" data-place-detail-trigger={place.id} className="pd-titlebutton" aria-label={t.workspace.viewDetail(place.name)} onClick={() => openDetail(place.id)}>{place.name}</button>}
                       <span className="pd-chip">{t.placeType[place.type]}</span>
-                      <span className="pd-state">{itineraryMembershipLabel(place, t)}</span>
-                      {available && needsAction ? <span className="pd-state"><StatusIcon status={actionStatus} />{statusLabel(actionStatus, t)}</span> : null}
+                      {selecting ? selectionCheckbox(place, "mobile") : null}
                     </div>
-                    {repeatedName ? <p className="pd-row-note">{place.address ?? t.workspace.unknownAddress}</p> : null}
                     <p className={`pd-row-note${place.notes ? "" : " pd-muted"}`}>{place.notes ?? t.workspace.noReason}</p>
+                    <div className="pd-row-status">
+                      {!located ? (
+                        <>
+                          <span className="pd-schedule-meta pd-schedule-meta--missing"><MapPinOff aria-hidden="true" />{schedule.missingLocation}</span>
+                          {available ? <a className="schedule-secondary-button pd-row-location-action" href={`?trip=${encodeURIComponent(trip.id)}&tab=itinerary&segment=daily&manage=places`} onClick={(event) => event.stopPropagation()}><MapPin aria-hidden="true" />{schedule.addLocation}</a> : null}
+                        </>
+                      ) : scheduled ? (
+                        <span className="pd-schedule-meta schedule-status-pill"><CalendarCheck aria-hidden="true" />{place.assignedDayId ? schedule.scheduledOn(dayLabel(place.assignedDayId)!) : t.status.scheduled}</span>
+                      ) : (
+                        <span className="pd-schedule-meta"><CalendarClock aria-hidden="true" />{schedule.notScheduled}</span>
+                      )}
+                    </div>
                     <PlacePhotoCredit photo={previews.photos.get(place.id)} />
+                    {votes ? <div className="pd-row-bottom pd-row-bottom--mobile"><div className="pd-row-actions">{votes}</div></div> : null}
                   </div>
                 </div>
-                <div className="pd-row-bottom">
-                  <span className="pd-state">{available ? plannedLabel : null}</span>
-                  {rowActions(place)}
-                </div>
+                {sideVotes ? <div className="pd-row-sidevotes"><div className="pd-row-actions">{sideVotes}</div></div> : null}
               </article>
             );
           })}
@@ -1121,36 +1206,50 @@ export function TripPlaceWorkspace({
           open
           appearance="workspace"
           title={selectedPlace.name}
-          description={<div className="pd-detail-badges"><span className="pd-chip">{t.placeType[selectedPlace.type]}</span><span className="pd-state">{itineraryMembershipLabel(selectedPlace, t)}</span>{selectedPlace.status !== "ready" ? <span className="pd-state"><StatusIcon status={selectedPlace.status} />{statusLabel(selectedPlace.status, t)}</span> : null}</div>}
+          description={<div className="pd-detail-badges">
+            <span className="pd-chip">{t.placeType[selectedPlace.type]}</span>
+            <span className="pd-state">{itineraryMembershipLabel(selectedPlace, t)}</span>
+            {selectedPlace.latitude === null || selectedPlace.longitude === null
+              ? <span className="pd-state"><MapPinOff aria-hidden="true" className="size-3.5" />{schedule.missingLocation}</span>
+              : selectedPlace.assignedDayId
+                ? <span className="schedule-status-pill"><CalendarCheck aria-hidden="true" />{schedule.scheduledOn(dayLabel(selectedPlace.assignedDayId)!)}</span>
+                : selectedPlace.scheduled
+                  ? <span className="schedule-status-pill"><CalendarCheck aria-hidden="true" />{t.status.scheduled}</span>
+                  : <span className="pd-state"><CalendarClock aria-hidden="true" className="size-3.5" />{schedule.notScheduled}</span>}
+            {selectedPlace.status === "possible-duplicate"
+              ? <span className="pd-state"><CircleAlert aria-hidden="true" className="size-3.5" />{t.status.possibleDuplicate}</span>
+              : selectedPlace.status === "provider-unavailable"
+                ? <span className="pd-state"><CloudOff aria-hidden="true" className="size-3.5" />{t.status.providerUnavailable}</span>
+                : null}
+          </div>}
           titleRef={detailTitleRef}
           onClose={closeDetail}
           footer={
           removalConfirmation ? <div className="pd-confirm-footer"><p>{t.workspace.confirmRemove(removalConfirmation.name)}</p>{message ? <p role="alert">{message}</p> : null}<div><button className="pd-secondary" disabled={removing} onClick={() => setRemovalConfirmation(null)}>保留地點</button><button className="pd-danger-button" disabled={removing} onClick={() => void remove(removalConfirmation)}>{removing ? "移除中…" : t.workspace.remove}</button></div></div>
-          : <div>{message ? <p className="pd-notice" role="alert">{message}</p> : null}<div className="pd-fixed-actions">{quickActions(selectedPlace)}{placesById.has(selectedPlace.id) ? <button className="pd-danger-link" disabled={removing} onClick={() => { setMessage(""); setRemovalConfirmation(selectedPlace); }}>{t.workspace.remove}</button> : null}</div></div>
+          : <div>{message ? <p className="pd-notice" role="alert">{message}</p> : null}<div className="pd-fixed-actions">{detailScheduleAction(selectedPlace)}{quickActions(selectedPlace)}{placesById.has(selectedPlace.id) ? <button className="pd-danger-link" disabled={removing} onClick={() => { setMessage(""); setRemovalConfirmation(selectedPlace); }}>{t.workspace.remove}</button> : null}</div></div>
         }>
           {placeDetail(selectedPlace)}
         </PlaceDetailSheet>
       ) : null}
-      {schedulingPlace ? (
-        <PlaceDetailSheet
-          open
-          appearance="workspace"
-          title={t.workspace.scheduleTitle}
-          description={schedulingPlace.name}
-          onClose={closeSchedule}
-        >
-          <PlaceDayPicker
-            key={`list-day:${schedulingPlace.id}`}
-            trip={trip}
-            place={schedulingPlace}
-            available={placesById.has(schedulingPlace.id)}
-            request={request}
-            changed={changedPlaces}
-            onSaved={closeSchedule}
-          />
-        </PlaceDetailSheet>
-      ) : null}
-
+      <SchedulePlacesSheet
+        open={scheduleContext !== null}
+        trip={trip}
+        places={schedulePlaces.map((place) => ({ id: place.id, name: place.name }))}
+        initialDayId={scheduledPlace?.assignedDayId}
+        allowUnscheduled={Boolean(scheduledPlace?.assignedDayId)}
+        busy={scheduleBusy}
+        error={scheduleError}
+        onConfirm={confirmSchedule}
+        onClose={closeSchedule}
+      />
+      <SelectionBar
+        count={selectedPlaceIds.size}
+        hint={missingLocationCount > 0 ? schedule.missingLocationHint(missingLocationCount) : undefined}
+        actionLabel={schedule.chooseDate}
+        onAction={openSelectionSchedule}
+        visible={selecting}
+      />
+      {toast}
 
       <Dialog open={mergeConfirmation !== null} onOpenChange={(open) => { if (!open && !merging) setMergeConfirmation(null); }}>
         <DialogContent>
