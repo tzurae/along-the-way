@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>行程 — Along the Way 互動原型</title>
+<style>
+:root {
+  --background:#f5f0e7; --foreground:#24372f; --card:#fffcf7; --primary:#1f3029;
+  --primary-foreground:#fffaf2; --muted-foreground:#52645c; --accent:#d37551;
+  --accent-ink:#9a4a2c; --border:color-mix(in srgb,#24372f 18%,transparent); --ring:#e09271;
+  --warning-bg:#fff2dd; --ease-out:cubic-bezier(.16,1,.3,1);
+  --font-sans:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",sans-serif;
+  --font-display:Georgia,"Noto Serif TC",serif;
+}
+* { box-sizing:border-box; }
+html { -webkit-text-size-adjust:100%; scroll-behavior:smooth; }
+body { margin:0; min-width:320px; min-height:100vh; color:var(--foreground); font-family:var(--font-sans); background:radial-gradient(circle at 82% 10%,color-mix(in srgb,var(--accent) 18%,transparent),transparent 28rem),linear-gradient(145deg,#f8f4ed 0%,#eee8dd 100%); background-attachment:fixed; overflow-x:clip; }
+::selection { background:color-mix(in srgb,var(--accent) 30%,transparent); color:var(--foreground); }
+button { font:inherit; color:inherit; cursor:pointer; }
+button:disabled { cursor:not-allowed; }
+button,a,summary { -webkit-tap-highlight-color:transparent; }
+:focus-visible { outline:2px solid var(--ring); outline-offset:2px; }
+svg { display:block; flex:none; }
+[hidden] { display:none!important; }
+.app { display:grid; min-height:100vh; }
+.rail { display:none; }
+.topbar { position:sticky; top:0; z-index:30; display:flex; align-items:center; gap:12px; padding:8px 12px; background:color-mix(in srgb,#f8f4ed 88%,transparent); backdrop-filter:blur(12px); border-bottom:1px solid var(--border); }
+.triptitle { flex:1; min-width:0; display:flex; align-items:center; height:46px; padding:0 4px; font-size:16px; font-weight:700; }
+.triptitle span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dot { width:10px; height:10px; margin:0 6px; border-radius:50%; background:var(--accent); }
+main { width:100%; max-width:900px; margin:0 auto; padding:18px 12px 112px; }
+.bottomnav { position:fixed; z-index:30; left:0; right:0; bottom:0; display:grid; grid-template-columns:repeat(4,1fr); padding:6px 8px calc(6px + env(safe-area-inset-bottom)); border-top:1px solid var(--border); background:color-mix(in srgb,#fbf8f2 94%,transparent); backdrop-filter:blur(12px); }
+.bottomnav :is(a,.nav-disabled) { display:grid; justify-items:center; gap:4px; padding:6px 0; border-radius:14px; color:var(--foreground); font-size:13px; font-weight:700; text-decoration:none; }
+.bottomnav a[aria-current="page"] { color:var(--accent-ink); background:color-mix(in srgb,var(--card) 80%,transparent); }
+.nav-disabled { opacity:.4; cursor:default; user-select:none; }
+.pagehead { margin:0 2px 18px; }
+.pagehead h1 { margin:0; font-family:var(--font-display); font-size:28px; line-height:1.2; letter-spacing:-.015em; }
+.pagehead p { max-width:62ch; margin:6px 0 0; color:var(--muted-foreground); font-size:14px; line-height:1.5; }
+.pending { margin-bottom:26px; overflow:hidden; border:1px solid color-mix(in srgb,var(--accent) 32%,transparent); border-radius:18px; background:color-mix(in srgb,var(--accent) 7%,var(--card)); box-shadow:0 12px 30px -26px rgba(31,48,41,.65); }
+.pending summary { list-style:none; display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; gap:10px; min-height:64px; padding:12px 16px; cursor:pointer; }
+.pending summary::-webkit-details-marker { display:none; }
+.pending-title { min-width:0; }
+.pending-title strong { display:block; font-family:var(--font-display); font-size:20px; line-height:1.25; }
+.pending-title span { display:block; margin-top:3px; color:var(--muted-foreground); font-size:13px; line-height:1.45; }
+.count { display:inline-flex; align-items:center; justify-content:center; min-width:30px; height:28px; padding:0 9px; border-radius:999px; background:var(--accent); color:#fffaf2; font-size:13px; font-weight:800; font-variant-numeric:tabular-nums; }
+.pending .chevron { transition:transform .22s var(--ease-out); }
+.pending[open] .chevron { transform:rotate(180deg); }
+.pending-body { padding:0 16px 14px; }
+.group-list { margin:0; padding:0; list-style:none; border-top:1px solid var(--border); }
+.place-row { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:12px; min-height:68px; padding:12px 0; }
+.place-row + .place-row { border-top:1px solid var(--border); }
+.place-main { min-width:0; }
+.place-name { display:flex; align-items:center; flex-wrap:wrap; gap:7px; }
+.place-name strong { font-size:16px; line-height:1.4; overflow-wrap:anywhere; }
+.meta { display:flex; flex-wrap:wrap; gap:4px 9px; margin-top:4px; color:var(--muted-foreground); font-size:13px; line-height:1.45; }
+.meta .status { display:inline-flex; align-items:center; gap:5px; font-weight:700; }
+.meta .status svg { width:15px; height:15px; }
+.meta .reschedule { color:var(--accent-ink); }
+.chip { display:inline-flex; align-items:center; gap:4px; min-height:24px; padding:3px 8px; border-radius:999px; background:color-mix(in srgb,var(--primary) 8%,transparent); color:var(--foreground); font-size:12px; font-weight:700; line-height:1; }
+.chip.fixed { background:color-mix(in srgb,var(--accent) 14%,transparent); color:var(--accent-ink); }
+.rowbtn,.outlinebtn { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:40px; padding:0 14px; border:1px solid var(--border); border-radius:999px; background:var(--card); font-size:13px; font-weight:750; white-space:nowrap; }
+.rowbtn:hover,.outlinebtn:hover { border-color:color-mix(in srgb,var(--foreground) 34%,transparent); }
+.emptyline { display:flex; align-items:center; gap:9px; min-height:58px; border-top:1px solid var(--border); color:var(--muted-foreground); font-size:14px; line-height:1.5; }
+.days { display:grid; gap:26px; }
+.day { scroll-margin-top:74px; }
+.dayhead { display:flex; align-items:flex-end; justify-content:space-between; gap:14px; margin:0 2px 10px; }
+.dayhead h2 { margin:0; font-family:var(--font-display); font-size:22px; line-height:1.25; }
+.dayhead p { margin:4px 0 0; color:var(--muted-foreground); font-size:13px; }
+.dayactions { display:flex; align-items:center; gap:12px; }
+.route-link { display:inline-flex; align-items:center; gap:5px; color:var(--foreground); font-size:13px; font-weight:700; text-decoration:underline; text-underline-offset:3px; white-space:nowrap; }
+.day-list { margin:0; padding:2px 16px; list-style:none; overflow:hidden; border:1px solid var(--border); border-radius:18px; background:var(--card); }
+.day-list .place-row { min-height:74px; }
+.time { color:var(--foreground); font-weight:750; font-variant-numeric:tabular-nums; }
+.no-plan { display:grid; grid-template-columns:20px minmax(0,1fr) auto; align-items:center; gap:10px; min-height:74px; color:var(--muted-foreground); font-size:14px; }
+.scrim { position:fixed; inset:0; z-index:50; background:rgba(31,48,41,.32); opacity:0; pointer-events:none; transition:opacity .3s var(--ease-out); }
+.scrim.show { opacity:1; pointer-events:auto; }
+.sheet { position:fixed; z-index:60; left:0; right:0; bottom:0; height:min(86dvh,760px); display:flex; flex-direction:column; border-radius:22px 22px 0 0; background:var(--card); box-shadow:0 -12px 40px -16px rgba(31,48,41,.45); transform:translateY(104%); transition:transform .42s var(--ease-out); }
+.sheet.show { transform:translateY(0); }
+.grab { flex:none; width:40px; height:5px; margin:8px auto 0; border-radius:999px; background:color-mix(in srgb,#24372f 18%,transparent); }
+.sheethead { flex:none; display:flex; align-items:flex-start; gap:12px; padding:14px 20px 12px; }
+.sheethead h2 { margin:0 0 6px; font-family:var(--font-display); font-size:24px; line-height:1.25; }
+.sheethead p { margin:0; color:var(--muted-foreground); font-size:13px; line-height:1.5; }
+.iconbtn { flex:none; display:grid; place-items:center; width:42px; height:42px; padding:0; border:1px solid var(--border); border-radius:999px; background:var(--card); }
+.sheetbody { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; padding:4px 20px 24px; background:linear-gradient(var(--card) 30%,transparent) top/100% 28px no-repeat local,linear-gradient(transparent,var(--card) 70%) bottom/100% 28px no-repeat local,radial-gradient(farthest-side at 50% 0,rgba(31,48,41,.16),transparent) top/100% 10px no-repeat scroll,radial-gradient(farthest-side at 50% 100%,rgba(31,48,41,.16),transparent) bottom/100% 10px no-repeat scroll,var(--card); }
+.daypicker { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:5px; padding:4px; margin:0 0 10px; border:1px solid var(--border); border-radius:15px; background:color-mix(in srgb,var(--primary) 4%,var(--card)); }
+.daypick { min-width:0; min-height:44px; padding:5px 2px; border:0; border-radius:11px; background:transparent; color:var(--muted-foreground); font-size:12px; font-weight:700; line-height:1.2; }
+.daypick span { display:block; }
+.daypick small { display:block; margin-top:2px; font-size:10px; }
+.daypick[aria-pressed="true"] { background:var(--card); color:var(--accent-ink); box-shadow:0 2px 8px -4px rgba(31,48,41,.25); }
+.source { padding:17px 0; }
+.source + .source { border-top:1px solid var(--border); }
+.source h3 { margin:0; font-size:16px; line-height:1.35; }
+.source > p { margin:4px 0 10px; color:var(--muted-foreground); font-size:13px; line-height:1.5; }
+.source-list { margin:0; padding:0; list-style:none; }
+.source-list .place-row { min-height:64px; padding:10px 0; }
+.source-empty { display:flex; align-items:center; gap:8px; min-height:52px; color:var(--muted-foreground); font-size:13px; }
+.schedulebtn { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:38px; padding:0 13px; border:0; border-radius:999px; background:var(--primary); color:var(--primary-foreground); font-size:13px; font-weight:750; white-space:nowrap; }
+.schedulebtn:active,.rowbtn:active,.outlinebtn:active { transform:scale(.97); }
+.schedulebtn:disabled { border:1px solid color-mix(in srgb,var(--foreground) 20%,transparent); background:color-mix(in srgb,var(--foreground) 7%,var(--card)); color:var(--muted-foreground); opacity:1; }
+.toast { position:fixed; z-index:70; left:50%; bottom:calc(84px + env(safe-area-inset-bottom)); max-width:calc(100vw - 24px); padding:12px 18px; overflow:hidden; border-radius:999px; background:var(--primary); color:var(--primary-foreground); box-shadow:0 14px 34px -12px rgba(31,48,41,.6); font-size:14px; font-weight:700; white-space:nowrap; text-overflow:ellipsis; opacity:0; pointer-events:none; transform:translate(-50%,28px) scale(.96); transition:transform .4s var(--ease-out),opacity .25s; }
+.toast.show { opacity:1; transform:translate(-50%,0) scale(1); }
+@media (max-width:620px) {
+  .dayhead { align-items:flex-start; }
+  .dayactions { flex-direction:column-reverse; align-items:flex-end; gap:7px; }
+  .day-list { padding-inline:13px; }
+  .place-row { gap:8px; }
+  .rowbtn { padding-inline:11px; }
+  .daypicker { grid-template-columns:repeat(4,minmax(0,1fr)); }
+}
+@media (min-width:700px) { main { padding-inline:22px; } }
+@media (min-width:1024px) {
+  .app { grid-template-columns:272px minmax(0,1fr); gap:24px; padding:20px; }
+  .topbar,.bottomnav { display:none; }
+  .rail { display:flex; flex-direction:column; gap:8px; position:sticky; top:20px; height:calc(100vh - 40px); padding:16px; border:1px solid var(--border); border-radius:22px; background:color-mix(in srgb,var(--card) 55%,transparent); }
+  .rail .triptitle { flex:none; margin-bottom:18px; padding-inline:12px; }
+  .rail :is(a,.nav-disabled) { display:flex; align-items:center; gap:10px; height:46px; padding:0 12px; border-radius:14px; color:var(--foreground); font-weight:700; text-decoration:none; }
+  .rail a[aria-current="page"] { color:var(--accent-ink); background:var(--card); }
+  main { max-width:900px; margin:0; padding:4px 0 80px; }
+  .pagehead h1 { font-size:30px; }
+  .sheet { left:auto; top:20px; right:20px; bottom:20px; width:460px; height:auto; border-radius:22px; transform:translateX(calc(100% + 40px)); box-shadow:-16px 0 48px -24px rgba(31,48,41,.5); }
+  .sheet.show { transform:translateX(0); }
+  .grab { display:none; }
+  .sheethead { padding:22px 24px 12px; }
+  .sheetbody { padding:4px 24px 24px; }
+  .toast { left:calc(50% + 148px); bottom:28px; }
+}
+@media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation-duration:.01ms!important; transition-duration:.01ms!important; scroll-behavior:auto!important; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail" aria-label="主要導覽">
+    <div class="triptitle"><span>京都 10/21–10/27</span></div>
+    <a href="today.html"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2v4M16 2v4"/><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18"/></svg>今天</a>
+    <a href="plan.html" aria-current="page"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg>行程</a>
+    <a href="pocket-v2.html"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 10c0 5-5.5 10.2-7.4 11.8a1 1 0 0 1-1.2 0C9.5 20.2 4 15 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></svg>地點</a>
+    <span class="nav-disabled" aria-disabled="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/></svg>成員</span>
+  </aside>
+  <div>
+    <header class="topbar"><div class="triptitle"><span>京都 10/21–10/27</span></div><span class="dot" role="img" aria-label="即時更新已連線"></span></header>
+    <main id="main"></main>
+  </div>
+  <nav class="bottomnav" aria-label="主要導覽">
+    <a href="today.html"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2v4M16 2v4"/><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18"/></svg>今天</a>
+    <a href="plan.html" aria-current="page"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg>行程</a>
+    <a href="pocket-v2.html"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 10c0 5-5.5 10.2-7.4 11.8a1 1 0 0 1-1.2 0C9.5 20.2 4 15 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></svg>地點</a>
+    <span class="nav-disabled" aria-disabled="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/></svg>成員</span>
+  </nav>
+</div>
+<div class="scrim" id="scrim"></div>
+<section class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheettitle" hidden></section>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>
+const STORE_KEY = "along-proto-places-v1";
+const DEMO_KEY = "along-proto-plan-demo-v1";
+const params = new URLSearchParams(location.search);
+const dates = ["2026-10-21","2026-10-22","2026-10-23","2026-10-24","2026-10-25","2026-10-26","2026-10-27"];
+const labels = {"2026-10-21":"10月21日（週三）","2026-10-22":"10月22日（週四）","2026-10-23":"10月23日（週五）","2026-10-24":"10月24日（週六）","2026-10-25":"10月25日（週日）","2026-10-26":"10月26日（週一）","2026-10-27":"10月27日（週二）"};
+const shortLabels = {"2026-10-21":["10/21","三"],"2026-10-22":["10/22","四"],"2026-10-23":["10/23","五"],"2026-10-24":["10/24","六"],"2026-10-25":["10/25","日"],"2026-10-26":["10/26","一"],"2026-10-27":["10/27","二"]};
+const I = {
+  route:'<circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/>',
+  calendar:'<path d="M8 2v4M16 2v4"/><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18"/>',
+  calendarPlus:'<path d="M16 18h6M16 2v3M19 15v6M21 11.5V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h8.3M3 9h18M8 2v3"/>',
+  calendarClock:'<path d="M16 14v2.2l1.6 1M16 2v3M21 7.338V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h2.338M3 9h5.859M8 2v3"/><circle cx="16" cy="16" r="6"/>',
+  calendarSync:'<path d="M11 10v4h4m-4 0 1.535-1.605a5 5 0 0 1 8 1.5M16 2v3m5 13-1.535 1.605a5 5 0 0 1-8-1.5M21 22v-4h-4M21 8.517V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.517M3 9h4M8 2v3"/>',
+  mapPinOff:'<path d="M12.75 7.09a3 3 0 0 1 2.16 2.16M17.072 17.072c-1.634 2.17-3.527 3.912-4.471 4.727a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 1.432-4.568M2 2l20 20M8.475 2.818A8 8 0 0 1 20 10c0 1.183-.31 2.377-.81 3.533M9.13 9.13a3 3 0 0 0 3.74 3.74"/>',
+  plus:'<path d="M5 12h14M12 5v14"/>',
+  close:'<path d="M18 6 6 18M6 6l12 12"/>', chevron:'<path d="m6 9 6 6 6-6"/>',
+  lock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  pin:'<path d="M20 10c0 5-5.5 10.2-7.4 11.8a1 1 0 0 1-1.2 0C9.5 20.2 4 15 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/>'
+};
+const svg = (path,size=18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
+
+/* SHARED PLACE SEED — keep byte-for-byte identical across today.html, pocket.html, and plan.html. */
+const SHARED_SEED = {"version":1,"places":[{"id":"breakfast","name":"京都車站早餐","kind":"餐食","confirmed":true,"dayDate":"2026-10-23","start":"07:30","duration":40,"unplacedFromDate":null,"addedBy":"itinerary","reason":"選擇方便、能快速出發的店。","hasLocation":true},{"id":"fushimi","name":"伏見稻荷大社","kind":"景點","confirmed":true,"dayDate":"2026-10-23","start":"08:30","duration":105,"unplacedFromDate":null,"addedBy":"itinerary","reason":"只走到千本鳥居中段，不上山頂。","hasLocation":true},{"id":"tofukuji","name":"東福寺","kind":"景點","confirmed":true,"dayDate":"2026-10-23","start":"10:35","duration":85,"unplacedFromDate":null,"addedBy":"itinerary","reason":"通天橋附近有階梯，按岳母步速調整。","hasLocation":true},{"id":"lunch","name":"錦市場午餐","kind":"餐食","confirmed":true,"dayDate":"2026-10-23","start":"12:20","duration":70,"unplacedFromDate":null,"addedBy":"itinerary","reason":"不要邊走邊吃；買完在店前或店內食用。","hasLocation":true},{"id":"nanzenji","name":"南禪寺與水路閣","kind":"景點","confirmed":true,"dayDate":"2026-10-23","start":"14:15","duration":115,"unplacedFromDate":null,"addedBy":"itinerary","reason":"下午保留坐下休息的時間。","hasLocation":true},{"id":"dinner","name":"京都車站晚餐","kind":"餐食","confirmed":true,"dayDate":"2026-10-23","start":"18:00","duration":90,"unplacedFromDate":null,"addedBy":"itinerary","reason":"如果體力不足，直接回飯店附近用餐。","hasLocation":true},{"id":"arashiyama","name":"嵐山散步","kind":"景點","confirmed":true,"dayDate":"2026-10-24","start":"08:00","duration":210,"unplacedFromDate":null,"addedBy":"itinerary","reason":"早點出發避開人潮。","hasLocation":true},{"id":"ine","name":"伊根一日往返","kind":"交通","confirmed":true,"dayDate":"2026-10-26","start":"08:00","duration":600,"unplacedFromDate":null,"addedBy":"itinerary","reason":"交通耗時較長，出發前再次確認巴士班次。","hasLocation":true},{"id":"pack","name":"整理行李與退房","kind":"住宿","confirmed":true,"dayDate":"2026-10-27","start":"09:00","duration":60,"unplacedFromDate":null,"addedBy":"itinerary","reason":"這是示意安排。","hasLocation":true},{"id":"eikando","name":"永觀堂","kind":"佛寺","confirmed":false,"dayDate":null,"start":null,"duration":90,"unplacedFromDate":null,"addedBy":"pocket","reason":"想去的候選地點","hasLocation":true},{"id":"kyoto-railway-museum","name":"京都鐵道博物館","kind":"博物館","confirmed":false,"dayDate":null,"start":null,"duration":90,"unplacedFromDate":null,"addedBy":"pocket","reason":"想去的候選地點","hasLocation":true},{"id":"honen-in","name":"法然院","kind":"佛寺","confirmed":false,"dayDate":null,"start":null,"duration":90,"unplacedFromDate":null,"addedBy":"pocket","reason":"想去的候選地點","hasLocation":true},{"id":"philosophers-path","name":"哲學之道","kind":"散步","confirmed":false,"dayDate":null,"start":null,"duration":60,"unplacedFromDate":null,"addedBy":"pocket","reason":"想去的候選地點","hasLocation":true},{"id":"gion-shirakawa","name":"祇園白川","kind":"散步","confirmed":false,"dayDate":null,"start":null,"duration":60,"unplacedFromDate":null,"addedBy":"pocket","reason":"想去的候選地點","hasLocation":true},{"id":"arashiyama-bamboo","name":"嵐山竹林小徑","kind":"散步","confirmed":false,"dayDate":null,"start":null,"duration":60,"unplacedFromDate":null,"addedBy":"pocket","reason":"想去的候選地點","hasLocation":true},{"id":"tenryuji","name":"天龍寺","kind":"佛寺","confirmed":false,"dayDate":null,"start":null,"duration":90,"unplacedFromDate":null,"addedBy":"pocket","reason":"想去的候選地點","hasLocation":true},{"id":"kyoto-gyoen","name":"京都御苑","kind":"公園","confirmed":false,"dayDate":null,"start":null,"duration":60,"unplacedFromDate":null,"addedBy":"pocket","reason":"想去的候選地點","hasLocation":true}]};
+/* END SHARED PLACE SEED */
+
+const fixedItems = {
+  "2026-10-21":[
+    {id:"ci152",name:"CI 152",kind:"航班",start:"09:00",meta:"12:30 抵達關西國際機場"},
+    {id:"granvia-in",name:"Hotel Granvia Kyoto",kind:"住宿",start:"15:00",meta:"入住・與京都車站相連"}
+  ],
+  "2026-10-22":[
+    {id:"granvia-out",name:"Hotel Granvia Kyoto・退房",kind:"住宿",start:"08:00",meta:"10:00 前退房"},
+    {id:"ci153",name:"CI 153",kind:"航班",start:"17:00",meta:"19:10 抵達桃園國際機場"}
+  ],
+  "2026-10-23":[],
+  "2026-10-24":[{id:"saihoji",name:"西芳寺",kind:"訂位",start:"14:00",meta:"固定預約 14:00"}],
+  "2026-10-25":[], "2026-10-26":[], "2026-10-27":[]
+};
+
+if (params.get("reset") === "1") {
+  try {
+    localStorage.removeItem(STORE_KEY); localStorage.removeItem(DEMO_KEY);
+    localStorage.removeItem("along-today-prototype-drafts-v2"); localStorage.removeItem("along-today-prototype-drafts");
+  } catch {}
+  const clean = new URL(location.href); clean.searchParams.delete("reset"); location.replace(clean.toString());
+}
+function cloneSeed() { return JSON.parse(JSON.stringify(SHARED_SEED)); }
+function validStore(value) { return value && value.version === 1 && Array.isArray(value.places); }
+function readStore() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
+    if (validStore(stored)) return stored;
+  } catch {}
+  const seeded = cloneSeed();
+  try { localStorage.setItem(STORE_KEY,JSON.stringify(seeded)); } catch {}
+  return seeded;
+}
+let store = readStore();
+if (params.get("demo") === "bumped") {
+  let prepared = false;
+  try { prepared = localStorage.getItem(DEMO_KEY) === "bumped"; } catch {}
+  if (!prepared) {
+    store = cloneSeed();
+    store.places.forEach(place => {
+      if (place.id === "tofukuji" || place.id === "lunch") {
+        place.confirmed = true; place.dayDate = null; place.start = null; place.unplacedFromDate = "2026-10-23";
+      }
+    });
+    try { localStorage.setItem(STORE_KEY,JSON.stringify(store)); localStorage.setItem(DEMO_KEY,"bumped"); } catch {}
+  }
+}
+function persist() { try { localStorage.setItem(STORE_KEY,JSON.stringify(store)); } catch {} }
+function esc(value) { return String(value).replace(/[&<>"']/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char])); }
+function timeValue(value) { if (!value) return 9999; const [h,m] = value.split(":").map(Number); return h*60+m; }
+function originalDateLabel(date) { return date ? date.slice(5).replace("-","/") : "原日期不明"; }
+function durationLabel(minutes) { if (!minutes) return "時間待安排"; const h=Math.floor(minutes/60),m=minutes%60; return h ? `${h} 小時${m ? ` ${m} 分` : ""}` : `${m} 分鐘`; }
+function dynamicFor(date) { return store.places.filter(place=>place.confirmed && place.dayDate===date); }
+function pendingPlaces() { return store.places.filter(place=>place.confirmed && !place.dayDate); }
+function pocketPlaces() { return store.places.filter(place=>!place.confirmed); }
+function combinedFor(date) {
+  return [...fixedItems[date].map(item=>({...item,fixed:true})),...dynamicFor(date)].sort((a,b)=>timeValue(a.start)-timeValue(b.start));
+}
+function pendingRow(place) {
+  return `<li class="place-row"><div class="place-main"><div class="place-name"><strong>${esc(place.name)}</strong><span class="chip">${esc(place.kind)}</span></div><div class="meta"><span class="status reschedule">${svg(I.calendarSync,15)}<span>原排 ${originalDateLabel(place.unplacedFromDate)}・待改期</span></span><span>${durationLabel(place.duration)}</span></div></div><button class="rowbtn" type="button" data-pending="${esc(place.id)}">${svg(I.calendarPlus,16)}安排日期</button></li>`;
+}
+function itineraryRow(item) {
+  if (item.fixed) return `<li class="place-row"><div class="place-main"><div class="place-name"><strong>${esc(item.name)}</strong><span class="chip fixed">${svg(I.lock,12)}固定</span></div><div class="meta"><span class="time">${esc(item.start)}</span><span>${esc(item.kind)}・${esc(item.meta)}</span></div></div></li>`;
+  return `<li class="place-row"><div class="place-main"><div class="place-name"><strong>${esc(item.name)}</strong><span class="chip">${esc(item.kind)}</span></div><div class="meta"><span class="time">${item.start ? esc(item.start) : "時間待安排"}</span><span>${durationLabel(item.duration)}</span></div></div></li>`;
+}
+function renderPending() {
+  const pending = pendingPlaces();
+  return `<details class="pending" open><summary><span class="pending-title"><strong>待安排</strong><span>已選進行程，但還沒有新的日期。</span></span><span class="count" aria-label="${pending.length} 個地點">${pending.length}</span><span class="chevron">${svg(I.chevron,18)}</span></summary><div class="pending-body">${pending.length ? `<ul class="group-list">${pending.map(pendingRow).join("")}</ul>` : `<div class="emptyline">${svg(I.calendar,18)}<span>目前沒有待安排的地點。</span></div>`}</div></details>`;
+}
+function renderDay(date) {
+  const items = combinedFor(date);
+  return `<section class="day" id="day-${date}" aria-labelledby="title-${date}"><header class="dayhead"><div><h2 id="title-${date}">${labels[date]}</h2><p>${items.length ? `${items.length} 項安排` : "尚未安排地點"}</p></div><div class="dayactions"><a class="route-link" href="route.html?day=${date}">${svg(I.route,15)}幫我排順路</a><button class="outlinebtn" type="button" data-plan="${date}">${svg(I.calendarPlus,16)}安排這一天</button></div></header><ul class="day-list">${items.length ? items.map(itineraryRow).join("") : `<li class="no-plan">${svg(I.calendar,18)}<span>這一天還沒有已選地點。</span><button class="rowbtn" type="button" data-plan="${date}">${svg(I.plus,16)}加入地點</button></li>`}</ul></section>`;
+}
+function render() {
+  document.getElementById("main").innerHTML = `<header class="pagehead"><h1>行程</h1><p>先看已經選進旅程的地點，再決定要放在哪一天。固定航班、住宿和訂位不會被移動。</p></header>${renderPending()}<div class="days">${dates.map(renderDay).join("")}</div>`;
+}
+let panelDate = "2026-10-24";
+let lastFocus = null;
+function picker() {
+  return `<div class="daypicker" aria-label="排入哪一天">${dates.map(date=>`<button class="daypick" type="button" data-pickday="${date}" aria-pressed="${date===panelDate}"><span>${shortLabels[date][0]}</span><small>週${shortLabels[date][1]}</small></button>`).join("")}</div>`;
+}
+function sourceRow(place) {
+  const blocked = !place.hasLocation;
+  const status = blocked
+    ? `${svg(I.mapPinOff,15)}<span>缺少位置</span>`
+    : place.confirmed
+      ? `${svg(I.calendarSync,15)}<span>原排 ${originalDateLabel(place.unplacedFromDate)}・待改期</span>`
+      : `${svg(I.calendarClock,15)}<span>尚未排入</span>`;
+  return `<li class="place-row"><div class="place-main"><div class="place-name"><strong>${esc(place.name)}</strong><span class="chip">${esc(place.kind)}</span></div><div class="meta"><span class="status${place.confirmed ? " reschedule" : ""}">${status}</span><span>${durationLabel(place.duration)}</span></div></div><button class="schedulebtn" type="button" data-schedule="${esc(place.id)}" ${blocked ? "disabled" : ""}>${blocked ? `${svg(I.mapPinOff,16)}需補位置` : `${svg(I.calendarPlus,16)}排入這天`}</button></li>`;
+}
+function sourceSection(title,helper,items,empty) {
+  return `<section class="source"><h3>${title}</h3><p>${helper}</p>${items.length ? `<ul class="source-list">${items.map(sourceRow).join("")}</ul>` : `<div class="source-empty">${svg(I.pin,17)}<span>${empty}</span></div>`}</section>`;
+}
+function renderSheet() {
+  const sheet = document.getElementById("sheet");
+  sheet.innerHTML = `<div class="grab" aria-hidden="true"></div><header class="sheethead"><div style="flex:1;min-width:0"><h2 id="sheettitle" tabindex="-1">安排${labels[panelDate]}</h2><p>從已選但待改期的地點，或仍在考慮的口袋名單排入這一天。</p></div><button class="iconbtn" type="button" data-close aria-label="關閉">${svg(I.close,20)}</button></header><div class="sheetbody">${picker()}${sourceSection("待安排的地點","這些地點已選進行程，只差新的日期。",pendingPlaces(),"目前沒有待安排的地點。")}${sourceSection("口袋名單","排入後也會正式選進行程。",pocketPlaces(),"口袋名單目前沒有候選地點。")}</div>`;
+}
+function openSheet(date,trigger) {
+  panelDate = dates.includes(date) ? date : "2026-10-24"; lastFocus = trigger || document.activeElement;
+  const sheet=document.getElementById("sheet"); sheet.hidden=false; renderSheet();
+  requestAnimationFrame(()=>{ sheet.classList.add("show"); document.getElementById("scrim").classList.add("show"); document.getElementById("sheettitle")?.focus({preventScroll:true}); });
+}
+function closeSheet() {
+  const sheet=document.getElementById("sheet"); sheet.classList.remove("show"); document.getElementById("scrim").classList.remove("show");
+  setTimeout(()=>sheet.hidden=true,430); lastFocus?.focus?.({preventScroll:true});
+}
+function showToast(text) {
+  const toast=document.getElementById("toast"); toast.textContent=text; toast.classList.remove("show"); void toast.offsetWidth; toast.classList.add("show");
+  clearTimeout(window.__toast); window.__toast=setTimeout(()=>toast.classList.remove("show"),2800);
+}
+function nextDateAfter(date) { const index=dates.indexOf(date); return index>=0 && index<dates.length-1 ? dates[index+1] : "2026-10-24"; }
+render();
+document.addEventListener("click",event=>{
+  const plan=event.target.closest("[data-plan]");
+  if (plan) { openSheet(plan.dataset.plan,plan); return; }
+  const pending=event.target.closest("[data-pending]");
+  if (pending) { const place=store.places.find(item=>item.id===pending.dataset.pending); openSheet(nextDateAfter(place?.unplacedFromDate),pending); return; }
+  const pick=event.target.closest("[data-pickday]");
+  if (pick) { panelDate=pick.dataset.pickday; renderSheet(); document.querySelector(`[data-pickday="${panelDate}"]`)?.focus(); return; }
+  const schedule=event.target.closest("[data-schedule]");
+  if (schedule) {
+    const place=store.places.find(item=>item.id===schedule.dataset.schedule); if (!place || !place.hasLocation) return;
+    const wasCandidate=!place.confirmed; place.confirmed=true; place.dayDate=panelDate; place.start=null; place.unplacedFromDate=null; persist(); render(); renderSheet();
+    showToast(wasCandidate ? `已將「${place.name}」選進行程並排入 ${shortLabels[panelDate][0]}` : `已將「${place.name}」排入 ${shortLabels[panelDate][0]}`);
+    return;
+  }
+  if (event.target.closest("[data-close]") || event.target===document.getElementById("scrim")) closeSheet();
+});
+document.addEventListener("keydown",event=>{ if (event.key==="Escape" && !document.getElementById("sheet").hidden) closeSheet(); });
+</script>
+</body>
+</html>

@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>幫我排順路 — Along the Way 互動原型</title>
+<style>
+:root {
+  --background:#f5f0e7; --foreground:#24372f; --card:#fffcf7; --primary:#1f3029;
+  --primary-foreground:#fffaf2; --muted-foreground:#52645c; --accent:#d37551;
+  --accent-ink:#9a4a2c; --border:color-mix(in srgb,#24372f 18%,transparent); --ring:#e09271;
+  --warning:#8a531f; --warning-bg:#fff2dd; --danger:#98442d; --danger-bg:#fceedf;
+  --font-sans:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",sans-serif;
+  --font-display:Georgia,"Noto Serif TC",serif; --ease-out:cubic-bezier(.16,1,.3,1);
+}
+*{box-sizing:border-box} html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+body{margin:0;min-width:320px;min-height:100vh;color:var(--foreground);font-family:var(--font-sans);background:radial-gradient(circle at 82% 10%,color-mix(in srgb,var(--accent) 18%,transparent),transparent 28rem),linear-gradient(145deg,#f8f4ed 0%,#eee8dd 100%);background-attachment:fixed;overflow-x:clip}
+::selection{background:color-mix(in srgb,var(--accent) 30%,transparent);color:var(--foreground)}
+button{font:inherit;color:inherit;cursor:pointer}button:disabled{cursor:not-allowed}button,a{-webkit-tap-highlight-color:transparent}:focus-visible{outline:2px solid var(--ring);outline-offset:2px}svg{display:block;flex:none}.app{display:grid;min-height:100vh}.rail{display:none}
+.topbar{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:12px;padding:8px 12px;background:color-mix(in srgb,#f8f4ed 88%,transparent);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.triptitle{flex:1;min-width:0;display:flex;align-items:center;height:46px;padding:0 4px;font-size:16px;font-weight:700}.triptitle span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dot{width:10px;height:10px;border-radius:50%;background:var(--accent);margin:0 6px}.dot.offline{background:#8b5d46}
+main{width:100%;max-width:1180px;margin:0 auto;padding:17px 12px 156px}.bottomnav{display:none}
+.pagehead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin:0 2px 14px}.pagehead h1{margin:0;font-family:var(--font-display);font-size:26px;line-height:1.2;letter-spacing:-.015em}.pagehead p{margin:5px 0 0;color:var(--muted-foreground);font-size:13px;line-height:1.45}.closebtn{display:grid;place-items:center;width:42px;height:42px;border:1px solid var(--border);border-radius:999px;background:var(--card)}
+/* Message taxonomy — each state has a distinct location, weight, icon, colour and wording:
+   1 summary: dark top decision band + route icon + gain/cost sentence;
+   2 fixed-kept: neutral inline lock row + “保留不動：…”;
+   3 moved-reason: accent move badge beside stop + arrow icon + one “提前／延後：…” reason;
+   4 unknown: amber standalone evidence strip + help icon + “查不到…未計入…” recovery;
+   5 cannot-fit: danger-tinted bottom section + calendar-x icon + “這次排不進去” and cause;
+   6 pinned: high-contrast green inline pin chip + pin icon + “你釘住…” ownership;
+   7 optimal: centered quiet success block + check-route icon + “目前順序已經很順”;
+   8 estimated-vs-confirmed: metadata legend above timelines; solid check chip vs dashed clock chip with explicit nouns.
+   Colour is always reinforced by position, icon, border style and wording. */
+.summary{display:grid;grid-template-columns:22px minmax(0,1fr);gap:10px;padding:16px 17px;margin-bottom:12px;border-radius:18px;background:var(--primary);color:var(--primary-foreground);box-shadow:0 14px 34px -24px rgba(31,48,41,.75)}.summary svg{margin-top:2px;color:var(--accent)}.summary strong{display:block;font-size:16px;line-height:1.45}.summary span{display:block;margin-top:4px;color:color-mix(in srgb,var(--primary-foreground) 74%,transparent);font-size:12px;line-height:1.5}
+.evidence{display:flex;align-items:center;flex-wrap:wrap;gap:7px 10px;margin:0 2px 13px;color:var(--muted-foreground);font-size:12px}.evidence-label{font-weight:700;color:var(--foreground)}.evidence-chip{display:inline-flex;align-items:center;gap:5px;padding:5px 8px;border-radius:999px;background:var(--card);border:1px solid var(--border);font-weight:650}.evidence-chip.estimated{border-style:dashed;background:transparent}.evidence .sep{width:1px;height:18px;background:var(--border)}
+.unknown{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:start;gap:10px;margin:0 0 13px;padding:12px 14px;border:1px solid color-mix(in srgb,var(--warning) 34%,transparent);border-radius:14px;background:var(--warning-bg);color:#71431b;font-size:13px;line-height:1.5}.unknown strong{display:block;font-size:14px}.unknown span{display:block;color:var(--foreground);margin-top:1px}.unknown button{align-self:center;display:inline-flex;align-items:center;gap:6px;min-height:44px;border:0;background:transparent;padding:6px 2px;color:#71431b;font-size:13px;font-weight:700;text-decoration:underline;text-underline-offset:3px;white-space:nowrap}.unknown button:disabled{cursor:not-allowed;opacity:.72;text-decoration:none}.spin{animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+.segments{display:grid;grid-template-columns:1fr 1fr;gap:0;margin:0 0 13px;border:1px solid var(--border);border-radius:16px;background:var(--card);overflow:hidden}.segments button{display:grid;grid-template-columns:18px auto 16px;align-items:center;justify-content:center;gap:8px;height:48px;border:0;border-radius:0;background:transparent;color:var(--foreground);font-size:14px;font-weight:700}.segments button+button{border-left:1px solid var(--border)}.segments .selectionmark{width:16px;height:16px;opacity:0}.segments button[aria-selected="true"]{background:var(--primary);color:var(--primary-foreground);box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--primary-foreground) 38%,transparent)}.segments button[aria-selected="true"] .selectionmark{opacity:1}
+.compare{display:grid;gap:14px}.version{min-width:0}.version[hidden]{display:none}.versionhead{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 2px 10px}.versionhead h2{margin:0;font-size:18px;line-height:1.3}.versionhead span{font-size:12px;color:var(--muted-foreground)}
+.timeline{list-style:none;margin:0;padding:4px 0;border:1px solid var(--border);border-radius:18px;background:var(--card);overflow:hidden}.stop{position:relative;display:grid;grid-template-columns:50px 12px 14px minmax(0,1fr);min-height:78px;padding:0 13px 0 8px}.stop::before{content:"";position:absolute;left:63.5px;top:0;bottom:0;width:1px;background:var(--border)}.stop:first-child::before{top:50%}.stop:last-child::before{bottom:50%}.time{grid-column:1;align-self:center;padding-right:10px;text-align:right;color:var(--muted-foreground);font-size:12px;font-weight:700;font-variant-numeric:tabular-nums}.track{grid-column:2;position:relative;z-index:1}.track::after{content:"";position:absolute;left:0;top:calc(50% - 5.5px);width:11px;height:11px;border:2px solid var(--card);border-radius:50%;background:color-mix(in srgb,var(--foreground) 36%,var(--card))}.stop.fixed .track::after{border-radius:3px;background:var(--primary)}.stop.moved .track::after{background:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 16%,transparent)}.stop.pinned .track::after{background:var(--primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--primary) 13%,transparent)}.stop.locked{background:color-mix(in srgb,var(--primary) 4%,var(--card))}.stopcontent{grid-column:4;align-self:center;min-width:0;padding:11px 0}.titleline{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0}.titleline strong{font-size:15px;line-height:1.35}.meta{display:flex;align-items:center;flex-wrap:wrap;gap:3px 9px;margin-top:4px;color:var(--muted-foreground);font-size:12px;line-height:1.45}.reason{display:flex;align-items:center;gap:5px;margin-top:5px;color:var(--accent-ink);font-size:12px;font-weight:700;line-height:1.35}.fixednote{display:inline-flex;align-items:center;gap:4px;color:var(--foreground);font-size:11px;font-weight:700}.movechip,.pinchip{display:inline-flex;align-items:center;gap:4px;padding:4px 7px;border-radius:999px;font-size:11px;font-weight:800;line-height:1}.movechip{background:color-mix(in srgb,var(--accent) 15%,transparent);color:var(--accent-ink)}.pinchip{background:var(--primary);color:var(--primary-foreground)}.pin-action{display:inline-flex;align-items:center;gap:4px;margin-top:7px;padding:5px 0;border:0;background:transparent;color:var(--foreground);font-size:12px;font-weight:700;text-decoration:underline;text-underline-offset:3px}
+.unscheduled{margin-top:13px;padding:15px 16px;border:1px solid color-mix(in srgb,var(--danger) 34%,transparent);border-radius:16px;background:var(--danger-bg)}.unscheduled-head{display:grid;grid-template-columns:20px minmax(0,1fr);gap:9px;align-items:start;color:var(--danger)}.unscheduled h3{margin:0;font-size:15px}.unscheduled p{margin:4px 0 0;color:var(--foreground);font-size:13px;line-height:1.5}.unscheduled .place{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-top:12px;padding-top:12px;border-top:1px solid color-mix(in srgb,var(--danger) 20%,transparent)}.unscheduled .place strong{font-size:14px}.unscheduled .place span{display:block;margin-top:3px;color:var(--muted-foreground);font-size:12px;line-height:1.4}.textbtn{display:inline-flex;align-items:center;gap:5px;min-height:44px;border:0;background:transparent;padding:5px 0;color:var(--danger);font-size:12px;font-weight:700;text-decoration:underline;text-underline-offset:3px;white-space:nowrap}
+.optimal{padding:30px 20px;border:1px solid var(--border);border-radius:18px;background:var(--card);text-align:center}.optimal .mark{display:grid;place-items:center;width:52px;height:52px;margin:0 auto 13px;border-radius:16px;background:color-mix(in srgb,var(--primary) 9%,var(--card));color:var(--primary)}.optimal h2{margin:0;font-family:var(--font-display);font-size:23px}.optimal p{max-width:38ch;margin:8px auto 0;color:var(--muted-foreground);font-size:14px;line-height:1.55}
+.offlinebox{display:grid;grid-template-columns:20px minmax(0,1fr);gap:10px;margin-bottom:13px;padding:13px 14px;border:1px solid var(--border);border-radius:14px;background:color-mix(in srgb,var(--primary) 5%,var(--card));font-size:13px;line-height:1.5}.offlinebox strong{display:block}.offlinebox span{display:block;margin-top:2px;color:var(--muted-foreground)}
+.actionbar{position:fixed;z-index:25;left:0;right:0;bottom:0;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:8px;padding:11px 12px calc(11px + env(safe-area-inset-bottom));border-top:1px solid var(--border);background:color-mix(in srgb,#fbf8f2 95%,transparent);backdrop-filter:blur(12px)}.primarybtn,.secondarybtn{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:48px;border-radius:999px;font-size:13px;font-weight:750;line-height:1.2}.primarybtn{border:0;background:var(--primary);color:var(--primary-foreground);box-shadow:0 9px 24px -14px rgba(0,0,0,.65)}.secondarybtn{border:1px solid var(--border);background:var(--card);color:var(--foreground)}.primarybtn:active,.secondarybtn:active{transform:scale(.98)}.primarybtn:disabled{opacity:.45}.recompute{grid-column:1/-1;display:none}.actionbar.repin .recompute{display:inline-flex}.actionbar.repin .keep,.actionbar.repin .apply{display:none}
+.actionbar[hidden]{display:none!important}.pin-action:disabled,.textbtn:disabled{cursor:not-allowed;opacity:.45;text-decoration:none}
+main{padding-bottom:calc(156px + env(safe-area-inset-bottom))}
+.toast{position:fixed;z-index:70;left:50%;bottom:calc(84px + env(safe-area-inset-bottom));display:flex;align-items:center;gap:9px;max-width:calc(100vw - 24px);padding:12px 16px;border-radius:999px;background:var(--primary);color:var(--primary-foreground);font-size:13px;font-weight:700;white-space:nowrap;box-shadow:0 14px 34px -12px rgba(31,48,41,.6);transform:translate(-50%,28px) scale(.96);opacity:0;pointer-events:none;transition:transform .4s var(--ease-out),opacity .25s}.toast.show{transform:translate(-50%,0) scale(1);opacity:1}
+@media(min-width:1024px){.app{grid-template-columns:272px minmax(0,1fr);gap:24px;padding:20px}.topbar{display:none}.rail{display:flex;flex-direction:column;gap:8px;position:sticky;top:20px;height:calc(100vh - 40px);padding:16px;border:1px solid var(--border);border-radius:22px;background:color-mix(in srgb,var(--card) 55%,transparent)}.rail .triptitle{flex:none;margin-bottom:18px;padding-inline:12px}.rail :is(a,.nav-disabled){display:flex;align-items:center;gap:10px;height:46px;padding:0 12px;border-radius:14px;color:var(--foreground);font-weight:700;text-decoration:none}.rail a[aria-current="page"]{color:var(--accent-ink);background:var(--card)}.nav-disabled{opacity:.4}.shellcontent{min-width:0}main{max-width:1180px;margin:0;padding:4px 0 110px}.pagehead h1{font-size:30px}.segments{display:none}.compare{grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.version[hidden]{display:block}.versionhead{margin-bottom:10px}.summary{padding:17px 20px}.summary strong{font-size:17px}.unknown{grid-template-columns:20px minmax(0,1fr) auto}.timeline{height:100%}.compare.equal-height{align-items:stretch}.actionbar{position:fixed;left:calc(272px + 44px);right:20px;bottom:20px;width:auto;display:flex;justify-content:flex-end;padding:12px;border:1px solid var(--border);border-radius:18px;background:color-mix(in srgb,var(--card) 96%,transparent);box-shadow:0 12px 36px -24px rgba(31,48,41,.55)}.actionbar button{width:auto;min-width:176px;padding-inline:22px}.actionbar .recompute{margin-left:auto}.toast{left:calc(50% + 148px);bottom:92px}.optimal{padding-block:42px}.optimalwrap{max-width:760px}.single-view{max-width:560px}}
+@media(min-width:1024px){.compare .stop{height:120px;min-height:120px}}
+@media(min-width:1024px){main{padding-bottom:180px}.compare .timeline{height:auto}}
+@media(max-width:370px){main{padding-inline:9px}.stop{grid-template-columns:44px 12px 11px minmax(0,1fr);padding-right:10px}.stop::before{left:55.5px}.actionbar{padding-inline:9px}.primarybtn,.secondarybtn{font-size:12px}.unknown{grid-template-columns:18px minmax(0,1fr)}.unknown button{grid-column:2;justify-self:start}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail" aria-label="主要導覽">
+    <div class="triptitle"><span>大阪京都 10/21–10/27</span></div>
+    <a href="today.html"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4M16 2v4"/><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18"/></svg>今天</a>
+    <a href="route.html" aria-current="page"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg>行程</a>
+    <a href="pocket-v2.html"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 5-5.5 10.2-7.4 11.8a1 1 0 0 1-1.2 0C9.5 20.2 4 15 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></svg>地點</a>
+    <span class="nav-disabled"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/></svg>成員</span>
+  </aside>
+  <div class="shellcontent">
+    <header class="topbar"><div class="triptitle"><span>大阪京都 10/21–10/27</span></div><span class="dot" id="statusDot" aria-label="即時更新已連線"></span></header>
+    <main id="main"></main>
+  </div>
+</div>
+<div class="actionbar" id="actionbar" hidden>
+  <button class="secondarybtn keep" id="keepBtn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg><span>保留目前順序</span></button>
+  <button class="primarybtn apply" id="applyBtn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg><span>套用建議順序</span></button>
+  <button class="primarybtn recompute" id="recomputeBtn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></svg><span>依釘住位置重新建議</span></button>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>
+const I={route:'<circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/>',lock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',move:'<path d="m7 7 4-4 4 4M11 3v14M17 17l-4 4-4-4"/>',help:'<circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 1 1 5.8 1c0 2-3 2-3 4M12 18h.01"/>',calendarOff:'<path d="M4.2 4.2A2 2 0 0 0 3 6v12a2 2 0 0 0 2 2h13.8"/><path d="M21 15.8V6a2 2 0 0 0-2-2h-9.8"/><path d="M16 2v4M8 2v2M3 10h7m5.2 0H21M2 2l20 20"/>',pin:'<path d="M12 17v5M5 3h14l-3 6v5l2 3H6l2-3V9L5 3Z"/>',check:'<path d="m20 6-11 11-5-5"/>',circleDot:'<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',wifi:'<path d="m2 2 20 20M8.5 8.5a5 5 0 0 1 7 7M5 12.5a9 9 0 0 1 3.1-2M12 20h.01M18.5 9.5A9 9 0 0 0 4.3 6.7"/>',close:'<path d="M18 6 6 18M6 6l12 12"/>',refresh:'<path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/>',loader:'<path d="M21 12a9 9 0 1 1-6.219-8.56"/>',sparkles:'<path d="m12 3-1.8 4.8L5.4 9.6l4.8 1.8L12 16.2l1.8-4.8 4.8-1.8-4.8-1.8L12 3Z"/><path d="m5 3-.6 1.4L3 5l1.4.6L5 7l.6-1.4L7 5l-1.4-.6L5 3Z"/><path d="m19 17-.8 2.2L16 20l2.2.8L19 23l.8-2.2L22 20l-2.2-.8L19 17Z"/>',listOrdered:'<path d="M10 6h11M10 12h11M10 18h11"/><path d="M4 6h1v4M4 10h2M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/>',mapPin:'<path d="M20 10c0 5-5.5 10.2-7.4 11.8a1 1 0 0 1-1.2 0C9.5 20.2 4 15 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/>',checkRoute:'<path d="m20 6-11 11-5-5"/><path d="M5 3h5m4 18h5"/>'};
+const svg=(path,size=18)=>`<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
+// INVENTED PROTOTYPE DATA: every Kyoto place, time, opening hour, route duration, meal window, status and reason below is fictional and is not a travel claim.
+const current=[
+ {id:'bamboo',time:'09:00',name:'嵐山竹林',duration:'停留 45 分鐘',travel:'從飯店 32 分鐘',estimate:true},
+ {id:'togetsu',time:'10:05',name:'渡月橋',duration:'停留 35 分鐘',travel:'步行 12 分鐘',estimate:true},
+ {id:'lunch',time:'11:30',name:'嵯峨野午餐',duration:'已訂 11:30–12:30',fixed:true,confirmed:true},
+ {id:'saihoji',time:'14:00',name:'西芳寺',duration:'固定預約 14:00',fixed:true,confirmed:true},
+ {id:'tenryu',time:'15:45',name:'天龍寺',duration:'停留 45 分鐘',travel:'移動 28 分鐘',estimate:true},
+ {id:'fushimi',time:'17:10',name:'伏見稻荷大社',duration:'停留 50 分鐘',travel:'交通時間查不到',unknown:true},
+ {id:'hotel',time:'18:45',name:'Hotel Granvia Kyoto',duration:'回到飯店',fixed:true}
+];
+const suggested=[
+ {id:'tenryu',time:'09:00',name:'天龍寺',duration:'停留 60 分鐘',travel:'從飯店 29 分鐘',estimate:true,moved:'第 5 → 第 1',reason:'提前：16:30 關門'},
+ {id:'bamboo',time:'10:20',name:'嵐山竹林',duration:'停留 45 分鐘',travel:'步行 8 分鐘',estimate:true,moved:'第 1 → 第 2',reason:'延後：接在天龍寺旁邊'},
+ {id:'lunch',time:'11:30',name:'嵯峨野午餐',duration:'已訂 11:30–12:30',fixed:true,confirmed:true},
+ {id:'saihoji',time:'14:00',name:'西芳寺',duration:'固定預約 14:00',fixed:true,confirmed:true},
+ {id:'togetsu',time:'16:05',name:'渡月橋',duration:'停留 35 分鐘',travel:'移動 26 分鐘',estimate:true,moved:'第 2 → 第 5',reason:'延後：避開往返同一路段'},
+ {id:'fushimi',time:'17:00',name:'伏見稻荷大社',duration:'停留 45 分鐘',travel:'交通時間查不到',unknown:true},
+ {id:'hotel',time:'18:10',name:'Hotel Granvia Kyoto',duration:'回到飯店',fixed:true}
+];
+const nishikiSuggested=[
+ {...suggested[0]}, {...suggested[1]}, {...suggested[2]}, {...suggested[3]},
+ {id:'nishiki',time:'16:10',name:'錦市場',duration:'停留 40 分鐘',travel:'移動時間查不到',unknown:true,moved:'未排入 → 第 5',reason:'加入：你指定要去'},
+ {...suggested[5],time:'17:20'}, {...suggested[6],time:'18:35'}
+];
+const duringCurrent=[
+ {...current[0],time:'09:00'}, {...current[1],time:'10:05'}, current[2], current[3],
+ {...current[5],time:'15:40',travel:'從西芳寺估計 38 分鐘'},
+ {...current[4],time:'17:00',travel:'從伏見稻荷估計 34 分鐘'},
+ {...current[6],time:'18:45'}
+];
+const duringSuggested=[
+ {...current[0],time:'09:00'}, {...current[1],time:'10:05'}, current[2], current[3],
+ {...current[4],time:'15:40',moved:'第 6 → 第 5',reason:'提前：16:30 關門'},
+ {...current[5],time:'17:00',moved:'第 5 → 第 6',reason:'延後：先趕上天龍寺關門'},
+ {...current[6],time:'18:10'}
+];
+const params=new URLSearchParams(location.search);
+const state=params.get('state')||'better';
+const atMatch=(params.get('at')||'').match(/T(\d{2}):(\d{2})/);
+const atMinutes=atMatch?Number(atMatch[1])*60+Number(atMatch[2]):null;
+const duringBounds={bamboo:[540,585],togetsu:[605,640],lunch:[690,750],saihoji:[840,920],tenryu:[940,985],fushimi:[1020,1070],hotel:[1090,1439]};
+let mobileView='suggested';
+let pinnedId=state==='pinned'?'togetsu':null;
+let needsRecompute=false;
+let applied=false;
+let comparisonClosed=false;
+let committedItems=null;
+const stateCopy={
+ better:{summary:'交通與步行差異查不到・回飯店時間查不到・1 個地點排不進去'},
+ pinned:{summary:'重新建議完成・交通與步行差異查不到・回飯店時間查不到・1 個地點排不進去'},
+ during:{summary:'剩下行程的交通與步行差異查不到・回飯店時間查不到・1 個地點排不進去'},
+ nodata:{summary:'交通時間查不到・步行時間查不到・回飯店時間查不到・1 個地點排不進去'},
+ offline:{summary:'目前離線・顯示上次儲存的建議・交通與步行差異查不到'}
+};
+const unavailable=()=>state==='offline'||state==='nodata';
+const cleanItems=items=>items.map(({moved,reason,...item})=>({...item}));
+function tripStatus(id){if(state!=='during'||atMinutes===null||!duringBounds[id])return null;const [start,end]=duringBounds[id];return atMinutes>=end?'done':atMinutes>=start?'current':'future'}
+function getModels(){const currentItems=state==='during'?duringCurrent:current;let suggestedItems=state==='during'?duringSuggested:suggested;if(pinnedId==='nishiki'&&!needsRecompute&&state!=='during')suggestedItems=nishikiSuggested;return{current:currentItems,suggested:suggestedItems}}
+function stopRow(item,index,kind){
+ const status=tripStatus(item.id);
+ const pinned=item.id===pinnedId&&kind==='suggested';
+ const moved=kind==='suggested'&&item.moved&&status!=='done'&&status!=='current';
+ const canPin=moved&&!pinned&&!applied;
+ return `<li class="stop ${item.fixed?'fixed locked':''} ${moved?'moved':''} ${pinned?'pinned':''} ${status==='done'||status==='current'?'locked':''}" data-stop-id="${item.id}"><time class="time">${item.time}</time><span class="track"></span><div class="stopcontent"><div class="titleline"><strong>${item.name}</strong>${item.fixed?`<span class="fixednote">${svg(I.lock,13)}保留不動</span>`:''}${status==='done'?`<span class="fixednote">${svg(I.check,13)}已完成</span>`:''}${status==='current'?`<span class="fixednote">${svg(I.circleDot,13)}進行中</span>`:''}${pinned?`<span class="pinchip">${svg(I.pin,12)}你釘住第 ${index+1} 站</span>`:''}${moved&&!pinned?`<span class="movechip">${svg(I.move,12)}${item.moved}</span>`:''}</div><div class="meta"><span>${item.duration}</span>${item.travel?`<span>${item.travel}</span>`:''}</div>${moved&&item.reason?`<div class="reason">${svg(I.move,13)}${item.reason}</div>`:''}${canPin?`<button class="pin-action" data-pin="${item.id}" ${unavailable()?'disabled title="目前無法重新計算"':''}>${svg(I.pin,13)}釘住這一站</button>`:''}</div></li>`
+}
+function timeline(items,kind){return `<ol class="timeline">${items.map((item,index)=>stopRow(item,index,kind)).join('')}</ol>`}
+function version(kind,items){const isSuggested=kind==='suggested';return `<section class="version" id="${kind}Version" ${!isSuggested?'hidden':''}><div class="versionhead"><h2>${isSuggested?'建議順序':'目前順序'}</h2><span>${isSuggested?'還沒套用':'10月23日・京都'}</span></div>${timeline(items,kind)}${isSuggested?unscheduled():''}</section>`}
+function unscheduled(){
+ const nishikiPending=pinnedId==='nishiki'&&needsRecompute;
+ const nishikiApplied=pinnedId==='nishiki'&&!needsRecompute;
+ const place=nishikiApplied?{id:'togetsu',name:'渡月橋',reason:'排入後會壓縮午餐後的休息與西芳寺準備時間。'}:{id:'nishiki',name:'錦市場',reason:'排入後會晚於西芳寺 14:00 的固定預約。'};
+ const action=nishikiPending?`<span class="pinchip">${svg(I.pin,12)}你釘住這一站</span>`:`<button class="textbtn" data-pin="${place.id}" ${unavailable()?'disabled title="目前無法重新計算"':''}>${svg(I.pin,16)}<span>${place.id==='nishiki'?'改釘這站':'釘住這一站'}</span></button>`;
+ return `<section class="unscheduled"><div class="unscheduled-head">${svg(I.calendarOff,19)}<div><h3>這次排不進去</h3><p>沒有刪除，仍留在 10月23日的想去清單。</p></div></div><div class="place"><div><strong>${place.name}</strong><span>原因：${place.reason}</span></div>${action}</div></section>`
+}
+function unknownBlock(){if(!['better','pinned','during','nodata'].includes(state))return'';const noData=state==='nodata';return `<aside class="unknown">${svg(I.help,19)}<div><strong>${noData?'路線服務暫時沒有回應':'有一段交通時間查不到'}</strong><span>${noData?'無法計算交通、步行與抵達時間；以下只比較地點順序。':'伏見稻荷 → 飯店資料不完整，因此不顯示推測的差異與抵達時間。'}</span></div><button id="retryBtn">${svg(noData?I.refresh:I.mapPin,16)}<span>${noData?'再試一次':'查看位置'}</span></button></aside>`}
+function evidence(){return `<div class="evidence" aria-label="時間資料說明"><span class="evidence-label">時間依據</span><span class="evidence-chip">${svg(I.check,13)}確定：預約與營業時間</span><span class="evidence-chip estimated">${svg(I.clock,13)}估計：路線與停留時間</span></div>`}
+function summary(){const key=pinnedId&&!needsRecompute&&!unavailable()?'pinned':state;return `<section class="summary">${svg(I.route,21)}<div><strong>${(stateCopy[key]||stateCopy.better).summary}</strong><span>${state==='offline'?'顯示上次儲存內容；連線後才能重新計算。':'資料不完整，不顯示推測的數字；先比較，再決定要不要改。'}</span></div></section>`}
+function offline(){return `<aside class="offlinebox">${svg(I.wifi,19)}<div><strong>目前離線，無法重新計算</strong><span>這是 10月8日 21:40 儲存的順序；連線後才能確認是否有更新。</span></div></aside>`}
+function optimal(){return `<div class="optimalwrap"><section class="optimal"><div class="mark">${svg(I.checkRoute,26)}</div><h2>目前順序已經很順</h2><p>在不移動午餐與西芳寺預約、保留足夠休息時間的前提下，沒有更省時的排法。</p></section><div class="single-view" style="margin-top:14px"><div class="versionhead"><h2>目前順序</h2><span>不用變更</span></div>${timeline(current,'current')}</div></div>`}
+function appliedView(){return `<section class="summary">${svg(I.check,21)}<div><strong>已套用建議順序</strong><span>固定事項、已完成與進行中的站都沒有變動。</span></div></section>${evidence()}<section class="version applied-version" id="currentVersion"><div class="versionhead"><h2>目前順序</h2><span>已套用</span></div>${timeline(committedItems,'current')}</section>`}
+function render(){
+ const main=document.getElementById('main');
+ const during=state==='during';
+ const models=getModels();
+ document.getElementById('statusDot').classList.toggle('offline',state==='offline');
+ const head=`<header class="pagehead"><div><h1>幫我排順路</h1><p>${during?'旅途中・只調整西芳寺之後還沒走的站':'10月23日（週五）・京都'}</p></div><button class="closebtn" aria-label="關閉比較" onclick="history.back()">${svg(I.close,19)}</button></header>`;
+ if(applied)main.innerHTML=head+appliedView();
+ else if(state==='optimal')main.innerHTML=head+optimal();
+ else main.innerHTML=head+summary()+(state==='offline'?offline():unknownBlock())+evidence()+`<div class="segments" role="tablist" aria-label="比較順序"><button role="tab" data-view="suggested" aria-selected="${mobileView==='suggested'}">${svg(I.sparkles,18)}<span>建議</span><span class="selectionmark">${svg(I.check,16)}</span></button><button role="tab" data-view="current" aria-selected="${mobileView==='current'}">${svg(I.listOrdered,18)}<span>目前</span><span class="selectionmark">${svg(I.check,16)}</span></button></div><div class="compare equal-height">${version('current',models.current)}${version('suggested',models.suggested)}</div>`;
+ wire();
+ syncAction();
+}
+function wire(){
+ document.querySelectorAll('[data-view]').forEach(btn=>btn.onclick=()=>{mobileView=btn.dataset.view;document.querySelectorAll('[data-view]').forEach(button=>button.setAttribute('aria-selected',String(button===btn)));document.getElementById('currentVersion').hidden=mobileView!=='current';document.getElementById('suggestedVersion').hidden=mobileView!=='suggested'});
+ document.querySelectorAll('[data-pin]').forEach(btn=>btn.onclick=()=>{if(unavailable()){showToast(state==='offline'?'目前離線，無法重新建議':'路線資料查不到，無法重新建議');return}pinnedId=btn.dataset.pin;needsRecompute=true;render();showToast(`已釘住${pinnedId==='nishiki'?'錦市場':pinnedId==='togetsu'?'渡月橋':'這一站'}，請重新建議`)});
+ const retry=document.getElementById('retryBtn');
+ if(retry)retry.onclick=()=>{if(state!=='nodata'){showToast('位置資料仍待補充');return}retry.disabled=true;retry.innerHTML=`${svg(I.loader,16).replace('<svg','<svg class="spin"')}<span>重新連線中…</span>`;setTimeout(()=>{if(!retry.isConnected)return;retry.disabled=false;retry.innerHTML=`${svg(I.refresh,16)}<span>再試一次</span>`;showToast('仍無法連線，請稍後再試')},1200)};
+}
+function syncAction(){
+ const bar=document.getElementById('actionbar');
+ bar.hidden=state==='optimal'||applied||comparisonClosed;
+ bar.classList.toggle('repin',needsRecompute&&!unavailable());
+ document.getElementById('applyBtn').disabled=unavailable();
+ document.getElementById('recomputeBtn').disabled=unavailable();
+ document.getElementById('applyBtn').title=state==='offline'?'連線後才能套用':state==='nodata'?'路線資料恢復後才能套用':'';
+}
+let toastTimer;
+function showToast(text){const toast=document.getElementById('toast');toast.innerHTML=`${svg(I.check,17)}<span>${text}</span>`;toast.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.classList.remove('show'),2400)}
+document.getElementById('keepBtn').onclick=()=>{comparisonClosed=true;syncAction();const note=document.querySelector('.summary span');if(note)note.textContent='已保留目前順序，行程沒有變更。';showToast('已保留目前順序，沒有變更行程')};
+document.getElementById('applyBtn').onclick=()=>{if(state==='optimal'||unavailable()||applied)return;committedItems=cleanItems(getModels().suggested);applied=true;mobileView='current';render();showToast('已套用建議順序')};
+document.getElementById('recomputeBtn').onclick=()=>{if(unavailable()||!pinnedId)return;needsRecompute=false;render();showToast(`已依${pinnedId==='nishiki'?'錦市場':pinnedId==='togetsu'?'渡月橋':'釘住的站'}重新安排`)};
+render();
+</script>
+</body>
+</html>
