@@ -776,7 +776,10 @@
 
 .pd-row-labels { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
 .pd-row-note { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; margin-top: 6px; color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
-.pd-row-bottom { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; font-size: 12px; }
+.pd-row-bottom { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; font-size: 12px; }
+.pd-row-bottom > .pd-state { flex: 1 1 7rem; }
+.pd-row-bottom .pd-row-actions { flex-wrap: nowrap; margin-inline-start: auto; }
+.pd-row-schedule-action { height: 44px; flex: none; padding-inline: 12px; font-size: 13px; text-decoration: none; }
 .pd-fit-line { min-width: 0; margin: 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
 .pd-fit-line--copy { display: none; margin-top: 10px; }
 .pd-empty { padding: 32px 16px; border: 1px dashed var(--border); border-radius: 18px; color: var(--muted-foreground); text-align: center; }
@@ -809,9 +812,10 @@
   .pd-row-bottom {
     grid-column: 2;
     grid-row: 1;
-    flex-direction: column;
-    align-items: flex-end;
-    justify-content: center;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
     margin: 0;
   }
 

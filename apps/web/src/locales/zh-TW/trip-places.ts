@@ -119,6 +119,7 @@ export const tripPlaces = {
     chooseDay: "選擇行程日期",
     scheduling: "安排中…",
     addToSchedule: "排入行程",
+    changeDay: "改日期",
     removeFromDay: "移出這一天",
     reloadDay: "重新載入日期",
     locationMissing: "缺少位置，暫時無法排入",

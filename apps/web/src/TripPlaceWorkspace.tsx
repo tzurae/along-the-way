@@ -1,6 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarCheck,
+  CalendarPlus,
   ChevronRight,
   CircleAlert,
   CircleCheck,
@@ -569,12 +570,13 @@ function PlanningEditors({ trip, place, available, request, changed, editingChan
   </>;
 }
 
-function PlaceDayPicker({ trip, place, available, request, changed }: {
+function PlaceDayPicker({ trip, place, available, request, changed, onSaved }: {
   trip: TripDto;
   place: TripPlaceDto;
   available: boolean;
   request<T>(url: string, options?: RequestOptions): Promise<T>;
   changed(): Promise<void>;
+  onSaved?(): void;
 }) {
   const { locale, t } = useI18n();
   const [dayId, setDayId] = useState(place.assignedDayId ?? "");
@@ -622,6 +624,7 @@ function PlaceDayPicker({ trip, place, available, request, changed }: {
       setDayId(updated.assignedDayId ?? "");
       setBase({ dayId: updated.assignedDayId ?? "", version: updated.version });
       await changed();
+      onSaved?.();
     } catch (reason) {
       const failure = errorMessage(reason, t.tripSkeleton.plannedDayUpdateError);
       setError(removedOriginalDay ? `原日期已移出，尚未排入新日期。${failure}` : failure);
@@ -680,8 +683,10 @@ export function TripPlaceWorkspace({
   const editingPlaceIds = useRef(new Set<string>());
   const readGeneration = useRef(0);
   const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
+  const [schedulingPlaceId, setSchedulingPlaceId] = useState<string | null>(null);
   const detailTitleRef = useRef<HTMLHeadingElement>(null);
   const detailReturnPosition = useRef<{ x: number; y: number } | null>(null);
+  const scheduleReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const [mergeConfirmation, setMergeConfirmation] = useState<{ source: TripPlaceDto; target: TripPlaceDto } | null>(null);
   const [merging, setMerging] = useState(false);
   const [removalConfirmation, setRemovalConfirmation] = useState<TripPlaceDto | null>(null);
@@ -694,6 +699,24 @@ export function TripPlaceWorkspace({
     }
     detailReturnPosition.current = { x: window.scrollX, y: window.scrollY };
     setSelectedPlaceId(placeId);
+  }
+
+  function openSchedule(placeId: string) {
+    scheduleReturnPosition.current = { x: window.scrollX, y: window.scrollY };
+    setSchedulingPlaceId(placeId);
+  }
+
+  function closeSchedule() {
+    const placeId = schedulingPlaceId;
+    const position = scheduleReturnPosition.current;
+    scheduleReturnPosition.current = null;
+    setSchedulingPlaceId(null);
+    if (placeId) {
+      window.requestAnimationFrame(() => {
+        document.querySelector<HTMLElement>(`[data-place-schedule-trigger="${placeId}"]`)?.focus({ preventScroll: true });
+        if (position) window.scrollTo({ left: position.x, top: position.y, behavior: "instant" });
+      });
+    }
   }
 
   const refreshPlaces = useCallback(async (generation = ++readGeneration.current) => {
@@ -910,6 +933,7 @@ export function TripPlaceWorkspace({
     placeNameCounts.set(place.name, (placeNameCounts.get(place.name) ?? 0) + 1);
   }
   const selectedPlace = listedPlaces.find((place) => place.id === selectedPlaceId) ?? null;
+  const schedulingPlace = listedPlaces.find((place) => place.id === schedulingPlaceId) ?? null;
   const previews = usePlacePreviews({
     tripId: trip.id,
     kind: "trip-place",
@@ -917,17 +941,38 @@ export function TripPlaceWorkspace({
     request,
   });
 
-  function quickActions(place: TripPlaceDto) {
+  function voteActions(place: TripPlaceDto) {
     if (!placesById.has(place.id) || !place.votingAvailable) return null;
     const voteDraft = voteDrafts[place.id];
-    return (
-      <div className="pd-row-actions">
-        <VoteControl compact name={place.name} voters={place.voters} voteCount={place.voteCount} ownVote={place.ownVote} votingAvailable disabled={Boolean(pendingVotes[place.id])} onChange={(voted) => void setVote(place, voted)} />
-        {failedVotes[place.id] && voteDraft !== undefined ? (
-          <button className="pd-secondary" disabled={pendingVotes[place.id]} onClick={() => void setVote(place, voteDraft)}>{t.vote.retry}</button>
-        ) : null}
-      </div>
-    );
+    return <>
+      <VoteControl compact name={place.name} voters={place.voters} voteCount={place.voteCount} ownVote={place.ownVote} votingAvailable disabled={Boolean(pendingVotes[place.id])} onChange={(voted) => void setVote(place, voted)} />
+      {failedVotes[place.id] && voteDraft !== undefined ? (
+        <button className="pd-secondary" disabled={pendingVotes[place.id]} onClick={() => void setVote(place, voteDraft)}>{t.vote.retry}</button>
+      ) : null}
+    </>;
+  }
+
+  function quickActions(place: TripPlaceDto) {
+    const actions = voteActions(place);
+    return actions ? <div className="pd-row-actions">{actions}</div> : null;
+  }
+
+  function scheduleAction(place: TripPlaceDto) {
+    if (!placesById.has(place.id) || place.scheduled) return null;
+    const located = place.latitude !== null && place.longitude !== null;
+    if (!located) {
+      return <a className="pd-secondary pd-row-schedule-action" href={`?trip=${encodeURIComponent(trip.id)}&tab=itinerary&segment=daily&manage=places`} onClick={(event) => event.stopPropagation()}><MapPin aria-hidden="true" />{t.workspace.addLocation}</a>;
+    }
+    return <button type="button" data-place-schedule-trigger={place.id} className="pd-secondary pd-row-schedule-action" onClick={(event) => {
+      event.stopPropagation();
+      openSchedule(place.id);
+    }}><CalendarPlus aria-hidden="true" />{place.assignedDayId ? t.workspace.changeDay : t.workspace.addToSchedule}</button>;
+  }
+
+  function rowActions(place: TripPlaceDto) {
+    const schedule = scheduleAction(place);
+    const votes = voteActions(place);
+    return schedule || votes ? <div className="pd-row-actions">{schedule}{votes}</div> : null;
   }
 
   function placeDetail(place: TripPlaceDto) {
@@ -1064,7 +1109,7 @@ export function TripPlaceWorkspace({
                 </div>
                 <div className="pd-row-bottom">
                   <span className="pd-state">{available ? plannedLabel : null}</span>
-                  {quickActions(place)}
+                  {rowActions(place)}
                 </div>
               </article>
             );
@@ -1086,6 +1131,26 @@ export function TripPlaceWorkspace({
           {placeDetail(selectedPlace)}
         </PlaceDetailSheet>
       ) : null}
+      {schedulingPlace ? (
+        <PlaceDetailSheet
+          open
+          appearance="workspace"
+          title={t.workspace.scheduleTitle}
+          description={schedulingPlace.name}
+          onClose={closeSchedule}
+        >
+          <PlaceDayPicker
+            key={`list-day:${schedulingPlace.id}`}
+            trip={trip}
+            place={schedulingPlace}
+            available={placesById.has(schedulingPlace.id)}
+            request={request}
+            changed={changedPlaces}
+            onSaved={closeSchedule}
+          />
+        </PlaceDetailSheet>
+      ) : null}
+
 
       <Dialog open={mergeConfirmation !== null} onOpenChange={(open) => { if (!open && !merging) setMergeConfirmation(null); }}>
         <DialogContent>
