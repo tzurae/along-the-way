@@ -1,0 +1,132 @@
+// @vitest-environment jsdom
+import { act } from "react";
+import { afterEach, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+
+import { LoginExperience } from "../src/LoginExperience";
+
+function renderLogin(overrides: Partial<React.ComponentProps<typeof LoginExperience>> = {}) {
+  const requestLink = overrides.requestLink ?? vi.fn(async () => {});
+  render(
+    <LoginExperience
+      initialError={overrides.initialError}
+      inviteToken={overrides.inviteToken ?? "invite-token"}
+      requestLink={requestLink}
+      describeError={overrides.describeError ?? (() => "無法索取登入連結。")}
+    />,
+  );
+  return { requestLink };
+}
+
+function submitEmail(email = "traveler@example.test") {
+  fireEvent.change(screen.getByRole("textbox", { name: "電子郵件" }), { target: { value: email } });
+  fireEvent.submit(screen.getByRole("button", { name: "寄送登入連結" }).closest("form")!);
+}
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+it("submits the email and pending invite token through the native form", async () => {
+  const requestLink = vi.fn(async () => {});
+  renderLogin({ requestLink, inviteToken: "family-invite" });
+
+  submitEmail();
+
+  await waitFor(() => expect(requestLink).toHaveBeenCalledWith("traveler@example.test", "family-invite"));
+});
+
+it("keeps the submitted address stable and disables editing while the request is in flight", async () => {
+  let resolveRequest!: () => void;
+  const requestLink = vi.fn(() => new Promise<void>((resolve) => { resolveRequest = resolve; }));
+  renderLogin({ requestLink });
+
+  submitEmail("original@example.test");
+
+  const input = screen.getByRole("textbox", { name: "電子郵件" });
+  expect(await screen.findByRole("button", { name: "正在寄出登入連結…" })).toBeDisabled();
+  expect(input).toBeDisabled();
+  fireEvent.change(input, { target: { value: "changed@example.test" } });
+  await act(async () => resolveRequest());
+  expect(await screen.findByText(/如果 original@example\.test 可以登入/)).toBeInTheDocument();
+});
+
+it("names the submitted address and focuses the sent-state heading", async () => {
+  renderLogin();
+
+  submitEmail("owner@example.test");
+
+  const heading = await screen.findByRole("heading", { name: "查看你的電子郵件" });
+  expect(screen.getByText(/如果 owner@example\.test 可以登入/)).toBeInTheDocument();
+  expect(heading).toHaveFocus();
+});
+
+it("returns to the editable form without discarding the email", async () => {
+  renderLogin();
+  submitEmail("owner@example.test");
+  await screen.findByRole("heading", { name: "查看你的電子郵件" });
+
+  fireEvent.click(screen.getByRole("button", { name: "電子郵件填錯了？修改" }));
+
+  expect(screen.getByRole("textbox", { name: "電子郵件" })).toHaveValue("owner@example.test");
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "電子郵件" })).toHaveFocus());
+});
+
+it("holds resend for 60 seconds, then enables it", async () => {
+  vi.useFakeTimers();
+  renderLogin();
+  submitEmail();
+  await act(async () => {});
+
+  expect(screen.getByRole("button", { name: "60 秒後可重新寄送" })).toBeDisabled();
+  act(() => vi.advanceTimersByTime(59_000));
+  expect(screen.getByRole("button", { name: "1 秒後可重新寄送" })).toBeDisabled();
+  act(() => vi.advanceTimersByTime(1_000));
+  expect(screen.getByRole("button", { name: "重新寄送" })).toBeEnabled();
+});
+
+it("blocks the same edited address during cooldown but sends a different address", async () => {
+  vi.useFakeTimers();
+  const requestLink = vi.fn(async () => {});
+  renderLogin({ requestLink });
+  submitEmail("owner@example.test");
+  await act(async () => {});
+
+  fireEvent.click(screen.getByRole("button", { name: "電子郵件填錯了？修改" }));
+
+  const blocked = screen.getByRole("button", { name: "60 秒後可重新寄送" });
+  expect(blocked).toBeDisabled();
+  fireEvent.submit(blocked.closest("form")!);
+  expect(requestLink).toHaveBeenCalledTimes(1);
+
+  fireEvent.change(screen.getByRole("textbox", { name: "電子郵件" }), {
+    target: { value: "companion@example.test" },
+  });
+  const submit = screen.getByRole("button", { name: "寄送登入連結" });
+  expect(submit).toBeEnabled();
+  fireEvent.submit(submit.closest("form")!);
+  await act(async () => {});
+  expect(requestLink).toHaveBeenNthCalledWith(2, "companion@example.test", "invite-token");
+});
+
+it("announces a rejected request and re-enables submission", async () => {
+  const failure = new Error("network");
+  renderLogin({
+    requestLink: vi.fn(async () => { throw failure; }),
+    describeError: (error) => error === failure ? "目前無法寄送，請稍後再試。" : "未知錯誤",
+  });
+
+  submitEmail();
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("目前無法寄送，請稍後再試。");
+  expect(screen.getByRole("button", { name: "寄送登入連結" })).toBeEnabled();
+});
+
+it("renders an initial localized error on mount", () => {
+  renderLogin({ initialError: "這個登入連結已使用。請寄一封新的登入信。" });
+
+  expect(screen.getByRole("alert")).toHaveTextContent("這個登入連結已使用。請寄一封新的登入信。");
+});
