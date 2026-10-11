@@ -12,6 +12,8 @@ import {
 } from "@along-the-way/contracts/private-trips";
 
 import { createApp } from "../src/app";
+import { PostgresPlaceDetailModule } from "../src/place-details/postgres-place-detail-module";
+import { packagedPhotoRoot } from "../src/place-details/photo-assets";
 import {
   createDatabase,
   type AlongTheWayDatabase,
@@ -142,6 +144,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       now: () => new Date(now),
     });
     app = createApp({
+      placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
       collaboration: new PostgresCollaborationModule(database),
       dayPlans: unrelatedDayPlanModule,
       discovery: unrelatedDiscoveryModule,

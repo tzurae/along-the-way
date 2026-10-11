@@ -4,6 +4,7 @@ import type {
   DayTimetableRowDto,
   TripPlanReason,
 } from "@along-the-way/contracts/day-plans";
+import { Clock3, Lock, MapPin, Route } from "lucide-react";
 
 import { useI18n, type Messages } from "./i18n";
 
@@ -72,88 +73,135 @@ function legSummary(leg: DayLegDto, t: Messages["timetable"]) {
 
 export function TimetableRow({ row }: { row: DayTimetableRowDto }) {
   const { t } = useI18n();
-  const travel = row.kind !== "start" && row.travel
-    ? <p className="text-sm text-muted-foreground">↓ {legSummary(row.travel, t.timetable)}</p>
-    : null;
+  const travel = row.kind !== "start" ? row.travel : null;
+  const travelLabel = travel ? legSummary(travel, t.timetable) : null;
+  const travelUnavailable = travel?.durationMinutes === null;
+
   switch (row.kind) {
     case "start":
       return (
-        <li className="grid grid-cols-[6.5rem_1fr] gap-x-3">
-          <span className="font-mono font-bold">{clock(row.departMinute)}</span>
-          <span className="font-semibold">{t.timetable.leave(row.name)}</span>
+        <li className="route-stop route-stop-start">
+          <time className="route-stop-time">{clock(row.departMinute)}</time>
+          <span className="route-stop-track" aria-hidden="true" />
+          <div className="route-stop-content">
+            <div className="route-stop-title">
+              <strong>{t.timetable.leave(row.name)}</strong>
+              <span className="route-fixed-note"><Route /> {t.timetable.confirmed}</span>
+            </div>
+          </div>
         </li>
       );
     case "visit":
       return (
-        <li className="grid grid-cols-[6.5rem_1fr] gap-x-3" data-trip-place-id={row.tripPlaceId}>
-          <span />
-          <div>
-            {travel}
+        <li
+          className={`route-stop${travelUnavailable ? " route-stop-unknown" : ""}`}
+          data-trip-place-id={row.tripPlaceId}
+        >
+          <time className="route-stop-time">{clock(row.startMinute)}</time>
+          <span className="route-stop-track" aria-hidden="true" />
+          <div className="route-stop-content">
+            <div className="route-stop-title">
+              <strong>{row.name}</strong>
+              {row.hours === "listed" ? (
+                <span className="route-fixed-note"><Clock3 /> {t.timetable.confirmed}</span>
+              ) : null}
+            </div>
+            <div className="route-stop-meta">
+              <span>{clock(row.startMinute)}–{clock(row.endMinute)}</span>
+              <span>
+                {t.timetable.stay(row.stayMinutes)}
+                {row.stayEstimated ? `（${t.timetable.estimate}）` : ""}
+              </span>
+              {travelLabel ? <span>{travelLabel}</span> : null}
+            </div>
             {row.waitMinutes > 0 ? (
-              <p className="text-sm text-muted-foreground">
+              <p className="route-stop-reason">
+                <Clock3 />
                 {t.timetable.arriveAndWaitForOpening(clock(row.arriveMinute), row.waitMinutes)}
               </p>
             ) : null}
-          </div>
-          <span className="font-mono font-bold">{clock(row.startMinute)}–{clock(row.endMinute)}</span>
-          <div>
-            <p className="font-semibold">{row.name}</p>
-            <p className="text-sm text-muted-foreground">
-              {t.timetable.stay(row.stayMinutes)}
-              {row.stayEstimated ? `（${t.timetable.estimate}）` : ""}
-              {"・"}
-              {row.hours === "listed" ? t.timetable.openAccordingToGoogle : t.timetable.openingHoursUnknown}
-            </p>
+            {row.hours === "unknown" ? (
+              <p className="route-stop-evidence">{t.timetable.openingHoursUnknown}</p>
+            ) : null}
           </div>
         </li>
       );
     case "fixed":
       return (
-        <li className="grid grid-cols-[6.5rem_1fr] gap-x-3" data-item-id={row.itemId}>
-          <span />
-          <div>{travel}</div>
-          <span className="font-mono font-bold">
-            {row.startsBeforeDay ? "…" : clock(row.startMinute)}–{row.endsAfterDay ? "…" : clock(row.endMinute)}
-          </span>
-          <div className="rounded-lg border border-accent/40 px-2 py-1">
-            <p className="font-semibold">{row.title}</p>
-            <p className="text-sm text-muted-foreground">
-              {t.timetable.fixedTimeNotMoved}
-              {row.bufferMinutes > 0
-                ? `・${t.timetable.arriveEarly(
-                    row.bufferMinutes,
-                    row.bufferEstimated ? t.timetable.estimate : t.timetable.confirmed,
-                  )}`
-                : ""}
-              {row.afterBufferMinutes > 0 ? `・${t.timetable.entryAndLuggageAfter(row.afterBufferMinutes)}` : ""}
-            </p>
+        <li
+          className={`route-stop route-stop-fixed${travelUnavailable ? " route-stop-unknown" : ""}`}
+          data-item-id={row.itemId}
+        >
+          <time className="route-stop-time">
+            {row.startsBeforeDay ? "…" : clock(row.startMinute)}
+          </time>
+          <span className="route-stop-track" aria-hidden="true" />
+          <div className="route-stop-content">
+            <div className="route-stop-title">
+              <strong>{row.title}</strong>
+              <span className="route-fixed-note"><Lock /> {t.timetable.fixedTimeNotMoved}</span>
+            </div>
+            <div className="route-stop-meta">
+              <span>
+                {row.startsBeforeDay ? "…" : clock(row.startMinute)}
+                –
+                {row.endsAfterDay ? "…" : clock(row.endMinute)}
+              </span>
+              {travelLabel ? <span>{travelLabel}</span> : null}
+            </div>
+            {row.bufferMinutes > 0 ? (
+              <p className="route-stop-evidence">
+                {t.timetable.arriveEarly(
+                  row.bufferMinutes,
+                  row.bufferEstimated ? t.timetable.estimate : t.timetable.confirmed,
+                )}
+              </p>
+            ) : null}
+            {row.afterBufferMinutes > 0 ? (
+              <p className="route-stop-evidence">{t.timetable.entryAndLuggageAfter(row.afterBufferMinutes)}</p>
+            ) : null}
           </div>
         </li>
       );
     case "luggage":
       return (
-        <li className="grid grid-cols-[6.5rem_1fr] gap-x-3">
-          <span />
-          <div>{travel}</div>
-          <span className="font-mono font-bold">
-            {row.arriveMinute === null || row.leaveMinute === null
-              ? t.timetable.timeUnknown
-              : `${clock(row.arriveMinute)}–${clock(row.leaveMinute)}`}
-          </span>
-          <span className="font-semibold">
-            {row.action === "drop"
-              ? t.timetable.leaveLuggageAt(row.name)
-              : t.timetable.collectLuggageAt(row.name)}
-          </span>
+        <li className={`route-stop route-stop-fixed${travelUnavailable ? " route-stop-unknown" : ""}`}>
+          <time className="route-stop-time">
+            {row.arriveMinute === null ? "—" : clock(row.arriveMinute)}
+          </time>
+          <span className="route-stop-track" aria-hidden="true" />
+          <div className="route-stop-content">
+            <div className="route-stop-title">
+              <strong>
+                {row.action === "drop"
+                  ? t.timetable.leaveLuggageAt(row.name)
+                  : t.timetable.collectLuggageAt(row.name)}
+              </strong>
+              <span className="route-fixed-note"><MapPin /> {t.timetable.fixedTimeNotMoved}</span>
+            </div>
+            <div className="route-stop-meta">
+              <span>
+                {row.arriveMinute === null || row.leaveMinute === null
+                  ? t.timetable.timeUnknown
+                  : `${clock(row.arriveMinute)}–${clock(row.leaveMinute)}`}
+              </span>
+              {travelLabel ? <span>{travelLabel}</span> : null}
+            </div>
+          </div>
         </li>
       );
     case "return":
       return (
-        <li className="grid grid-cols-[6.5rem_1fr] gap-x-3">
-          <span />
-          <div>{travel}</div>
-          <span className="font-mono font-bold">{clock(row.arriveMinute)}</span>
-          <span className="font-semibold">{t.timetable.backAt(row.name)}</span>
+        <li className={`route-stop route-stop-fixed${travelUnavailable ? " route-stop-unknown" : ""}`}>
+          <time className="route-stop-time">{clock(row.arriveMinute)}</time>
+          <span className="route-stop-track" aria-hidden="true" />
+          <div className="route-stop-content">
+            <div className="route-stop-title">
+              <strong>{t.timetable.backAt(row.name)}</strong>
+              <span className="route-fixed-note"><MapPin /> {t.timetable.confirmed}</span>
+            </div>
+            {travelLabel ? <div className="route-stop-meta"><span>{travelLabel}</span></div> : null}
+          </div>
         </li>
       );
   }

@@ -25,9 +25,11 @@ import {
 } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldLabel, FieldLegend, FieldSet } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "./i18n";
 import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./ConflictPanel";
+import "./form-sheet.css";
 
 type EditableItem = Exclude<ItineraryItemDto, { type: "flight" | "lodging" }>;
 type EditableItemType = EditableItem["type"];
@@ -120,9 +122,9 @@ function EndpointEditor({
       <div className="grid gap-4 sm:grid-cols-2">
         <Field>
           <FieldLabel htmlFor={`${id}-country`}>{t.itemDialog.countryStop}</FieldLabel>
-          <select
+          <NativeSelect
             id={`${id}-country`}
-            className="min-h-10 rounded-lg border border-input bg-transparent px-3"
+            className="w-full rounded-lg border border-input bg-transparent"
             required
             // A leftover outside-route choice from transport is unchosen for other types.
             value={allowOutsideRoute || draft.countryStopId !== OUTSIDE_ROUTE ? draft.countryStopId : ""}
@@ -143,13 +145,13 @@ function EndpointEditor({
               </option>
             ))}
             {allowOutsideRoute ? <option value={OUTSIDE_ROUTE}>{t.itemDialog.outsideRoute}</option> : null}
-          </select>
+          </NativeSelect>
         </Field>
         <Field>
           <FieldLabel htmlFor={`${id}-place`}>{t.itemDialog.place}</FieldLabel>
-          <select
+          <NativeSelect
             id={`${id}-place`}
-            className="min-h-10 rounded-lg border border-input bg-transparent px-3"
+            className="w-full rounded-lg border border-input bg-transparent"
             required
             value={draft.placeId}
             onChange={(event) => {
@@ -166,7 +168,7 @@ function EndpointEditor({
             {places.map((place) => (
               <option key={place.id} value={place.id}>{place.name}</option>
             ))}
-          </select>
+          </NativeSelect>
         </Field>
         <Field>
           <FieldLabel htmlFor={`${id}-time`}>{t.itemDialog.localDateTime}</FieldLabel>
@@ -387,37 +389,48 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
         {item ? <Pencil /> : <Plus />}
         {item ? t.itemDialog.editTrigger(item.title) : t.itemDialog.addCommitment}
       </DialogTrigger>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] overflow-y-auto sm:max-w-3xl">
+      <DialogContent className="form-sheet form-sheet--itinerary" placement="sheet">
         <DialogHeader>
           <DialogTitle>{item ? t.itemDialog.editCommitment : t.itemDialog.addCommitment}</DialogTitle>
           <DialogDescription>{t.itemDialog.endpointDescription}</DialogDescription>
         </DialogHeader>
-        {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={submitting}
-          formatValue={(path, value) => {
-            if (path.endsWith(".placeId")) return places.find((place) => place.id === value)?.name;
-            if (path.startsWith("participantMemberIds.")) {
-              const participant = participantChoices.find((member) => member.memberId === value);
-              return participant?.displayName ?? participant?.email ?? t.collaboration.unknownActor;
-            }
-            if (path.endsWith(".countryStopId")) return countryStops.find((stop) => stop.id === value)?.countryCode;
-          }}
-          onAccept={() => { resolution.clear(); changeOpen(false); }}
-          onReapply={() => void persist(resolution.conflict!.attempted, resolution.conflict!.current!.version, resolution.conflict!.base.version)}
-          onEdit={() => { setBaseSnapshot(resolution.conflict!.current!); setExpectedVersion(resolution.conflict!.current!.version); resolution.resume(); setError(""); }}
-        /> : null}
-        {resolution.conflict && error ? <p role="alert" className="text-destructive">{error}</p> : null}
-        <form hidden={Boolean(resolution.conflict)} className="grid gap-5" onSubmit={(event) => event.preventDefault()}>
+        {resolution.conflict ? (
+          <div className="form-sheet__body">
+            <ConflictPanel
+              conflict={resolution.conflict}
+              busy={submitting}
+              formatValue={(path, value) => {
+                if (path.endsWith(".placeId")) return places.find((place) => place.id === value)?.name;
+                if (path.startsWith("participantMemberIds.")) {
+                  const participant = participantChoices.find((member) => member.memberId === value);
+                  return participant?.displayName ?? participant?.email ?? t.collaboration.unknownActor;
+                }
+                if (path.endsWith(".countryStopId")) return countryStops.find((stop) => stop.id === value)?.countryCode;
+              }}
+              onAccept={() => { resolution.clear(); changeOpen(false); }}
+              onReapply={() => void persist(resolution.conflict!.attempted, resolution.conflict!.current!.version, resolution.conflict!.base.version)}
+              onEdit={() => { setBaseSnapshot(resolution.conflict!.current!); setExpectedVersion(resolution.conflict!.current!.version); resolution.resume(); setError(""); }}
+            />
+            {error ? <p role="alert" className="text-destructive">{error}</p> : null}
+          </div>
+        ) : null}
+        <form
+          hidden={Boolean(resolution.conflict)}
+          className="form-sheet__form"
+          onSubmit={(event) => { event.preventDefault(); void submit(); }}
+        >
+          <div className="form-sheet__body grid gap-5">
           <div className="grid gap-4 sm:grid-cols-2">
             <Field>
               <FieldLabel htmlFor={`item-type-${item?.id ?? "new"}`}>{t.itemDialog.type}</FieldLabel>
-              <select
+              <NativeSelect
                 id={`item-type-${item?.id ?? "new"}`}
-                className="min-h-10 rounded-lg border border-input bg-transparent px-3"
+                className="w-full rounded-lg border border-input bg-transparent"
                 value={type}
                 onChange={(event) => setType(event.target.value as EditableItemType)}
               >
                 {itemTypes.map((itemType) => <option key={itemType} value={itemType}>{t.itemDialog.itemTypes[itemType]}</option>)}
-              </select>
+              </NativeSelect>
             </Field>
             <Field>
               <FieldLabel htmlFor={`item-title-${item?.id ?? "new"}`}>{t.itemDialog.title}</FieldLabel>
@@ -492,7 +505,7 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
             <div className="grid gap-4 sm:grid-cols-3">
               <Field><FieldLabel htmlFor="appointment-duration">{t.itemDialog.durationMinutes}</FieldLabel><Input id="appointment-duration" type="number" min="1" required value={durationMinutes} onChange={(event) => setDurationMinutes(event.target.value)} /></Field>
               <Field><FieldLabel htmlFor="appointment-booked-by">{t.itemDialog.bookedBy}</FieldLabel><Input id="appointment-booked-by" value={bookedBy} onChange={(event) => setBookedBy(event.target.value)} /></Field>
-              <Field><FieldLabel htmlFor="appointment-status">{t.itemDialog.confirmationStatus}</FieldLabel><Input id="appointment-status" value={confirmationStatus} onChange={(event) => setConfirmationStatus(event.target.value)} /></Field>
+              <Field><FieldLabel htmlFor="appointment-status">{t.travel.appointmentConfirmationInfo}</FieldLabel><Input id="appointment-status" value={confirmationStatus} onChange={(event) => setConfirmationStatus(event.target.value)} /></Field>
             </div>
           ) : null}
           {type === "free-time" ? (
@@ -519,20 +532,30 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
               <div className="grid gap-4 sm:grid-cols-3">
                 <Field>
                   <FieldLabel htmlFor="constraint-type">{t.itemDialog.constraint}</FieldLabel>
-                  <select id="constraint-type" className="min-h-10 rounded-lg border border-input bg-transparent px-3" value={constraintType} onChange={(event) => setConstraintType(event.target.value as ConstraintType | "")}>
+                  <NativeSelect
+                    id="constraint-type"
+                    className="w-full rounded-lg border border-input bg-transparent"
+                    value={constraintType}
+                    onChange={(event) => setConstraintType(event.target.value as ConstraintType | "")}
+                  >
                     <option value="">{t.itemDialog.none}</option>
                     <option value="fixed_time">{t.itemDialog.constraintTypes.fixed_time}</option>
                     <option value="immovable">{t.itemDialog.constraintTypes.immovable}</option>
                     <option value="minimum_buffer">{t.itemDialog.constraintTypes.minimum_buffer}</option>
-                  </select>
+                  </NativeSelect>
                 </Field>
                 <Field>
-                  <FieldLabel htmlFor="constraint-status">{t.itemDialog.knowledgeStatus}</FieldLabel>
-                  <select id="constraint-status" className="min-h-10 rounded-lg border border-input bg-transparent px-3" value={constraintStatus} onChange={(event) => setConstraintStatus(event.target.value as ConstraintStatus)}>
+                  <FieldLabel htmlFor="constraint-status">{t.travel.constraintStatus}</FieldLabel>
+                  <NativeSelect
+                    id="constraint-status"
+                    className="w-full rounded-lg border border-input bg-transparent"
+                    value={constraintStatus}
+                    onChange={(event) => setConstraintStatus(event.target.value as ConstraintStatus)}
+                  >
                     <option value="confirmed">{t.itemDialog.constraintStatuses.confirmed}</option>
                     <option value="unknown">{t.itemDialog.constraintStatuses.unknown}</option>
                     <option value="conflicted">{t.itemDialog.constraintStatuses.conflicted}</option>
-                  </select>
+                  </NativeSelect>
                 </Field>
                 {constraintType === "minimum_buffer" ? (
                   <Field><FieldLabel htmlFor="constraint-buffer">{t.itemDialog.bufferMinutes}</FieldLabel><Input id="constraint-buffer" type="number" min="0" required value={minimumBufferMinutes} onChange={(event) => setMinimumBufferMinutes(event.target.value)} /></Field>
@@ -544,8 +567,14 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
           <Field><FieldLabel htmlFor="item-source">{t.itemDialog.sourceUrl}</FieldLabel><Input id="item-source" type="url" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} /></Field>
           <Field><FieldLabel htmlFor="item-notes">{t.itemDialog.notes}</FieldLabel><Textarea id="item-notes" value={notes} onChange={(event) => setNotes(event.target.value)} /></Field>
           {error ? <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-destructive">{error}</p> : null}
-          <DialogFooter>
-            <Button type="button" disabled={submitting} onClick={() => void submit()}>{submitting ? t.itemDialog.saving : t.itemDialog.save}</Button>
+          </div>
+          <DialogFooter className="form-sheet__footer">
+            <Button type="button" variant="outline" disabled={submitting} onClick={() => changeOpen(false)}>
+              {t.travel.cancel}
+            </Button>
+            <Button type="submit" disabled={submitting}>
+              {submitting ? t.itemDialog.saving : t.itemDialog.save}
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>

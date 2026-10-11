@@ -18,6 +18,8 @@ import {
 import { parseTripSkeletonResponse } from "@along-the-way/contracts/trip-skeleton";
 
 import { createApp } from "../src/app";
+import { PostgresPlaceDetailModule } from "../src/place-details/postgres-place-detail-module";
+import { packagedPhotoRoot } from "../src/place-details/photo-assets";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
 import { runMigrations } from "../src/database/migrate";
 import { seedDatabase } from "../src/database/seed";
@@ -409,6 +411,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       policyVersion: "discovery-test-v2",
     });
     app = createApp({
+      placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
       collaboration: new PostgresCollaborationModule(database),
       dayPlans: unrelatedDayPlanModule,
       discovery,
@@ -482,6 +485,45 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       },
       body: json(body),
     });
+  }
+
+  async function addEditorMember(tripId: string, emailAddress: string) {
+    const user = await database.insertInto("users").values({
+      email: emailAddress,
+      display_name: emailAddress.split("@")[0]!,
+      status: "active",
+      created_at: now(),
+      updated_at: now(),
+    }).returning("id").executeTakeFirstOrThrow();
+    const cookie = await login(emailAddress);
+    await database.insertInto("trip_members").values({
+      trip_id: tripId,
+      user_id: user.id,
+      role: "editor",
+      removed_at: null,
+    }).execute();
+    return { cookie, userId: user.id };
+  }
+
+  async function generateLocatedProposals(
+    cookie: string,
+    tripId: string,
+    key: string,
+    names: readonly string[],
+  ) {
+    model.releasePlan();
+    for (const name of names) provider.known.set(name, {});
+    model.researchedPlaces = [...names];
+    const brief = await discoveryRequest(cookie, `/api/trips/${tripId}/discovery/brief`, `${key}-brief`, {
+      originalText: "Quiet gardens.",
+      expectedVersion: null,
+    });
+    expect(brief.status).toBe(200);
+    const generated = await discoveryRequest(cookie, `/api/trips/${tripId}/discovery/generate`, `${key}-generate`, {
+      expectedBriefVersion: 1,
+    });
+    expect(generated.status).toBe(200);
+    return parseDiscoveryWorkspaceResponse(await generated.json()).discovery;
   }
 
   it("treats a concurrently created discovery brief as a version conflict without overwriting it", async () => {
@@ -774,7 +816,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
 
       model.releasePlan();
       await click("尋找候選地點");
-      expect(button("重新研究")).toBeDefined();
+      expect(button("修改需求")).toBeDefined();
       expect.soft(model.researchInputs.at(-1)?.confirmedFeedback[0]).toContain(originalText);
       expect.soft(model.researchInputs.at(-1)?.confirmedFeedback[0]).not.toContain("Member-corrected interpretation");
     } finally {
@@ -1051,6 +1093,248 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(replayAccept.status).toBe(200);
     expect(await database.selectFrom("trip_place_votes").select("member_user_id").where("trip_place_id", "=", existingPlace.id).execute())
       .toHaveLength(3);
+  });
+
+  it("only the trip owner can accept, schedule or reject AI proposals", async () => {
+    const ownerCookie = await login();
+    const trip = await createTrip(ownerCookie, "Owner-only proposal decisions");
+    const editor = await addEditorMember(trip.id, "proposal-editor@example.test");
+    const generated = await generateLocatedProposals(ownerCookie, trip.id, "owner-only", [
+      "Gion Garden",
+      "Okazaki Garden",
+      "Shoren Garden",
+    ]);
+    const byName = new Map(generated.proposals.map((proposal) => [proposal.name, proposal]));
+    expect([...byName.keys()].sort()).toEqual(["Gion Garden", "Okazaki Garden", "Shoren Garden"]);
+    const acceptProposal = byName.get("Gion Garden")!;
+    const scheduleProposal = byName.get("Okazaki Garden")!;
+    const rejectProposal = byName.get("Shoren Garden")!;
+    const forbiddenActions = [
+      {
+        path: `/api/trips/${trip.id}/discovery/proposals/${acceptProposal.id}/accept`,
+        key: "editor-cannot-accept",
+        body: { expectedVersion: acceptProposal.version },
+      },
+      {
+        path: `/api/trips/${trip.id}/discovery/proposals/schedule`,
+        key: "editor-cannot-schedule",
+        body: {
+          tripDayId: trip.days[0]!.id,
+          proposals: [{ proposalId: scheduleProposal.id, expectedVersion: scheduleProposal.version }],
+        },
+      },
+      {
+        path: `/api/trips/${trip.id}/discovery/proposals/${rejectProposal.id}/reject`,
+        key: "editor-cannot-reject",
+        body: { expectedVersion: rejectProposal.version },
+      },
+    ];
+
+    // catches: ownership checks removed from accept, schedule, or reject; the three 403 assertions below fail.
+    for (const action of forbiddenActions) {
+      const response = await discoveryRequest(editor.cookie, action.path, action.key, action.body);
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({
+        error: { code: "forbidden", message: "Only the trip owner can do that" },
+      });
+    }
+    const unchangedResponse = await app.request(`/api/trips/${trip.id}/discovery`, {
+      headers: { cookie: ownerCookie },
+    });
+    expect(unchangedResponse.status).toBe(200);
+    expect(parseDiscoveryWorkspaceResponse(await unchangedResponse.json()).discovery.proposals)
+      .toEqual(generated.proposals);
+
+    const voted = await discoveryRequest(
+      editor.cookie,
+      `/api/trips/${trip.id}/discovery/proposals/${acceptProposal.id}/vote`,
+      "editor-can-still-vote",
+      { voted: true },
+    );
+    expect(voted.status).toBe(200);
+    const votedProposal = parseDiscoveryWorkspaceResponse(await voted.json()).discovery.proposals
+      .find((proposal) => proposal.id === acceptProposal.id)!;
+    expect(votedProposal).toMatchObject({ status: "pending", ownVote: true, voteCount: 1 });
+    expect(votedProposal.voters.map((voter) => voter.memberUserId)).toEqual([editor.userId]);
+
+    const accepted = await discoveryRequest(
+      ownerCookie,
+      `/api/trips/${trip.id}/discovery/proposals/${acceptProposal.id}/accept`,
+      "owner-accepts-proposal",
+      { expectedVersion: acceptProposal.version },
+    );
+    expect(accepted.status).toBe(200);
+    expect(parseDiscoveryWorkspaceResponse(await accepted.json()).discovery.proposals
+      .find((proposal) => proposal.id === acceptProposal.id))
+      .toMatchObject({ status: "accepted", acceptedTripPlaceId: expect.any(String) });
+
+    const scheduled = await discoveryRequest(
+      ownerCookie,
+      `/api/trips/${trip.id}/discovery/proposals/schedule`,
+      "owner-schedules-proposal",
+      {
+        tripDayId: trip.days[0]!.id,
+        proposals: [{ proposalId: scheduleProposal.id, expectedVersion: scheduleProposal.version }],
+      },
+    );
+    expect(scheduled.status).toBe(200);
+    expect(parseDiscoveryWorkspaceResponse(await scheduled.json()).discovery.proposals
+      .find((proposal) => proposal.id === scheduleProposal.id))
+      .toMatchObject({ status: "accepted", acceptedTripPlaceId: expect.any(String) });
+
+    const rejected = await discoveryRequest(
+      ownerCookie,
+      `/api/trips/${trip.id}/discovery/proposals/${rejectProposal.id}/reject`,
+      "owner-rejects-proposal",
+      { expectedVersion: rejectProposal.version },
+    );
+    expect(rejected.status).toBe(200);
+    expect(parseDiscoveryWorkspaceResponse(await rejected.json()).discovery.proposals
+      .find((proposal) => proposal.id === rejectProposal.id))
+      .toMatchObject({ status: "rejected", acceptedTripPlaceId: null });
+
+    const placesResponse = await app.request(`/api/trips/${trip.id}/trip-places`, {
+      headers: { cookie: ownerCookie },
+    });
+    expect(placesResponse.status).toBe(200);
+    const places = parseTripPlaceListResponse(await placesResponse.json()).tripPlaces;
+    expect(places.map((place) => place.aiProposalId).sort())
+      .toEqual([acceptProposal.id, scheduleProposal.id].sort());
+    expect(places.find((place) => place.aiProposalId === scheduleProposal.id))
+      .toMatchObject({ selectedForItinerary: true, assignedDayId: trip.days[0]!.id });
+  });
+
+  it("scheduling proposals is all-or-nothing and idempotent", async () => {
+    const ownerCookie = await login();
+    const trip = await createTrip(ownerCookie, "Atomic proposal scheduling");
+    const owner = await database.selectFrom("users").select("id")
+      .where("email", "=", "owner@example.test").executeTakeFirstOrThrow();
+    const editor = await addEditorMember(trip.id, "atomic-voter@example.test");
+    const generated = await generateLocatedProposals(ownerCookie, trip.id, "atomic-schedule", [
+      "Gion Garden",
+      "Okazaki Garden",
+    ]);
+    const located = generated.proposals.find((proposal) => proposal.name === "Gion Garden")!;
+    const unlocated = generated.proposals.find((proposal) => proposal.name === "Okazaki Garden")!;
+    expect(generated.proposals).toHaveLength(2);
+    await database.updateTable("candidate_proposals")
+      .set({ latitude: null, longitude: null })
+      .where("id", "=", unlocated.id)
+      .execute();
+    for (const [cookie, key] of [
+      [ownerCookie, "atomic-owner-vote"],
+      [editor.cookie, "atomic-editor-vote"],
+    ] as const) {
+      const vote = await discoveryRequest(
+        cookie,
+        `/api/trips/${trip.id}/discovery/proposals/${located.id}/vote`,
+        key,
+        { voted: true },
+      );
+      expect(vote.status).toBe(200);
+    }
+    const failedBody = {
+      tripDayId: trip.days[1]!.id,
+      proposals: [
+        { proposalId: located.id, expectedVersion: located.version },
+        { proposalId: unlocated.id, expectedVersion: unlocated.version },
+      ],
+    };
+
+    // catches: partial commit or duplicate replay in proposal scheduling; the pending-state, identical-body, and one-place assertions fail.
+    const failed = await discoveryRequest(
+      ownerCookie,
+      `/api/trips/${trip.id}/discovery/proposals/schedule`,
+      "atomic-schedule-failure",
+      failedBody,
+    );
+    expect(failed.status).toBe(400);
+    expect(await failed.json()).toEqual({
+      error: {
+        code: "validation_error",
+        message: `Proposal ${unlocated.id} has no coordinates and cannot be scheduled`,
+      },
+    });
+    const afterFailureResponse = await app.request(`/api/trips/${trip.id}/discovery`, {
+      headers: { cookie: ownerCookie },
+    });
+    expect(afterFailureResponse.status).toBe(200);
+    const afterFailure = parseDiscoveryWorkspaceResponse(await afterFailureResponse.json()).discovery;
+    for (const proposal of [located, unlocated]) {
+      expect(afterFailure.proposals.find((candidate) => candidate.id === proposal.id))
+        .toMatchObject({
+          status: "pending",
+          version: proposal.version,
+          acceptedTripPlaceId: null,
+        });
+    }
+    const emptyPlacesResponse = await app.request(`/api/trips/${trip.id}/trip-places`, {
+      headers: { cookie: ownerCookie },
+    });
+    expect(emptyPlacesResponse.status).toBe(200);
+    expect(parseTripPlaceListResponse(await emptyPlacesResponse.json()).tripPlaces).toEqual([]);
+
+    const validBody = {
+      tripDayId: trip.days[1]!.id,
+      proposals: [{ proposalId: located.id, expectedVersion: located.version }],
+    };
+    const scheduled = await discoveryRequest(
+      ownerCookie,
+      `/api/trips/${trip.id}/discovery/proposals/schedule`,
+      "atomic-schedule-success",
+      validBody,
+    );
+    expect(scheduled.status).toBe(200);
+    const scheduledBody = await scheduled.json();
+    const accepted = parseDiscoveryWorkspaceResponse(scheduledBody).discovery.proposals
+      .find((proposal) => proposal.id === located.id)!;
+    expect(accepted).toMatchObject({
+      status: "accepted",
+      acceptedTripPlaceId: expect.any(String),
+    });
+    const placesResponse = await app.request(`/api/trips/${trip.id}/trip-places`, {
+      headers: { cookie: ownerCookie },
+    });
+    expect(placesResponse.status).toBe(200);
+    const places = parseTripPlaceListResponse(await placesResponse.json()).tripPlaces;
+    expect(places).toHaveLength(1);
+    expect(places[0]).toMatchObject({
+      id: accepted.acceptedTripPlaceId,
+      aiProposalId: located.id,
+      selectedForItinerary: true,
+      assignedDayId: trip.days[1]!.id,
+      voteCount: 2,
+    });
+    expect(places[0]!.voters.map((voter) => voter.memberUserId).sort())
+      .toEqual([owner.id, editor.userId].sort());
+
+    const replay = await discoveryRequest(
+      ownerCookie,
+      `/api/trips/${trip.id}/discovery/proposals/schedule`,
+      "atomic-schedule-success",
+      validBody,
+    );
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(scheduledBody);
+    const afterReplayResponse = await app.request(`/api/trips/${trip.id}/trip-places`, {
+      headers: { cookie: ownerCookie },
+    });
+    expect(afterReplayResponse.status).toBe(200);
+    expect(parseTripPlaceListResponse(await afterReplayResponse.json()).tripPlaces).toEqual(places);
+
+    const stale = await discoveryRequest(
+      ownerCookie,
+      `/api/trips/${trip.id}/discovery/proposals/schedule`,
+      "atomic-schedule-stale",
+      {
+        tripDayId: trip.days[1]!.id,
+        proposals: [{ proposalId: located.id, expectedVersion: located.version }],
+      },
+    );
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      error: { code: "conflict", currentVersion: accepted.version },
+    });
   });
 
   it.each(["remove", "delete", "travel", "archived", "missing"] as const)("reopens accepted proposals after %s and only excludes travel identities from research", async (removal) => {

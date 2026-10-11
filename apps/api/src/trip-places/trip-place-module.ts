@@ -3,7 +3,6 @@ import type {
   CreateTripPlaceInput,
   MergeTripPlacesInput,
   ProviderCandidatesResponse,
-  ProviderPlaceCandidateDto,
   RemoveTripPlaceInput,
   TripPlaceDto,
   UpdateMemberVoteInput,
@@ -28,12 +27,6 @@ export interface TripPlaceModule {
     tripId: string,
     idempotencyKey: string,
     input: CreateTripPlaceInput,
-  ): Promise<TripPlaceDto>;
-  addObservedCandidate(
-    userId: string,
-    tripId: string,
-    idempotencyKey: string,
-    candidate: ProviderPlaceCandidateDto,
   ): Promise<TripPlaceDto>;
   updatePlanning(
     userId: string,

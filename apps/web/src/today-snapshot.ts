@@ -1,6 +1,6 @@
 import type { TodayModel } from "./today-model";
 
-export const TODAY_SCHEMA_VERSION = 2;
+export const TODAY_SCHEMA_VERSION = 3;
 const PREFIX = "along-the-way:today:";
 const ACCOUNT_KEY = "along-the-way:today-account";
 const SIGNED_OUT_KEY = "along-the-way:locally-signed-out";
@@ -27,6 +27,30 @@ function zone(value: unknown) {
 }
 function coordinate(value: unknown, limit: number) { return value === null || (typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= limit); }
 
+/**
+ * Upgrade only compatible schema-2 endpoints, then validate the complete account-scoped result.
+ * Missing references remain unknown; never accept new reference fields from a purported old format
+ * or infer IDs from names, coordinates, or another snapshot.
+ */
+function migrateLegacySnapshot(value: unknown): unknown {
+  if (!record(value, "schemaVersion accountId fetchedAt model") || value.schemaVersion !== 2) return value;
+  const model = value.model;
+  if (!record(model, "tripId tripName tripVersion memberId days items") || !Array.isArray(model.items)) return value;
+  const items = [];
+  for (const item of model.items) {
+    if (!record(item, "id title type start end endpoints participants locked constraints facts notes sourceUrl") || !Array.isArray(item.endpoints)) return value;
+    const endpoints = [];
+    for (const endpoint of item.endpoints) {
+      if (!record(endpoint, "role instant timeZone place")) return value;
+      const place = endpoint.place;
+      if (place !== null && !record(place, "name address latitude longitude")) return value;
+      endpoints.push({ ...endpoint, place: place === null ? null : { ...place, id: null } });
+    }
+    items.push({ ...item, endpoints });
+  }
+  return { ...value, schemaVersion: TODAY_SCHEMA_VERSION, model: { ...model, items } };
+}
+
 /** Validate the whole persisted boundary; reject extra fields as well as incompatible/corrupt data. */
 function validSnapshot(value: unknown): value is TodaySnapshot {
   if (!record(value, "schemaVersion accountId fetchedAt model") || value.schemaVersion !== TODAY_SCHEMA_VERSION || !text(value.accountId) || !instant(value.fetchedAt)) return false;
@@ -39,7 +63,7 @@ function validSnapshot(value: unknown): value is TodaySnapshot {
     && (item.start === null || instant(item.start)) && (item.end === null || instant(item.end)) && typeof item.locked === "boolean" && nullableText(item.notes) && nullableText(item.sourceUrl)
     && (item.participants === null || list(item.participants, (person) => record(person, "id name") && text(person.id) && text(person.name)))
     && list(item.endpoints, (endpoint) => record(endpoint, "role instant timeZone place") && ["start", "end"].includes(String(endpoint.role)) && instant(endpoint.instant) && text(endpoint.timeZone) && zone(endpoint.timeZone)
-      && (endpoint.place === null || (record(endpoint.place, "name address latitude longitude") && text(endpoint.place.name) && nullableText(endpoint.place.address) && coordinate(endpoint.place.latitude, 90) && coordinate(endpoint.place.longitude, 180))))
+      && (endpoint.place === null || (record(endpoint.place, "id name address latitude longitude") && nullableText(endpoint.place.id) && text(endpoint.place.name) && nullableText(endpoint.place.address) && coordinate(endpoint.place.latitude, 90) && coordinate(endpoint.place.longitude, 180))))
     && list(item.constraints, (constraint) => record(constraint, "type status minutes") && ["fixed_time", "immovable", "minimum_buffer"].includes(String(constraint.type)) && ["confirmed", "unknown", "conflicted"].includes(String(constraint.status)) && (constraint.minutes === null || (typeof constraint.minutes === "number" && Number.isFinite(constraint.minutes) && constraint.minutes >= 0)))
     && list(item.facts, (fact) => record(fact, "kind value") && ["carrier", "serviceNumber", "confirmationNotes", "bookedBy", "confirmationCode", "mode", "ticketInfo", "durationMinutes", "confirmationStatus"].includes(String(fact.kind)) && text(fact.value)));
 }
@@ -62,8 +86,15 @@ export class TodaySnapshotStore {
     try {
       const raw = this.storage.getItem(key);
       if (!raw) return null;
-      const value: unknown = JSON.parse(raw);
-      if (validSnapshot(value) && value.accountId === accountId && value.model.tripId === tripId) return value;
+      const parsed: unknown = JSON.parse(raw);
+      const value = migrateLegacySnapshot(parsed);
+      if (validSnapshot(value) && value.accountId === accountId && value.model.tripId === tripId) {
+        if (value !== parsed) {
+          try { this.storage.setItem(key, JSON.stringify(value)); }
+          catch { /* A failed upgrade write must not discard the readable legacy snapshot. */ }
+        }
+        return value;
+      }
       this.storage.removeItem(key);
     } catch { try { this.storage.removeItem(key); } catch { /* Storage can be disabled. */ } }
     return null;

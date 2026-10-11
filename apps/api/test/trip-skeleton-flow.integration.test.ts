@@ -18,6 +18,8 @@ import { parseTripResponse } from "@along-the-way/contracts/private-trips";
 import { parseTripPlaceListResponse } from "@along-the-way/contracts/trip-places";
 
 import { createApp } from "../src/app";
+import { PostgresPlaceDetailModule } from "../src/place-details/postgres-place-detail-module";
+import { packagedPhotoRoot } from "../src/place-details/photo-assets";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
 import { runMigrations } from "../src/database/migrate";
 import { seedDatabase } from "../src/database/seed";
@@ -128,6 +130,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       now,
     });
     app = createApp({
+      placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
       collaboration: new PostgresCollaborationModule(database),
       dayPlans: unrelatedDayPlanModule,
       discovery: unrelatedDiscoveryModule,
@@ -2945,7 +2948,8 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         const proposalsAfter = await database.selectFrom("candidate_proposals").selectAll().orderBy("id").execute();
         const downgraded = await migrator.migrateTo("016_travel_places");
         if (downgraded.error) throw downgraded.error;
-        expect(await database.selectFrom("trip_places").selectAll().orderBy("id").execute()).toEqual(placesAfter);
+        expect(await database.selectFrom("trip_places").selectAll().orderBy("id").execute())
+          .toEqual(placesAfter.map(({ selected_for_itinerary: _selected, unplaced_from_date: _unplaced, ...place }) => place));
         expect(await database.selectFrom("candidate_proposals").selectAll().orderBy("id").execute())
           .toEqual(proposalsAfter.map(({ reopened_at: _reopenedAt, ...proposal }) => proposal));
       } finally {

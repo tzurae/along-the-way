@@ -138,6 +138,8 @@ export interface TripPlaceTable {
   longitude: number | null;
   time_zone: string | null;
   duration_minutes: number | null;
+  selected_for_itinerary: Generated<boolean>;
+  unplaced_from_date: DateOnly | null;
   budget_amount_minor: BigInteger | null;
   budget_currency: string | null;
   notes: string | null;
@@ -426,6 +428,23 @@ export interface ChangeEventTable {
   created_at: Timestamp;
 }
 
+export interface CuratedPlaceDetailTable {
+  place_id: string;
+  manifest_key: string;
+  name: string;
+  sections: unknown;
+  sources: unknown;
+}
+
+export interface CuratedPlacePhotoTable {
+  place_id: string;
+  work_id: string;
+  position: number;
+  metadata: unknown;
+  image_filename: string;
+  thumbnail_filename: string;
+}
+
 export interface AlongTheWayDatabase {
   users: UserTable;
   magic_link_tokens: MagicLinkTokenTable;
@@ -437,6 +456,8 @@ export interface AlongTheWayDatabase {
   places: PlaceTable;
   legacy_place_origins: LegacyPlaceOriginTable;
   place_identities: PlaceIdentityTable;
+  curated_place_details: CuratedPlaceDetailTable;
+  curated_place_photos: CuratedPlacePhotoTable;
   trip_places: TripPlaceTable;
   trip_place_contributions: TripPlaceContributionTable;
   trip_place_votes: TripPlaceVoteTable;

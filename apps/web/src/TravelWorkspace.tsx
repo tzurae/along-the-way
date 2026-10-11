@@ -6,10 +6,12 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
 import { countryStopLabel } from "./country-stop-label";
 import { emptyFlight, FlightFields, flightComplete } from "./FlightFields";
 import { useI18n } from "./i18n";
 import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./ConflictPanel";
+import "./plan-route.css";
 
 interface TravelWorkspaceProps {
   trip: TripDto;
@@ -140,7 +142,7 @@ function TravelEditor({ trip, type, item, skeleton, request, saved, close }: Tra
   }
 
   return <Dialog open onOpenChange={(open) => { if (!open && !busy) close(); }}>
-    <DialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] overflow-y-auto sm:max-w-3xl">
+    <DialogContent className="travel-editor max-[599px]:translate-x-0 max-[599px]:translate-y-0">
       <DialogHeader><DialogTitle>{title}</DialogTitle>
         <DialogDescription>{type === "flight" ? t.travel.sharedFlights : t.travel.lodgingDescription}</DialogDescription></DialogHeader>
       {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={busy}
@@ -153,16 +155,24 @@ function TravelEditor({ trip, type, item, skeleton, request, saved, close }: Tra
       <form hidden={Boolean(resolution.conflict)} className="grid gap-5" onSubmit={(event) => { event.preventDefault(); void save(); }}>
         {type === "flight" ? <FlightFields value={flight} onChange={setFlight} legend={t.travel.flights} startDate={trip.startDate} endDate={trip.endDate} /> : <>
           <Field><FieldLabel htmlFor={`${id}-stop`}>{t.travel.countryStop}</FieldLabel>
-            <select id={`${id}-stop`} required className="min-h-10 rounded-lg border border-input bg-transparent px-3" value={lodging.countryStopId} onChange={(event) => {
-              const previousZone = trip.countryStops.find((stop) => stop.id === lodging.countryStopId)?.timeZone;
-              const nextZone = trip.countryStops.find((stop) => stop.id === event.target.value)?.timeZone;
-              const zone = !lodging.hotel.timeZone || lodging.hotel.timeZone === previousZone ? nextZone ?? "" : lodging.hotel.timeZone;
-              setLodging({ ...lodging, countryStopId: event.target.value, hotel: { ...lodging.hotel, timeZone: zone },
-                checkInUtcOffset: zone === lodging.hotel.timeZone ? lodging.checkInUtcOffset : null,
-                checkOutUtcOffset: zone === lodging.hotel.timeZone ? lodging.checkOutUtcOffset : null });
-            }}><option value="">{t.travel.chooseCountryStop}</option>
+            <NativeSelect
+              id={`${id}-stop`}
+              required
+              className="w-full rounded-lg border border-input bg-transparent"
+              value={lodging.countryStopId}
+              onChange={(event) => {
+                const previousZone = trip.countryStops.find((stop) => stop.id === lodging.countryStopId)?.timeZone;
+                const nextZone = trip.countryStops.find((stop) => stop.id === event.target.value)?.timeZone;
+                const zone = !lodging.hotel.timeZone || lodging.hotel.timeZone === previousZone ? nextZone ?? "" : lodging.hotel.timeZone;
+                setLodging({ ...lodging, countryStopId: event.target.value, hotel: { ...lodging.hotel, timeZone: zone },
+                  checkInUtcOffset: zone === lodging.hotel.timeZone ? lodging.checkInUtcOffset : null,
+                  checkOutUtcOffset: zone === lodging.hotel.timeZone ? lodging.checkOutUtcOffset : null });
+              }}
+            >
+              <option value="">{t.travel.chooseCountryStop}</option>
               {trip.countryStops.map((stop) => <option key={stop.id} value={stop.id}>{stop.position + 1}. {countryStopLabel(stop.countryCode)}</option>)}
-            </select></Field>
+            </NativeSelect>
+          </Field>
           <Field><FieldLabel htmlFor={`${id}-search`}>{t.travel.hotelSearch}</FieldLabel>
             <div className="flex gap-2"><Input id={`${id}-search`} value={query} onChange={(event) => setQuery(event.target.value)} />
               <Button type="button" variant="outline" disabled={searching || !query.trim()} onClick={() => void search()}>{searching ? t.travel.searching : t.travel.search}</Button></div>
@@ -265,15 +275,15 @@ export function TravelWorkspace(props: TravelWorkspaceProps) {
     finally { setBusy(null); }
   }
 
-  return <section aria-labelledby={`${id}-heading`} className="grid gap-4">
-    <div className="flex flex-wrap items-center justify-between gap-3">
-      <h3 id={`${id}-heading`} className="font-display text-2xl">{type === "flight" ? t.travel.flights : t.travel.lodgings}</h3>
-      {skeleton && (type === "lodging" || items.length < 2) ? <Button disabled={refreshing} onClick={() => setEditor({ item: null })}>{type === "flight" ? t.travel.addFlight : t.travel.addLodging}</Button> : null}
+  return <section aria-labelledby={`${id}-heading`} className="travel-workspace">
+    <div className="travel-pagehead">
+      <h3 id={`${id}-heading`}>{type === "flight" ? t.travel.flights : t.travel.lodgings}</h3>
+      {skeleton ? <Button disabled={refreshing} onClick={() => setEditor({ item: null })}>{type === "flight" ? t.travel.addFlight : t.travel.addLodging}</Button> : null}
     </div>
     <p className="text-sm text-muted-foreground">{type === "flight" ? t.travel.sharedFlights : t.travel.lodgingDescription}</p>
     {error ? <div role="alert"><p className="text-destructive">{error}</p><Button variant="outline" onClick={() => void load()}>{t.travel.retry}</Button></div> : null}
     {!skeleton ? <p role="status">{t.travel.loading}</p> : type === "flight" && items.length < 2 ? <p role="status"><strong>{t.travel.missingFlights}</strong> · {t.travel.missingFlightsDescription}</p> : type === "lodging" && !items.length ? <p>{t.travel.noLodgings}</p> : null}
-    <ol className="grid gap-4">{items.map((item, index) => <li key={item.id} data-travel-item-id={item.id} className="grid gap-3 border-t py-4">
+    <ol className="travel-list">{items.map((item, index) => <li key={item.id} data-travel-item-id={item.id} className="travel-card">
       <h4 className="font-semibold">{type === "flight" ? `${index === 0 ? t.travel.outbound : index === items.length - 1 ? t.travel.return : t.travel.otherFlight} · ` : ""}{item.title}</h4>
       {item.type === "flight" && item.details.carrier ? <p>{item.details.carrier}</p> : null}
       {item.endpoints.map((endpoint) => <p key={endpoint.role} className="text-sm [overflow-wrap:anywhere]">

@@ -1,17 +1,46 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { TodayWorkspace } from "../src/TodayWorkspace";
 import { createTodayModel, type TodayModel } from "../src/today-model";
 import { todayActivity, todaySkeleton, todayTrip, todayUser } from "./today-fixtures";
 
+const mounted: Array<{ root: Root; host: HTMLDivElement }> = [];
 const trip = todayTrip();
 function display(model: TodayModel, offline = false) {
   const host = document.createElement("div");
   host.innerHTML = renderToStaticMarkup(<TodayWorkspace model={model} selectedDate="2026-10-21" onDayChanged={() => {}} fetchedAt="2026-10-21T01:30:00Z" retry={() => {}} offline={offline} />);
   return host;
 }
-afterEach(() => vi.restoreAllMocks());
+async function openDetails(model: TodayModel) {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("ResizeObserver", class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  mounted.push({ root, host });
+  await act(async () => root.render(<TodayWorkspace model={model} selectedDate="2026-10-21" onDayChanged={() => {}} fetchedAt="2026-10-21T01:30:00Z" retry={() => {}} />));
+  const trigger = host.querySelector<HTMLButtonElement>("[data-today-item-trigger]");
+  expect(trigger).toBeInTheDocument();
+  await act(async () => trigger!.click());
+  const details = document.querySelector<HTMLElement>(".today-item-detail");
+  expect(details).toBeInTheDocument();
+  return details!;
+}
+afterEach(async () => {
+  for (const { root, host } of mounted.splice(0)) {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 it("shows each cross-zone flight endpoint's local time and zone in the card and personal current/next", () => {
   const start = { ...todayActivity().endpoints[0]!, instant: "2026-10-21T01:00:00Z", localDateTime: "2026-10-21T09:00", timeZone: "Asia/Taipei", utcOffset: "+08:00" };
@@ -24,30 +53,31 @@ it("shows each cross-zone flight endpoint's local time and zone in the card and 
   model.days[0]!.timeZone = "Asia/Tokyo";
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-21T01:30:00Z"));
   const current = display(model);
-  for (const surface of [current.querySelector("article > p"), current.querySelector('[aria-label="我的目前與下一步"]')]) {
-    expect(surface).toHaveTextContent(/09:00.*台北.*Asia\/Taipei.*12:30.*東京.*Asia\/Tokyo/);
-  }
+  expect(current.querySelector('[data-today-item-trigger="跨時區航班"]')?.closest("li")).toHaveTextContent(/09:00.*至 12:30.*Asia\/Taipei.*Asia\/Tokyo.*東京/);
+  expect(current.querySelector('[aria-label="進行中"] .today-lead-time')).toHaveTextContent(/09:00.*台北.*Asia\/Taipei.*12:30.*東京.*Asia\/Tokyo/);
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-21T00:30:00Z"));
-  expect(display(model).querySelector('[aria-label="我的目前與下一步"]')).toHaveTextContent(/09:00.*Asia\/Taipei.*12:30.*Asia\/Tokyo/);
+  expect(display(model).querySelector('[aria-label="下一站"] .today-lead-time')).toHaveTextContent(/09:00.*Asia\/Taipei.*12:30.*Asia\/Tokyo/);
   model.items[0]!.endpoints[1]!.place = null;
-  expect(display(model).querySelector("article > p")).toHaveTextContent(/12:30 · Asia\/Tokyo/);
-  expect(display(model).querySelector("article > p")).not.toHaveTextContent(/12:30.*台北/);
+  const missingDestination = display(model).querySelector('[aria-label="下一站"] .today-lead-time');
+  expect(missingDestination).toHaveTextContent(/12:30 · Asia\/Tokyo/);
+  expect(missingDestination).not.toHaveTextContent(/12:30.*台北/);
 });
 
-it("uses an email fallback instead of an opaque participant ID", () => {
+it("uses an email fallback instead of an opaque participant ID", async () => {
   const model = createTodayModel(trip, todaySkeleton(trip, [todayActivity()]), [], todayUser.id);
-  expect(display(model).querySelector("article")).toHaveTextContent(`參與者：${todayUser.email}（你）`);
+  expect(await openDetails(model)).toHaveTextContent(`參與者：${todayUser.email}（你）`);
 });
 
-it("shows one actionable pending-participant state rather than duplicate warnings", () => {
+it("shows one actionable pending-participant state rather than duplicate warnings", async () => {
   const item = todayActivity(); item.participants = null;
-  const card = display(createTodayModel(trip, todaySkeleton(trip, [item]), [], todayUser.id)).querySelector("article")!;
-  expect(card.textContent?.match(/參與者待確認/g)).toHaveLength(1);
-  expect(card).not.toHaveTextContent("參與者：參與者待確認");
+  const details = await openDetails(createTodayModel(trip, todaySkeleton(trip, [item]), [], todayUser.id));
+  expect(details.textContent?.match(/參與者待確認/g)).toHaveLength(1);
+  expect(details).not.toHaveTextContent("參與者：參與者待確認");
 });
 
 it("distinguishes online synchronization from offline reconnect", () => {
   const model = createTodayModel(trip, todaySkeleton(trip), [], todayUser.id);
-  expect(display(model).querySelector("header button")).toHaveTextContent(/^重新同步$/);
-  expect(display(model, true).querySelector("header button")).toHaveTextContent(/^重新連線並同步$/);
+  expect(display(model).querySelector(".today-sync-status")).toHaveTextContent(/^已同步$/);
+  expect(display(model).querySelector(".today-zone button")).toBeNull();
+  expect(display(model, true).querySelector(".today-zone button")).toHaveTextContent(/^重新連線並同步$/);
 });

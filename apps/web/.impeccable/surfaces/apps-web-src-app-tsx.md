@@ -2,7 +2,7 @@
 version: 1
 slug: "apps-web-src-app-tsx"
 primary_target: "apps/web/src/App.tsx"
-related_targets: ["apps/web/src/TripPlaceWorkspace.tsx","apps/web/src/DiscoveryWorkspace.tsx"]
+related_targets: ["apps/web/src/TripPlaceWorkspace.tsx","apps/web/src/DiscoveryWorkspace.tsx","apps/web/src/TodayWorkspace.tsx","apps/web/src/PlaceDetailContent.tsx","apps/web/src/PlaceThumbnail.tsx"]
 ---
 
 # Trip workspace (app shell, 地點)
@@ -22,3 +22,9 @@ FIRST VIEWPORT: Phone: a one-line header 「{trip} ▾」, the selected tab's co
 FORM: 「底部分頁＋點開看詳情」, position 3 on the ordered list of seven structures, seed key 586f025c.
 
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+
+## Approved place-detail extension (2026-10-09)
+
+This is an extension of the same Operate direction, not a new design selection. The selected B prototype behavior is translated into the incumbent visual world: small reserved thumbnails in existing rows; the existing mobile bottom sheet and desktop side panel; native horizontal photo swiping; restrained terracotta/ink controls; and sourced, scan-friendly content below a stable image area.
+
+The compact attribution strip remains exactly 56px in the panel's main scroll flow. Full work, author, source, license, modification, location and check metadata belongs in a nested full-image dialog with complete-composition image fit. Empty, failed, unknown, conflicting and out-of-date states remain readable and explicit; they do not borrow another place's content or replace recommendation, notes, votes, schedule, navigation or member actions.

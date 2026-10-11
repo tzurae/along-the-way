@@ -201,6 +201,15 @@ export interface GenerateDiscoveryInput {
 export interface DecideCandidateProposalInput {
   expectedVersion: number;
 }
+
+export interface ScheduleDiscoveryProposalsInput {
+  tripDayId: string;
+  /** Between 1 and 100 distinct proposals; accepted proposals still require their current version. */
+  proposals: Array<{ proposalId: string; expectedVersion: number }>;
+}
+
+export type ScheduleDiscoveryProposalsResponse = DiscoveryWorkspaceResponse;
+
 export interface UpdateCandidateProposalVoteInput {
   voted: boolean;
 }
@@ -461,4 +470,8 @@ export function parseDiscoveryWorkspaceResponse(value: unknown): DiscoveryWorksp
       placeProviderAvailable: typeof root.placeProviderAvailable === "boolean" ? root.placeProviderAvailable : invalid(),
     },
   };
+}
+
+export function parseScheduleDiscoveryProposalsResponse(value: unknown): ScheduleDiscoveryProposalsResponse {
+  return parseDiscoveryWorkspaceResponse(value);
 }

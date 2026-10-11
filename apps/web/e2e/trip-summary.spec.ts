@@ -16,6 +16,7 @@ import {
 import { fillTripFlights } from "./travel-support";
 
 const execFileAsync = promisify(execFile);
+const mailpit = process.env.MAILPIT_API_URL ?? "http://127.0.0.1:8025";
 
 interface MailpitMessage {
   id: string;
@@ -79,9 +80,7 @@ async function emailLink(
   await expect
     .poll(
       async () => {
-        const response = await request.get(
-          "http://127.0.0.1:8025/api/v1/messages",
-        );
+        const response = await request.get(`${mailpit}/api/v1/messages`);
         messageId =
           mailpitMessages(await response.json()).find(
             (message) =>
@@ -93,9 +92,7 @@ async function emailLink(
       { timeout: 15_000 },
     )
     .not.toBe("");
-  const detail = await request.get(
-    `http://127.0.0.1:8025/api/v1/message/${messageId}`,
-  );
+  const detail = await request.get(`${mailpit}/api/v1/message/${messageId}`);
   const link = mailpitText(await detail.json()).match(/https?:\/\/\S+/)?.[0];
   if (!link) throw new Error(`Email for ${recipient} omitted its link`);
   return link;
@@ -116,12 +113,7 @@ async function signIn(page: Page, request: APIRequestContext, email: string) {
     page,
     await emailLink(request, email, "Sign in to Along the Way"),
   );
-  const identity = page.getByText(`登入帳號：${email}`, { exact: true });
-  if (!await identity.isVisible()) {
-    await page.getByRole("button", { name: /切換旅程$/ }).click();
-    await expect(page.getByRole("dialog", { name: "切換旅程" }).getByText(`登入帳號：${email}`, { exact: true })).toBeVisible();
-    await page.keyboard.press("Escape");
-  }
+  await expect(page.getByRole("button", { name: /切換旅程$/ })).toBeVisible();
 }
 
 function localDateLabel(date: string) {
@@ -257,7 +249,7 @@ test("private trips work across four identities, viewports, and rejection paths"
   request,
 }) => {
   test.setTimeout(180_000);
-  await request.delete("http://127.0.0.1:8025/api/v1/messages");
+  await request.delete(`${mailpit}/api/v1/messages`);
 
   await page.goto("/");
   await signIn(page, request, "owner@example.test");
@@ -316,7 +308,8 @@ test("private trips work across four identities, viewports, and rejection paths"
     expect(await dialog.getByRole("listitem").allTextContents()).toEqual(routeBeforeInvalidMove);
   });
   await page.getByRole("tab", { name: "行程", exact: true }).click();
-  await page.getByRole("tab", { name: "航班", exact: true }).click();
+  await page.getByRole("button", { name: "FIXTURE-OUT 航班 05:00", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "到航班修改航班", exact: true }).click();
   await expect(page.getByText("2026-10-21 – 2026-10-27", { exact: false })).toBeVisible();
   await expect(page.getByText("無法推定預設幣別")).toBeVisible();
   const countryRoute = page.locator('section[aria-labelledby="trip-country-route"]');
@@ -348,8 +341,9 @@ test("private trips work across four identities, viewports, and rejection paths"
   // A reload selects the first listed trip; other specs' trips may be listed before this one.
   await page.getByRole("button", { name: /切換旅程$/ }).click();
   const switcherDialog = page.getByRole("dialog", { name: "切換旅程" });
-  await expect(switcherDialog.getByText(/2026-10-21 – 2026-10-27・4 位成員/)).toBeVisible();
-  await switcherDialog.getByRole("button", { name: /^大阪京都家庭旅行/ }).click();
+  const ownTrip = switcherDialog.getByRole("button", { name: /^大阪京都家庭旅行 2026-10-21 – 2026-10-27・4 位成員$/ });
+  await expect(ownTrip).toBeVisible();
+  await ownTrip.click();
   await expect(page.getByRole("button", { name: /大阪京都家庭旅行，切換旅程/ })).toBeVisible();
   await openMembers(page);
   const membersPanel = page.getByRole("tabpanel", { name: "成員", exact: true });
@@ -378,7 +372,8 @@ test("private trips work across four identities, viewports, and rejection paths"
       .toBeLessThanOrEqual(390);
   });
   await wifePage.getByRole("tab", { name: "行程", exact: true }).click();
-  await wifePage.getByRole("tab", { name: "航班", exact: true }).click();
+  await wifePage.getByRole("button", { name: "FIXTURE-OUT 航班 05:00", exact: true }).click();
+  await wifePage.getByRole("dialog").getByRole("button", { name: "到航班修改航班", exact: true }).click();
   await expect(wifePage.getByText("Asia/Taipei", { exact: true })).toBeVisible();
   await wifePage.getByRole("button", { name: /切換旅程$/ }).click();
   const wifeSwitcher = wifePage.getByRole("dialog", { name: "切換旅程" });

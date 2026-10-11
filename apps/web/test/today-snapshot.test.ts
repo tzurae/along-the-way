@@ -4,7 +4,7 @@ import { TodaySnapshotStore } from "../src/today-snapshot";
 import { createTodayModel, type TodayModel } from "../src/today-model";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import type { TripSkeletonDto } from "@along-the-way/contracts/trip-skeleton";
-import { todayActivity, todaySkeleton, todayTrip, todayUser } from "./today-fixtures";
+import { todayActivity, todaySkeleton, todayTrip, todayUser, todayWishlist } from "./today-fixtures";
 
 const model: TodayModel = { tripId: "trip", tripName: "Private trip", tripVersion: 7, memberId: "member", items: [], days: [{ id: "day", date: "2026-10-21", timeZone: "Asia/Tokyo", itemIds: [], wishlist: [] }] };
 const key = "along-the-way:today:account:trip";
@@ -15,7 +15,7 @@ describe("account-scoped read-only Today snapshots", () => {
     const store = new TodaySnapshotStore(localStorage);
     store.save("account", model, Date.parse("2026-10-21T02:30Z"));
     const reopened = new TodaySnapshotStore(localStorage);
-    expect(reopened.read("account", "trip")).toMatchObject({ schemaVersion: 2, fetchedAt: "2026-10-21T02:30:00.000Z", model: { tripVersion: 7, days: [{ timeZone: "Asia/Tokyo" }] } });
+    expect(reopened.read("account", "trip")).toMatchObject({ schemaVersion: 3, fetchedAt: "2026-10-21T02:30:00.000Z", model: { tripVersion: 7, days: [{ timeZone: "Asia/Tokyo" }] } });
     expect(reopened.read("other-account", "trip")).toBeNull();
     expect(reopened.lastAccount()).toBe("account");
     store.save("account", { ...model, tripVersion: 8 });
@@ -69,5 +69,65 @@ describe("account-scoped read-only Today snapshots", () => {
     expect(saved.model.items[0]!.participants).toEqual([{ id: "member", name: todayUser.email }, { id: "named", name: "旅伴" }]);
     expect(JSON.stringify(saved)).not.toContain("unused@example.test");
     expect(JSON.stringify(saved)).not.toContain("hidden-name@example.test");
+  });
+  it("keeps only reference IDs needed to reopen Today place details", () => {
+    const trip = todayTrip();
+    const readModel = createTodayModel(trip, todaySkeleton(trip, [todayActivity()]), todayWishlist(), todayUser.id);
+    const store = new TodaySnapshotStore(localStorage);
+    const saved = store.save(todayUser.id, readModel);
+
+    expect(saved?.model.items[0]!.endpoints[0]!.place?.id).toBe("place");
+
+    const incompatible = structuredClone(saved!);
+    delete (incompatible.model.items[0]!.endpoints[0]!.place as Partial<{ id: string | null }>).id;
+    localStorage.setItem(`along-the-way:today:${todayUser.id}:${trip.id}`, JSON.stringify(incompatible));
+    expect(store.read(todayUser.id, trip.id)).toBeNull();
+  });
+  it("migrates an accepted schema 2 snapshot without guessing missing place identities", () => {
+    const trip = todayTrip();
+    const store = new TodaySnapshotStore(localStorage);
+    const current = store.save(todayUser.id, createTodayModel(trip, todaySkeleton(trip, [todayActivity()]), todayWishlist(), todayUser.id))!;
+    const legacy = structuredClone(current) as unknown as {
+      schemaVersion: number;
+      model: {
+        days: Array<{ wishlist: Array<Record<string, unknown>> }>;
+        items: Array<{ title: string; endpoints: Array<{ place: Record<string, unknown> | null }> }>;
+      };
+    };
+    legacy.schemaVersion = 2;
+    for (const item of legacy.model.items) for (const endpoint of item.endpoints) if (endpoint.place) delete endpoint.place.id;
+    localStorage.setItem(`along-the-way:today:${todayUser.id}:${trip.id}`, JSON.stringify(legacy));
+
+    const migrated = store.read(todayUser.id, trip.id);
+    expect(migrated).toMatchObject({ schemaVersion: 3, model: { items: [{ title: "activity", endpoints: [{ place: { id: null, name: "Park" } }] }] } });
+    expect(migrated?.model.days[0]!.wishlist[0]).toEqual({ id: "FIRST", name: "FIRST" });
+    expect(JSON.parse(localStorage.getItem(`along-the-way:today:${todayUser.id}:${trip.id}`)!).schemaVersion).toBe(3);
+  });
+  it("rejects a purported legacy snapshot carrying a place identity outside the legacy format", () => {
+    const trip = todayTrip();
+    const store = new TodaySnapshotStore(localStorage);
+    const current = store.save(todayUser.id, createTodayModel(trip, todaySkeleton(trip, [todayActivity()]), [], todayUser.id))!;
+    const snapshotKey = `along-the-way:today:${todayUser.id}:${trip.id}`;
+    localStorage.setItem(snapshotKey, JSON.stringify({ ...current, schemaVersion: 2 }));
+
+    expect(store.read(todayUser.id, trip.id)).toBeNull();
+    expect(localStorage.getItem(snapshotKey)).toBeNull();
+  });
+  it("keeps a readable legacy itinerary when persisting its migration exceeds storage quota", () => {
+    const raw = JSON.stringify({ schemaVersion: 2, accountId: "account", fetchedAt: "2026-10-21T02:30:00.000Z", model });
+    localStorage.setItem(key, raw);
+    const storage: Storage = {
+      get length() { return localStorage.length; },
+      key: (index) => localStorage.key(index),
+      getItem: (name) => localStorage.getItem(name),
+      removeItem: (name) => localStorage.removeItem(name),
+      clear: () => localStorage.clear(),
+      setItem: () => { throw new DOMException("Storage quota exceeded", "QuotaExceededError"); },
+    };
+
+    const reopened = new TodaySnapshotStore(storage);
+    expect(reopened.read("account", "trip")?.model.tripVersion).toBe(7);
+    expect(localStorage.getItem(key)).toBe(raw);
+    expect(new TodaySnapshotStore(storage).read("account", "trip")?.model.tripName).toBe("Private trip");
   });
 });

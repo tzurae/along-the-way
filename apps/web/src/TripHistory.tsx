@@ -3,6 +3,9 @@ import { parseTripHistoryResponse, type TripHistoryEvent } from "@along-the-way/
 import { Button } from "@/components/ui/button";
 import { useI18n } from "./i18n";
 
+const HISTORY_BATCH_SIZE = 10;
+
+
 export function TripHistory({ tripId, revision, active, request }: {
   tripId: string; revision: number; active: boolean;
   request<T>(url: string, options?: RequestInit): Promise<T>;
@@ -10,6 +13,7 @@ export function TripHistory({ tripId, revision, active, request }: {
   const { t, locale } = useI18n();
   const [events, setEvents] = useState<TripHistoryEvent[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(HISTORY_BATCH_SIZE);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
@@ -20,6 +24,7 @@ export function TripHistory({ tripId, revision, active, request }: {
   useEffect(() => {
     const current = ++generation.current;
     needsRecovery.current = true;
+    setVisibleCount(HISTORY_BATCH_SIZE);
     setBusy(true);
     void request(`/api/trips/${tripId}/history`).then((value) => {
       if (current !== generation.current) return;
@@ -45,7 +50,12 @@ export function TripHistory({ tripId, revision, active, request }: {
   }, []);
 
   async function more() {
-    if (!nextCursor || busy) return;
+    if (busy) return;
+    if (visibleCount < events.length) {
+      setVisibleCount((current) => Math.min(current + HISTORY_BATCH_SIZE, events.length));
+      return;
+    }
+    if (!nextCursor) return;
     const current = generation.current;
     setBusy(true);
     try {
@@ -60,7 +70,7 @@ export function TripHistory({ tripId, revision, active, request }: {
   return <section className="trip-skeleton-shell" aria-labelledby="trip-history-heading">
     <h3 id="trip-history-heading" className="section-heading">{t.collaboration.history}</h3>
     {!events.length && !busy && !error ? <p>{t.collaboration.noHistory}</p> : null}
-    <ol className="activity-list">{events.map((event) => <li key={event.id} className="[overflow-wrap:anywhere]">
+    <ol className="activity-list">{events.slice(0, visibleCount).map((event) => <li key={event.id} className="[overflow-wrap:anywhere]">
       <p className="font-semibold">{t.tripSkeleton.events[event.eventType] ?? t.collaboration.savedChange}</p>
       <p className="text-sm">{event.actorDisplayName ?? event.actorEmail} · <time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString(locale)}</time></p>
       <p className="text-sm text-muted-foreground">{t.collaboration.target}：{t.collaboration.targets[event.targetType] ?? t.collaboration.savedChange}{event.targetName ? ` · ${event.targetName}` : ""}</p>
@@ -68,6 +78,6 @@ export function TripHistory({ tripId, revision, active, request }: {
     </li>)}</ol>
     {error ? <p role="alert">{error} <Button variant="outline" onClick={() => setRetry((value) => value + 1)}>{t.collaboration.retry}</Button></p> : null}
     {busy ? <p role="status">{t.collaboration.loading}</p> : null}
-    {nextCursor ? <Button variant="outline" disabled={busy} onClick={() => void more()}>{t.collaboration.loadMore}</Button> : null}
+    {visibleCount < events.length || nextCursor ? <Button variant="outline" disabled={busy} onClick={() => void more()}>{t.collaboration.loadMore}</Button> : null}
   </section>;
 }

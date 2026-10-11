@@ -1,0 +1,1030 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AI 建議 — 互動原型</title>
+<style>
+:root {
+  --background: #f5f0e7; --foreground: #24372f; --card: #fffcf7; --primary: #1f3029;
+  --primary-foreground: #fffaf2; --muted-foreground: #52645c; --accent: #d37551;
+  --accent-ink: #9a4a2c; --border: color-mix(in srgb, #24372f 18%, transparent); --ring: #e09271;
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", sans-serif;
+  --font-display: Georgia, "Noto Serif TC", serif;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; min-width: 320px; min-height: 100vh; color: var(--foreground); font-family: var(--font-sans);
+  background: radial-gradient(circle at 82% 10%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 28rem), linear-gradient(145deg, #f8f4ed 0%, #eee8dd 100%);
+  background-attachment: fixed; overflow-x: clip;
+}
+::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--foreground); }
+button { font: inherit; color: inherit; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+svg { display: block; }
+[hidden] { display: none !important; }
+
+/* ---------- shell ---------- */
+.app { display: grid; min-height: 100vh; }
+.rail { display: none; }
+.topbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 12px; padding: 8px 12px; background: color-mix(in srgb, #f8f4ed 88%, transparent); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }
+.switcher { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 46px; padding: 0 14px; border-radius: 16px; border: 1px solid var(--border); background: var(--card); font-weight: 700; font-size: 16px; }
+.switcher span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); flex: none; margin: 0 6px; }
+main { padding: 16px 10px 150px; max-width: 1180px; width: 100%; }
+.segments { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border-radius: 18px; background: color-mix(in srgb, var(--card) 60%, transparent); border: 1px solid var(--border); margin-bottom: 22px; }
+.segments > a { display: grid; place-items: center; height: 46px; border-radius: 14px; font-weight: 700; font-size: 16px; color: var(--muted-foreground); text-decoration: none; }
+.segments > a[aria-selected="true"] { background: var(--card); color: var(--accent-ink); box-shadow: 0 2px 8px -4px rgba(31,48,41,.25); }
+.bottomnav { position: fixed; z-index: 30; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(4, 1fr); padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); background: color-mix(in srgb, #fbf8f2 94%, transparent); backdrop-filter: blur(12px); border-top: 1px solid var(--border); }
+.bottomnav a { display: grid; justify-items: center; gap: 4px; padding: 6px 0; border-radius: 14px; font-size: 13px; font-weight: 700; color: var(--foreground); text-decoration: none; }
+.bottomnav a[aria-current="page"] { color: var(--accent-ink); background: color-mix(in srgb, var(--card) 80%, transparent); }
+
+/* ---------- page header ---------- */
+.pagehead { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 4px 2px; min-height: 44px; }
+.pagehead h1 { font-family: var(--font-display); font-size: 25px; line-height: 1.2; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+.headside { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+.ghost { height: 34px; padding: 0 16px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); font-weight: 600; font-size: 14px; color: var(--foreground); transition: background .2s var(--ease-out); }
+.ghost:hover { background: #fff; }
+.iconghost { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 14px 0 12px; }
+.iconaction { display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+.headside .ghost { min-height: 44px; height: 44px; padding: 0 15px; gap: 7px; font-size: 14px; font-weight: 700; }
+.headprimary { min-height: 44px; height: 44px; padding: 0 18px; gap: 7px; font-size: 15px; font-weight: 700; box-shadow: none; }
+.loader-icon { animation: spin .8s linear infinite; }
+.subhead { margin: 0 4px 14px; min-height: 20px; font-size: 14px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+.banner { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; padding: 12px 16px; border-radius: 14px; background: color-mix(in srgb, var(--accent) 12%, var(--card)); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); font-size: 14px; line-height: 1.5; color: var(--accent-ink); }
+.spinner { flex: none; width: 16px; height: 16px; border-radius: 50%; border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.fieldlabel { display: block; font-size: 15px; font-weight: 700; margin: 0 0 8px; }
+textarea.brief { display: block; width: 100%; resize: vertical; min-height: 140px; padding: 12px 14px; border-radius: 14px; border: 1px solid var(--border); background: #fff; color: var(--foreground); font: 15px/1.6 var(--font-sans); }
+textarea.brief:focus { outline: 2px solid var(--ring); outline-offset: 1px; }
+textarea.brief.invalid { border-color: #b55737; }
+.unclear { display: grid; grid-template-columns: 18px 1fr; gap: 10px; margin: 0 0 16px; padding: 12px 14px; border-radius: 14px; background: color-mix(in srgb, #b55737 8%, var(--card)); border: 1px solid color-mix(in srgb, #b55737 30%, transparent); color: #8f4228; }
+.unclear svg { margin-top: 2px; }
+.unclear div { display: grid; gap: 4px; font-size: 14px; line-height: 1.55; }
+.unclear strong { font-size: 15px; }
+.unclear span { color: var(--foreground); }
+.failbox { display: grid; grid-template-columns: 18px 1fr auto; gap: 10px; align-items: center; margin: 0 0 12px; padding: 12px 14px; border-radius: 14px; background: color-mix(in srgb, #b55737 8%, var(--card)); border: 1px solid color-mix(in srgb, #b55737 30%, transparent); color: #8f4228; }
+.rejected { margin-top: 16px; padding: 0 4px; }
+.rejected summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: 6px; padding: 8px 0; font-size: 14px; font-weight: 600; color: var(--muted-foreground); }
+.rejected summary::-webkit-details-marker { display: none; }
+.rejected summary svg { transition: transform .25s var(--ease-out); }
+.rejected[open] summary svg { transform: rotate(90deg); }
+.rejectedhint { margin: 4px 0 10px; font-size: 13px; line-height: 1.5; color: var(--muted-foreground); }
+.rejected ul { margin: 0; padding: 0; list-style: none; border: 1px solid var(--border); border-radius: 14px; background: var(--card); }
+.rejected li { display: flex; align-items: center; gap: 8px; padding: 12px 14px; }
+.rejected li + li { border-top: 1px solid var(--border); }
+.rname { font-size: 15px; font-weight: 600; }
+.failbox > svg { align-self: start; margin-top: 2px; }
+.failtext { display: grid; gap: 3px; font-size: 14px; line-height: 1.55; min-width: 0; }
+.failtext strong { font-size: 15px; }
+.failtext span { color: var(--foreground); }
+.firstrun .failbox { margin-bottom: 4px; }
+.hint { display: flex; gap: 6px; margin: 10px 0 0; font-size: 13px; line-height: 1.5; color: var(--muted-foreground); }
+.hint svg { flex: none; margin-top: 2px; }
+.primarybtn.small { height: 42px; padding: 0 20px; font-size: 15px; box-shadow: none; }
+.askcard { display: flex; align-items: center; gap: 12px; margin: 0 0 12px; padding: 14px 14px 14px 16px; border-radius: 16px; background: var(--card); border: 1px solid var(--border); }
+.askicon { flex: none; display: grid; place-items: center; width: 38px; height: 38px; border-radius: 12px; background: color-mix(in srgb, var(--accent) 14%, var(--card)); color: var(--accent-ink); }
+.asktext { flex: 1; min-width: 0; display: grid; gap: 2px; font-size: 13px; line-height: 1.45; color: var(--muted-foreground); }
+.asktext strong { font-size: 15px; color: var(--foreground); }
+.sheetsub { margin: 0; font-size: 13px; line-height: 1.5; color: var(--muted-foreground); }
+.qitem { display: grid; gap: 12px; border: 0; margin: 0; padding: 0; min-width: 0; }
+.qitem legend { padding: 0; margin-bottom: 12px; }
+.qtext { margin: 0; font-size: 16px; font-weight: 700; line-height: 1.55; }
+.qtext.small { font-size: 13px; font-weight: 600; color: var(--muted-foreground); }
+.optgroup { border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--card); }
+.opt { display: grid; grid-template-columns: 20px 1fr; gap: 12px; align-items: start; min-height: 56px; padding: 14px 16px; cursor: pointer; transition: background-color .2s var(--ease-out); }
+.opt + .opt { border-top: 1px solid var(--border); }
+.opt:hover { background: color-mix(in srgb, var(--primary) 3%, var(--card)); }
+.opt.on { background: color-mix(in srgb, var(--accent) 10%, var(--card)); }
+.opt input { appearance: none; width: 20px; height: 20px; margin: 2px 0 0; border-radius: 50%; border: 1.5px solid color-mix(in srgb, #24372f 40%, transparent); background: #fff; display: grid; place-items: center; transition: border-color .2s var(--ease-out); }
+.opt input::after { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); transform: scale(0); transition: transform .25s var(--ease-out); }
+.opt input:checked { border-color: var(--accent); }
+.opt input:checked::after { transform: scale(1); }
+.optbody { display: grid; gap: 3px; min-width: 0; }
+.optlabel { font-size: 16px; font-weight: 600; line-height: 1.45; }
+.opteffect { font-size: 14px; line-height: 1.5; color: var(--muted-foreground); }
+.customwrap { display: grid; gap: 6px; margin-top: 8px; }
+.customlabel { font-size: 13px; font-weight: 700; color: var(--muted-foreground); }
+textarea.qanswer { width: 100%; resize: vertical; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: #fff; color: var(--foreground); font: 15px/1.55 var(--font-sans); }
+.qerror { font-size: 13px; font-weight: 600; color: #b55737; }
+.answered { display: grid; gap: 12px; }
+.answered li { display: grid; gap: 2px; font-size: 14px; line-height: 1.5; }
+.unknownans { color: var(--muted-foreground); }
+.gateactions { display: flex; align-items: center; gap: 16px; margin-top: 22px; }
+/* Higher specificity than `.firstrun .primarybtn`, whose 18px top margin pushed the button below the link. */
+.firstrun .gateactions .primarybtn { margin-top: 0; }
+@media (max-width: 599.98px) {
+  .gateactions { flex-direction: column; align-items: stretch; gap: 6px; }
+  .firstrun .gateactions .primarybtn { justify-self: stretch; width: 100%; }
+  .gateactions .linkbtn { align-self: center; padding: 10px 12px; }
+}
+.linkbtn { border: 0; background: none; padding: 8px 0; font-size: 14px; font-weight: 600; color: var(--foreground); text-decoration: underline; text-underline-offset: 3px; }
+.firstrun { background: var(--card); border: 1px solid var(--border); border-radius: 18px; padding: 24px 20px; display: grid; gap: 4px; }
+.firstrun h2 { font-family: var(--font-display); font-size: 24px; line-height: 1.3; margin: 0; text-wrap: balance; }
+.firstrun .lede { margin: 6px 0 18px; font-size: 15px; line-height: 1.65; color: var(--muted-foreground); max-width: 46ch; }
+.firstrun .primarybtn { justify-self: start; margin-top: 18px; box-shadow: none; }
+/* Questions read and compare best at a prose measure, not stretched across a 1100px column. */
+.firstrun > div:has(> .qitem), .firstrun .brief, .firstrun .hint { max-width: 760px; }
+.waithead { display: flex; gap: 14px; align-items: flex-start; }
+.waithead .lede { margin: 6px 0 0; }
+.spinner.big { width: 24px; height: 24px; border-width: 3px; margin-top: 6px; }
+.asked { margin-top: 18px; padding: 12px 14px; border-radius: 14px; background: color-mix(in srgb, var(--primary) 5%, var(--card)); }
+.askedlabel { display: block; font-size: 13px; font-weight: 700; color: var(--muted-foreground); margin-bottom: 4px; }
+.asked p { margin: 0; font-size: 14px; line-height: 1.6; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.ghostrows { margin-top: 18px; display: grid; }
+.ghostrow { display: grid; gap: 10px; padding: 18px 0; }
+.ghostrow + .ghostrow { border-top: 1px solid var(--border); }
+.ghostrow i { display: block; height: 12px; border-radius: 6px; background: linear-gradient(90deg, color-mix(in srgb, var(--primary) 7%, transparent) 0%, color-mix(in srgb, var(--primary) 13%, transparent) 50%, color-mix(in srgb, var(--primary) 7%, transparent) 100%); background-size: 200% 100%; animation: shimmer 1.6s ease-in-out infinite; }
+.ghostrow i:first-child { height: 16px; }
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+.list.revealing .row { animation: rise .6s var(--ease-out) both; }
+.list.revealing .row:nth-child(2) { animation-delay: .06s; } .list.revealing .row:nth-child(3) { animation-delay: .12s; }
+.list.revealing .row:nth-child(4) { animation-delay: .18s; } .list.revealing .row:nth-child(5) { animation-delay: .24s; } .list.revealing .row:nth-child(6) { animation-delay: .3s; }
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+/* ---------- list ---------- */
+.list { background: var(--card); border: 1px solid var(--border); border-radius: 18px; padding: 0; overflow: hidden; }
+.row { position: relative; display: grid; grid-template-columns: 82px minmax(0,1fr); gap: 14px; padding: 16px; transition: background-color .55s var(--ease-out); cursor: pointer; }
+.row + .row { border-top: 1px solid var(--border); }
+.row:hover { background: color-mix(in srgb,var(--primary) 2.5%,var(--card)); }
+.row.open { background: color-mix(in srgb,var(--accent) 9%,var(--card)); }
+/* Scheduled suggestions keep their content strength while showing itinerary status. */
+.row.scheduled { background: color-mix(in srgb, var(--primary) 10%, var(--card)); }
+.row.scheduled.just-scheduled { animation: settlesch 1.2s var(--ease-out); }
+@keyframes settlesch { 0% { background-color: color-mix(in srgb, var(--accent) 24%, var(--card)); } 100% { background-color: color-mix(in srgb, var(--primary) 10%, var(--card)); } }
+.row.scheduled.open { background: color-mix(in srgb, var(--accent) 12%, var(--card)); }
+.row.selecting { cursor: default; }
+.row.selecting:hover { background: var(--card); }
+.row.selecting.is-selectable { cursor: pointer; }
+.row.selecting.is-selectable:hover { background: color-mix(in srgb,var(--primary) 2.5%,var(--card)); }
+.row.selecting.is-selected { background: color-mix(in srgb,var(--accent) 8%,var(--card)); }
+.thumb { width: 82px; height: 82px; align-self: start; overflow: hidden; border-radius: 14px; background: color-mix(in srgb,var(--primary) 6%,var(--card)); border: 1px solid var(--border); }
+.thumb img { width: 100%; height: 100%; display: block; object-fit: cover; }
+.nophoto { width: 100%; height: 100%; display: grid; place-items: center; align-content: center; gap: 5px; padding: 8px; color: var(--muted-foreground); font-size: 10px; line-height: 1.25; text-align: center; }
+.rowcontent { min-width: 0; }
+.titleline { display: flex; align-items: center; gap: 8px; min-width: 0; margin-bottom: 6px; }
+.titleline h2 { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 17px; line-height: 1.4; font-weight: 700; margin: 0; }
+.chip { flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; line-height: 1; padding: 4px 8px 4px 6px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-ink); }
+.scheduledtag { padding: 4px 10px 4px 8px; border-radius: 999px; background: color-mix(in srgb, var(--primary) 14%, transparent); font-size: 13px; line-height: 1.2; font-weight: 700; color: var(--primary); display: inline-flex; align-items: center; gap: 4px; }
+.spacer { flex: 1; }
+.desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; max-width: 64ch; margin: 0; font-size: 15px; line-height: 1.55; }
+.statusrow { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; margin-top: 9px; }
+.fit { flex: 1 1 auto; min-width: 0; font-size: 13px; line-height: 1.45; color: var(--muted-foreground); margin: 0; }
+.fit span { white-space: nowrap; }
+.rowbottom { display: flex; justify-content: flex-end; align-items: center; margin-top: 10px; }
+.votes { display: flex; flex: none; gap: 6px; }
+.vote { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 51px; height: 30px; padding: 0 9px; border-radius: 999px; border: 1px solid var(--border); background: transparent; color: var(--muted-foreground); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; transition: background-color .2s var(--ease-out),color .2s var(--ease-out),border-color .2s var(--ease-out),transform .2s var(--ease-out); }
+.vote:not(:disabled):hover { border-color: color-mix(in srgb,#24372f 35%,transparent); }
+.vote:not(:disabled):active { transform: scale(.94); }
+.vote.up[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: #fffaf2; }
+.vote.down[aria-pressed="true"] { border-color: var(--primary); background: var(--primary); color: #fffaf2; }
+.vote.bump svg { animation: bump .4s var(--ease-out); }
+@keyframes bump { 35% { transform: scale(1.28) rotate(-9deg); } }
+.sidevotes { display: none; }
+.lead { display: none; }
+.check { flex: none; display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border-radius: 7px; border: 1.5px solid color-mix(in srgb,#24372f 35%,transparent); background: var(--card); color: #fffaf2; transition: background-color .2s var(--ease-out),border-color .2s var(--ease-out),transform .2s var(--ease-out); }
+.check[aria-checked="true"] { background: var(--primary); border-color: var(--primary); }
+.check svg { opacity: 0; transform: scale(.5); transition: opacity .2s var(--ease-out),transform .3s var(--ease-out); }
+.check[aria-checked="true"] svg { opacity: 1; transform: scale(1); }
+.check:disabled { opacity: .32; cursor: default; }
+.check:active:not(:disabled) { transform: scale(.9); }
+.mobilecheck { margin-left: auto; }
+/* ---------- selection bar + toast ---------- */
+.actionbar { position: fixed; z-index: 35; left: 10px; right: 10px; bottom: calc(79px + env(safe-area-inset-bottom)); display: flex; align-items: center; gap: 12px; max-width: 760px; margin: auto; padding: 10px 10px 10px 16px; border: 1px solid var(--border); border-radius: 18px; background: color-mix(in srgb, var(--card) 96%, transparent); box-shadow: 0 14px 34px -16px rgba(31,48,41,.5); transform: translateY(140%); opacity: 0; transition: transform .45s var(--ease-out), opacity .3s var(--ease-out); pointer-events: none; }
+.actionbar.show { transform: translateY(0); opacity: 1; pointer-events: auto; }
+.bulkcopy { flex: 1; min-width: 0; display: grid; gap: 2px; font-size: 14px; line-height: 1.4; font-weight: 700; font-variant-numeric: tabular-nums; }
+.bulkcopy small { color: var(--muted-foreground); font-size: 12px; font-weight: 600; line-height: 1.3; }
+.actionbar .primarybtn { flex: none; min-height: 44px; height: 44px; padding: 0 14px; font-size: 15px; box-shadow: none; }
+.primarybtn { height: 50px; padding: 0 28px; border-radius: 999px; border: 0; background: var(--primary); color: var(--primary-foreground); font-weight: 700; font-size: 16px; white-space: nowrap; font-variant-numeric: tabular-nums; box-shadow: 0 10px 28px -10px rgba(31,48,41,.55); transition: transform .2s var(--ease-out), opacity .2s; }
+.primarybtn:disabled { opacity: .45; cursor: default; }
+.primarybtn:not(:disabled):active { transform: scale(.97); }
+.sheetfoot .primarybtn { width: 100%; height: auto; min-height: 44px; padding: 9px 18px; font-size: 15px; line-height: 1.35; white-space: normal; box-shadow: none; }
+.headside .headprimary { min-height: 44px; height: 44px; padding: 0 18px; gap: 7px; font-size: 15px; font-weight: 700; box-shadow: none; }
+.toast { position: fixed; z-index: 40; left: 50%; bottom: calc(84px + env(safe-area-inset-bottom)); display: flex; align-items: center; gap: 10px; width: max-content; max-width: calc(100vw - 24px); padding: 10px 12px; border-radius: 999px; background: var(--primary); color: var(--primary-foreground); font-weight: 700; font-size: 14px; box-shadow: 0 14px 34px -12px rgba(31,48,41,.6); transform: translate(-50%, 30px) scale(.96); opacity: 0; pointer-events: none; transition: transform .5s var(--ease-out), opacity .35s var(--ease-out); }
+.toast.show { transform: translate(-50%, 0) scale(1); opacity: 1; }
+.toast .badge { flex: none; width: 30px; height: 30px; border-radius: 50%; background: var(--accent); display: grid; place-items: center; }
+.toastmessage { min-width: 0; line-height: 1.35; white-space: normal; }
+.toastaction { flex: none; padding: 8px 4px; color: inherit; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; white-space: nowrap; pointer-events: auto; }
+.toast .badge path { stroke-dasharray: 24; stroke-dashoffset: 24; }
+.toast.show .badge path { animation: draw .5s .15s var(--ease-out) forwards; }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+.row.just-scheduled { animation: settle 1.2s var(--ease-out); }
+@keyframes settle { 0% { background-color: color-mix(in srgb, var(--accent) 18%, var(--card)); } 100% { background-color: color-mix(in srgb, var(--primary) 6%, var(--card)); } }
+
+/* ---------- place detail: bottom sheet (phone) / side panel (desktop) ---------- */
+.scrim { position: fixed; inset: 0; z-index: 50; background: rgba(31,48,41,.32); opacity: 0; pointer-events: none; transition: opacity .3s var(--ease-out); }
+.scrim.show { opacity: 1; pointer-events: auto; }
+.sheet { position: fixed; z-index: 60; left: 0; right: 0; bottom: 0; height: 84dvh; display: flex; flex-direction: column; background: var(--card); border-radius: 22px 22px 0 0; box-shadow: 0 -12px 40px -16px rgba(31,48,41,.45); transform: translateY(104%); transition: transform .45s var(--ease-out); }
+.sheet.show { transform: translateY(0); }
+.sheet .grab { width: 40px; height: 5px; border-radius: 999px; background: color-mix(in srgb, #24372f 18%, transparent); margin: 8px auto 0; flex: none; }
+.sheethead { display: flex; align-items: flex-start; gap: 12px; padding: 14px 20px 12px; flex: none; }
+.sheethead h2 { font-family: var(--font-display); font-size: 24px; line-height: 1.25; margin: 0 0 6px; }
+.sheethead p { margin: 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
+.iconbtn { flex: none; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); color: var(--foreground); padding: 0; }
+/* Fixed-height detail: header and footer stay put, the body scrolls. Edge shadows appear only when there is more to scroll. */
+.sheetbody { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 20px 20px;
+  background:
+    linear-gradient(var(--card) 30%, transparent) top / 100% 28px no-repeat local,
+    linear-gradient(transparent, var(--card) 70%) bottom / 100% 28px no-repeat local,
+    radial-gradient(farthest-side at 50% 0, rgba(31,48,41,.16), transparent) top / 100% 10px no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, rgba(31,48,41,.16), transparent) bottom / 100% 10px no-repeat scroll,
+    var(--card); }
+.detailphoto { width: 100%; aspect-ratio: 16/9; overflow: hidden; border: 1px solid var(--border); border-radius: 16px; background: color-mix(in srgb,var(--primary) 6%,var(--card)); }
+.detailphoto img { width: 100%; height: 100%; object-fit: cover; }
+.detailphoto .nophoto { font-size: 13px; }
+.sec { padding: 16px 0; }
+.sec + .sec { border-top: 1px solid var(--border); }
+.sec h3 { font-size: 13px; font-weight: 700; color: var(--muted-foreground); margin: 0 0 10px; }
+.where { display: grid; gap: 6px; font-size: 14px; line-height: 1.5; }
+.where .far { font-weight: 700; color: var(--accent-ink); }
+.maplink { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; color: var(--foreground); text-underline-offset: 3px; }
+.reasons { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+.reasons li { font-size: 15px; line-height: 1.65; }
+.cite { display: inline-block; margin-left: 4px; font-size: 12px; font-weight: 600; color: var(--muted-foreground); white-space: nowrap; }
+.notes { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; font-size: 14px; line-height: 1.55; }
+.notes li { display: grid; grid-template-columns: 18px 1fr; gap: 6px; }
+.notes li svg { margin-top: 2px; color: var(--muted-foreground); }
+.notes .unknown { color: var(--muted-foreground); }
+details.sources summary { cursor: pointer; font-size: 14px; font-weight: 600; list-style: none; display: flex; align-items: center; gap: 6px; }
+details.sources summary::-webkit-details-marker { display: none; }
+details.sources summary svg { transition: transform .25s var(--ease-out); }
+details.sources[open] summary svg { transform: rotate(90deg); }
+details.sources ul { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; font-size: 14px; }
+details.sources a { color: var(--foreground); text-underline-offset: 3px; }
+.sheetfoot { flex: none; display: flex; align-items: center; gap: 12px; padding: 12px 20px calc(12px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--card); }
+.sheetfoot .label { font-size: 13px; color: var(--muted-foreground); flex: 1; }
+.textdanger { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; border: 0; background: none; padding: 8px 0; font-size: 14px; font-weight: 600; color: #b55737; text-decoration: underline; text-underline-offset: 3px; }
+.sheetfoot.placeactions { flex-wrap: wrap; }
+.detailbuttons { flex: 1 1 250px; display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+.schedulefoot .primarybtn { width: 100%; }
+.detailadd { min-height: 44px; height: 44px; padding: 0 16px; font-size: 14px; box-shadow: none; }
+.daypicker { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 5px; padding: 4px; margin: 8px 0 10px; border: 1px solid var(--border); border-radius: 15px; background: color-mix(in srgb,var(--primary) 4%,var(--card)); }
+.daypick { min-width: 0; min-height: 54px; padding: 5px 2px; border: 0; border-radius: 11px; background: transparent; color: var(--muted-foreground); font-size: 13px; font-weight: 700; line-height: 1.2; }
+.daypick span,.daypick small { display: block; }
+.daypick small { margin-top: 3px; font-size: 11px; }
+.daypick[aria-pressed="true"] { background: var(--card); color: var(--accent-ink); box-shadow: 0 2px 8px -4px rgba(31,48,41,.25); }
+.daypick.unschedule { grid-row: span 1; }
+.confirmrow { display: none; flex-direction: column; gap: 10px; padding: 14px 20px calc(14px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: color-mix(in srgb, #b55737 7%, var(--card)); }
+.confirmrow p { margin: 0; font-size: 14px; line-height: 1.5; }
+.confirmrow .btns { display: flex; gap: 8px; justify-content: flex-end; }
+.dangerbtn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 44px; padding: 0 16px; border-radius: 999px; border: 0; background: #b55737; color: #fffaf2; font-weight: 700; font-size: 14px; }
+.sheet.confirming .sheetfoot { display: none; }
+.sheet.confirming .confirmrow { display: flex; }
+.row.open { background: color-mix(in srgb, var(--accent) 9%, var(--card)); }
+.row:not(.selecting) { cursor: pointer; }
+.row:not(.selecting):hover h2 { text-decoration: underline; text-underline-offset: 4px; text-decoration-thickness: 1px; }
+
+/* ---------- desktop ---------- */
+@media (min-width: 1024px) {
+  .scrim { background: rgba(31,48,41,.14); }
+  .sheet { left: auto; top: 20px; right: 20px; bottom: 20px; width: 460px; height: auto; border-radius: 22px; transform: translateX(calc(100% + 40px)); box-shadow: -16px 0 48px -24px rgba(31,48,41,.5); }
+  .actionbar .primarybtn { padding-inline: 18px; }
+  .sheet.show { transform: translateX(0); }
+  .sheet .grab { display: none; }
+  .sheethead { padding: 22px 24px 12px; }
+  .sheetbody { padding: 4px 24px 24px; }
+  .sheetfoot, .confirmrow { padding-left: 24px; padding-right: 24px; border-radius: 0 0 22px 22px; }
+  .app { grid-template-columns: 272px 1fr; gap: 24px; padding: 20px; }
+  .topbar, .bottomnav { display: none; }
+  .rail { display: flex; flex-direction: column; gap: 8px; position: sticky; top: 20px; height: calc(100vh - 40px); padding: 16px; border-radius: 22px; background: color-mix(in srgb, var(--card) 55%, transparent); border: 1px solid var(--border); }
+  .rail .switcher { flex: none; margin-bottom: 18px; }
+  .rail a { display: flex; align-items: center; gap: 10px; height: 46px; padding: 0 12px; border-radius: 14px; font-weight: 700; color: var(--foreground); text-decoration: none; }
+  .rail a[aria-current="page"] { color: var(--accent-ink); background: var(--card); }
+  main { padding: 0 0 120px; }
+  .segments { max-width: 480px; }
+  .list { padding: 0; }
+  .row { grid-template-columns: 96px minmax(0,1fr) auto; align-items: center; gap: 22px; padding: 19px 28px; }
+  .row.selecting { grid-template-columns: 24px 96px minmax(0,1fr) auto; }
+  .row.selecting .lead { display: grid; place-items: center; }
+  .thumb { width: 96px; height: 88px; }
+  .mobilecheck { display: none; }
+  .rowbottom { display: none; }
+  .sidevotes { display: flex; }
+  .titleline h2 { font-size: 18px; }
+  .statusrow { margin-top: 7px; }
+  .actionbar { left: calc(50% + 148px); right: auto; bottom: 28px; width: min(720px, calc(100vw - 360px)); margin: 0; transform: translate(-50%, 140%); }
+  .actionbar.show { transform: translate(-50%, 0); }
+  .toast { left: calc(50% + 148px); bottom: 28px; }
+}
+@media (max-width: 599.98px) {
+  .pagehead { align-items: flex-start; flex-wrap: wrap; }
+  .headside { width: 100%; }
+  .headside > *, .headside .headprimary, .headside .ghost { flex: 1; padding-inline: 10px; }
+  .pagehead h1 { flex: 1 0 100%; }
+  .pagehead.is-selecting h1 { flex: 1 1 auto; }
+  .pagehead.is-selecting .headside { width: auto; margin-left: auto; }
+  .pagehead.is-selecting .headside > * { flex: none; }
+  .detailbuttons { flex-basis: 100%; }
+  .row { padding: 15px 13px; gap: 11px; }
+  .titleline { align-items: flex-start; }
+  .titleline h2 { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  .chip { margin-top: 2px; }
+}
+@media (max-width: 1023.98px) { .sidevotes { display: none !important; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail" aria-label="主要導覽">
+    <button class="switcher" type="button"><span>京都 10/21–10/26</span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/></svg></button>
+    <a href="today.html"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/></svg>今天</a>
+    <a href="plan.html"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg>行程</a>
+    <a href="pocket-v2.html" aria-current="page"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></svg>地點</a>
+    <a href="#"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>成員</a>
+  </aside>
+
+  <div>
+    <header class="topbar">
+      <button class="switcher" type="button"><span>京都 10/21–10/26</span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/></svg></button>
+      <span class="dot" role="img" aria-label="即時更新已連線"></span>
+    </header>
+    <main>
+      <div class="segments" role="tablist" aria-label="地點">
+        <a role="tab" aria-selected="false" href="pocket-v2.html">口袋名單</a>
+        <a role="tab" aria-selected="true" href="index-v2.html" aria-current="page">AI 建議</a>
+      </div>
+      <div class="pagehead" id="pagehead">
+        <h1 id="pagetitle">AI 建議</h1>
+        <div class="headside" id="headside"></div>
+      </div>
+      <p class="subhead" id="subhead"></p>
+      <div id="banner"></div>
+      <div class="list" id="list"></div>
+      <div id="rejectedbox"></div>
+    </main>
+  </div>
+
+  <nav class="bottomnav" aria-label="主要導覽">
+    <a href="today.html"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/></svg>今天</a>
+    <a href="plan.html"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg>行程</a>
+    <a href="pocket-v2.html" aria-current="page"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></svg>地點</a>
+    <a href="#"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>成員</a>
+  </nav>
+</div>
+
+<div class="actionbar" id="actionbar">
+  <div class="bulkcopy"><span id="bulkcount"></span><small id="bulkhint"></small></div>
+  <button class="primarybtn iconaction" id="chooseDate" type="button">選擇日期</button>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite">
+  <span class="badge"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fffaf2" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></span>
+  <span class="toastmessage" id="toasttext"></span>
+  <a class="toastaction" id="toastaction" href="plan.html" hidden>查看行程</a>
+</div>
+<div class="scrim" id="scrim"></div>
+<section class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheettitle" hidden></section>
+
+<script>
+const icon = {
+  up: '<path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/>',
+  down: '<path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
+  calendarPlus: '<path d="M16 2v4M8 2v4M3 10h18"/><path d="M19 14v6M16 17h6"/><path d="M21 12V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h8"/>',
+  calendarCheck: '<path d="M16 2v4M8 2v4M3 10h18"/><path d="M21 12V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h8"/><path d="m16 19 2 2 4-4"/>',
+  image: '<rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
+  x: '<path d="M18 6 6 18M6 6l12 12"/>',
+  ban: '<circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/>',
+  undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5A5.5 5.5 0 0 1 14.5 20H11"/>',
+  rotate: '<path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/>',
+  loader: '<path d="M21 12a9 9 0 1 1-6.219-8.56"/>',
+  sparkles: '<path d="m12 3-1.912 5.813a2 2 0 0 1-1.272 1.272L3 12l5.813 1.912a2 2 0 0 1 1.272 1.272L12 21l1.912-5.813a2 2 0 0 1 1.272-1.272L21 12l-5.813-1.912a2 2 0 0 1-1.272-1.272L12 3Z"/><path d="M5 3v4M3 5h4M19 17v4M17 19h4"/>',
+  send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
+  pencilLine: '<path d="M13.5 6.5 17.5 10.5M4 20h4l10.5-10.5a2.828 2.828 0 1 0-4-4L4 16v4Z"/><path d="M12 20h9"/>',
+  arrowLeft: '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+  temple: '<path d="M10 18v-7"/><path d="M11.12 2.198a2 2 0 0 1 1.76.006l7.866 3.847c.476.233.31.949-.22.949H3.474c-.53 0-.695-.716-.22-.949z"/><path d="M14 18v-7"/><path d="M18 18v-7"/><path d="M3 22h18"/><path d="M6 18v-7"/>',
+  market: '<path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4"/><path d="M2 7h20"/><path d="M22 7v3a2 2 0 0 1-2 2a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 16 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 12 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 8 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 4 12a2 2 0 0 1-2-2V7"/>',
+  park: '<path d="M10 10v.2A3 3 0 0 1 8.9 16H5a3 3 0 0 1-1-5.8V10a3 3 0 0 1 6 0Z"/><path d="M7 16v6"/><path d="M13 19v3"/><path d="M12 19h8.3a1 1 0 0 0 .7-1.7L18 14h.3a1 1 0 0 0 .7-1.7L16 9h.2a1 1 0 0 0 .8-1.7L13 3l-1.4 1.5"/>',
+  trail: '<path d="M4 16v-2.38C4 11.5 2.970 10.5 3 8c.03-2.72 1.49-6 4.5-6C9.37 2 10 3.8 10 5.5c0 3.11-2 5.66-2 8.68V16a2 2 0 1 1-4 0Z"/><path d="M20 20v-2.38c0-2.12 1.03-3.12 1-5.62-.03-2.72-1.49-6-4.5-6C14.63 6 14 7.8 14 9.5c0 3.11 2 5.66 2 8.68V20a2 2 0 1 0 4 0Z"/><path d="M16 17h4"/><path d="M4 13h4"/>',
+};
+const svg = (p, s = 16, w = 2) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const kinds = { 神社: "temple", 佛寺: "temple", 市場: "market", 公園: "park", 步道: "trail" };
+
+// Illustrative data. 錦市場、舟屋之里公園、清水寺: name, area, coordinates, reasons, cautions and source names come from the test trip's real AI output.
+// 伏見稻荷大社、嵐山竹林小徑 and every vote count are invented for the prototype.
+const LODGING = { name: "住宿（京都車站附近）", lat: 34.9858, lng: 135.7588 }; // illustrative lodging
+const places = [
+  { id: 1, name: "伏見稻荷大社", kind: "神社", area: "京都市伏見區", lat: 34.9671, lng: 135.7727, what: "以千本鳥居聞名的神社，沿山道可以一路走進成排的朱紅鳥居。", fit: ["寺廟", "拍照"], yes: 2, no: 0, mine: "yes", day: "10/22",
+    reasons: [["以千本鳥居聞名的神社，沿山道可以一路走進成排的朱紅鳥居。", "示意來源"]], cautions: ["往山頂的完整路線較長，體力負擔較大"], unknowns: [], sources: ["示意來源"] },
+  { id: 2, name: "錦市場", kind: "市場", area: "京都市中京區", lat: 35.0050, lng: 135.7647, what: "被稱為「京都的廚房」，可以集中吃到卵燒、湯葉、京野菜等京都代表性食物。", fit: ["必吃的食物", "京都在地小吃"], yes: 1, no: 1, mine: null,
+    reasons: [["如果你想找「必吃的食物」，錦市場是最穩的答案：這裡被稱為「京都的廚房」，可以集中吃到卵燒、湯葉、京野菜、魚類小吃等京都代表性食物。", "kyoto.travel"]], cautions: ["不能邊走邊吃，較適合邊買邊在店前或店內吃", "觀光客很多，熱門時段會擁擠"], unknowns: ["各攤位營業時間不一，需逐店確認"], sources: ["Google Maps", "Kyoto/Central (Wikivoyage)", "kyoto.travel"] },
+  { id: 3, name: "舟屋之里公園", kind: "公園", area: "京都府伊根町", lat: 35.6745, lng: 135.2911, what: "伊根舟屋觀光的代表性據點之一，可以把舟屋景觀和海邊氣氛一起看。", fit: ["伊根舟屋"], yes: 1, no: 0, mine: null,
+    reasons: [["這裡是伊根舟屋觀光的代表性據點之一，適合把舟屋景觀和海邊氣氛一起看。", "ine-kankou.jp"], ["若你這次重點是伊根舟屋，這個地方和伊根町觀光資源連動性高，符合保留伊根行程的方向。", "ine-kankou.jp"]], cautions: ["它比較像伊根行程中的樞紐點，不是寺廟或單一美食店。"], unknowns: [], sources: ["Google Maps", "ine-kankou.jp"] },
+  { id: 4, name: "嵐山竹林小徑", kind: "步道", area: "京都市右京區", lat: 35.0170, lng: 135.6713, what: "兩側高聳竹林夾道的散步路線，早上人少時最安靜。", fit: ["散步", "拍照"], yes: 0, no: 1, mine: null,
+    reasons: [["兩側高聳竹林夾道的散步路線，早上人少時最安靜。", "示意來源"]], cautions: ["白天人潮多，拍照不容易避開人群"], unknowns: [], sources: ["示意來源"] },
+  { id: 5, name: "清水寺", kind: "佛寺", area: "京都市東山區", lat: 34.9947, lng: 135.7847, what: "京都最具代表性的寺院之一，辨識度和完成度都很高。", fit: ["寺廟"], yes: 0, no: 1, mine: null, photo: "photo-assets/kiyomizu.jpg",
+    reasons: [["清水寺是京都最具代表性的寺院之一，官方觀光頁也有完整介紹。", "ja.kyoto.travel"], ["如果你這次只想挑少數經典寺院，清水寺的辨識度和完成度都很高。", "ja.kyoto.travel"]], cautions: ["人氣很高，體驗感通常比小眾寺院更熱鬧。"], unknowns: [], sources: ["Google Maps", "ja.kyoto.travel", "京都府 (Wikivoyage)"] },
+  // Already excluded earlier (invented), so the 「不再推薦的地點」 section has something to restore.
+  { id: 7, name: "金閣寺", kind: "佛寺", area: "京都市北區", lat: 35.0394, lng: 135.7292, what: "外牆貼滿金箔的舍利殿，倒映在鏡湖池上。", fit: ["寺廟"], yes: 0, no: 2, mine: "no", rejected: true,
+    reasons: [["外牆貼滿金箔的舍利殿，倒映在鏡湖池上。", "示意來源"]], cautions: ["離市中心較遠，假日人潮多"], unknowns: [], sources: ["示意來源"] },
+  // Long-content case (invented): proves the 2-line "…" preview and the scrolling fixed-height detail.
+  { id: 6, name: "東福寺", kind: "佛寺", area: "京都市東山區", lat: 34.9764, lng: 135.7737, what: "京都五山之一的禪宗大寺，境內的通天橋橫跨楓樹溪谷，秋天整片紅葉從橋下一路延伸到方丈庭園；方丈四周的八相庭是重森三玲的代表作，以苔蘚與石塊組成的市松圖樣非常適合慢慢走、慢慢看，也適合想避開清水寺人潮、但仍想看經典禪寺的人。", fit: ["寺廟", "紅葉", "庭園"], yes: 2, no: 0, mine: null, photo: "photo-assets/tofukuji.jpg",
+    reasons: [
+      ["京都五山之一的禪宗大寺，伽藍規模在京都數一數二，三門是日本現存最古老的禪宗三門。", "示意來源"],
+      ["境內的通天橋橫跨楓樹溪谷，秋天整片紅葉從橋下一路延伸到方丈庭園，是京都最具代表性的賞楓地點之一。", "示意來源"],
+      ["方丈四周的八相庭是重森三玲的代表作，以苔蘚與石塊組成的市松圖樣，非常適合慢慢走、慢慢看。", "示意來源"],
+      ["比起清水寺，參觀動線集中在幾個區域，對想避開人潮、但仍想看經典禪寺的人比較輕鬆。", "示意來源"],
+      ["從京都車站搭 JR 奈良線一站即到，可以和伏見稻荷大社排在同一個上午或下午。", "示意來源"],
+    ],
+    cautions: ["紅葉季（11 月中下旬）通天橋禁止拍照停留，人潮會在橋上排隊前進", "方丈庭園與通天橋分開收費", "境內坡道與階梯多，推嬰兒車或行動不便者需要多留時間"],
+    unknowns: ["10 月下旬紅葉是否已經開始轉色", "旅行期間是否有特別公開的塔頭"], sources: ["示意來源"] },
+];
+// Sort once on load (likes desc, dislikes asc); never re-sort while the member is voting.
+places.sort((a, b) => (b.yes - a.yes) || (a.no - b.no) || (a.id - b.id));
+
+const params = new URLSearchParams(location.search);
+const demoState = params.get("state") || "default";
+const isTripCreator = params.get("role") !== "member";
+let selecting = false;
+let scheduleIds = [];
+let selectedDay = null;
+let changingDate = false;
+let rejectedOpen = false;
+document.addEventListener("toggle", (e) => { if (e.target.matches?.("details.rejected")) rejectedOpen = e.target.open; }, true);
+const selected = new Set();
+let justScheduled = new Set();
+const $ = (id) => document.getElementById(id);
+
+// One row skeleton for every state: content never dims; only the controls change affordance.
+function voteButtons(p, side = false) {
+  return `<div class="votes${side ? " sidevotes" : ""}" aria-label="對「${p.name}」表態">
+    <button class="vote up" type="button" data-vote="yes" data-id="${p.id}" aria-pressed="${p.mine === "yes"}" aria-label="想去，${p.yes} 人">${svg(icon.up, 15)}<span>${p.yes}</span></button>
+    <button class="vote down" type="button" data-vote="no" data-id="${p.id}" aria-pressed="${p.mine === "no"}" aria-label="不想去，${p.no} 人">${svg(icon.down, 15)}<span>${p.no}</span></button>
+  </div>`;
+}
+function checkbox(p, where = "mobile") {
+  return `<button class="check ${where === "mobile" ? "mobilecheck" : ""}" type="button" role="checkbox" data-select="${p.id}" aria-checked="${selected.has(p.id)}" aria-label="選擇 ${p.name}" ${p.day ? "disabled" : ""}>${svg(icon.check, 16, 3)}</button>`;
+}
+function thumb(p, detail = false) {
+  const cls = detail ? "detailphoto" : "thumb";
+  return p.photo
+    ? `<div class="${cls}"><img src="${p.photo}" alt="${p.name}"></div>`
+    : `<div class="${cls}"><div class="nophoto">${svg(icon.image, detail ? 26 : 20)}<span>尚無可用照片</span></div></div>`;
+}
+const days = [["10/21","週三"],["10/22","週四"],["10/23","週五"],["10/24","週六"],["10/25","週日"],["10/26","週一"]];
+function dayLabel(day) {
+  return `${day}（${days.find((d) => d[0] === day)?.[1] || ""}）`;
+}
+// ---------- research brief ----------
+// Real brief text from the test trip; ?state=empty shows the first-run page instead.
+let brief = "幫我規劃一波 我們大概21號晚上11點到大阪 會入住機場飯店 接著隔天會直接去京都 26號會從京都回大阪再回台灣 這次去京都我主要想去近郊的區域 伊根 東福寺 永安堂 西芳寺 幫我規劃最適合的必去的寺廟 必吃的食物 必看的風景 在這個季節";
+let firstRun = demoState === "empty";
+// A brand-new trip: nobody has voted and nothing is scheduled yet; results arrive in the AI's order.
+if (firstRun) {
+  places.forEach((p) => { p.yes = 0; p.no = 0; p.mine = null; p.day = null; });
+  places.sort((a, b) => a.id - b.id);
+  brief = ""; // a brand-new trip has no brief yet
+}
+let researching = false;
+// Questions now arrive WITH candidate answers and what each answer changes in the search (backend contract:
+// { text, options: [{ id, label, effect }] }). The member picks one, writes their own, or says 不知道.
+// Question 1 is real (test trip 「Kyoto English check」); options/effects are written for the prototype.
+// choice: option id | "custom" | "unknown" | null (null at submit = implicit 不知道).
+const questions = [
+  { id: 1, text: "你們想把行程偏向哪一種？", done: false, choice: null, custom: "", error: false,
+    options: [
+      { id: "city", label: "京都市區為主，伊根一日往返", effect: "會搜尋：京都市區，以及少量適合一日往返的伊根景點。" },
+      { id: "coast", label: "京都＋海之京都一起排", effect: "會搜尋：京都市區、伊根、天橋立與舞鶴一帶的景點。" },
+    ],
+    when: (b) => b.includes("伊根") && b.includes("京都") },
+  { id: 2, text: "想吃哪一類的京都美食？", done: false, choice: null, custom: "", error: false,
+    options: [
+      { id: "kaiseki", label: "正式的懷石、湯豆腐", effect: "會搜尋：需要預約的懷石料理與湯豆腐老店。" },
+      { id: "street", label: "邊走邊吃的在地小吃", effect: "會搜尋：錦市場一帶的市場小吃與甜點店。" },
+      { id: "mix", label: "都想試試看", effect: "會搜尋：正式餐廳和市場小吃各挑幾家。" },
+    ],
+    when: (b) => /吃|美食|食物/.test(b) && !/懷石|拉麵|湯豆腐|甜點|居酒屋|都可/.test(b) },
+];
+let questionsEditAll = false;
+let planning = false;   // AI is reading the brief (before any place search)
+let gate = null;        // ids of questions asked before this search starts
+let unclear = false;    // AI could not tell what to look for: nothing is searched
+function planBrief() {
+  return questions.filter((q) => !q.done && q.when(brief)).map((q) => q.id);
+}
+// Prototype stand-in for the AI's judgement: a brief with no place, activity, food or travel word is unreadable.
+// The real backend must return an explicit "unclear" result from the planning step instead of guessing.
+function briefIsUnclear(b) {
+  return !/[京都阪伊根寺神社廟宮城園山川海島湖橋街町市景點逛走看吃喝食飯麵茶甜溫泉紅葉楓櫻購買拍照散步親子長輩老人小孩住旅行程天晚早午]/.test(b);
+}
+// Every search goes through here: read the brief first, stop if it can't be understood, ask only if needed, then search once.
+function requestResearch() {
+  planning = true; gate = null; unclear = false; failure = null;
+  render();
+  setTimeout(() => {
+    planning = false;
+    if (briefIsUnclear(brief)) {
+      unclear = true;
+      render();
+      if (!firstRun) openSheet("brief", null);
+      ($("brief-first") ?? $("brief-edit"))?.focus();
+      return;
+    }
+    const open = planBrief();
+    if (!open.length) { startResearch(); return; }
+    gate = open;
+    if (firstRun) render(); else { render(); openSheet("questions", null); }
+  }, 1400);
+}
+function gateQuestions() { return questionsEditAll ? questions.filter((q) => q.done) : questions.filter((q) => gate?.includes(q.id)); }
+function answerText(q) {
+  if (q.choice === "custom") return q.custom.trim();
+  return q.options.find((o) => o.id === q.choice)?.label ?? "不知道";
+}
+// Returns false (and marks the question) when "其他" was chosen but left empty.
+function validateAnswers() {
+  let ok = true;
+  gateQuestions().forEach((q) => { q.error = q.choice === "custom" && !q.custom.trim(); if (q.error) ok = false; });
+  return ok;
+}
+function answerGate() {
+  // Questions left unchosen count as 「不知道」: the member is never blocked, and the AI never guesses.
+  gateQuestions().forEach((q) => { if (!q.choice) q.choice = "unknown"; q.done = true; });
+  gate = null;
+}
+function questionFields(list) {
+  const row = (q, value, label, effect, extra = "") => `<label class="opt${q.choice === value ? " on" : ""}">
+      <input type="radio" name="q${q.id}" value="${value}" data-q="${q.id}" ${q.choice === value ? "checked" : ""}>
+      <span class="optbody"><span class="optlabel">${label}</span>${effect ? `<span class="opteffect">${effect}</span>` : ""}${extra}</span></label>`;
+  return list.map((q) => `<fieldset class="qitem" data-q="${q.id}">
+      <legend class="qtext">${q.text}</legend>
+      <div class="optgroup">
+        ${q.options.map((o) => row(q, o.id, o.label, o.effect)).join("")}
+        ${row(q, "custom", "其他，我想自己說", "", q.choice === "custom" ? `<span class="customwrap"><span class="customlabel">補充你想要的安排</span>
+          <textarea class="qanswer" data-q="${q.id}" rows="3" placeholder="例如：京都住 4 晚，再到伊根住 1 晚">${q.custom}</textarea>
+          ${q.error ? `<span class="qerror" role="alert">請寫下想補充的內容，或改選「不知道」。</span>` : ""}</span>` : "")}
+        ${row(q, "unknown", "不知道，請 AI 不要猜", "這題不會加入搜尋條件。")}
+      </div>
+    </fieldset>`).join("");
+}
+function briefForm(id, cta) {
+  const alert = unclear ? `<div class="unclear" role="alert">${svg('<circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>', 18)}
+      <div><strong>AI 看不懂這段需求，所以還沒開始找。</strong>
+      <span>請寫下這趟想去的地方、想做的事，或想吃什麼。例如：「想在京都看紅葉、吃湯豆腐，長輩同行不想走太多階梯」。</span></div></div>` : "";
+  return `${alert}<label class="fieldlabel" for="${id}">想找什麼樣的地點？</label>
+    <textarea class="brief${unclear ? " invalid" : ""}" id="${id}" rows="6" placeholder="例如：想看紅葉、吃在地小吃，長輩同行不想走太多階梯" ${unclear ? 'aria-invalid="true"' : ""}>${brief}</textarea>
+    <p class="hint">${svg('<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>', 15)}<span>AI 只會提出建議，要不要排入行程由你們決定。</span></p>`;
+}
+function retryControl(id, className) {
+  const retryIcon = svg(retrying ? icon.loader : icon.rotate, 18).replace("<svg", `<svg${retrying ? ' class="loader-icon"' : ""}`);
+  return `<button class="${className} iconaction" type="button" id="${id}" ${retrying ? 'disabled aria-busy="true"' : ""}>${retryIcon}<span>${retrying ? "重新尋找中…" : "再試一次"}</span></button>`;
+}
+function render() {
+  const pending = places.filter((p) => !p.mine && !p.rejected).length;
+  const briefBtn = `<button class="ghost iconghost" type="button" id="openbrief" aria-label="修改需求">${svg(icon.pencilLine, 16)}<span>修改需求</span></button>`;
+  $("pagehead").classList.toggle("is-selecting", selecting);
+  $("pagetitle").textContent = selecting ? `已選 ${selected.size} 個` : "AI 建議";
+  $("headside").innerHTML = firstRun ? "" : selecting
+    ? `<button class="ghost iconghost" type="button" id="cancel">${svg(icon.x, 16)}<span>取消</span></button>`
+    : `${isTripCreator ? `<button class="primarybtn headprimary iconaction" type="button" id="select">${svg(icon.calendarPlus, 16)}<span>排入行程</span></button>` : ""}${briefBtn}`;
+  $("subhead").textContent = !isTripCreator
+    ? "由旅程建立者把 AI 建議排入行程；大家都能投讚或倒讚。"
+    : firstRun || selecting ? "" : pending ? `你還有 ${pending} 個沒選` : "你都選好了";
+  $("banner").innerHTML = firstRun ? ""
+    : failure ? failureBox(failure, false)
+    : planning ? `<div class="banner" role="status"><span class="spinner" aria-hidden="true"></span><span>AI 正在讀你的需求…</span></div>`
+    : researching === "busy" ? `<div class="banner" role="status"><span class="spinner" aria-hidden="true"></span><span>其他成員剛剛已經開始找了，結果出來會直接出現在這裡。</span></div>`
+    : researching ? `<div class="banner" role="status"><span class="spinner" aria-hidden="true"></span><span>AI 正在依照新的需求找地點，目前的建議會先保留。</span></div>` : "";
+  if (firstRun && failure) {
+    $("list").className = "firstrun";
+    $("list").innerHTML = `${failureBox(failure, true)}
+      <div class="asked"><span class="askedlabel">你的需求</span><p>${brief}</p></div>
+      <div class="gateactions">${FAILURE_COPY[failure].retry ? retryControl("retryresearch2", "primarybtn") : ""}
+        <button class="linkbtn iconaction" type="button" id="editafterfail">${svg(icon.pencilLine, 16)}<span>修改需求</span></button></div>`;
+    renderSheet();
+    return;
+  }
+  if (firstRun && planning) {
+    $("list").className = "firstrun waiting";
+    $("list").innerHTML = `<div class="waithead" role="status"><span class="spinner big" aria-hidden="true"></span><div><h2>AI 正在讀你的需求</h2>
+        <p class="lede">先確認有沒有需要問你的地方，再開始找地點。</p></div></div>
+      <div class="asked"><span class="askedlabel">你的需求</span><p>${brief}</p></div>`;
+    renderSheet();
+    return;
+  }
+  if (firstRun && gate) {
+    const list = gateQuestions();
+    $("list").className = "firstrun";
+    $("list").innerHTML = `<h2>AI 想先確認 ${list.length} 件事</h2>
+      <p class="lede">開始找之前先問清楚，這會決定 AI 去哪裡找、找什麼。不確定的按「不知道」，AI 不會自己猜。</p>
+      <div style="display:grid;gap:22px;margin-top:6px">${questionFields(list)}</div>
+      <div class="gateactions"><button class="primarybtn iconaction" type="button" id="submitanswers">${svg(icon.send, 18)}<span>送出並開始找</span></button>
+        <button class="linkbtn iconaction" type="button" id="backtobrief">${svg(icon.pencilLine, 16)}<span>回去改需求</span></button></div>
+      <p class="hint">沒有選的題目會當作「不知道」，AI 不會猜。</p>`;
+    renderSheet();
+    return;
+  }
+  if (firstRun && researching) {
+    // First research with nothing to keep: the card itself becomes the waiting state,
+    // echoes what was asked, and previews the shape of the results that are coming.
+    $("list").className = "firstrun waiting";
+    $("list").innerHTML = `<div class="waithead" role="status"><span class="spinner big" aria-hidden="true"></span><div><h2>AI 正在找地點</h2>
+        <p class="lede">會查證每個地點並附上來源，找到後會直接出現在這裡。你可以先去看別的分頁。</p></div></div>
+      <div class="asked"><span class="askedlabel">你的需求</span><p>${brief}</p></div>
+      <div class="ghostrows" aria-hidden="true">${[0, 1, 2].map(() => `<div class="ghostrow"><i style="width:38%"></i><i style="width:92%"></i><i style="width:64%"></i></div>`).join("")}</div>`;
+    renderSheet();
+    return;
+  }
+  if (firstRun) {
+    $("list").className = "firstrun";
+    $("list").innerHTML = `<h2>讓 AI 幫你們找地點</h2>
+      <p class="lede">寫下這趟想要什麼，AI 會找出合適的景點、說明原因並附上來源。大家再用讚和倒讚表達想不想去。</p>
+      ${briefForm("brief-first")}
+      <button class="primarybtn iconaction" type="button" id="startresearch" ${brief.trim() ? "" : "disabled"}>${svg(icon.sparkles, 18)}<span>開始找地點</span></button>`;
+    renderSheet();
+    return;
+  }
+  $("list").className = revealing ? "list revealing" : "list";
+
+  $("list").innerHTML = places.filter((p) => !p.rejected).map((p) => {
+    const canSelect = !p.day;
+    const scheduledTag = p.day ? `<span class="scheduledtag">${svg(icon.calendarCheck, 15)}已排入 ${dayLabel(p.day)}</span>` : "";
+    return `<article class="row${p.day ? " scheduled" : ""}${selecting ? " selecting" : ""}${canSelect ? " is-selectable" : ""}${selected.has(p.id) ? " is-selected" : ""}${justScheduled.has(p.id) ? " just-scheduled" : ""}${openId === p.id ? " open" : ""}" data-row="${p.id}" ${selecting ? "" : `tabindex="0" aria-haspopup="dialog"`}>
+      <div class="lead">${selecting ? checkbox(p, "desktop") : ""}</div>
+      ${thumb(p)}
+      <div class="rowcontent">
+        <div class="titleline"><h2>${p.name}</h2><span class="chip">${p.kind}</span><span class="spacer"></span>${selecting ? checkbox(p) : ""}</div>
+        <p class="desc">${p.what}</p>
+        <div class="statusrow">${scheduledTag}<p class="fit">符合：${p.fit.map((f) => `<span>${f}</span>`).join("・")}</p></div>
+        <div class="rowbottom">${voteButtons(p)}</div>
+      </div>
+      ${voteButtons(p, true)}
+    </article>`;
+  }).join("");
+  // Excluded places stay findable and reversible: one person's 「不要再推薦」 affects the whole family.
+  const rejected = places.filter((p) => p.rejected);
+  $("rejectedbox").innerHTML = rejected.length && !selecting ? `<details class="rejected" ${rejectedOpen ? "open" : ""}>
+      <summary>${svg('<path d="m9 18 6-6-6-6"/>', 16)}不再推薦的地點（${rejected.length}）</summary>
+      <p class="rejectedhint">AI 之後的研究不會再推薦這些地點。恢復後會回到上面的清單。</p>
+      <ul>${rejected.map((p) => `<li><span class="rname">${p.name}</span><span class="chip">${p.kind}</span><span class="spacer"></span>
+        <button class="ghost iconghost" type="button" data-restore="${p.id}">${svg(icon.undo, 16)}<span>恢復推薦</span></button></li>`).join("")}</ul></details>` : "";
+
+  const bar = $("actionbar");
+  bar.classList.toggle("show", selecting);
+  $("bulkcount").textContent = `已選 ${selected.size} 個`;
+  $("bulkhint").textContent = "";
+  $("chooseDate").disabled = selected.size === 0;
+  justScheduled = new Set();
+  renderSheet();
+}
+
+// ---------- place detail ----------
+let openId = null;
+let confirming = false;
+function km(a, b) {
+  const R = 6371, rad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * rad, dLng = (b.lng - a.lng) * rad;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function openSchedule(ids, change = false, trigger = null) {
+  scheduleIds = [...ids];
+  selectedDay = null;
+  changingDate = change;
+  if (openId !== null) {
+    openId = "schedule";
+    renderSheet();
+    $("sheettitle")?.focus({ preventScroll: true });
+  } else {
+    openSheet("schedule", trigger);
+  }
+}
+function renderSchedule() {
+  const chosen = places.filter((p) => scheduleIds.includes(p.id));
+  const names = chosen.map((p) => p.name).join("、");
+  const single = chosen.length === 1;
+  const label = selectedDay && selectedDay !== "none" ? dayLabel(selectedDay) : null;
+  let buttonLabel = "先選擇日期";
+  if (selectedDay === "none") buttonLabel = `將「${chosen[0]?.name || ""}」設為先不安排`;
+  else if (label) buttonLabel = single ? `將「${chosen[0].name}」排入 ${label}` : `將 ${chosen.length} 個地點排入 ${label}`;
+  $("sheet").classList.remove("confirming");
+  $("sheet").innerHTML = `<div class="grab" aria-hidden="true"></div>
+    <div class="sheethead"><div style="flex:1;min-width:0"><h2 id="sheettitle" tabindex="-1">排入行程</h2><p>${names}</p></div>
+      <button class="iconbtn" type="button" data-close aria-label="關閉">${svg(icon.x, 20)}</button></div>
+    <div class="sheetbody"><div class="sec" style="padding-top:4px"><h3>選擇日期</h3>
+      <div class="daypicker" aria-label="排入哪一天">${changingDate ? `<button class="daypick unschedule" type="button" data-day="none" aria-pressed="${selectedDay === "none"}"><span>先不安排</span><small>保留在行程</small></button>` : ""}${days.map((day) => `<button class="daypick" type="button" data-day="${day[0]}" aria-pressed="${selectedDay === day[0]}"><span>${day[0]}</span><small>${day[1]}</small></button>`).join("")}</div>
+    </div></div>
+    <div class="sheetfoot schedulefoot"><button class="primarybtn" id="confirmSchedule" type="button" ${selectedDay ? "" : "disabled"}>${buttonLabel}</button></div>`;
+}
+function confirmSchedule() {
+  if (!selectedDay) return;
+  const chosen = places.filter((p) => scheduleIds.includes(p.id));
+  if (selectedDay === "none") {
+    chosen.forEach((p) => { p.day = null; });
+    closeSheet();
+    showToast(`已將「${chosen[0].name}」設為先不安排`);
+    return;
+  }
+  chosen.forEach((p) => { p.day = selectedDay; });
+  const label = dayLabel(selectedDay);
+  justScheduled = new Set(chosen.map((p) => p.id));
+  selected.clear();
+  selecting = false;
+  const sheet = $("sheet");
+  sheet.classList.remove("show");
+  $("scrim").classList.remove("show");
+  openId = null;
+  setTimeout(() => { if (openId === null) sheet.hidden = true; }, 450);
+  render();
+  showToast(`已將 ${chosen.length} 個地點排入 ${label}`, true);
+}
+function renderSheet() {
+  const sheet = $("sheet");
+  if (openId === "schedule") {
+    renderSchedule();
+    return;
+  }
+  if (openId === "questions") {
+    sheet.classList.remove("confirming");
+    const list = gateQuestions();
+    const editing = questionsEditAll;
+    sheet.innerHTML = `
+      <div class="grab" aria-hidden="true"></div>
+      <div class="sheethead"><div style="flex:1;min-width:0"><h2 id="sheettitle" tabindex="-1">${editing ? "修改回答" : `AI 想先確認 ${list.length} 件事`}</h2>
+        <p class="sheetsub">${editing ? "" : "開始找之前先問清楚。"}你的選擇會改變 AI 搜尋的地區與地點類型；沒有選的題目會當作「不知道」。</p></div>
+        <button class="iconbtn" type="button" data-close aria-label="取消">${svg('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>', 18)}</button></div>
+      <div class="sheetbody"><div class="sec" style="padding-top:4px;display:grid;gap:22px">${questionFields(list)}</div></div>
+      <div class="sheetfoot"><span class="label">${editing ? "送出後，AI 會依新的回答重新找一次。" : "送出後，AI 會照你的回答開始找。"}</span><button class="primarybtn small iconaction" type="button" id="submitanswers">${svg(icon.send, 18)}<span>${editing ? "送出並更新建議" : "送出並開始找"}</span></button></div>`;
+    return;
+  }
+  if (openId === "brief") {
+    sheet.classList.remove("confirming");
+    const answered = questions.filter((q) => q.done);
+    sheet.innerHTML = `
+      <div class="grab" aria-hidden="true"></div>
+      <div class="sheethead"><div style="flex:1;min-width:0"><h2 id="sheettitle" tabindex="-1">你的需求</h2></div>
+        <button class="iconbtn" type="button" data-close aria-label="關閉">${svg('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>', 18)}</button></div>
+      <div class="sheetbody"><div class="sec" style="padding-top:4px">${briefForm("brief-edit")}</div>
+        ${answered.length ? `<div class="sec"><details class="sources"><summary>${svg('<path d="m9 18 6-6-6-6"/>', 16)}AI 問過的 ${answered.length} 個問題</summary>
+          <ul class="answered">${answered.map((q) => `<li><span class="qtext small">${q.text}</span><span class="${q.choice === "unknown" ? "unknownans" : ""}">${answerText(q)}</span></li>`).join("")}</ul>
+          <button class="ghost iconghost" type="button" id="editanswers" style="margin-top:12px">${svg(icon.pencilLine, 16)}<span>修改回答</span></button></details></div>` : ""}
+      </div>
+      <div class="sheetfoot"><span class="label">改完後，AI 會依新的需求重新找一次。</span><button class="primarybtn small iconaction" type="button" id="runresearch" ${brief.trim() ? "" : "disabled"}>${svg(icon.rotate, 18)}<span>更新 AI 建議</span></button></div>`;
+    return;
+  }
+  const p = places.find((x) => x.id === openId);
+  if (!p) return;
+  const d = km(LODGING, p);
+  const distance = d >= 30
+    ? `<span class="far">離住宿直線約 ${Math.round(d)} 公里，需要另外安排一天</span>`
+    : `<span>離住宿直線約 ${d.toFixed(1)} 公里</span>`;
+  sheet.classList.toggle("confirming", confirming);
+  sheet.innerHTML = `
+    <div class="grab" aria-hidden="true"></div>
+    <div class="sheethead">
+      <div style="flex:1;min-width:0">
+        <h2 id="sheettitle" tabindex="-1">${p.name}</h2>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="chip">${p.kind}</span>${p.day ? `<span class="scheduledtag">${svg(icon.calendarCheck, 15)}已排入 ${dayLabel(p.day)}</span>` : ""}</div>
+      </div>
+      <button class="iconbtn" type="button" data-close aria-label="關閉">${svg('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>', 18)}</button>
+    </div>
+    <div class="sheetbody">
+      ${thumb(p, true)}
+      <div class="sec">
+        <h3>為什麼推薦</h3>
+        <ul class="reasons">${p.reasons.map(([t, s]) => `<li>${t}<span class="cite">— ${s}</span></li>`).join("")}</ul>
+      </div>
+      <div class="sec">
+        <h3>在哪裡</h3>
+        <div class="where"><span>${p.area}</span>${distance}
+          <a class="maplink" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${p.name} ${p.area} 日本`)}${p.googlePlaceId ? `&query_place_id=${encodeURIComponent(p.googlePlaceId)}` : ""}" target="_blank" rel="noreferrer">${svg('<path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/>', 16)}在 Google Maps 開啟</a></div>
+      </div>
+      ${p.cautions.length || p.unknowns.length ? `<div class="sec">
+        <h3>要注意</h3>
+        <ul class="notes">
+          ${p.cautions.map((c) => `<li>${svg('<circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>', 15)}<span>${c}</span></li>`).join("")}
+          ${p.unknowns.map((u) => `<li class="unknown">${svg('<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>', 15)}<span>還不確定：${u}</span></li>`).join("")}
+        </ul>
+      </div>` : ""}
+      <div class="sec">
+        <h3>符合你的需求</h3>
+        <p style="margin:0;font-size:14px;line-height:1.6">${p.fit.join("・")}</p>
+      </div>
+      <div class="sec">
+        <details class="sources"><summary>${svg('<path d="m9 18 6-6-6-6"/>', 16)}${p.sources.length} 個來源</summary>
+          <ul>${p.sources.map((s) => `<li>${s}</li>`).join("")}</ul>
+        </details>
+      </div>
+    </div>
+    <div class="sheetfoot placeactions">
+      ${voteButtons(p)}
+      <div class="detailbuttons">
+        <button class="textdanger" type="button" data-reject>${svg(icon.ban, 16)}<span>不要再推薦</span></button>
+        ${isTripCreator ? `<button class="primarybtn detailadd iconaction" type="button" data-detail-schedule="${p.id}">${svg(icon.calendarPlus, 16)}<span>${p.day ? "更改日期" : "排入行程"}</span></button>` : ""}
+      </div>
+    </div>
+    <div class="confirmrow" role="alertdialog" aria-label="確認不要再推薦">
+      <p><strong>${p.name}</strong> 會從 AI 建議移除，之後的研究也不會再推薦它。如果按錯，可以在清單最下面的「不再推薦的地點」恢復。</p>
+      <div class="btns"><button class="ghost iconghost" type="button" data-reject-cancel>${svg(icon.arrowLeft, 16)}<span>返回</span></button><button class="dangerbtn" type="button" data-reject-confirm>${svg(icon.ban, 16)}<span>不要再推薦</span></button></div>
+    </div>`;
+}
+let lastRow = null;
+function openSheet(id, row) {
+  openId = id; confirming = false; lastRow = row;
+  const sheet = $("sheet");
+  sheet.hidden = false;
+  render();
+  requestAnimationFrame(() => { sheet.classList.add("show"); $("scrim").classList.add("show"); $("sheettitle")?.focus({ preventScroll: true }); });
+}
+function closeSheet() {
+  const sheet = $("sheet");
+  sheet.classList.remove("show"); $("scrim").classList.remove("show");
+  const id = openId; openId = null; confirming = false;
+  // Closing the pre-search questions cancels that search; nothing was searched yet.
+  if (id === "questions") { gate = null; questionsEditAll = false; }
+  render();
+  setTimeout(() => { if (openId === null) sheet.hidden = true; }, 450);
+  (id === "brief" ? $("openbrief") : id === "questions" ? ($("openquestions") ?? $("openbrief")) : document.querySelector(`[data-row="${id}"]`))?.focus({ preventScroll: true });
+}
+let revealing = false;
+// Demo switch: ?fail=model | places | limit | busy makes the FIRST search fail that way; 再試一次 then succeeds.
+// These are the four real outcomes the backend can return when a search does not complete
+// (model_unavailable, provider_unavailable, research_limit_reached: 6 per trip / 10 per member per hour, research_in_progress).
+let failMode = new URLSearchParams(location.search).get("fail");
+let failure = null;
+let retrying = false;
+const FAILURE_COPY = {
+  model: { title: "這次沒找成", reason: "AI 研究服務暫時無法使用。", retry: true },
+  places: { title: "這次沒找成", reason: "地點查證服務（Google 地圖）暫時無法使用，AI 沒辦法確認地點是真的。", retry: true },
+  limit: { title: "這一小時已經找了 6 次", reason: "每趟旅程每小時最多找 6 次，約 23 分鐘後可以再找。", retry: false },
+};
+function failureBox(kind, first) {
+  const f = FAILURE_COPY[kind];
+  const kept = first ? "你的需求已經保留。" : "原本的建議都還在，沒有任何變動。";
+  return `<div class="failbox" role="alert">${svg('<circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/>', 18)}
+    <div class="failtext"><strong>${f.title}</strong><span>${f.reason}${kept}</span></div>
+    ${f.retry && !first ? retryControl("retryresearch", "ghost") : ""}</div>`;
+}
+function showToast(text, itineraryAction = false, keep = false) {
+  $("toasttext").textContent = text;
+  $("toastaction").hidden = !itineraryAction;
+  const t = $("toast");
+  t.classList.remove("show"); void t.offsetWidth; t.classList.add("show");
+  clearTimeout(window.__toast);
+  if (!keep) window.__toast = setTimeout(() => t.classList.remove("show"), 4800);
+}
+function startResearch(isRetry = false) {
+  const wasFirst = firstRun;
+  const fail = isRetry ? null : failMode; failMode = null; // a retry succeeds in this prototype
+  if (!isRetry) failure = null;
+  if (fail === "limit") { failure = "limit"; render(); return; } // refused up front: nothing runs
+  retrying = isRetry;
+  researching = fail === "busy" ? "busy" : true;
+  render();
+  if (wasFirst) $("list").scrollIntoView({ block: "nearest" });
+  // Prototype only: pretend the research run finishes after a moment.
+  setTimeout(() => {
+    researching = false;
+    retrying = false;
+    if (fail === "model" || fail === "places") { failure = fail; render(); return; }
+    failure = null;
+    if (wasFirst) { firstRun = false; revealing = true; }
+    render();
+    if (wasFirst) {
+      showToast(`找到 ${places.filter((p) => !p.rejected).length} 個地點`);
+      setTimeout(() => { revealing = false; }, 1200);
+    }
+  }, 3500);
+}
+document.addEventListener("input", (e) => {
+  if (e.target.matches("textarea.brief")) {
+    brief = e.target.value;
+    // Searching needs something to search for: the button wakes up as soon as there is text.
+    for (const id of ["startresearch", "runresearch"]) { const b = $(id); if (b) b.disabled = !brief.trim(); }
+  }
+  if (e.target.matches("textarea.qanswer")) {
+    const q = questions.find((x) => x.id === Number(e.target.dataset.q));
+    q.custom = e.target.value;
+  }
+});
+document.addEventListener("change", (e) => {
+  if (!e.target.matches('input[type="radio"][data-q]')) return;
+  const q = questions.find((x) => x.id === Number(e.target.dataset.q));
+  q.choice = e.target.value; q.error = false;
+  if (openId === "questions") renderSheet(); else render();
+  if (q.choice === "custom") document.querySelector(`textarea.qanswer[data-q="${q.id}"]`)?.focus();
+  else document.querySelector(`input[name="q${q.id}"][value="${q.choice}"]`)?.focus();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && openId !== null) closeSheet();
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches?.(".row[tabindex]")) { e.preventDefault(); openSheet(Number(e.target.dataset.row), e.target); }
+});
+
+document.addEventListener("click", (e) => {
+  const vote = e.target.closest("[data-vote]");
+  if (vote) {
+    e.stopPropagation();
+    const p = places.find((x) => x.id === Number(vote.dataset.id));
+    const kind = vote.dataset.vote;
+    if (p.mine === kind) { p[kind]--; p.mine = null; }
+    else { if (p.mine) p[p.mine]--; p[kind]++; p.mine = kind; }
+    render();
+    document.querySelectorAll(`[data-id="${p.id}"][data-vote="${kind}"]`).forEach((b) => { if (p.mine === kind) b.classList.add("bump"); });
+    return;
+  }
+  if (e.target.closest("#openbrief")) { openSheet("brief", null); return; }
+  if (e.target.closest("#editanswers")) { questionsEditAll = true; openId = "questions"; renderSheet(); $("sheettitle")?.focus(); return; }
+  if (e.target.closest("#submitanswers")) {
+    if (!validateAnswers()) {
+      if (openId === "questions") renderSheet(); else render();
+      document.querySelector(".qerror")?.closest(".customwrap")?.querySelector("textarea")?.focus();
+      return;
+    }
+    const wasEditing = questionsEditAll;
+    if (!wasEditing) answerGate();
+    questionsEditAll = false;
+    if (openId === "questions") closeSheet();
+    startResearch();
+    return;
+  }
+  if (e.target.closest("#backtobrief")) { gate = null; render(); $("brief-first")?.focus(); return; }
+  if (e.target.closest("#runresearch")) { closeSheet(); requestResearch(); return; }
+  if (e.target.closest("#retryresearch, #retryresearch2")) { startResearch(true); return; }
+  if (e.target.closest("#editafterfail")) { failure = null; render(); $("brief-first")?.focus(); return; }
+  if (e.target.closest("#startresearch")) { if (brief.trim()) requestResearch(); return; }
+  if (e.target.closest("#select")) {
+    selecting = true;
+    selected.clear();
+    render();
+    return;
+  }
+  if (e.target.closest("#cancel")) { selecting = false; selected.clear(); render(); return; }
+  if (e.target.closest("#chooseDate") && !$("chooseDate").disabled) {
+    openSchedule(selected, false, e.target);
+    return;
+  }
+  const detailSchedule = e.target.closest("[data-detail-schedule]");
+  if (detailSchedule) {
+    const p = places.find((x) => x.id === Number(detailSchedule.dataset.detailSchedule));
+    if (!p) return;
+    openSchedule([p.id], !!p.day, detailSchedule);
+    return;
+  }
+  const day = e.target.closest("[data-day]");
+  if (day) {
+    selectedDay = day.dataset.day;
+    renderSchedule();
+    document.querySelector(`[data-day="${selectedDay}"]`)?.focus();
+    return;
+  }
+  if (e.target.closest("#confirmSchedule")) { confirmSchedule(); return; }
+  if (e.target.closest("[data-close]") || e.target === $("scrim")) { closeSheet(); return; }
+  if (e.target.closest("[data-reject]")) { confirming = true; renderSheet(); return; }
+  if (e.target.closest("[data-reject-cancel]")) { confirming = false; renderSheet(); return; }
+  if (e.target.closest("[data-reject-confirm]")) {
+    const p = places.find((x) => x.id === openId);
+    p.rejected = true;
+    closeSheet();
+    showToast(`已不再推薦「${p.name}」`);
+    return;
+  }
+  const restore = e.target.closest("[data-restore]");
+  if (restore) {
+    const p = places.find((x) => x.id === Number(restore.dataset.restore));
+    p.rejected = false;
+    justScheduled.add(p.id); // reuse the brief highlight so the member sees where it came back
+    render();
+    document.querySelector(`[data-row="${p.id}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    showToast(`已恢復推薦「${p.name}」`);
+    return;
+  }
+  const row = e.target.closest(".row.is-selectable");
+  if (row && selecting) {
+    const id = Number(row.dataset.row);
+    selected.has(id) ? selected.delete(id) : selected.add(id);
+    render();
+    return;
+  }
+  const openRow = e.target.closest(".row");
+  if (openRow && !selecting && !e.target.closest("a, button")) openSheet(Number(openRow.dataset.row), openRow);
+});
+// Direct demo states supplement all existing ?state=empty and ?fail=… URLs.
+if (demoState === "selecting" && !firstRun && isTripCreator) {
+  selecting = true;
+  selected.add(2);
+}
+if (demoState === "sheet" && !firstRun && isTripCreator) {
+  selecting = true;
+  selected.add(2);
+  selected.add(3);
+}
+if (demoState === "done" && !firstRun && isTripCreator) {
+  places.find((p) => p.id === 2).day = "10/23";
+  places.find((p) => p.id === 3).day = "10/23";
+  justScheduled = new Set([2, 3]);
+}
+if (failMode) {
+  if (firstRun && !brief) brief = "想在京都看紅葉";
+  if (failMode === "busy") startResearch();
+  else { failure = failMode; failMode = null; render(); }
+} else {
+  render();
+  if (demoState === "sheet" && !firstRun && isTripCreator) openSchedule(selected, false);
+  if (demoState === "done" && !firstRun && isTripCreator) requestAnimationFrame(() => showToast("已將 2 個地點排入 10/23（週五）", true, true));
+}
+</script>
+</body>
+</html>

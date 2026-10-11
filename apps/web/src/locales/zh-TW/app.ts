@@ -52,7 +52,7 @@ export const app = {
     lodging: "住宿",
   },
   placesSegments: {
-    wishlist: "想去",
+    wishlist: "口袋名單",
     discovery: "AI 建議",
   },
   itinerarySectionPicker: "行程內容",

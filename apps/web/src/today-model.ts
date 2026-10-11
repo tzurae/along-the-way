@@ -6,6 +6,7 @@ import type { ItineraryItemDto, ItineraryItemType, TripSkeletonDto } from "@alon
 
 export type TodayFact = "carrier" | "serviceNumber" | "confirmationNotes" | "bookedBy" | "confirmationCode" | "mode" | "ticketInfo" | "durationMinutes" | "confirmationStatus";
 export interface TodayPlace {
+  id: string | null;
   name: string;
   address: string | null;
   latitude: number | null;
@@ -77,7 +78,7 @@ export function createTodayModel(trip: TripDto, skeleton: TripSkeletonDto, place
       endpoints: item.endpoints.map((endpoint) => {
         const place = byPlace.get(endpoint.placeId);
         return { role: endpoint.role, instant: endpoint.instant, timeZone: endpoint.timeZone,
-          place: place ? { name: place.name, address: place.address, latitude: place.latitude, longitude: place.longitude } : null };
+          place: place ? { id: place.id, name: place.name, address: place.address, latitude: place.latitude, longitude: place.longitude } : null };
       }),
       participants: item.participants?.map((person) => ({ id: person.memberId, name: person.displayName ?? person.email })) ?? null,
       locked: item.lockedAt !== null,

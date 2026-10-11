@@ -35,7 +35,10 @@ import {
   requireIdempotencyKey,
   type DatabaseExecutor,
 } from "../private-trips/postgres-private-trip-store";
-import { suggestPossibleTripPlaceDuplicates } from "../trip-places/postgres-trip-place-module";
+import {
+  PostgresTripPlaceModule,
+  suggestPossibleTripPlaceDuplicates,
+} from "../trip-places/postgres-trip-place-module";
 import type { TripSkeletonModule } from "./trip-skeleton-module";
 import {
   canonicalNamedTimeZone,
@@ -476,6 +479,8 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         longitude: place.longitude,
         time_zone: place.timeZone,
         duration_minutes: null,
+        selected_for_itinerary: false,
+        unplaced_from_date: null,
         budget_amount_minor: null,
         budget_currency: null,
         notes: place.notes,
@@ -1032,6 +1037,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       const current = await this.lockItemRow(transaction, tripId, itemId);
       this.requireExpectedVersion(current.version, expectedVersion);
       this.requireUnlocked(current.locked_at);
+      await this.replaceEndpoints(transaction, tripId, itemId, []);
       await transaction.deleteFrom("itinerary_items").where("id", "=", itemId).execute();
       await recordEvent(transaction, {
         tripId,
@@ -1499,18 +1505,64 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     itemId: string,
     endpoints: ResolvedEndpoint[],
   ) {
+    // Reuse the canonical legacy mapping even if a retained writer has not yet
+    // been reconciled by a wishlist read. Capture its placement before removing it.
+    await PostgresTripPlaceModule.reconcileLegacyPlacesInTransaction(transaction, tripId, this.now);
+    const previous = await transaction.selectFrom("itinerary_endpoints")
+      .select(["place_id", "local_date_time"])
+      .where("trip_id", "=", tripId).where("itinerary_item_id", "=", itemId).execute();
     await transaction.deleteFrom("itinerary_endpoints").where("itinerary_item_id", "=", itemId).execute();
-    await transaction.insertInto("itinerary_endpoints").values(endpoints.map((endpoint) => ({
-      itinerary_item_id: itemId,
-      trip_id: tripId,
-      endpoint_role: endpoint.role,
-      country_stop_id: endpoint.countryStopId,
-      place_id: endpoint.placeId,
-      local_date_time: endpoint.localDateTime,
-      time_zone: endpoint.timeZone,
-      utc_offset_minutes: endpoint.utcOffsetMinutes,
-      instant: endpoint.instant,
-    }))).execute();
+    if (endpoints.length > 0) {
+      await transaction.insertInto("itinerary_endpoints").values(endpoints.map((endpoint) => ({
+        itinerary_item_id: itemId,
+        trip_id: tripId,
+        endpoint_role: endpoint.role,
+        country_stop_id: endpoint.countryStopId,
+        place_id: endpoint.placeId,
+        local_date_time: endpoint.localDateTime,
+        time_zone: endpoint.timeZone,
+        utc_offset_minutes: endpoint.utcOffsetMinutes,
+        instant: endpoint.instant,
+      }))).execute();
+    }
+    const affectedPlaceIds = [...new Set([
+      ...previous.map((endpoint) => endpoint.place_id),
+      ...endpoints.map((endpoint) => endpoint.placeId),
+    ])];
+    if (affectedPlaceIds.length === 0) return;
+    const [places, remainingEndpoints] = await Promise.all([
+      transaction.selectFrom("trip_places as place")
+        .select(["place.id", "place.legacy_place_id"])
+        .select((builder) => builder.exists(
+          builder.selectFrom("trip_place_day_assignments as assignment")
+            .select("assignment.trip_place_id")
+            .whereRef("assignment.trip_id", "=", "place.trip_id")
+            .whereRef("assignment.trip_place_id", "=", "place.id"),
+        ).as("assigned"))
+        .where("place.trip_id", "=", tripId)
+        .where("place.legacy_place_id", "in", affectedPlaceIds)
+        .orderBy("place.id").forUpdate().execute(),
+      transaction.selectFrom("itinerary_endpoints").select("place_id")
+        .where("trip_id", "=", tripId).where("place_id", "in", affectedPlaceIds).execute(),
+    ]);
+    const scheduled = new Set(remainingEndpoints.map((endpoint) => endpoint.place_id));
+    const updatedAt = this.now();
+    for (const place of places) {
+      const priorDates = new Set(previous
+        .filter((endpoint) => endpoint.place_id === place.legacy_place_id)
+        .map((endpoint) => endpoint.local_date_time.slice(0, 10)));
+      // Other items can still use this place. Only the last removal is unplaced,
+      // and multiple endpoint dates do not justify choosing one as its prior date.
+      const unplacedFromDate = place.assigned || scheduled.has(place.legacy_place_id)
+        ? null
+        : priorDates.size === 1 ? [...priorDates][0]! : null;
+      await transaction.updateTable("trip_places").set({
+        selected_for_itinerary: true,
+        unplaced_from_date: unplacedFromDate,
+        version: sql`version + 1`,
+        updated_at: updatedAt,
+      }).where("trip_id", "=", tripId).where("id", "=", place.id).execute();
+    }
   }
 
   private async readPlaces(executor: DatabaseExecutor, tripId: string) {

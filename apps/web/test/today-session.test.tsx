@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { waitFor } from "@testing-library/react";
 import type { TripHistoryResponse } from "@along-the-way/contracts/private-trips";
 import { App } from "../src/App";
 import { createTodayModel } from "../src/today-model";
@@ -19,6 +20,7 @@ let gate: Promise<void> | null = null;
 let requests: string[] = [];
 let liveVersion = 0;
 let liveSources: Array<EventTarget & { url: string }> = [];
+let previewFails = false;
 const reply = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 
 beforeEach(() => {
@@ -28,7 +30,7 @@ beforeEach(() => {
   tripHistory = { events: [], nextCursor: null };
   dayVersion = 1;
   savedOrder = false; gate = null; requests = [];
-  liveVersion = 0; liveSources = [];
+  liveVersion = 0; liveSources = []; previewFails = false;
   history.replaceState({}, "", "/?trip=A&tab=today&day=2026-10-21");
   Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -49,6 +51,9 @@ beforeEach(() => {
     if (input.endsWith("/version")) return reply({ tripVersion: liveVersion, lastEventId: liveVersion ? "latest-event" : null });
     if (input.endsWith("/skeleton")) return reply({ skeleton: trip.id === "A" ? skeleton : todaySkeleton(trip) });
     if (input.endsWith("/trip-places")) return reply({ tripPlaces: trip.id === "A" ? todayWishlist(savedOrder) : [] });
+    if (input.includes("/place-previews?")) return previewFails
+      ? reply({ error: { code: "provider_unavailable", message: "Preview unavailable" } }, 503)
+      : reply({ previews: [] });
     if (input.endsWith("/place-order")) {
       savedOrder = true;
       return reply({ orderedTripPlaceIds: ["SECOND", "FIRST"], version: ++dayVersion });
@@ -93,6 +98,17 @@ async function travelHistory(direction: "back" | "forward") {
   });
 }
 
+it("keeps the core Today snapshot readable when optional place previews fail", async () => {
+  previewFails = true;
+  await mount();
+
+  expect(snapshot().model.days[0]!.wishlist.map((place) => place.name)).toEqual(["FIRST", "SECOND"]);
+  const today = document.getElementById("trip-panel-today");
+  expect(today).toHaveTextContent("這一天還沒有行程");
+  expect(today).toHaveTextContent(/今天想去（未排時間）.*FIRST.*SECOND/);
+  expect(document.body).not.toHaveTextContent("離線資料");
+});
+
 it("purges an unselected revoked snapshot after an authorized trip-list refresh", async () => {
   const store = new TodaySnapshotStore(localStorage);
   for (const trip of trips) store.save(todayUser.id, createTodayModel(trip, todaySkeleton(trip), [], todayUser.id));
@@ -131,12 +147,16 @@ it("preserves destination dates and forward history while a cross-trip Back read
   expect(document.querySelector("#trip-panel-today select")).toHaveValue("2026-11-21");
 });
 
-it("refreshes mounted itinerary, lodging and recent changes after explicit Today sync without a reload loop", async () => {
+it("refreshes itinerary and recent changes after reconnecting from Today without a reload loop", async () => {
   const lodging = { ...todayActivity("REMOVED_LODGING"), type: "lodging" as const, details: { bookedBy: null, confirmationCode: null } };
   skeleton = todaySkeleton(trips[0], [todayActivity("REMOVED_ACTIVITY"), lodging]);
   await mount();
+  await click(document.querySelector<HTMLButtonElement>('button[data-trip-tab="itinerary"]')!);
   expect(document.getElementById("itinerary-segment-panel-daily")).toHaveTextContent("REMOVED_ACTIVITY");
-  expect(document.getElementById("itinerary-segment-panel-lodging")).toHaveTextContent("REMOVED_LODGING");
+  expect(document.getElementById("itinerary-segment-panel-daily")).toHaveTextContent("REMOVED_LODGING");
+  await click(document.querySelector<HTMLButtonElement>('button[data-trip-tab="today"]')!);
+  await act(async () => { window.dispatchEvent(new Event("offline")); });
+  expect(document.body).toHaveTextContent("離線資料");
   trips[0] = { ...trips[0]!, version: 8 };
   skeleton = todaySkeleton(trips[0]);
   tripHistory = { events: [{
@@ -144,16 +164,20 @@ it("refreshes mounted itinerary, lodging and recent changes after explicit Today
     eventType: "itinerary_item.deleted", targetType: "itinerary_item", targetId: "REMOVED_ACTIVITY", targetName: null,
     summary: "Deleted an itinerary item", createdAt: "2026-10-21T03:00:00Z", reappliedFromVersion: null,
   }], nextCursor: null };
-  const sync = [...host.querySelectorAll<HTMLButtonElement>("#trip-panel-today button")].find((element) => /重新.*同步/.test(element.textContent ?? ""))!;
-  await click(sync);
-  expect(document.getElementById("trip-panel-today")).toHaveTextContent("正式行程版本 8");
+  await click(button("重新連線並同步", host));
+  await click(document.querySelector<HTMLButtonElement>('button[data-trip-tab="itinerary"]')!);
   expect(document.getElementById("itinerary-segment-panel-daily")).not.toHaveTextContent("REMOVED_ACTIVITY");
-  expect(document.getElementById("itinerary-segment-panel-lodging")).not.toHaveTextContent("REMOVED_LODGING");
+  expect(document.getElementById("itinerary-segment-panel-daily")).not.toHaveTextContent("REMOVED_LODGING");
+  await click(document.querySelector<HTMLButtonElement>('button[data-trip-tab="members"]')!);
   expect(document.getElementById("trip-panel-members")).toHaveTextContent("刪除了固定行程");
   expect(document.getElementById("trip-panel-members")).toHaveTextContent("History editor");
   expect(document.getElementById("trip-panel-members")).not.toHaveTextContent("REMOVED_ACTIVITY");
   const afterSync = requests.length;
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
+  await act(async () => {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setTimeout(resolve, 30);
+    await promise;
+  });
   expect(requests.length).toBe(afterSync);
 });
 
@@ -161,9 +185,8 @@ it("updates the offline wishlist order and day timezone after accepting a sugges
   await mount();
   expect(snapshot().model.days[0]!.timeZone).toBe("Asia/Tokyo");
   await click(document.querySelector<HTMLButtonElement>('[data-trip-tab="itinerary"]')!);
-  await click(document.getElementById("itinerary-segment-daily")!);
-  await click(button("排這一天", document.getElementById("itinerary-segment-panel-daily")!));
-  await click(button("試試建議順序"));
+  await click(button("幫我排順路", document.getElementById("itinerary-segment-panel-daily")!));
+  await waitFor(() => expect(button("使用這個順序")).toBeEnabled());
   await click(button("使用這個順序"));
   expect(savedOrder).toBe(true);
   expect(snapshot().model.days[0]!.wishlist.map((place) => place.id)).toEqual(["SECOND", "FIRST"]);

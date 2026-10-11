@@ -57,6 +57,10 @@ export interface TripPlaceDto {
   timeZone: string | null;
   status: TripPlaceStatus;
   scheduled: boolean;
+  /** Durable itinerary intent; votes and Pocket intake do not select a place. */
+  selectedForItinerary: boolean;
+  /** Last removed placement's local date, or null when unknown or currently placed. */
+  unplacedFromDate: string | null;
   durationMinutes: number | null;
   assignedDayId: string | null;
   /** Applied order within the assigned day; null until a route order is applied. */
@@ -158,6 +162,15 @@ function nullableText(value: unknown) {
   return value === null || typeof value === "string" ? value : invalid();
 }
 
+function nullableDate(value: unknown) {
+  if (value === null) return null;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return invalid();
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
+    ? value
+    : invalid();
+}
+
 function integer(value: unknown) {
   return typeof value === "number" && Number.isSafeInteger(value) ? value : invalid();
 }
@@ -238,6 +251,14 @@ function tripPlace(value: unknown): TripPlaceDto {
   ) return invalid();
   if (row.provider !== "google" && row.provider !== "manual") return invalid();
   if (row.factsSource !== "provider" && row.factsSource !== "member") return invalid();
+  const scheduled = boolean(row.scheduled);
+  const assignedDayId = nullableText(row.assignedDayId);
+  const selectedForItinerary = boolean(row.selectedForItinerary);
+  const unplacedFromDate = nullableDate(row.unplacedFromDate);
+  if ((scheduled || assignedDayId !== null) && (!selectedForItinerary || unplacedFromDate !== null)) {
+    return invalid();
+  }
+  if (unplacedFromDate !== null && !selectedForItinerary) return invalid();
   return {
     id: text(row.id),
     tripId: text(row.tripId),
@@ -257,9 +278,11 @@ function tripPlace(value: unknown): TripPlaceDto {
     longitude: row.longitude === null || typeof row.longitude === "number" ? row.longitude : invalid(),
     timeZone: nullableText(row.timeZone),
     status,
-    scheduled: boolean(row.scheduled),
+    scheduled,
+    selectedForItinerary,
+    unplacedFromDate,
     durationMinutes: nullableInteger(row.durationMinutes),
-    assignedDayId: nullableText(row.assignedDayId),
+    assignedDayId,
     dayPosition: nullableInteger(row.dayPosition),
     budgetAmountMinor: nullableInteger(row.budgetAmountMinor),
     budgetCurrency: nullableText(row.budgetCurrency),
