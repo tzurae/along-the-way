@@ -42,20 +42,57 @@ function messages(value: unknown): MailpitMessage[] {
     };
   });
 }
-function colorChannels(value: string) {
-  const channels = value.match(/[\d.]+/g)?.slice(0, 3).map(Number);
-  if (!channels || channels.length !== 3) throw new Error(`Unsupported color: ${value}`);
-  return channels.map((channel) => channel / 255);
+interface ParsedColor {
+  red: number;
+  green: number;
+  blue: number;
+  alpha: number;
 }
 
-function relativeLuminance(value: string) {
-  const [red, green, blue] = colorChannels(value).map((channel) =>
-    channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
-  );
-  return 0.2126 * red! + 0.7152 * green! + 0.0722 * blue!;
+function colorChannels(value: string): ParsedColor {
+  const srgb = value.match(/^color\(srgb\s+(.+)\)$/i);
+  const rgb = value.match(/^rgba?\((.+)\)$/i);
+  const body = srgb?.[1] ?? rgb?.[1];
+  if (!body) throw new Error(`Unsupported color: ${value}`);
+  const [channelPart, alphaPart] = body.split("/").map((part) => part.trim());
+  const tokens = channelPart!.replaceAll(",", " ").split(/\s+/).filter(Boolean);
+  const inlineAlpha = !alphaPart && tokens.length === 4 ? tokens.pop() : undefined;
+  if (tokens.length !== 3) throw new Error(`Unsupported color: ${value}`);
+  const channel = (token: string) => {
+    const parsed = token.endsWith("%") ? Number(token.slice(0, -1)) * 2.55 : Number(token);
+    return srgb ? parsed * 255 : parsed;
+  };
+  const alphaToken = alphaPart ?? inlineAlpha;
+  const alpha = alphaToken
+    ? alphaToken.endsWith("%") ? Number(alphaToken.slice(0, -1)) / 100 : Number(alphaToken)
+    : 1;
+  const [red, green, blue] = tokens.map(channel);
+  if (![red, green, blue, alpha].every(Number.isFinite)) throw new Error(`Unsupported color: ${value}`);
+  return { red: red!, green: green!, blue: blue!, alpha };
 }
 
-function contrastRatio(foreground: string, background: string) {
+function composite(foreground: ParsedColor, background: ParsedColor): ParsedColor {
+  const alpha = foreground.alpha + background.alpha * (1 - foreground.alpha);
+  if (alpha === 0) return { red: 0, green: 0, blue: 0, alpha: 0 };
+  const channel = (front: number, back: number) =>
+    (front * foreground.alpha + back * background.alpha * (1 - foreground.alpha)) / alpha;
+  return {
+    red: channel(foreground.red, background.red),
+    green: channel(foreground.green, background.green),
+    blue: channel(foreground.blue, background.blue),
+    alpha,
+  };
+}
+
+function relativeLuminance({ red, green, blue }: ParsedColor) {
+  const [linearRed, linearGreen, linearBlue] = [red, green, blue].map((value) => {
+    const channel = value / 255;
+    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * linearRed! + 0.7152 * linearGreen! + 0.0722 * linearBlue!;
+}
+
+function contrastRatio(foreground: ParsedColor, background: ParsedColor) {
   const lighter = Math.max(relativeLuminance(foreground), relativeLuminance(background));
   const darker = Math.min(relativeLuminance(foreground), relativeLuminance(background));
   return (lighter + 0.05) / (darker + 0.05);
@@ -64,21 +101,25 @@ function contrastRatio(foreground: string, background: string) {
 async function expectReadableText(locator: Locator, pseudoElement?: "::placeholder") {
   const sample = await locator.evaluate((element, pseudo) => {
     const foregroundStyle = getComputedStyle(element, pseudo);
+    const backgrounds: string[] = [];
     let backgroundElement: Element | null = element;
-    let background = "rgba(0, 0, 0, 0)";
     while (backgroundElement) {
-      background = getComputedStyle(backgroundElement).backgroundColor;
-      if (!background.endsWith(", 0)")) break;
+      backgrounds.push(getComputedStyle(backgroundElement).backgroundColor);
       backgroundElement = backgroundElement.parentElement;
     }
     return {
       foreground: foregroundStyle.color,
-      background,
+      backgrounds,
       opacity: foregroundStyle.opacity,
     };
   }, pseudoElement);
   expect(Number(sample.opacity)).toBe(1);
-  expect(contrastRatio(sample.foreground, sample.background)).toBeGreaterThanOrEqual(4.5);
+  const fallback = { red: 255, green: 255, blue: 255, alpha: 1 };
+  const background = sample.backgrounds
+    .map(colorChannels)
+    .reduceRight((resolved, layer) => composite(layer, resolved), fallback);
+  const foreground = composite(colorChannels(sample.foreground), background);
+  expect(contrastRatio(foreground, background)).toBeGreaterThanOrEqual(4.5);
 }
 
 async function executeDatabase(command: string) {
@@ -245,11 +286,33 @@ async function createTrip(
 
 async function openTab(page: Page, name: "成員" | "航班" | "住宿" | "行程" | "最近變更") {
   const destination = name === "成員" || name === "最近變更" ? "成員" : "行程";
-  await page.getByRole("tab", { name: destination, exact: true }).click();
-  if (destination === "行程") {
-    const segment = name === "航班" ? "航班" : name === "住宿" ? "住宿" : "每日";
-    await page.getByRole("tab", { name: segment, exact: true }).click();
+  if (name === "航班" || name === "住宿") {
+    const target = page.getByRole("tab", { name, exact: true });
+    if (await target.isVisible()) {
+      await target.click();
+      return;
+    }
   }
+  await page.getByRole("tab", { name: destination, exact: true }).click();
+  if (destination !== "行程") return;
+  const management = page.locator("details.plan-management");
+  if (!(await management.evaluate((element) => (element as HTMLDetailsElement).open))) {
+    await management.locator(":scope > summary").click();
+  }
+  if (name === "行程") return;
+  const tripInformation = page.locator("details.plan-inventory").filter({ hasText: "旅程資訊" });
+  if (!(await tripInformation.evaluate((element) => (element as HTMLDetailsElement).open))) {
+    await tripInformation.locator(":scope > summary").click();
+  }
+  const travelRows = tripInformation.locator(".plan-item-row");
+  let travelRow = travelRows.filter({ hasText: name }).first();
+  if (await travelRow.count() === 0) travelRow = travelRows.first();
+  await travelRow.click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: /到(?:航班修改航班|住宿修改住宿)/ })
+    .click();
+  await page.getByRole("tab", { name, exact: true }).click();
 }
 
 async function createPlace(
@@ -267,9 +330,11 @@ async function createPlace(
   await dialog.getByLabel("IANA 時區").fill(input.timeZone);
   await dialog.getByRole("button", { name: "儲存地點" }).click();
   await expect(dialog).toHaveCount(0);
-  await expect(
-    page.getByRole("region", { name: "地點", exact: true }).getByRole("heading", { name: input.name }),
-  ).toBeVisible();
+  const placeInventory = page.locator("details.plan-inventory").filter({ has: page.getByText("地點", { exact: true }) });
+  if (!(await placeInventory.evaluate((element) => (element as HTMLDetailsElement).open))) {
+    await placeInventory.locator(":scope > summary").click();
+  }
+  await expect(placeInventory.getByRole("heading", { name: input.name })).toBeVisible();
 }
 
 async function chooseEndpoint(
@@ -384,7 +449,7 @@ async function addTransport(
   await dialog.getByLabel("交通方式").fill("Train");
   await dialog.getByLabel("票券資訊").fill("Reserved seats");
   if (input.buffer) {
-    await dialog.getByLabel("限制").selectOption("minimum_buffer");
+    await dialog.getByLabel("限制", { exact: true }).selectOption("minimum_buffer");
     await dialog.locator("#constraint-status").selectOption(input.buffer.status);
     await dialog.getByLabel("緩衝分鐘數").fill(input.buffer.minutes);
   }
@@ -405,7 +470,7 @@ async function addReservation(
   await dialog.getByLabel("期間（分鐘）").fill("90");
   await dialog.getByLabel("預訂者").fill("Owner");
   await dialog.locator("#appointment-status").fill("Confirmed");
-  await dialog.getByLabel("限制").selectOption("immovable");
+  await dialog.getByLabel("限制", { exact: true }).selectOption("immovable");
   await dialog.locator("#constraint-status").selectOption("conflicted");
   await dialog.getByRole("button", { name: "儲存固定行程" }).click();
   await expect(dialog).toHaveCount(0);
@@ -450,7 +515,7 @@ async function addActivity(page: Page, input: { title: string; endpoint: Endpoin
   await dialog.getByLabel("期間（分鐘）").fill("75");
   await dialog.getByLabel("預訂者").fill("Mobile owner");
   await dialog.locator("#appointment-status").fill("Paid");
-  await dialog.getByLabel("限制").selectOption("immovable");
+  await dialog.getByLabel("限制", { exact: true }).selectOption("immovable");
   await dialog.locator("#constraint-status").selectOption("confirmed");
   await dialog.getByRole("button", { name: "儲存固定行程" }).click();
   await expect(dialog).toHaveCount(0);
@@ -495,12 +560,25 @@ async function addParticipantActivity(
   await expect(dialog).toHaveCount(0);
 }
 
-function timelineCard(page: Page, title: string) {
+function timelineRow(page: Page, title: string) {
   return page
-    .getByRole("region", { name: "每日行程", exact: true })
-    .locator(".itinerary-card")
+    .getByRole("region", { name: "行程", exact: true })
+    .locator(".plan-days .plan-item-row")
     .filter({ hasText: title })
     .first();
+}
+
+async function openTimelineCard(page: Page, title: string) {
+  await timelineRow(page, title).click();
+  const dialog = page.getByRole("dialog", { name: title, exact: true });
+  await expect(dialog).toBeVisible();
+  return dialog.locator(".itinerary-card");
+}
+
+async function closeTimelineCard(page: Page, title: string) {
+  const dialog = page.getByRole("dialog", { name: title, exact: true });
+  await dialog.getByRole("button", { name: "關閉", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
 }
 
 async function tripIdentifier(page: Page, name: string) {
@@ -531,7 +609,7 @@ async function openTrip(page: Page, name: string) {
   await page.getByRole("dialog", { name: "切換旅程" }).getByRole("button").filter({ hasText: name }).click();
   await expect(page.getByRole("button", { name: new RegExp(`${name}，切換旅程`) })).toBeVisible();
   await openTab(page, "行程");
-  await expect(page.getByRole("heading", { name: "固定行程與每日行程" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "行程", exact: true, level: 2 })).toBeVisible();
 }
 
 test("the seven-day Osaka Kyoto pilot works on desktop and mobile", async ({ browser, request }) => {
@@ -554,7 +632,7 @@ test("the seven-day Osaka Kyoto pilot works on desktop and mobile", async ({ bro
       { query: "Taiwan", code: "TW" },
     ],
   });
-  await expectReadableText(page.locator(".empty-state").first());
+  await expectReadableText(page.locator(".plan-pending-empty"));
 
   await page.getByRole("button", { name: "新增地點" }).click();
   const invalidPlaceDialog = page.getByRole("dialog", { name: "新增地點" });
@@ -616,31 +694,32 @@ test("the seven-day Osaka Kyoto pilot works on desktop and mobile", async ({ bro
     endpoint: { stop: "2、JP", place: "Osaka Hotel", local: "2026-10-21T17:00", zone: "Asia/Tokyo" },
   });
 
-  const days = page.getByRole("region", { name: "每日行程", exact: true }).locator(".day-column");
+  const days = page.getByRole("region", { name: "行程", exact: true }).locator(".day-column");
   await expect(days).toHaveCount(7);
   await expect(days.first()).toHaveAttribute("data-date", "2026-10-21");
   await expect(days.last()).toHaveAttribute("data-date", "2026-10-27");
-  const arrivalPriorities = page.getByTestId("arrival-priorities");
+  const arrivalPriorities = page.getByRole("heading", { name: "已儲存固定行程的抵達日重點" }).locator("..");
   await expect(arrivalPriorities).toContainText("JL814");
   await expect(arrivalPriorities).toContainText("Kansai Airport");
   await expect(arrivalPriorities).toContainText("Osaka Hotel");
-  const departurePriorities = page.getByTestId("departure-priorities");
+  const departurePriorities = page.getByRole("heading", { name: "已儲存固定行程的出發日重點" }).locator("..");
   await expect(departurePriorities).toContainText("Kyoto Hotel");
   await expect(departurePriorities).toContainText("JL813");
   await expect(departurePriorities).toContainText("至少 180 分鐘");
   await expect(departurePriorities).toContainText("240 分鐘・未確認");
-  const tripInformation = page.getByRole("region", { name: "旅程資訊", exact: true });
-  await expect(tripInformation.getByRole("heading", { name: "JL814" })).toBeVisible();
-  await expect(tripInformation.getByRole("heading", { name: "JL813" })).toBeVisible();
-  await expect(tripInformation.getByRole("heading", { name: "Osaka Hotel" })).toBeVisible();
-  await expect(tripInformation.getByRole("heading", { name: "Kyoto Hotel", exact: true })).toBeVisible();
-  await expect(tripInformation.getByRole("heading", { name: "大阪到京都" })).toBeVisible();
+  const tripInformation = page.locator("details.plan-inventory").filter({ hasText: "旅程資訊" });
+  if (!(await tripInformation.evaluate((element) => (element as HTMLDetailsElement).open))) {
+    await tripInformation.locator(":scope > summary").click();
+  }
+  for (const title of ["JL814", "JL813", "Osaka Hotel", "Kyoto Hotel", "大阪到京都"]) {
+    await expect(tripInformation.locator(".plan-item-row").filter({ hasText: title }).first()).toBeVisible();
+  }
   await page.reload();
   await openTrip(page, name);
   await expect(page.locator(".day-column")).toHaveCount(7);
-  await expect(page.locator("#trip-panel-itinerary").getByText("京都固定晚餐").first()).toBeVisible();
-  await expect(page.locator("#trip-panel-itinerary").getByText("京都午餐").first()).toBeVisible();
-  await expect(page.locator("#trip-panel-itinerary").getByText("抵達後自由時間").first()).toBeVisible();
+  await expect(timelineRow(page, "京都固定晚餐")).toBeVisible();
+  await expect(timelineRow(page, "京都午餐")).toBeVisible();
+  await expect(timelineRow(page, "抵達後自由時間")).toBeVisible();
 
   const authState = await desktopContext.storageState();
   const mobileContext = await browser.newContext({
@@ -651,15 +730,14 @@ test("the seven-day Osaka Kyoto pilot works on desktop and mobile", async ({ bro
   const mobilePage = await mobileContext.newPage();
   await mobilePage.goto("/");
   await openTrip(mobilePage, name);
-  await expect(mobilePage.getByTestId("departure-priorities")).toContainText(
-    "240 分鐘・未確認",
-  );
+  await expect(
+    mobilePage.getByRole("heading", { name: "已儲存固定行程的出發日重點" }).locator(".."),
+  ).toContainText("240 分鐘・未確認");
   await addActivity(mobilePage, {
     title: "Mobile museum ticket",
     endpoint: { stop: "2、JP", place: "Kyoto venue to confirm", local: "2026-10-25T10:00", zone: "Asia/Tokyo" },
   });
-  const mobileTimeline = mobilePage.getByRole("region", { name: "每日行程", exact: true });
-  const activityCard = mobileTimeline.locator(".itinerary-card").filter({ hasText: "Mobile museum ticket" }).first();
+  const activityCard = await openTimelineCard(mobilePage, "Mobile museum ticket");
   await activityCard.getByRole("button", { name: "鎖定" }).click();
   await expect(activityCard.getByText("已鎖定", { exact: true })).toBeVisible();
   await activityCard.getByRole("button", { name: "解鎖" }).click();
@@ -677,7 +755,7 @@ test("the seven-day Osaka Kyoto pilot works on desktop and mobile", async ({ bro
 
   await page.reload();
   await openTrip(page, name);
-  await expect(page.locator("#trip-panel-itinerary").getByText("Mobile museum ticket · confirmed").first()).toBeVisible();
+  await expect(timelineRow(page, "Mobile museum ticket · confirmed")).toBeVisible();
   await Promise.all([desktopContext.close(), mobileContext.close()]);
 });
 
@@ -721,22 +799,31 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
     endpoint: { stop: "2、JP", place: "Kyoto Restaurant", local: "2027-11-03T19:00", zone: "Asia/Tokyo" },
   });
 
-  const timeline = page.getByRole("region", { name: "每日行程", exact: true });
-  await expect(timeline.getByText("JL001").first()).toBeVisible();
-  await expect(timeline.getByText(/2027-11-01 10:00 · America\/Los_Angeles \(.+, -07:00\)/).first()).toBeVisible();
-  await expect(timeline.getByText(/2027-11-02 14:00 · Asia\/Tokyo \(.+, \+09:00\)/).first()).toBeVisible();
-  const arrivalContext = page.getByTestId("arrival-priorities");
+  const timeline = page.getByRole("region", { name: "行程", exact: true });
+  await expect(timelineRow(page, "JL001")).toBeVisible();
+  const arrivalContext = page.getByRole("heading", { name: "已儲存固定行程的抵達日重點" }).locator("..");
   await expect(arrivalContext).toContainText("尚未設定抵達端點。");
   await expect(arrivalContext).toContainText("尚未設定住宿入住時間。");
   const arrivalContinuation = timeline
-    .locator('.day-column[data-date="2027-11-02"] .itinerary-card')
+    .locator('.day-column[data-date="2027-11-02"] .plan-item-row')
     .filter({ hasText: "JL001" });
-  await expect(arrivalContinuation).toContainText("Haneda Airport");
-  await expect(page.getByTestId("departure-priorities")).toContainText("Osaka Hotel");
-  await expect(page.locator("#trip-panel-itinerary").getByText("不可移動・未確認").first()).toBeVisible();
-  await expect(page.locator("#trip-panel-itinerary").getByText("不可移動・有衝突").first()).toBeVisible();
+  await expect(arrivalContinuation).toContainText("14:00");
+  await expect(arrivalContinuation).toContainText("接續前一天");
+  await expect(page.getByRole("heading", { name: "已儲存固定行程的出發日重點" }).locator("..")).toContainText("Osaka Hotel");
 
-  const flightCard = timeline.locator(".itinerary-card").filter({ hasText: "JL001" }).first();
+  let flightCard = await openTimelineCard(page, "JL001");
+  await expect(flightCard).toContainText(/2027-11-01 10:00 · America\/Los_Angeles \(.+, -07:00\)/);
+  await expect(flightCard).toContainText(/2027-11-02 14:00 · Asia\/Tokyo \(.+, \+09:00\)/);
+  await expect(flightCard).toContainText("Haneda Airport");
+  await closeTimelineCard(page, "JL001");
+  const lodgingCard = await openTimelineCard(page, "Osaka Hotel");
+  await expect(lodgingCard).toContainText("不可移動・未確認");
+  await closeTimelineCard(page, "Osaka Hotel");
+  const reservationCard = await openTimelineCard(page, "Kyoto dinner reservation");
+  await expect(reservationCard).toContainText("不可移動・有衝突");
+  await closeTimelineCard(page, "Kyoto dinner reservation");
+
+  flightCard = await openTimelineCard(page, "JL001");
   await flightCard.getByRole("button", { name: "鎖定" }).click();
   await expect(flightCard.getByText("已鎖定", { exact: true })).toBeVisible();
   await expect(flightCard.getByRole("button", { name: /編輯/ })).toHaveCount(0);
@@ -744,9 +831,6 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   const hanedaPlace = page.locator(".place-card").filter({ hasText: "Haneda Airport" });
   await expect(hanedaPlace).toContainText("請先解鎖引用此地點的固定行程，才能編輯地點。");
   await expect(hanedaPlace.getByRole("button", { name: "編輯「Haneda Airport」" })).toHaveCount(0);
-  await openTab(page, "航班");
-  await expect(page.getByRole("button", { name: "修改 JL001", exact: true })).toBeDisabled();
-  await openTab(page, "行程");
   await flightCard.getByRole("button", { name: "解鎖" }).click();
   const unlockDialog = page.getByRole("dialog", { name: "要解鎖「JL001」嗎？" });
   await expect(unlockDialog).toContainText("未來的排程流程");
@@ -755,11 +839,7 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   await flightCard.getByRole("button", { name: "未確認", exact: true }).click();
   await expect(flightCard).toContainText("固定時間・未確認");
 
-  const tripInformationFlight = page
-    .getByRole("region", { name: "旅程資訊", exact: true })
-    .locator(".itinerary-card")
-    .filter({ hasText: "JL001" });
-  await tripInformationFlight.getByRole("button", { name: "到航班修改航班" }).click();
+  await flightCard.getByRole("button", { name: "到航班修改航班" }).click();
   await expect(page.getByRole("tab", { name: "航班", exact: true })).toHaveAttribute("aria-selected", "true");
   await page.locator("#itinerary-segment-panel-flight").getByRole("button", { name: "修改 JL001", exact: true }).click();
   let samePageEdit = page.getByRole("dialog", { name: "修改航班" });
@@ -768,6 +848,7 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   await expect(samePageEdit).toHaveCount(0);
 
   await openTab(page, "行程");
+  flightCard = await openTimelineCard(page, "JL001");
   await flightCard.getByRole("button", { name: "到航班修改航班" }).click();
   await expect(page.getByRole("tab", { name: "航班", exact: true })).toHaveAttribute("aria-selected", "true");
   await page.locator("#itinerary-segment-panel-flight").getByRole("button", { name: "修改 JL001", exact: true }).click();
@@ -791,11 +872,9 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   const secondPage = await secondContext.newPage();
   await secondPage.goto("/");
   await openTrip(secondPage, name);
-  const secondTimeline = secondPage.getByRole("region", { name: "每日行程", exact: true });
-  const secondFlight = secondTimeline.locator(".itinerary-card").filter({ hasText: "JL001" }).first();
-
   await page.getByRole("button", { name: "修改 JL001", exact: true }).click();
-  await secondFlight.getByRole("button", { name: "到航班修改航班" }).click();
+  const secondFlightCard = await openTimelineCard(secondPage, "JL001");
+  await secondFlightCard.getByRole("button", { name: "到航班修改航班" }).click();
   await secondPage.getByRole("button", { name: "修改 JL001", exact: true }).click();
   const firstEdit = page.getByRole("dialog", { name: "修改航班" });
   const secondEdit = secondPage.getByRole("dialog", { name: "修改航班" });
@@ -813,8 +892,7 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
 
   await page.reload();
   await openTrip(page, name);
-  // The hidden overview panel also lists the flight, so look inside the visible timeline.
-  await expect(page.getByRole("region", { name: "每日行程", exact: true }).getByText("JL002").first()).toBeVisible();
+  await expect(timelineRow(page, "JL002")).toBeVisible();
   await expect(page.getByText("JL003")).toHaveCount(0);
   await openTab(page, "最近變更");
   await expect(page.getByText("修改了固定行程").first()).toBeVisible();
@@ -827,11 +905,9 @@ test("a US to Japan skeleton survives locking, concurrent edits, reload, and mob
   const mobilePage = await mobileContext.newPage();
   await mobilePage.goto("/");
   await openTrip(mobilePage, name);
-  // The hidden overview panel also lists the flight, so look inside the visible itinerary panel.
-  const mobileItinerary = mobilePage.locator("#trip-panel-itinerary");
-  await expect(mobileItinerary.getByText("JL002").first()).toBeVisible();
-  await expect(mobileItinerary.getByText(/2027-11-01 11:00 · America\/Los_Angeles \(.+, -07:00\)/).first()).toBeVisible();
-  await expect(mobileItinerary.getByText(/2027-11-02 14:00 · Asia\/Tokyo \(.+, \+09:00\)/).first()).toBeVisible();
+  const mobileFlightCard = await openTimelineCard(mobilePage, "JL002");
+  await expect(mobileFlightCard).toContainText(/2027-11-01 11:00 · America\/Los_Angeles \(.+, -07:00\)/);
+  await expect(mobileFlightCard).toContainText(/2027-11-02 14:00 · Asia\/Tokyo \(.+, \+09:00\)/);
   const shellBox = await mobilePage.locator("#trip-panel-itinerary .trip-skeleton-shell").boundingBox();
   expect(shellBox?.x).toBeGreaterThanOrEqual(0);
   expect(shellBox ? shellBox.x + shellBox.width : Number.POSITIVE_INFINITY).toBeLessThanOrEqual(390);
@@ -925,34 +1001,37 @@ test("activity participants persist exact subsets, history, times, and concurren
     expectedRosterSize: 4,
   });
 
-  let alphaCard = timelineCard(page, "甲");
-  let betaCard = timelineCard(page, "乙");
-  const pendingCard = timelineCard(page, "Participation pending");
+  let alphaCard = await openTimelineCard(page, "甲");
   await expect(alphaCard).toContainText("開始： 2027-03-10 10:00");
   await expect(alphaCard).toContainText("結束： 2027-03-10 12:00");
-  await expect(betaCard).toContainText("開始： 2027-03-10 11:00");
-  await expect(betaCard).toContainText("結束： 2027-03-10 13:00");
   await expect(alphaCard.locator('[aria-label="參與成員"]')).toContainText(participantA);
   await expect(alphaCard.locator('[aria-label="參與成員"]')).not.toContainText(participantB);
+  await closeTimelineCard(page, "甲");
+  let betaCard = await openTimelineCard(page, "乙");
+  await expect(betaCard).toContainText("開始： 2027-03-10 11:00");
+  await expect(betaCard).toContainText("結束： 2027-03-10 13:00");
   await expect(betaCard.locator('[aria-label="參與成員"]')).toContainText(participantB);
   await expect(betaCard.locator('[aria-label="參與成員"]')).not.toContainText(participantA);
-  await expect(pendingCard.locator('[aria-label="參與成員"]')).toContainText(
-    "待確認",
-  );
+  await closeTimelineCard(page, "乙");
+  let pendingCard = await openTimelineCard(page, "Participation pending");
+  await expect(pendingCard.locator('[aria-label="參與成員"]')).toContainText("待確認");
+  await closeTimelineCard(page, "Participation pending");
 
   await page.reload();
   await openTrip(page, name);
-  alphaCard = timelineCard(page, "甲");
-  betaCard = timelineCard(page, "乙");
+  alphaCard = await openTimelineCard(page, "甲");
   await expect(alphaCard).toContainText("結束： 2027-03-10 12:00");
-  await expect(betaCard).toContainText("結束： 2027-03-10 13:00");
   await expect(alphaCard.locator('[aria-label="參與成員"]')).toContainText(participantA);
   await expect(alphaCard.locator('[aria-label="參與成員"]')).not.toContainText(participantB);
+  await closeTimelineCard(page, "甲");
+  betaCard = await openTimelineCard(page, "乙");
+  await expect(betaCard).toContainText("結束： 2027-03-10 13:00");
   await expect(betaCard.locator('[aria-label="參與成員"]')).toContainText(participantB);
   await expect(betaCard.locator('[aria-label="參與成員"]')).not.toContainText(participantA);
-  await expect(
-    timelineCard(page, "Participation pending").locator('[aria-label="參與成員"]'),
-  ).toContainText("待確認");
+  await closeTimelineCard(page, "乙");
+  pendingCard = await openTimelineCard(page, "Participation pending");
+  await expect(pendingCard.locator('[aria-label="參與成員"]')).toContainText("待確認");
+  await closeTimelineCard(page, "Participation pending");
   const id = await tripIdentifier(page, name);
   const trip = await readTrip(page, id);
   const memberA = trip.members.find((member) => member.email === participantA);
@@ -972,6 +1051,7 @@ test("activity participants persist exact subsets, history, times, and concurren
   expect(pendingItem.participants).toBeNull();
 
   const stableAlphaId = alphaItem.id;
+  alphaCard = await openTimelineCard(page, "甲");
   await alphaCard.getByRole("button", { name: "編輯「甲」" }).click();
   let editDialog = page.getByRole("dialog", { name: "編輯固定行程" });
   await expect(participantCheckbox(editDialog, participantA)).toBeChecked();
@@ -979,7 +1059,6 @@ test("activity participants persist exact subsets, history, times, and concurren
   await participantCheckbox(editDialog, participantB).check();
   await editDialog.getByRole("button", { name: "儲存固定行程" }).click();
   await expect(editDialog).toHaveCount(0);
-  alphaCard = timelineCard(page, "甲");
   await expect(alphaCard).toHaveAttribute("data-item-id", stableAlphaId);
   await expect(alphaCard.locator('[aria-label="參與成員"]')).toContainText(participantA);
   await expect(alphaCard.locator('[aria-label="參與成員"]')).toContainText(participantB);
@@ -1000,17 +1079,18 @@ test("activity participants persist exact subsets, history, times, and concurren
   );
   await page.reload();
   await openTrip(page, name);
-  alphaCard = timelineCard(page, "甲");
+  alphaCard = await openTimelineCard(page, "甲");
   await expect(alphaCard).toHaveAttribute("data-item-id", stableAlphaId);
   await expect(alphaCard.locator('[aria-label="參與成員"]')).toContainText(participantA);
   await expect(alphaCard.locator('[aria-label="參與成員"]')).toContainText(participantB);
 
 
+  await closeTimelineCard(page, "甲");
   const fourthPage = editorPages[2]!;
   await fourthPage.reload();
   await openTrip(fourthPage, name);
-  betaCard = timelineCard(page, "乙");
-  const fourthBetaCard = timelineCard(fourthPage, "乙");
+  betaCard = await openTimelineCard(page, "乙");
+  const fourthBetaCard = await openTimelineCard(fourthPage, "乙");
   await betaCard.getByRole("button", { name: "編輯「乙」" }).click();
   await fourthBetaCard.getByRole("button", { name: "編輯「乙」" }).click();
   const ownerEdit = page.getByRole("dialog", { name: "編輯固定行程" });
@@ -1028,7 +1108,6 @@ test("activity participants persist exact subsets, history, times, and concurren
   await expect(participantCheckbox(staleEdit, participantB)).toBeChecked();
   await staleEdit.press("Escape");
 
-  betaCard = timelineCard(page, "乙");
   await expect(betaCard.locator('[aria-label="參與成員"]')).toContainText(
     fourthParticipant,
   );
@@ -1046,6 +1125,7 @@ test("activity participants persist exact subsets, history, times, and concurren
   await unlockDialog.getByRole("button", { name: "解鎖固定行程" }).click();
   await expect(betaCard.getByRole("button", { name: "編輯「乙」" })).toBeVisible();
 
+  await closeTimelineCard(page, "乙");
   await openTab(page, "成員");
   const membersPanel = page.getByRole("heading", { name: "成員", exact: true }).locator("..");
   const memberARow = membersPanel.getByRole("listitem").filter({ hasText: participantA });
@@ -1053,15 +1133,17 @@ test("activity participants persist exact subsets, history, times, and concurren
   await expect(memberARow).toHaveCount(0);
   await page.reload();
   await openTrip(page, name);
-  alphaCard = timelineCard(page, "甲");
+  alphaCard = await openTimelineCard(page, "甲");
   await expect(alphaCard).toHaveAttribute("data-item-id", stableAlphaId);
   const alphaParticipants = alphaCard.locator('[aria-label="參與成員"]');
   await expect(alphaParticipants).toContainText(participantA);
   await expect(alphaParticipants).toContainText("已移除");
   await expect(alphaParticipants).toContainText(participantB);
-  await expect(
-    timelineCard(page, "乙").locator('[aria-label="參與成員"]'),
-  ).toContainText(fourthParticipant);
+  await closeTimelineCard(page, "甲");
+  betaCard = await openTimelineCard(page, "乙");
+  await expect(betaCard.locator('[aria-label="參與成員"]')).toContainText(fourthParticipant);
+  await closeTimelineCard(page, "乙");
+  alphaCard = await openTimelineCard(page, "甲");
 
   const tripAfterRemoval = await readTrip(page, id);
   expect(tripAfterRemoval.members.some((member) => member.id === memberA.id)).toBe(false);
@@ -1087,7 +1169,6 @@ test("activity participants persist exact subsets, history, times, and concurren
   );
   await editDialog.getByRole("button", { name: "儲存固定行程" }).click();
   await expect(editDialog).toHaveCount(0);
-  alphaCard = timelineCard(page, "甲");
   await expect(alphaCard.locator('[aria-label="參與成員"]')).toContainText(participantA);
   await expect(alphaCard.locator('[aria-label="參與成員"]')).toContainText("已移除");
   skeleton = await readSkeleton(page, id);
@@ -1187,16 +1268,13 @@ test("travel editors keep airports and hotels out of the wishlist and old flight
   await openTab(page, "住宿");
   await expect(page.locator("#itinerary-segment-panel-lodging")).toContainText("2026-10-26 11:00");
   await page.getByRole("tab", { name: "地點", exact: true }).click();
-  await page.getByRole("tab", { name: "想去", exact: true }).click();
+  await page.getByRole("tab", { name: "口袋名單", exact: true }).click();
   await expect(page.locator("#places-segment-panel-wishlist")).not.toContainText("Only travel hotel");
   await expect(page.locator("#places-segment-panel-wishlist")).not.toContainText("Fixture home airport");
   await openTab(page, "住宿");
   page.once("dialog", (dialog) => void dialog.accept());
   await page.getByRole("button", { name: "刪除 Only travel hotel", exact: true }).click();
   await expect(page.getByRole("button", { name: "修改 Only travel hotel", exact: true })).toHaveCount(0);
-  await openTab(page, "行程");
-  await expect(page.getByRole("region", { name: "旅程資訊", exact: true }).getByRole("heading", { name: "Only travel hotel" })).toHaveCount(0);
-
   await openTab(page, "航班");
   await flightPanel.getByRole("button", { name: "新增航班", exact: true }).click();
   editor = page.getByRole("dialog", { name: "新增航班" });
@@ -1213,6 +1291,7 @@ test("travel editors keep airports and hotels out of the wishlist and old flight
   await expect(flightPanel.getByText("尚未填寫航班", { exact: true })).toBeVisible();
   await page.reload();
   await openTrip(page, name);
+  await expect(timelineRow(page, "Only travel hotel")).toHaveCount(0);
   await openTab(page, "航班");
   await expect(flightPanel.getByRole("heading", { name: "去程 · RESTORED-OUT" })).toBeVisible();
 });

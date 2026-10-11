@@ -489,7 +489,19 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
     const setOwnerMessage = owner === "reason" ? setReasonMessage : setPlanningMessage;
     return <ConflictPanel conflict={conflict} busy={busy}
       onAccept={() => {
-        finishOwnerEdit(owner, conflict.current ?? base);
+        if (!conflict.current) {
+          // The place no longer exists: nothing can be saved, so drop every open editor
+          // (reason and planning) and release the retained row.
+          setReasonEditing(false);
+          setPlanningDirty(false);
+          setConflictOwner(null);
+          resolution.clear();
+          setOwnerMessage("");
+          editingChanged(false);
+          void changed();
+          return;
+        }
+        finishOwnerEdit(owner, conflict.current);
         resolution.clear();
         setOwnerMessage("");
         void changed();
