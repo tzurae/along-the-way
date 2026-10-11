@@ -1,0 +1,165 @@
+{
+  "version": 1,
+  "places": [
+    {
+      "key": "hong-kong-park",
+      "name": "香港公園",
+      "sections": [
+        {
+          "kind": "intro",
+          "title": "景點介紹",
+          "blocks": [
+            {
+              "text": "香港公園位於金鐘與中環上方，面積約 8.16 公頃，1991 年 5 月開放。園區由昔日域多利兵房的一部分改建，保留多座 1842 至 1910 年間的軍營建築，同時加入人工湖、瀑布、溫室與觀鳥園；適合把歷史建築與城市綠地安排在同一次步行中。",
+              "style": "paragraph",
+              "sourceIds": ["hong-kong-park-official"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "sights",
+          "title": "主要看點",
+          "blocks": [
+            {
+              "text": "園區中央的人工湖與瀑布建在昔日軍營網球場的位置；沿湖往中環方向步行，可接續前往奧林匹克廣場、公園辦事處與紅棉路婚姻登記處。",
+              "style": "bullet",
+              "sourceIds": ["hong-kong-park-official"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "園內保留旗杆屋、羅連信樓、華福樓與卡素樓等軍營建築，現分別由茶具文物館、公園辦事處、教育中心與香港視覺藝術中心等設施使用。",
+              "style": "bullet",
+              "sourceIds": ["hong-kong-park-official"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "溫室與尤德觀鳥園位於山坡一帶，鄰近太極園與瞭望台；各設施可能有與戶外公園不同的開放時間。",
+              "style": "bullet",
+              "sourceIds": ["hong-kong-park-official"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "location",
+          "title": "地址",
+          "blocks": [
+            {
+              "text": "香港中環紅棉路 19 號。",
+              "style": "paragraph",
+              "sourceIds": ["hong-kong-park-official"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "transport",
+          "title": "交通方式",
+          "blocks": [
+            {
+              "text": "康樂及文化事務署官網建議搭港鐵、巴士、小巴或電車前往；園內沒有公眾停車位。實際路線與車程應以到訪當日的交通資訊為準。",
+              "style": "paragraph",
+              "sourceIds": ["hong-kong-park-official"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "hours",
+          "title": "開放時間參考",
+          "blocks": [
+            {
+              "text": "戶外公園設施在官網查核時列為每日 06:00–23:00。溫室、觀鳥園、體育館等個別設施另有時段，不能把戶外公園時間套用到所有室內設施。",
+              "style": "paragraph",
+              "sourceIds": ["hong-kong-park-official"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "fees",
+          "title": "費用參考",
+          "blocks": [
+            {
+              "text": "官網查核時列示公園戶外設施免費；體育館與壁球中心除外。個別活動或設施費用應另外查核。",
+              "style": "paragraph",
+              "sourceIds": ["hong-kong-park-official"],
+              "certainty": "sourced"
+            }
+          ]
+        },
+        {
+          "kind": "notices",
+          "title": "參觀注意事項",
+          "blocks": [
+            {
+              "text": "當八號熱帶氣旋警告信號預警、八號或以上熱帶氣旋警告信號，或紅色、黑色暴雨警告生效時，公園與部分設施可能臨時關閉且不另行通知。出發前應查看當日天氣警告。",
+              "style": "bullet",
+              "sourceIds": ["hong-kong-park-official"],
+              "certainty": "sourced"
+            },
+            {
+              "text": "相簿照片拍攝於 2016 年，只用來辨識人工湖一帶，不代表目前餐飲營運、植栽或水景狀況。",
+              "style": "bullet",
+              "sourceIds": ["hong-kong-park-official"],
+              "certainty": "sourced"
+            }
+          ]
+        }
+      ],
+      "sources": [
+        {
+          "id": "hong-kong-park-official",
+          "title": "香港康樂及文化事務署：香港公園參觀資訊",
+          "url": "https://hkp.lcsd.gov.hk/en/visit",
+          "checkedAt": "2026-10-09T13:12:41Z",
+          "publishedAt": null,
+          "validFrom": null,
+          "validUntil": null,
+          "expiresAt": null
+        }
+      ],
+      "photos": [
+        {
+          "id": "commons-49044047",
+          "title": "香港公園人工湖與餐廳",
+          "description": "2016 年 5 月 27 日拍攝的香港公園人工湖一帶；照片中的餐廳與景觀只反映拍攝當時。",
+          "sourceName": "Wikimedia Commons",
+          "sourceUrl": "https://commons.wikimedia.org/wiki/File:Hong_Kong_Park_lake_and_restaurant.jpg",
+          "fileSourceUrl": "https://upload.wikimedia.org/wikipedia/commons/3/3a/Hong_Kong_Park_lake_and_restaurant.jpg",
+          "author": "Citobun",
+          "authorUrl": "https://commons.wikimedia.org/wiki/User:Citobun",
+          "creditText": "Citobun，作品來源 Wikimedia Commons，CC BY-SA 4.0",
+          "licenseName": "Creative Commons Attribution-ShareAlike 4.0 International",
+          "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
+          "capturedAt": "2016-05-27",
+          "checkedAt": "2026-10-09T13:12:41Z",
+          "verificationUrl": "https://commons.wikimedia.org/w/index.php?title=File:Hong_Kong_Park_lake_and_restaurant.jpg&oldid=1267201094",
+          "locationEvidence": "作品頁說明明確記載為 Hong Kong Park 的湖與餐廳，分類列為 Hong Kong Park 與 Ponds in Hong Kong Park；作者欄記載 Citobun 為自行創作。香港公園官方頁也確認園區中央設有人工湖。",
+          "changes": "採用 Wikimedia Commons 產生的 1280×960 與 330×247 JPEG 等比例縮放版本，下載後未再編修。清單預覽可由介面以 CSS 居中裁切顯示；放大檢視使用完整構圖。",
+          "notices": [
+            "使用時須適當署名、連結授權條款並標示修改；若另行改作，須依 CC BY-SA 4.0 以相同授權分享。",
+            "照片為 2016 年歷史影像，不代表目前餐廳營運或園區現況。Wikimedia Commons 不保證所有權利資料無誤，其他非著作權限制仍可能適用。"
+          ],
+          "originalWidth": 4000,
+          "originalHeight": 3000,
+          "image": {
+            "filename": "ce1827eff9fec5218e637f548aeaff47f6191116db4bafd8bf2e43349cd6e522.jpg",
+            "sha256": "ce1827eff9fec5218e637f548aeaff47f6191116db4bafd8bf2e43349cd6e522",
+            "width": 1280,
+            "height": 960,
+            "mediaType": "image/jpeg"
+          },
+          "thumbnail": {
+            "filename": "91d4b90a651143d97a5100e277b108dba55279cbe222aad495b8b3a6110b3de2.jpg",
+            "sha256": "91d4b90a651143d97a5100e277b108dba55279cbe222aad495b8b3a6110b3de2",
+            "width": 330,
+            "height": 247,
+            "mediaType": "image/jpeg"
+          }
+        }
+      ]
+    }
+  ]
+}

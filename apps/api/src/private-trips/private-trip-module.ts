@@ -1,0 +1,117 @@
+import type {
+  CreateTripInput,
+  InviteDto,
+  TripDto,
+  TripSummaryDto,
+  UserDto,
+} from "@along-the-way/contracts/private-trips";
+
+export type AuthenticatedUser = UserDto;
+export type InviteReadModel = InviteDto;
+export type TripReadModel = TripDto;
+export type TripSummaryReadModel = TripSummaryDto;
+
+export type { CreateTripInput };
+
+export interface SessionResult {
+  sessionToken: string;
+  user: AuthenticatedUser;
+}
+
+export interface AcceptedInvite {
+  tripId: string;
+}
+
+export interface IdentityAccessModule {
+  requestMagicLink(email: string, inviteToken?: string): Promise<void>;
+  consumeMagicLink(token: string): Promise<SessionResult>;
+  authenticate(sessionToken: string): Promise<AuthenticatedUser | null>;
+  logout(sessionToken: string): Promise<void>;
+  inviteMember(
+    userId: string,
+    tripId: string,
+    idempotencyKey: string,
+    email: string,
+  ): Promise<InviteReadModel>;
+  acceptInvite(
+    userId: string,
+    idempotencyKey: string,
+    token: string,
+  ): Promise<AcceptedInvite>;
+  revokeInvite(
+    userId: string,
+    tripId: string,
+    inviteId: string,
+    idempotencyKey: string,
+  ): Promise<void>;
+  removeMember(
+    userId: string,
+    tripId: string,
+    memberUserId: string,
+    idempotencyKey: string,
+  ): Promise<void>;
+}
+
+export interface ReadinessProbe {
+  isReady(): Promise<boolean>;
+}
+
+export interface TripWorkspaceModule {
+  listTrips(userId: string): Promise<TripSummaryReadModel[]>;
+  createTrip(
+    userId: string,
+    idempotencyKey: string,
+    input: CreateTripInput,
+  ): Promise<TripReadModel>;
+  getTrip(userId: string, tripId: string): Promise<TripReadModel>;
+}
+
+export class AppError extends Error {
+  constructor(
+    readonly code:
+      | "validation_error"
+      | "adjacent_country_stops"
+      | "rate_limited"
+      | "invalid_local_time"
+      | "ambiguous_local_time"
+      | "place_not_found"
+      | "item_not_found"
+      | "constraint_not_found"
+      | "item_locked"
+      | "place_in_use"
+      | "travel_place"
+      | "flight_order"
+      | "unauthenticated"
+      | "forbidden"
+      | "trip_not_found"
+      | "trip_place_not_found"
+      | "trip_day_not_found"
+      | "already_in_wishlist"
+      | "duplicate_suggestion_not_found"
+      | "discovery_proposal_not_found"
+      | "discovery_feedback_not_found"
+      | "model_unavailable"
+      | "provider_unavailable"
+      | "research_in_progress"
+      | "research_limit_reached"
+      | "voting_unavailable"
+      | "invite_not_found"
+      | "conflict"
+      | "invalid_magic_link"
+      | "expired_magic_link"
+      | "used_magic_link"
+      | "revoked_magic_link"
+      | "invalid_invite"
+      | "expired_invite"
+      | "used_invite"
+      | "revoked_invite"
+      | "invite_email_mismatch",
+    message: string,
+    readonly status: 400 | 401 | 403 | 404 | 409 | 429 | 503 = 400,
+    readonly retryAfterSeconds?: number,
+    readonly currentVersion?: number,
+    readonly conflictTargetId?: string,
+  ) {
+    super(message);
+  }
+}
