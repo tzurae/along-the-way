@@ -32,22 +32,21 @@ rows without a photo show the same 「尚無可用照片」 placeholder the app 
 ## Implemented in the real app
 
 The page-level 排入行程 flow, shared row anatomy, scheduled-row tint and pill, and removal of the row chevron and
-per-row button are implemented on both pages (frontend only). Shared pieces live in `SchedulePlacesSheet.tsx`,
-`SelectionBar.tsx`, `ScheduleToast.tsx`, `schedule-assignments.ts`, `schedule-flow.css` and `locales/zh-TW/schedule.ts`.
-AI 建議 schedules by accepting each pending proposal and then sending one day-assignment request (client-side
-orchestration, no new backend endpoint).
+per-row button are implemented on both pages. Shared pieces live in `SchedulePlacesSheet.tsx`, `SelectionBar.tsx`,
+`ScheduleToast.tsx`, `schedule-assignments.ts`, `schedule-flow.css` and `locales/zh-TW/schedule.ts`.
+AI 建議 schedules through one backend command, `POST /api/trips/:tripId/discovery/proposals/schedule`, which accepts the
+selected proposals and assigns the day in one transaction (all-or-nothing, idempotent by `Idempotency-Key`, 409 when a
+proposal changed, 400 naming a proposal without coordinates). Accepting, scheduling and rejecting AI proposals is
+owner-only on the server (403 `forbidden`); other members vote and use 修改需求 only.
 
 ## Still open
 
-- Backend: one idempotent endpoint that accepts AI proposals and assigns a day in one transaction (today a failure
-  between the accept calls and the assignment leaves places accepted but unscheduled; the UI reports this and retries
-  without re-accepting); creator-only authorization for AI places is UI-only; per-member 倒讚; who-added-a-place;
-  distance to lodging; applying a searched place's location to an existing place.
+- Backend: per-member 倒讚; who-added-a-place; distance to lodging in the AI detail; applying a searched place's
+  location to an existing place; a restore route for 不要再推薦.
 - AI 建議 photos: proposals use Google place ids with no matching place identity, so curated photos cannot bind.
 - AI proposals without coordinates cannot be scheduled and show 「缺少位置，暫時無法排入」 (real Google-sourced
-  proposals carry coordinates; the isolated verification fixture does not).
-- The whole flow was verified against the private verification trip with scheduling writes intercepted; a real
-  end-to-end write of a scheduled AI proposal has not been exercised.
+  proposals carry coordinates; the isolated verification fixture does not). The schedule command was exercised for
+  real against temporary proposals with coordinates in the verification environment and by integration tests.
 
 ## Known process lesson
 
