@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { PlaceDetailResponse, PlacePhotoDto } from "@along-the-way/contracts/place-details";
 import { PlaceDetailContent } from "../src/PlaceDetailContent";
 import type { PlaceDetailRequest } from "../src/PlaceThumbnail";
@@ -68,8 +68,10 @@ it("keeps a healthy selected work, credit, license, and full viewer aligned afte
   fireEvent.error(screen.getByAltText(/第一張作品.*第 1 張/));
   expect(screen.getByText("照片暫時無法載入")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "下一張照片" }));
-  expect(document.querySelector("[data-photo-credit='work-two']")).toHaveTextContent("作者乙");
-  expect(document.querySelector("[data-photo-credit='work-two']")).toHaveTextContent("CC0 1.0");
+  const selectedCredit = document.querySelector<HTMLElement>("[data-photo-credit='work-two']");
+  expect(selectedCredit).toHaveTextContent("作者乙");
+  expect(within(selectedCredit!).getByRole("link", { name: "來源" })).toHaveAttribute("href", response.detail.photos[1]!.sourceUrl);
+  expect(within(selectedCredit!).getByRole("link", { name: "授權" })).toHaveAttribute("href", response.detail.photos[1]!.licenseUrl);
 
   fireEvent.click(screen.getByRole("button", { name: /完整照片資訊/ }));
   await waitFor(() => expect(document.querySelector("[data-photo-viewer='work-two']")).toBeInTheDocument());
