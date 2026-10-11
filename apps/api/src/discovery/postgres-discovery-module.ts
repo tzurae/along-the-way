@@ -11,13 +11,14 @@ import type {
   GenerateDiscoveryInput,
   SaveDiscoveryBriefInput,
   SaveDiscoveryQuestionAnswersInput,
+  ScheduleDiscoveryProposalsInput,
   UpdateCandidateProposalVoteInput,
 } from "@along-the-way/contracts/discovery";
 import { parseDiscoveryWorkspaceResponse } from "@along-the-way/contracts/discovery";
 import type { ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
-import { sql, type Kysely, type Transaction } from "kysely";
+import { sql, type Kysely, type Selectable, type Transaction } from "kysely";
 
-import type { AlongTheWayDatabase } from "../database/database";
+import type { AlongTheWayDatabase, CandidateProposalTable } from "../database/database";
 import { AppError } from "../private-trips/private-trip-module";
 import {
   dateOnly,
@@ -27,6 +28,7 @@ import {
   remember,
   replayed,
   requireIdempotencyKey,
+  requireOwner as requireTripOwner,
   type DatabaseExecutor,
 } from "../private-trips/postgres-private-trip-store";
 import {
@@ -49,7 +51,7 @@ import {
   ProviderUnavailableError,
   type RatedPlaceLookup,
 } from "../trip-places/google-places-provider";
-import type { TripPlaceModule } from "../trip-places/trip-place-module";
+import { PostgresTripPlaceModule } from "../trip-places/postgres-trip-place-module";
 import { reopenRemovedProposals } from "./reopen-removed-proposals";
 
 interface PostgresDiscoveryModuleOptions {
@@ -57,7 +59,7 @@ interface PostgresDiscoveryModuleOptions {
   model: DiscoveryModel;
   /** Google lookups with rating and review count, used to place and screen researched candidates. */
   placeLookup: RatedPlaceLookup;
-  tripPlaces: TripPlaceModule;
+  tripPlaces: PostgresTripPlaceModule;
   sourceChecks?: RecommendationSourceChecks;
   now?: () => Date;
   policyVersion?: string;
@@ -238,7 +240,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
   private readonly database: Kysely<AlongTheWayDatabase>;
   private readonly model: DiscoveryModel;
   private readonly placeLookup: RatedPlaceLookup;
-  private readonly tripPlaces: TripPlaceModule;
+  private readonly tripPlaces: PostgresTripPlaceModule;
   private readonly sourceChecks: RecommendationSourceChecks;
   private readonly now: () => Date;
   private readonly policyVersion: string;
@@ -817,50 +819,152 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     const key = requireIdempotencyKey(rawKey);
     const version = expectedVersion(input.expectedVersion);
     const operation = `discovery:accept:${proposalId}`;
-    await this.requireMember(this.database, userId, tripId);
-    const replay = await replayed(this.database, userId, operation, key);
-    if (replay) return replayedWorkspace(replay);
-    const proposal = await this.database.transaction().execute(async (transaction) => {
-      await this.requireMember(transaction, userId, tripId);
+    return this.database.transaction().execute(async (transaction) => {
+      await requireTripOwner(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
-      const existingReplay = await replayed(transaction, userId, operation, key);
-      if (existingReplay) return null;
-      const row = await transaction.selectFrom("candidate_proposals")
-        .select([
-          "provider_place_id",
-          "name",
-          "place_type",
-          "address",
-          "latitude",
-          "longitude",
-          "source_url",
-          "created_at",
-          "status",
-          "version",
-        ])
-        .where("id", "=", proposalId)
-        .where("trip_id", "=", tripId)
-        .forUpdate()
-        .executeTakeFirst();
-      if (!row) throw new AppError("discovery_proposal_not_found", "Candidate proposal not found", 404);
-      if (row.status === "accepting" && row.version === version + 1) return row;
-      if (row.status !== "pending" || row.version !== version) {
-        throw new AppError("conflict", "The candidate proposal changed; reload before accepting", 409, undefined, row.version);
+      await transaction.selectFrom("trips").select("id").where("id", "=", tripId)
+        .forUpdate().executeTakeFirstOrThrow();
+      await requireTripOwner(transaction, userId, tripId);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return replayedWorkspace(replay);
+      await PostgresTripPlaceModule.reconcileLegacyPlacesInTransaction(transaction, tripId, this.now);
+      const proposal = await transaction.selectFrom("candidate_proposals").selectAll()
+        .where("id", "=", proposalId).where("trip_id", "=", tripId)
+        .forUpdate().executeTakeFirst();
+      if (!proposal) throw new AppError("discovery_proposal_not_found", "Candidate proposal not found", 404);
+      await this.acceptProposalInTransaction(transaction, userId, tripId, proposal, version, {
+        resumeKey: key,
+        scheduling: false,
+      });
+      const response = await this.readWorkspace(transaction, tripId, userId);
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
+  async scheduleProposals(
+    userId: string,
+    tripId: string,
+    rawKey: string,
+    input: ScheduleDiscoveryProposalsInput,
+  ) {
+    tripId = uuid(tripId, "tripId").toLowerCase();
+    const tripDayId = uuid(input.tripDayId, "tripDayId").toLowerCase();
+    if (!Array.isArray(input.proposals) || input.proposals.length === 0 || input.proposals.length > 100) {
+      throw new AppError("validation_error", "proposals must contain between 1 and 100 proposals");
+    }
+    const versions = new Map<string, number>();
+    for (const entry of input.proposals) {
+      const proposalId = uuid(entry?.proposalId, "proposalId").toLowerCase();
+      if (versions.has(proposalId)) {
+        throw new AppError("validation_error", `Proposal ${proposalId} appears more than once`);
       }
+      if (!Number.isSafeInteger(entry.expectedVersion) || entry.expectedVersion < 1) {
+        throw new AppError("validation_error", `Proposal ${proposalId} expectedVersion must be a positive integer`);
+      }
+      versions.set(proposalId, entry.expectedVersion);
+    }
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `discovery:schedule:${tripId}`;
+    return this.database.transaction().execute(async (transaction) => {
+      await requireTripOwner(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      await transaction.selectFrom("trips").select("id").where("id", "=", tripId)
+        .forUpdate().executeTakeFirstOrThrow();
+      await requireTripOwner(transaction, userId, tripId);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return replayedWorkspace(replay);
+      await PostgresTripPlaceModule.reconcileLegacyPlacesInTransaction(transaction, tripId, this.now);
+      const day = await transaction.selectFrom("trip_days").select("id")
+        .where("trip_id", "=", tripId).where("id", "=", tripDayId).executeTakeFirst();
+      if (!day) throw new AppError("validation_error", "tripDayId must belong to this trip");
+      // Provider identities are shared across trips: materialize them in a stable order too.
+      const proposals = await transaction.selectFrom("candidate_proposals").selectAll()
+        .where("trip_id", "=", tripId).where("id", "in", [...versions.keys()])
+        .orderBy("provider_place_id").orderBy("id").forUpdate().execute();
+      const found = new Set(proposals.map((proposal) => proposal.id));
+      for (const proposalId of versions.keys()) {
+        if (!found.has(proposalId)) {
+          throw new AppError("discovery_proposal_not_found", `Candidate proposal ${proposalId} not found`, 404);
+        }
+      }
+      const proposalByPlace = new Map<string, string>();
+      for (const proposal of proposals) {
+        const tripPlaceId = await this.acceptProposalInTransaction(
+          transaction, userId, tripId, proposal, versions.get(proposal.id)!, { scheduling: true },
+        );
+        proposalByPlace.set(tripPlaceId, proposal.id);
+      }
+      const places = await transaction.selectFrom("trip_places").select(["id", "version", "latitude", "longitude"])
+        .where("trip_id", "=", tripId).where("id", "in", [...proposalByPlace.keys()])
+        .where("archived_at", "is", null).orderBy("id").forUpdate().execute();
+      for (const place of places) {
+        if (place.latitude === null || place.longitude === null) {
+          throw new AppError(
+            "validation_error", `Proposal ${proposalByPlace.get(place.id)} has a trip place without coordinates and cannot be scheduled`,
+          );
+        }
+      }
+      await this.tripPlaces.writeDayAssignmentsInTransaction(
+        transaction, userId, tripId,
+        places.map((place) => ({ tripPlaceId: place.id, tripDayId, expectedVersion: place.version })),
+      );
+      const response = await this.readWorkspace(transaction, tripId, userId);
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
+  /** All acceptance effects use the caller's transaction; no network calls or nested commits. */
+  private async acceptProposalInTransaction(
+    transaction: Transaction<AlongTheWayDatabase>,
+    userId: string,
+    tripId: string,
+    proposal: Selectable<CandidateProposalTable>,
+    version: number,
+    options: { scheduling: boolean; resumeKey?: string },
+  ) {
+    const proposalId = proposal.id;
+    const resuming = !options.scheduling && proposal.status === "accepting" && proposal.version === version + 1;
+    if (proposal.version !== version && !resuming) {
+      throw new AppError(
+        "conflict", `Candidate proposal ${proposalId} changed; reload before accepting`,
+        409, undefined, proposal.version, proposalId,
+      );
+    }
+    if (options.scheduling && proposal.status === "accepted") {
+      const place = proposal.accepted_trip_place_id === null ? undefined
+        : await transaction.selectFrom("trip_places").select("id")
+          .where("id", "=", proposal.accepted_trip_place_id).where("trip_id", "=", tripId)
+          .where("archived_at", "is", null).forUpdate().executeTakeFirst();
+      if (!place) {
+        throw new AppError("conflict", `Accepted trip place for proposal ${proposalId} is no longer available`, 409);
+      }
+      return place.id;
+    }
+    if (proposal.status !== "pending" && !resuming) {
+      throw new AppError(
+        "conflict", `Candidate proposal ${proposalId} is ${proposal.status}; reload before accepting`,
+        409, undefined, proposal.version, proposalId,
+      );
+    }
+    if (options.scheduling && (proposal.latitude === null || proposal.longitude === null)) {
+      throw new AppError("validation_error", `Proposal ${proposalId} has no coordinates and cannot be scheduled`);
+    }
+    if (!resuming) {
       await transaction.updateTable("candidate_proposals").set({
         status: "accepting",
         version: sql`version + 1`,
         updated_at: this.now(),
       }).where("id", "=", proposalId).execute();
-      return row;
-    });
-    if (!proposal) {
-      const completed = await replayed(this.database, userId, operation, key);
-      if (completed) return replayedWorkspace(completed);
-      throw new AppError("conflict", "Candidate acceptance is already in progress", 409);
     }
-    try {
-      const evidence = await this.database.selectFrom("discovery_evidence as evidence")
+    // A retained binary may have committed the old intermediate intake before stopping.
+    const previousIntake = options.resumeKey
+      ? await replayed(transaction, userId, `tp:add:${tripId}`, `${options.resumeKey}:trip-place`)
+      : null;
+    let tripPlaceId = previousIntake ? requiredText(jsonObject(previousIntake).id, "tripPlaceId", 36) : null;
+    if (tripPlaceId === null) {
+      const evidence = await transaction.selectFrom("discovery_evidence as evidence")
         .innerJoin("candidate_proposal_evidence as link", "link.evidence_id", "evidence.id")
         .select("evidence.facts")
         .where("link.proposal_id", "=", proposalId)
@@ -881,86 +985,62 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         observedAt: typeof facts.observedAt === "string" ? facts.observedAt : isoTimestamp(proposal.created_at),
         expiresAt: typeof facts.expiresAt === "string" ? facts.expiresAt : isoTimestamp(this.now()),
       };
-      const tripPlace = await this.tripPlaces.addObservedCandidate(
-        userId,
-        tripId,
-        `${key}:trip-place`,
-        candidate,
-      );
-      return await this.database.transaction().execute(async (transaction) => {
-        await lockMutation(transaction, userId, operation, key);
-        const existingReplay = await replayed(transaction, userId, operation, key);
-        if (existingReplay) return replayedWorkspace(existingReplay);
-        await transaction.selectFrom("trips").select("id").where("id", "=", tripId).forUpdate().executeTakeFirstOrThrow();
-        await this.requireMember(transaction, userId, tripId);
-        const activePlace = await transaction.selectFrom("trip_places").select("id")
-          .where("id", "=", tripPlace.id).where("trip_id", "=", tripId)
-          .where("archived_at", "is", null).forUpdate().executeTakeFirst();
-        if (!activePlace) throw new AppError("conflict", "The accepted place was removed from the wishlist; reload", 409);
-        const updated = await transaction.updateTable("candidate_proposals").set({
-          status: "accepted",
-          reopened_at: null,
-          accepted_trip_place_id: tripPlace.id,
-          decided_by: userId,
-          decided_at: this.now(),
-          version: sql`version + 1`,
-          updated_at: this.now(),
-        }).where("id", "=", proposalId)
-          .where("trip_id", "=", tripId)
-          .where("status", "=", "accepting")
-          .returning("id")
-          .executeTakeFirst();
-        if (!updated) throw new AppError("conflict", "Candidate acceptance state changed", 409);
-        const proposalVotes = await transaction.selectFrom("discovery_proposal_votes as vote")
-          .innerJoin("trip_members as member", (join) => join
-            .onRef("member.trip_id", "=", "vote.trip_id")
-            .onRef("member.user_id", "=", "vote.member_user_id"))
-          .select("vote.member_user_id")
-          .where("vote.proposal_id", "=", proposalId)
-          .where("member.removed_at", "is", null)
-          .execute();
-        const carriedVotes = proposalVotes.length === 0
-          ? []
-          : await transaction.insertInto("trip_place_votes").values(proposalVotes.map((vote) => ({
-              trip_id: tripId,
-              trip_place_id: tripPlace.id,
-              member_user_id: vote.member_user_id,
-            }))).onConflict((conflict) => conflict.columns(["trip_place_id", "member_user_id"]).doNothing())
-            .returning("member_user_id").execute();
-        if (carriedVotes.length > 0) {
-          await transaction.updateTable("trip_places").set({
-            version: sql`version + 1`,
-            updated_at: this.now(),
-          }).where("id", "=", tripPlace.id).execute();
-          await recordEvent(transaction, {
-            tripId,
-            actorId: userId,
-            eventType: "trip_place.vote_carried_from_proposal",
-            targetType: "trip_place",
-            targetId: tripPlace.id,
-            summary: `Carried ${carriedVotes.length} proposal vote(s) into the shared wishlist`,
-          });
-        }
-        await recordEvent(transaction, {
-          tripId,
-          actorId: userId,
-          eventType: "discovery.proposal_accepted",
-          targetType: "candidate_proposal",
-          targetId: proposalId,
-          summary: "Accepted an AI place proposal into the shared wishlist",
-        });
-        const response = await this.readWorkspace(transaction, tripId, userId);
-        await remember(transaction, userId, operation, key, response);
-        return response;
-      });
-    } catch (error) {
-      await this.database.updateTable("candidate_proposals").set({
-        status: "pending",
+      tripPlaceId = await this.tripPlaces.addObservedCandidateInTransaction(transaction, userId, tripId, candidate);
+    }
+    const activePlace = await transaction.selectFrom("trip_places").select("id")
+      .where("id", "=", tripPlaceId).where("trip_id", "=", tripId)
+      .where("archived_at", "is", null).forUpdate().executeTakeFirst();
+    if (!activePlace) {
+      throw new AppError("conflict", `The accepted place for proposal ${proposalId} was removed from the wishlist; reload`, 409);
+    }
+    await transaction.updateTable("candidate_proposals").set({
+      status: "accepted",
+      reopened_at: null,
+      accepted_trip_place_id: tripPlaceId,
+      decided_by: userId,
+      decided_at: this.now(),
+      version: sql`version + 1`,
+      updated_at: this.now(),
+    }).where("id", "=", proposalId).execute();
+    const proposalVotes = await transaction.selectFrom("discovery_proposal_votes as vote")
+      .innerJoin("trip_members as member", (join) => join
+        .onRef("member.trip_id", "=", "vote.trip_id")
+        .onRef("member.user_id", "=", "vote.member_user_id"))
+      .select("vote.member_user_id")
+      .where("vote.proposal_id", "=", proposalId)
+      .where("member.removed_at", "is", null)
+      .execute();
+    const carriedVotes = proposalVotes.length === 0
+      ? []
+      : await transaction.insertInto("trip_place_votes").values(proposalVotes.map((vote) => ({
+          trip_id: tripId,
+          trip_place_id: activePlace.id,
+          member_user_id: vote.member_user_id,
+        }))).onConflict((conflict) => conflict.columns(["trip_place_id", "member_user_id"]).doNothing())
+        .returning("member_user_id").execute();
+    if (carriedVotes.length > 0) {
+      await transaction.updateTable("trip_places").set({
         version: sql`version + 1`,
         updated_at: this.now(),
-      }).where("id", "=", proposalId).where("status", "=", "accepting").execute();
-      throw error;
+      }).where("id", "=", tripPlaceId).execute();
+      await recordEvent(transaction, {
+        tripId,
+        actorId: userId,
+        eventType: "trip_place.vote_carried_from_proposal",
+        targetType: "trip_place",
+        targetId: tripPlaceId,
+        summary: `Carried ${carriedVotes.length} proposal vote(s) into the shared wishlist`,
+      });
     }
+    await recordEvent(transaction, {
+      tripId,
+      actorId: userId,
+      eventType: "discovery.proposal_accepted",
+      targetType: "candidate_proposal",
+      targetId: proposalId,
+      summary: "Accepted an AI place proposal into the shared wishlist",
+    });
+    return tripPlaceId;
   }
 
   async rejectProposal(
@@ -976,8 +1056,11 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     const version = expectedVersion(input.expectedVersion);
     const operation = `discovery:reject:${proposalId}`;
     return this.database.transaction().execute(async (transaction) => {
-      await this.requireMember(transaction, userId, tripId);
+      await requireTripOwner(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
+      await transaction.selectFrom("trips").select("id").where("id", "=", tripId)
+        .forUpdate().executeTakeFirstOrThrow();
+      await requireTripOwner(transaction, userId, tripId);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedWorkspace(replay);
       const updated = await transaction.updateTable("candidate_proposals").set({

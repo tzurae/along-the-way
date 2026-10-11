@@ -677,6 +677,29 @@ export function createApp({
     });
   });
 
+  app.post("/api/trips/:tripId/discovery/proposals/schedule", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json({
+      discovery: await discovery.scheduleProposals(
+        user.id,
+        uuidParam(context, "tripId"),
+        idempotencyKey(context),
+        {
+          tripDayId: stringField(body, "tripDayId"),
+          proposals: arrayField(body, "proposals").map((value) => {
+            const proposal = objectBody(value);
+            return {
+              proposalId: stringField(proposal, "proposalId"),
+              expectedVersion: numberField(proposal, "expectedVersion"),
+            };
+          }),
+        },
+      ),
+    });
+  });
+
   app.post("/api/trips/:tripId/discovery/proposals/:proposalId/accept", async (context) => {
     const { user } = await authenticated(context);
     await rateLimiter.consume("trip_content", clientIp(context), user.id);

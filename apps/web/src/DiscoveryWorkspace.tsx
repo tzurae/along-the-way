@@ -3,6 +3,7 @@ import { Ban, CalendarCheck, CalendarPlus, Check, ChevronRight, ExternalLink, Im
 
 import {
   parseDiscoveryWorkspaceResponse,
+  parseScheduleDiscoveryProposalsResponse,
   type CandidateProposalDto,
   type DiscoveryClaimSentenceDto,
   type DiscoveryEndorsement,
@@ -10,6 +11,8 @@ import {
   type DiscoveryQuestionAnswerDto,
   type DiscoveryShortfallDto,
   type DiscoveryWorkspaceDto,
+  type ScheduleDiscoveryProposalsInput,
+  type ScheduleDiscoveryProposalsResponse,
 } from "@along-the-way/contracts/discovery";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import { parseTripPlaceListResponse, type TripPlaceDto } from "@along-the-way/contracts/trip-places";
@@ -244,6 +247,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const [scheduleProposalIds, setScheduleProposalIds] = useState<string[]>([]);
   const [scheduleInitialDayId, setScheduleInitialDayId] = useState<string | null>(null);
   const [scheduleAllowUnscheduled, setScheduleAllowUnscheduled] = useState(false);
+  const [scheduleFromDetail, setScheduleFromDetail] = useState(false);
   const [scheduleError, setScheduleError] = useState("");
   const [changedProposalIds, setChangedProposalIds] = useState<Set<string>>(() => new Set());
   const changedRowsTimer = useRef<number | null>(null);
@@ -257,6 +261,18 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   useEffect(() => () => {
     if (changedRowsTimer.current !== null) window.clearTimeout(changedRowsTimer.current);
   }, []);
+
+  useEffect(() => {
+    if (trip.role === "owner") return;
+    setSelecting(false);
+    setSelectedProposalIds(new Set());
+    setScheduleProposalIds([]);
+    setScheduleInitialDayId(null);
+    setScheduleAllowUnscheduled(false);
+    setScheduleFromDetail(false);
+    setScheduleError("");
+    setRejectConfirmation(null);
+  }, [trip.role]);
 
   function openProposalDetail(proposalId: string) {
     if (proposalId === selectedProposalId) {
@@ -406,10 +422,20 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
             return feedback ? { input: { decision: "confirm", interpretation: feedback.interpretation }, version: feedback.version } : null;
           });
           if (captured) { conflictAction.current = { operation, path, payload, area, after, method }; return; }
-        } catch (failure) { setNotice({ area, text: errorMessage(failure, t.errors.failed) }); return; }
+        } catch (failure) {
+          setNotice({ area, text: errorMessage(failure, t.errors.failed) });
+          return;
+        }
       }
       if (shouldStartFreshRequest(error)) clearRetryKey(retryKeys.current, operation);
-      setNotice({ area, text: errorMessage(error, t.errors.failed) });
+      setNotice({
+        area,
+        text: operation.startsWith("reject:")
+          && error instanceof ApiRequestError
+          && (error.code === "forbidden" || error.status === 403)
+          ? t.errors.ownerOnly
+          : errorMessage(error, t.errors.failed),
+      });
     } finally {
       setPending(null);
     }
@@ -455,13 +481,12 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     if (researched) setResearchSettingsOpen(false);
   }
 
-  async function decideProposal(proposal: CandidateProposalDto, decision: "accept" | "reject") {
+  async function rejectProposal(proposal: CandidateProposalDto) {
     return mutate(
-      `${decision}:${proposal.id}`,
-      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/${decision}`,
+      `reject:${proposal.id}`,
+      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/reject`,
       { expectedVersion: proposal.version },
       "general",
-      decision === "accept" ? onPlacesChanged : undefined,
     );
   }
   async function setProposalVote(proposal: CandidateProposalDto, voted: boolean) {
@@ -483,7 +508,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       && Boolean(proposal.status === "pending" || place);
     return (
       <div className="flex flex-wrap items-center justify-between gap-2">
-        {proposal.status === "pending" ? (
+        {proposal.status === "pending" ? trip.role === "owner" ? (
           <button
             className="pd-danger-button"
             disabled={pending !== null}
@@ -495,7 +520,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
             <Ban aria-hidden="true" className="size-4" />
             {t.proposal.decline}
           </button>
-        ) : <span className="font-bold">{t.status[proposal.status]}</span>}
+        ) : null : <span className="font-bold">{t.status[proposal.status]}</span>}
         {canSchedule && located ? (
           <button
             type="button"
@@ -670,7 +695,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   };
   const proposalDayId = (proposal: CandidateProposalDto) => acceptedPlaceFor(proposal)?.assignedDayId ?? null;
   const proposalCanBeSelected = (proposal: CandidateProposalDto) => {
-    if (!proposalIsLocated(proposal)) return false;
+    if (trip.role !== "owner" || !proposalIsLocated(proposal)) return false;
     if (proposal.status === "pending") return true;
     const place = acceptedPlaceFor(proposal);
     return proposal.status === "accepted" && Boolean(place && !place.scheduled && !place.assignedDayId);
@@ -696,6 +721,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   }
 
   function beginSelection() {
+    if (trip.role !== "owner") return;
     setSelectedProposalIds(new Set());
     setScheduleError("");
     setSelecting(true);
@@ -711,19 +737,26 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     });
   }
 
-  function openSchedule(ids: string[], initialDayId: string | null = null, allowUnscheduled = false) {
-    if (ids.length === 0) return;
+  function openSchedule(
+    ids: string[],
+    initialDayId: string | null = null,
+    allowUnscheduled = false,
+    fromDetail = false,
+  ) {
+    if (trip.role !== "owner" || ids.length === 0) return;
     setScheduleProposalIds(ids);
     setScheduleInitialDayId(initialDayId);
     setScheduleAllowUnscheduled(allowUnscheduled);
+    setScheduleFromDetail(fromDetail);
     setScheduleError("");
   }
 
   function openProposalSchedule(proposal: CandidateProposalDto) {
+    if (trip.role !== "owner") return;
     const dayId = proposalDayId(proposal);
     setSelectedProposalId(null);
     setRejectConfirmation(null);
-    openSchedule([proposal.id], dayId, dayId !== null);
+    openSchedule([proposal.id], dayId, dayId !== null, true);
   }
 
   function closeSchedule() {
@@ -731,43 +764,45 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     setScheduleProposalIds([]);
     setScheduleInitialDayId(null);
     setScheduleAllowUnscheduled(false);
+    setScheduleFromDetail(false);
     setScheduleError("");
   }
 
-  async function readSchedulingState() {
-    const [discoveryValue, placesValue] = await Promise.all([
-      request<unknown>(`/api/trips/${trip.id}/discovery`),
-      request<unknown>(`/api/trips/${trip.id}/trip-places`),
-    ]);
-    const nextWorkspace = parseDiscoveryWorkspaceResponse(discoveryValue).discovery;
-    const nextPlaces = parseTripPlaceListResponse(placesValue).tripPlaces;
-    setWorkspace(nextWorkspace);
-    setTripPlaces(nextPlaces);
-    return { nextWorkspace, nextPlaces };
+  function scheduleRequestError(error: unknown) {
+    if (error instanceof ApiRequestError) {
+      return error.code === "forbidden" || error.status === 403
+        ? t.errors.ownerOnly
+        : t.scheduling.failed(error.message);
+    }
+    return t.scheduling.requestFailed;
   }
 
-  function scheduleFailure(
-    proposalIds: string[],
-    currentWorkspace: DiscoveryWorkspaceDto,
-    currentPlaces: TripPlaceDto[],
-    targetDayId: string | null,
-    error: unknown,
+  async function scheduleProposalsAtomically(
+    proposals: CandidateProposalDto[],
+    dayId: string,
   ) {
-    const placesById = new Map(currentPlaces.map((place) => [place.id, place]));
-    const unscheduledNames = proposalIds.flatMap((id) => {
-      const proposal = currentWorkspace.proposals.find((candidate) => candidate.id === id);
-      if (!proposal?.acceptedTripPlaceId) return [];
-      const place = placesById.get(proposal.acceptedTripPlaceId);
-      return !place || (targetDayId !== null && place.assignedDayId === null)
-        ? [proposal.name]
-        : [];
-    });
-    setNotice(null);
-    setScheduleError(unscheduledNames.length
-      ? t.scheduling.partialFailure(unscheduledNames)
-      : error instanceof ApiRequestError
-        ? t.scheduling.failed(error.message)
-        : t.scheduling.requestFailed);
+    const payload: ScheduleDiscoveryProposalsInput = {
+      tripDayId: dayId,
+      proposals: proposals
+        .map((proposal) => ({ proposalId: proposal.id, expectedVersion: proposal.version }))
+        .sort((left, right) => left.proposalId.localeCompare(right.proposalId)),
+    };
+    const operation = `schedule-proposals:${dayId}:${payload.proposals.map((proposal) => proposal.proposalId).join(",")}`;
+    const response = await request<ScheduleDiscoveryProposalsResponse>(
+      `/api/trips/${trip.id}/discovery/proposals/schedule`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": retryKey(retryKeys.current, operation, payload),
+        },
+        body: JSON.stringify(payload),
+        parse: parseScheduleDiscoveryProposalsResponse,
+      },
+    );
+    clearRetryKey(retryKeys.current, operation);
+    setWorkspace(response.discovery);
+    return response.discovery;
   }
 
   function finishSchedule(
@@ -802,77 +837,53 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   }
 
   async function confirmSchedule(dayId: string | null) {
-    if (bulkBusy || scheduleProposalIds.length === 0) return;
+    if (trip.role !== "owner") {
+      setScheduleError(t.errors.ownerOnly);
+      return;
+    }
+    if (bulkBusy || scheduleProposalIds.length === 0 || !workspace) return;
     const proposalIds = [...scheduleProposalIds];
+    const proposals = proposalIds.flatMap((proposalId) => {
+      const proposal = workspace.proposals.find((candidate) => candidate.id === proposalId);
+      return proposal ? [proposal] : [];
+    });
+    if (proposals.length !== proposalIds.length) {
+      setScheduleError(t.scheduling.proposalChanged);
+      return;
+    }
     setBulkBusy(true);
     setScheduleError("");
-    let currentWorkspace = workspace;
-    let currentPlaces = tripPlaces;
+    setNotice(null);
     try {
-      const fresh = await readSchedulingState();
-      currentWorkspace = fresh.nextWorkspace;
-      currentPlaces = fresh.nextPlaces;
-      for (const proposalId of proposalIds) {
-        const proposal = currentWorkspace.proposals.find((candidate) => candidate.id === proposalId);
-        if (!proposal) throw new Error(t.scheduling.proposalChanged);
-        if (proposal.status === "pending") {
-          const next = await decideProposal(proposal, "accept");
-          if (!next) throw new Error(t.scheduling.acceptFailed);
-          currentWorkspace = next;
-        } else if (proposal.status !== "accepted" || !proposal.acceptedTripPlaceId) {
-          throw new Error(t.scheduling.proposalChanged);
+      let nextWorkspace = workspace;
+      const detailProposal = scheduleFromDetail && proposals.length === 1 ? proposals[0]! : null;
+      if (detailProposal?.status === "accepted") {
+        const place = acceptedPlaceFor(detailProposal);
+        if (!place) {
+          setScheduleError(t.scheduling.placeUnavailable);
+          return;
         }
+        const assigned = await assignPlacesToDay({
+          request,
+          tripId: trip.id,
+          dayId,
+          items: [{
+            tripPlaceId: place.id,
+            version: place.version,
+            currentDayId: place.assignedDayId,
+          }],
+        });
+        setTripPlaces(assigned.tripPlaces);
+      } else {
+        if (dayId === null) {
+          setScheduleError(t.scheduling.proposalChanged);
+          return;
+        }
+        nextWorkspace = await scheduleProposalsAtomically(proposals, dayId);
       }
-      const placesValue = await request<unknown>(`/api/trips/${trip.id}/trip-places`);
-      currentPlaces = parseTripPlaceListResponse(placesValue).tripPlaces;
-      setTripPlaces(currentPlaces);
-      const items = proposalIds.map((proposalId) => {
-        const proposal = currentWorkspace!.proposals.find((candidate) => candidate.id === proposalId);
-        const place = proposal?.acceptedTripPlaceId
-          ? currentPlaces.find((candidate) => candidate.id === proposal.acceptedTripPlaceId)
-          : null;
-        if (!proposal || !place || place.latitude === null || place.longitude === null) {
-          throw new Error(t.scheduling.placeUnavailable);
-        }
-        return {
-          tripPlaceId: place.id,
-          version: place.version,
-          currentDayId: place.assignedDayId,
-        };
-      });
-      const assigned = await assignPlacesToDay({
-        request,
-        tripId: trip.id,
-        dayId,
-        items,
-      });
-      setTripPlaces(assigned.tripPlaces);
-      finishSchedule(proposalIds, currentWorkspace, dayId);
+      finishSchedule(proposalIds, nextWorkspace, dayId);
     } catch (error) {
-      try {
-        const fresh = await readSchedulingState();
-        currentWorkspace = fresh.nextWorkspace;
-        currentPlaces = fresh.nextPlaces;
-      } catch {
-        // Keep the latest successfully read state; retry always reconciles before accepting.
-      }
-      if (!currentWorkspace) {
-        setScheduleError(error instanceof ApiRequestError
-          ? t.scheduling.failed(error.message)
-          : t.scheduling.requestFailed);
-        return;
-      }
-      const placesById = new Map(currentPlaces.map((place) => [place.id, place]));
-      const completed = proposalIds.every((proposalId) => {
-        const proposal = currentWorkspace!.proposals.find((candidate) => candidate.id === proposalId);
-        const place = proposal?.acceptedTripPlaceId ? placesById.get(proposal.acceptedTripPlaceId) : null;
-        return place?.assignedDayId === dayId;
-      });
-      if (completed) {
-        finishSchedule(proposalIds, currentWorkspace, dayId);
-        return;
-      }
-      scheduleFailure(proposalIds, currentWorkspace, currentPlaces, dayId, error);
+      setScheduleError(scheduleRequestError(error));
     } finally {
       setBulkBusy(false);
     }
@@ -912,6 +923,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
           </div>
         )}
       </div>
+      {trip.role !== "owner" ? <p className="pd-subhead">{t.header.ownerSchedulingOnly}</p> : null}
       {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={pending !== null}
         onAccept={() => {
           const operation = conflictAction.current?.operation;
@@ -1168,7 +1180,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
               titleRef={detailTitleRef}
               onClose={closeProposalDetail}
               footer={
-              rejectConfirmation ? <div className="pd-confirm-footer"><p>{t.proposal.rejectConfirmTitle(rejectConfirmation.name)}</p><p>{t.proposal.rejectConfirmDescription}</p>{notice?.area === "general" ? <p role="alert">{notice.text}</p> : null}<div><button className="pd-secondary" disabled={pending !== null} onClick={() => setRejectConfirmation(null)}>{t.proposal.cancel}</button><button className="pd-danger-button" disabled={pending !== null} onClick={() => { const proposal = rejectConfirmation; void decideProposal(proposal, "reject").then((next) => { if (next) { setRejectConfirmation(null); closeProposalDetail(); } }); }}>{t.proposal.rejectConfirm}</button></div></div>
+              rejectConfirmation && trip.role === "owner" ? <div className="pd-confirm-footer"><p>{t.proposal.rejectConfirmTitle(rejectConfirmation.name)}</p><p>{t.proposal.rejectConfirmDescription}</p>{notice?.area === "general" ? <p role="alert">{notice.text}</p> : null}<div><button className="pd-secondary" disabled={pending !== null} onClick={() => setRejectConfirmation(null)}>{t.proposal.cancel}</button><button className="pd-danger-button" disabled={pending !== null} onClick={() => { const proposal = rejectConfirmation; void rejectProposal(proposal).then((next) => { if (next) { setRejectConfirmation(null); closeProposalDetail(); } }); }}>{t.proposal.rejectConfirm}</button></div></div>
               : <div>{notice?.area === "general" ? <p className="pd-notice" role="alert">{notice.text}</p> : null}<div className="pd-fixed-actions">{selectedProposal.status === "pending" && selectedProposal.votingAvailable ? <VoteControl compact name={selectedProposal.name} voters={selectedProposal.voters} voteCount={selectedProposal.voteCount} ownVote={selectedProposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(selectedProposal, voted)} /> : null}{proposalActions(selectedProposal)}</div></div>
             }>
               {proposalDetail(selectedProposal)}

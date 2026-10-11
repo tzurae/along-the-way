@@ -3,6 +3,7 @@ export const discovery = {
     failed: "無法完成 AI 研究",
     researchUnavailable: (services: string) => `無法進行 AI 研究：此伺服器尚未設定${services}。你的旅程說明會保留。`,
     feedbackUnavailable: (services: string) => `無法解讀意見：此伺服器尚未設定${services}。你的意見會保留。`,
+    ownerOnly: "只有旅程建立者可以操作 AI 建議。",
   },
   services: {
     openAi: "AI 服務金鑰與模型",
@@ -68,13 +69,12 @@ export const discovery = {
     description: "只要說明一次旅程需求，AI 就會研究可信來源、在 Google Maps 確認每個地點，並只顯示至少有兩個獨立來源推薦的地點。",
     researchAgain: "重新研究",
     loading: "正在載入 AI 研究…",
+    ownerSchedulingOnly: "由旅程建立者把 AI 建議排入行程；大家都能投讚或倒讚。",
   },
   scheduling: {
-    partialFailure: (names: string[]) => `「${names.join("、")}」目前已在口袋名單，但尚未排入行程。保留目前選擇，請再試一次。`,
     failed: (reason: string) => `無法排入行程：${reason}。請再試一次。`,
     requestFailed: "無法排入行程。請稍後再試一次。",
     proposalChanged: "AI 建議已更新，請重新確認目前的選擇。",
-    acceptFailed: "部分 AI 建議尚未接受。",
     placeUnavailable: "找不到已接受地點的最新資料，或地點仍缺少位置。",
     missingLocationHint: (count: number) => `${count} 個地點缺少位置，暫時無法排入行程`,
     missingLocationUnavailable: "缺少位置，暫時無法排入",

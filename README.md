@@ -268,6 +268,33 @@ select an unplaced candidate.
 Down removes the new schema and cannot retain the new selection/history data;
 it is not the deployment rollback procedure.
 
+### Accept AI proposals directly onto a day
+
+`POST /api/trips/:tripId/discovery/proposals/schedule` requires an
+`Idempotency-Key` and `{ "tripDayId": "uuid", "proposals": [
+{ "proposalId": "uuid", "expectedVersion": 1 } ] }` with 1–100 distinct proposals.
+It accepts pending proposals (including their active-member votes) and assigns
+their places to the requested trip day in one transaction. Already accepted
+proposals reuse their live wishlist places, validate those places' current
+coordinates rather than the original proposal snapshot, and still require the
+current proposal version. Merging a linked wishlist place advances the proposal
+version, so a pre-merge request conflicts instead of silently scheduling the merge
+target. Pending proposals must have coordinates before acceptance. A stale,
+rejected, accepting, missing or unlocated candidate fails the whole command; no
+acceptance, assignment, vote, event or replay record is committed.
+The day must belong to the trip. Existing timed-item and cross-day assignment
+conflicts remain unchanged; assignment selects the place and clears its prior date.
+Success returns the existing `{ discovery }` workspace, parsed by
+`parseScheduleDiscoveryProposalsResponse`; a retry with the same key returns the
+stored response without repeating effects. No database migration is required.
+
+Only the trip creator (`owner`) may call this command, accept a proposal, or use
+「不要再推薦」 (`POST .../proposals/:proposalId/reject`). The backend returns
+`403 forbidden` / `Only the trip owner can do that` for other active members;
+non-members retain `404 trip_not_found`. All members keep their existing voting,
+manual place intake and Pocket-place scheduling permissions. Existing route
+response shapes and stored-reply compatibility are unchanged.
+
 ## Activity participants (Issue #21)
 
 This slice of [Issue #21](https://github.com/tzurae/along-the-way/issues/21)
