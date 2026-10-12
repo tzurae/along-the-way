@@ -63,14 +63,16 @@ export function AuthProgress({ phase }: { phase: AuthProgressPhase }): JSX.Eleme
 export function LoginExperience(props: {
   initialError?: string | null;
   inviteToken?: string | null;
-  requestLink: (email: string, inviteToken: string | null) => Promise<void>;
+  requestLink: (email: string) => Promise<void>;
+  requestInviteLink: (inviteToken: string) => Promise<void>;
+  retryConsume?: () => void;
   describeError: (error: unknown) => string;
 }): JSX.Element {
   const [email, setEmail] = useState("");
   const [submittedEmail, setSubmittedEmail] = useState("");
   const [screen, setScreen] = useState<"form" | "sent">("form");
   const [pending, setPending] = useState(false);
-  const [resendDeadline, setResendDeadline] = useState<{ email: string; expiresAt: number } | null>(null);
+  const [resendDeadline, setResendDeadline] = useState<{ key: string; expiresAt: number } | null>(null);
   const [cooldown, setCooldown] = useState(0);
   const [error, setError] = useState<LoginError | null>(() =>
     props.initialError ? { kind: "form", message: props.initialError } : null,
@@ -79,6 +81,8 @@ export function LoginExperience(props: {
   const errorHeadingRef = useRef<HTMLHeadingElement>(null);
   const sentHeadingRef = useRef<HTMLHeadingElement>(null);
   const focusEmailAfterEdit = useRef(false);
+  const previousInviteToken = useRef(props.inviteToken);
+  const inviteMode = Boolean(props.inviteToken);
 
   useEffect(() => {
     if (error?.kind === "form") errorHeadingRef.current?.focus();
@@ -92,6 +96,22 @@ export function LoginExperience(props: {
       emailRef.current?.focus();
     }
   }, [screen]);
+
+  useEffect(() => {
+    if (props.initialError) {
+      setError({ kind: "form", message: props.initialError });
+    }
+  }, [props.initialError]);
+
+  useEffect(() => {
+    if (previousInviteToken.current === props.inviteToken) return;
+    previousInviteToken.current = props.inviteToken;
+    setScreen("form");
+    setPending(false);
+    setResendDeadline(null);
+    setCooldown(0);
+    setError(null);
+  }, [props.inviteToken]);
 
   useEffect(() => {
     if (!resendDeadline) return;
@@ -109,17 +129,23 @@ export function LoginExperience(props: {
 
   async function sendLink(address: string) {
     if (pending) return;
-    if (resendDeadline?.email === address && resendDeadline.expiresAt > Date.now()) {
+    const inviteToken = props.inviteToken;
+    const requestKey = inviteToken ?? address;
+    if (resendDeadline?.key === requestKey && resendDeadline.expiresAt > Date.now()) {
       setCooldown(Math.ceil((resendDeadline.expiresAt - Date.now()) / 1_000));
       return;
     }
     setPending(true);
     setError(null);
     try {
-      await props.requestLink(address, props.inviteToken ?? null);
+      if (inviteToken) {
+        await props.requestInviteLink(inviteToken);
+      } else {
+        await props.requestLink(address);
+      }
       const expiresAt = Date.now() + 60_000;
       setSubmittedEmail(address);
-      setResendDeadline({ email: address, expiresAt });
+      setResendDeadline({ key: requestKey, expiresAt });
       setCooldown(60);
       setScreen("sent");
     } catch (requestError) {
@@ -148,43 +174,62 @@ export function LoginExperience(props: {
   }
 
   const addressErrorId = error?.kind === "address" ? "auth-email-error" : undefined;
-  const sameAddressCoolingDown = resendDeadline?.email === email && cooldown > 0;
+  const requestKey = props.inviteToken ?? email;
+  const sameRequestCoolingDown = resendDeadline?.key === requestKey && cooldown > 0;
 
   return (
     <AuthFrame>
-      <h1 id="auth-title" className="auth-title">{auth.heading}</h1>
-      <p className="auth-intro">{auth.intro}</p>
+      <h1 id="auth-title" className="auth-title">
+        {inviteMode ? auth.inviteHeading : auth.heading}
+      </h1>
+      <p className="auth-intro">{inviteMode ? auth.inviteIntro : auth.intro}</p>
       <p className="auth-private-note">{auth.privateSpace}</p>
 
       <div className="auth-stage" data-screen={screen}>
         {screen === "form" ? (
           <form className="auth-form" onSubmit={submit} noValidate={false}>
-            <Field data-invalid={error?.kind === "address" || undefined}>
-              <FieldLabel htmlFor="auth-email">{auth.email}</FieldLabel>
-              <Input
-                ref={emailRef}
-                id="auth-email"
-                className="auth-email-input"
-                type="email"
-                required
-                autoComplete="email"
-                value={email}
-                disabled={pending}
-                aria-invalid={error?.kind === "address" || undefined}
-                aria-describedby={addressErrorId}
-                onInvalid={handleInvalid}
-                onChange={(event) => {
-                  setEmail(event.target.value);
-                  if (error?.kind === "address") setError(null);
-                }}
-              />
-              <FieldDescription className="sr-only">{auth.intro}</FieldDescription>
-            </Field>
+            {inviteMode ? null : (
+              <Field data-invalid={error?.kind === "address" || undefined}>
+                <FieldLabel htmlFor="auth-email">{auth.email}</FieldLabel>
+                <Input
+                  ref={emailRef}
+                  id="auth-email"
+                  className="auth-email-input"
+                  type="email"
+                  required
+                  autoComplete="email"
+                  value={email}
+                  disabled={pending}
+                  aria-invalid={error?.kind === "address" || undefined}
+                  aria-describedby={addressErrorId}
+                  onInvalid={handleInvalid}
+                  onChange={(event) => {
+                    setEmail(event.target.value);
+                    if (error?.kind === "address") setError(null);
+                  }}
+                />
+                <FieldDescription className="sr-only">{auth.intro}</FieldDescription>
+              </Field>
+            )}
 
-            <Button className="auth-submit" size="lg" type="submit" disabled={pending || sameAddressCoolingDown}>
-              <span className="auth-button-content" key={pending ? "pending" : sameAddressCoolingDown ? cooldown : "idle"}>
+            <Button
+              className="auth-submit"
+              size="lg"
+              type="submit"
+              disabled={pending || sameRequestCoolingDown}
+            >
+              <span
+                className="auth-button-content"
+                key={pending ? "pending" : sameRequestCoolingDown ? cooldown : "idle"}
+              >
                 {pending ? <ProgressMark /> : null}
-                {pending ? auth.requestingLink : sameAddressCoolingDown ? auth.resendAfter(cooldown) : auth.requestLink}
+                {pending
+                  ? auth.requestingLink
+                  : sameRequestCoolingDown
+                    ? auth.resendAfter(cooldown)
+                    : inviteMode
+                      ? auth.requestInviteLink
+                      : auth.requestLink}
               </span>
             </Button>
 
@@ -198,6 +243,11 @@ export function LoginExperience(props: {
                   <h2 ref={errorHeadingRef} className="auth-outcome-heading" tabIndex={-1}>
                     {error.message}
                   </h2>
+                  {props.retryConsume ? (
+                    <Button className="mt-3 min-h-11" type="button" variant="outline" onClick={props.retryConsume}>
+                      {auth.retrySignIn}
+                    </Button>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -209,13 +259,17 @@ export function LoginExperience(props: {
               <h2 ref={sentHeadingRef} className="auth-sent-heading" tabIndex={-1}>
                 {auth.sentHeading}
               </h2>
-              <p className="auth-sent-message">{auth.sentMessage(submittedEmail)}</p>
+              <p className="auth-sent-message">
+                {inviteMode ? auth.inviteSentMessage : auth.sentMessage(submittedEmail)}
+              </p>
               <p className="auth-private-note">{auth.invitedOnly}</p>
             </div>
             <div className="auth-sent-actions">
-              <Button type="button" variant="link" onClick={editEmail} disabled={pending}>
-                {auth.editEmail}
-              </Button>
+              {inviteMode ? null : (
+                <Button type="button" variant="link" onClick={editEmail} disabled={pending}>
+                  {auth.editEmail}
+                </Button>
+              )}
               <Button
                 className="auth-resend"
                 type="button"

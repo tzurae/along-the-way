@@ -44,10 +44,12 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  closeButtonClassName,
   placement = "center",
   ...props
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean
+  closeButtonClassName?: string
   placement?: "center" | "sheet"
 }) {
   const { t } = useI18n()
@@ -70,7 +72,7 @@ function DialogContent({
             render={
               <Button
                 variant="ghost"
-                className="absolute top-2 right-2"
+                className={cn("absolute top-2 right-2", closeButtonClassName)}
                 size="icon-sm"
               />
             }

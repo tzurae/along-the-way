@@ -4,10 +4,13 @@ import { flushSync } from "react-dom";
 import {
   parseApiError,
   parseInviteResponse,
+  parseMagicLinkConsumeResponse,
   parseSessionResponse,
   parseTripListResponse,
   parseTripResponse,
   type CreateTripInput,
+  type MagicLinkConsumeResponse,
+  type SessionResponse,
   type TripDto,
   type TripSummaryDto,
   type UserDto,
@@ -59,7 +62,7 @@ interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
 }
 
-const RECOVERABLE_MAGIC_CODES: Record<string, true> = {
+const TERMINAL_MAGIC_CODES: Record<string, true> = {
   expired_magic_link: true,
   invalid_magic_link: true,
   revoked_magic_link: true,
@@ -130,8 +133,17 @@ async function requestJson<T>(
   return (options.parse ? options.parse(value) : value) as T;
 }
 
-function tokenParameter(name: "magicToken" | "inviteToken") {
-  return new URLSearchParams(window.location.hash.slice(1)).get(name);
+interface AuthFragment {
+  magicToken: string | null;
+  inviteToken: string | null;
+}
+
+function readAuthFragment(): AuthFragment {
+  const fragment = new URLSearchParams(window.location.hash.slice(1));
+  return {
+    magicToken: fragment.get("magicToken"),
+    inviteToken: fragment.get("inviteToken"),
+  };
 }
 
 function removeTokenFragment(remove: "magicToken" | "inviteToken") {
@@ -513,9 +525,15 @@ export function App() {
   const [accepting, setAccepting] = useState(false);
   const inviteKey = useRef<string | null>(null);
   const createTripKey = useRef<string | null>(null);
+  const [authFragment, setAuthFragment] = useState<AuthFragment>(readAuthFragment);
+  const authFragmentRef = useRef(authFragment);
+  const consumeRequests = useRef(new Map<string, Promise<MagicLinkConsumeResponse>>());
+  const completedAuthKeys = useRef(new Set<string>());
+  const [authAttempt, setAuthAttempt] = useState(0);
+  const [retryMagicToken, setRetryMagicToken] = useState<string | null>(null);
   const [signInError, setSignInError] = useState("");
   const [authProgressPhase, setAuthProgressPhase] = useState<AuthProgressPhase>(
-    () => tokenParameter("magicToken") ? "consuming-link" : "restoring",
+    () => authFragment.magicToken ? "consuming-link" : "restoring",
   );
   const [shellEntering, setShellEntering] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
@@ -731,15 +749,39 @@ export function App() {
       if (readOnly.current) restoreSnapshot();
       else if (location.trip) void loadTrip(location.trip).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : t.today.unavailable));
     };
+    const fragmentChanged = () => {
+      let next = readAuthFragment();
+      const previous = authFragmentRef.current;
+      if (
+        next.magicToken &&
+        completedAuthKeys.current.has(next.magicToken)
+      ) {
+        removeTokenFragment("magicToken");
+        next = { ...next, magicToken: previous.magicToken };
+      }
+      authFragmentRef.current = next;
+      setAuthFragment(next);
+      if (next.magicToken && next.magicToken !== previous.magicToken) {
+        ++sessionEpoch.current;
+        setSignInError("");
+        setRetryMagicToken(null);
+        setOffline(false);
+        readOnly.current = false;
+        setAuthProgressPhase("consuming-link");
+        setUser(undefined);
+      }
+    };
     window.addEventListener("offline", unavailable);
     window.addEventListener("online", online);
     window.addEventListener("today-api-unavailable", unavailable);
     window.addEventListener("today-access-denied", denied);
     window.addEventListener("popstate", navigate);
+    window.addEventListener("hashchange", fragmentChanged);
     return () => {
       window.removeEventListener("offline", unavailable); window.removeEventListener("online", online);
       window.removeEventListener("today-api-unavailable", unavailable); window.removeEventListener("today-access-denied", denied);
       window.removeEventListener("popstate", navigate);
+      window.removeEventListener("hashchange", fragmentChanged);
     };
   }, [loadTrip, reconnect, restoreSnapshot, t.today.unavailable]);
 
@@ -791,70 +833,149 @@ export function App() {
   useEffect(() => {
     let active = true;
     const epoch = sessionEpoch.current;
+    const magicToken = authFragment.magicToken;
+    const authKey = magicToken ?? "session";
     let authenticatedUser: UserDto | null = null;
+    let linkedInviteOutcome: MagicLinkConsumeResponse["inviteOutcome"];
+    void authAttempt;
+    if (completedAuthKeys.current.has(authKey)) {
+      return () => {
+        active = false;
+      };
+    }
+
     void (async () => {
       try {
-        const magicToken = tokenParameter("magicToken");
-        if (!magicToken && store?.isLocallySignedOut()) { setUser(null); return; }
+        if (!magicToken && store?.isLocallySignedOut()) {
+          completedAuthKeys.current.add(authKey);
+          setUser(null);
+          return;
+        }
+
+        let session: SessionResponse;
+        let acceptedTripId: string | undefined;
         if (magicToken) {
           setAuthProgressPhase("consuming-link");
-          await request("/api/auth/magic-links/consume", {
-            method: "POST",
-            body: JSON.stringify({ token: magicToken }),
-            parse: (value) => parseSessionResponse(value),
-          });
+          setSignInError("");
+          setRetryMagicToken(null);
+          let consumeRequest = consumeRequests.current.get(magicToken);
+          if (!consumeRequest) {
+            consumeRequest = request<MagicLinkConsumeResponse>("/api/auth/magic-links/consume", {
+              method: "POST",
+              body: JSON.stringify({ token: magicToken }),
+              parse: (value) => parseMagicLinkConsumeResponse(value),
+            });
+            consumeRequests.current.set(magicToken, consumeRequest);
+          }
+          let consumed: MagicLinkConsumeResponse;
+          try {
+            consumed = await consumeRequest;
+          } catch (reason) {
+            if (consumeRequests.current.get(magicToken) === consumeRequest) {
+              consumeRequests.current.delete(magicToken);
+            }
+            if (!active || epoch !== sessionEpoch.current) return;
+            setUser(null);
+            if (
+              reason instanceof ApiRequestError &&
+              TERMINAL_MAGIC_CODES[reason.code]
+            ) {
+              completedAuthKeys.current.add(authKey);
+              removeTokenFragment("magicToken");
+              setSignInError(`${reason.message} ${t.app.requestNewMagicLink}`);
+              setRetryMagicToken(null);
+            } else {
+              setSignInError(t.app.unableConsumeMagicLink);
+              setRetryMagicToken(magicToken);
+            }
+            return;
+          }
+          if (!active || epoch !== sessionEpoch.current) return;
+          completedAuthKeys.current.add(authKey);
           removeTokenFragment("magicToken");
           store?.setLocallySignedOut(false);
+          signedOut.current = false;
+          session = consumed;
+          acceptedTripId = consumed.acceptedTripId;
+          linkedInviteOutcome = consumed.inviteOutcome;
+          if (acceptedTripId || linkedInviteOutcome) {
+            removeTokenFragment("inviteToken");
+            const next = {
+              ...authFragmentRef.current,
+              inviteToken: null,
+            };
+            authFragmentRef.current = next;
+            setAuthFragment(next);
+          }
         } else {
           setAuthProgressPhase("restoring");
+          session = await request<SessionResponse>("/api/session", {
+            parse: (value) => parseSessionResponse(value),
+          });
+          completedAuthKeys.current.add(authKey);
         }
-        const session = await request<{ user: UserDto }>("/api/session", {
-          parse: (value) => parseSessionResponse(value),
-        });
+
         authenticatedUser = session.user;
         if (!active || epoch !== sessionEpoch.current) return;
         setAuthProgressPhase("loading-trips");
         const previousAccount = accountId.current ?? store?.lastAccount();
-        if (previousAccount && previousAccount !== session.user.id) store?.clearAccount(previousAccount);
+        if (previousAccount && previousAccount !== session.user.id) {
+          store?.clearAccount(previousAccount);
+        }
         accountId.current = session.user.id;
         const available = await refreshTrips();
         if (!active || epoch !== sessionEpoch.current) return;
-        const tripId = readTripLocation().trip ?? available[0]?.id;
+        const tripId = acceptedTripId ?? readTripLocation().trip ?? available[0]?.id;
         if (tripId) await loadTrip(tripId);
         else {
           setTodaySnapshot(null);
           setSelectedTrip(null);
           setOnboardingFacts(null);
         }
+        if (linkedInviteOutcome === "expired-or-revoked") {
+          setError(t.app.linkedInvitationUnavailable);
+        }
         if (active && epoch === sessionEpoch.current) enterSignedIn(session.user);
       } catch (reason) {
-        if (active) {
-          if (!(reason instanceof ApiRequestError) || (reason.status ?? 0) >= 500) {
-            if (restoreSnapshot()) return;
-          }
-          if (accountId.current && reason instanceof ApiRequestError && [403, 404].includes(reason.status ?? 0)) {
-            setError(reason.message);
-            if (authenticatedUser) enterSignedIn(authenticatedUser);
-            return;
-          }
-          setUser(null);
-          if (
-            reason instanceof ApiRequestError &&
-            RECOVERABLE_MAGIC_CODES[reason.code]
-          ) {
-            setSignInError(`${reason.message} ${t.app.requestNewMagicLink}`);
-            removeTokenFragment("magicToken");
-          }
+        if (!active) return;
+        if (!magicToken) completedAuthKeys.current.add(authKey);
+        if (!(reason instanceof ApiRequestError) || (reason.status ?? 0) >= 500) {
+          if (restoreSnapshot()) return;
         }
+        if (authenticatedUser) {
+          setError(
+            linkedInviteOutcome === "expired-or-revoked"
+              ? t.app.linkedInvitationUnavailable
+              : reason instanceof Error
+                ? reason.message
+                : t.today.unavailable,
+          );
+          enterSignedIn(authenticatedUser);
+          return;
+        }
+        setUser(null);
       }
     })();
     return () => {
       active = false;
     };
-  }, [enterSignedIn, loadTrip, refreshTrips, request, restoreSnapshot, store, t.app.requestNewMagicLink]);
+  }, [
+    authAttempt,
+    authFragment.magicToken,
+    enterSignedIn,
+    loadTrip,
+    refreshTrips,
+    request,
+    restoreSnapshot,
+    store,
+    t.app.linkedInvitationUnavailable,
+    t.app.requestNewMagicLink,
+    t.app.unableConsumeMagicLink,
+    t.today.unavailable,
+  ]);
 
   async function acceptInvitation() {
-    const token = tokenParameter("inviteToken");
+    const token = authFragment.inviteToken;
     if (!token) return;
     setAccepting(true);
     setError("");
@@ -868,6 +989,9 @@ export function App() {
       });
       inviteKey.current = null;
       removeTokenFragment("inviteToken");
+      const next = { ...authFragmentRef.current, inviteToken: null };
+      authFragmentRef.current = next;
+      setAuthFragment(next);
       setSelectedTrip(response.trip);
       await refreshTrips();
       await loadTrip(response.trip.id);
@@ -935,23 +1059,34 @@ export function App() {
       <div className="atw-auth-transition-surface">
         <LoginExperience
           initialError={signInError || null}
-          inviteToken={tokenParameter("inviteToken")}
-          requestLink={async (email, inviteToken) => {
+          inviteToken={authFragment.inviteToken}
+          requestLink={async (email) => {
             await requestJson<{ message: string }>(t.errors, "/api/auth/magic-links", {
               method: "POST",
-              body: JSON.stringify({
-                email,
-                ...(inviteToken ? { inviteToken } : {}),
-              }),
+              body: JSON.stringify({ email }),
             });
           }}
+          requestInviteLink={async (inviteToken) => {
+            await requestJson<{ message: string }>(t.errors, "/api/auth/invite-magic-links", {
+              method: "POST",
+              body: JSON.stringify({ inviteToken }),
+            });
+          }}
+          retryConsume={retryMagicToken === authFragment.magicToken ? () => {
+            ++sessionEpoch.current;
+            setSignInError("");
+            setRetryMagicToken(null);
+            setAuthProgressPhase("consuming-link");
+            setUser(undefined);
+            setAuthAttempt((attempt) => attempt + 1);
+          } : undefined}
           describeError={(reason) => reason instanceof Error ? reason.message : t.app.unableRequestLink}
         />
       </div>
     );
   }
 
-  const inviteToken = tokenParameter("inviteToken");
+  const inviteToken = authFragment.inviteToken;
   const itinerarySegment = itinerarySegmentIds.includes(activeSegment as ItinerarySegment)
     ? activeSegment as ItinerarySegment
     : "daily";

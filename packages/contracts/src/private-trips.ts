@@ -66,11 +66,19 @@ export interface TripSummaryDto {
   role: MemberRole;
 }
 
+export interface TripAirportInput {
+  name: string;
+  timeZone: string;
+  latitude?: number;
+  longitude?: number;
+}
+
 export interface TripFlightInput {
+  /** Empty when unknown; the API derives the itinerary title from the route. */
   serviceNumber: string;
   carrier: string | null;
-  departureAirport: { name: string; timeZone: string };
-  arrivalAirport: { name: string; timeZone: string };
+  departureAirport: TripAirportInput;
+  arrivalAirport: TripAirportInput;
   departureLocalDateTime: string;
   arrivalLocalDateTime: string;
   departureUtcOffset?: string | null;
@@ -87,6 +95,16 @@ export interface CreateTripInput {
 
 export interface SessionResponse {
   user: UserDto;
+}
+
+export type LinkedInviteOutcome =
+  | "accepted"
+  | "already-member"
+  | "expired-or-revoked";
+
+export interface MagicLinkConsumeResponse extends SessionResponse {
+  acceptedTripId?: string;
+  inviteOutcome?: LinkedInviteOutcome;
 }
 
 export interface TripListResponse {
@@ -273,6 +291,28 @@ function tripValue(value: unknown): TripDto {
 export function parseSessionResponse(value: unknown): SessionResponse {
   if (!isRecord(value)) return invalidResponse();
   return { user: userValue(value.user) };
+}
+
+export function parseMagicLinkConsumeResponse(value: unknown): MagicLinkConsumeResponse {
+  if (!isRecord(value)) return invalidResponse();
+  const acceptedTripId = value.acceptedTripId;
+  const inviteOutcome = value.inviteOutcome;
+  if (acceptedTripId !== undefined && typeof acceptedTripId !== "string") {
+    return invalidResponse();
+  }
+  if (
+    inviteOutcome !== undefined &&
+    inviteOutcome !== "accepted" &&
+    inviteOutcome !== "already-member" &&
+    inviteOutcome !== "expired-or-revoked"
+  ) {
+    return invalidResponse();
+  }
+  return {
+    user: userValue(value.user),
+    ...(acceptedTripId === undefined ? {} : { acceptedTripId }),
+    ...(inviteOutcome === undefined ? {} : { inviteOutcome }),
+  };
 }
 
 export function parseTripListResponse(value: unknown): TripListResponse {

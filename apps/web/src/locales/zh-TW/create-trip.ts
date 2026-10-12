@@ -21,6 +21,7 @@ export const createTrip = {
   tripDates: "旅程日期",
   chooseEndDate: "選擇結束日期",
   chooseDateRange: "選擇日期範圍",
+  confirmDates: "確定",
   dateDescription: "日期會以日曆日期儲存，不會進行時區轉換。",
   addCountry: "新增國家",
   searchCountryPlaceholder: "搜尋中文、英文或 ISO 代碼",

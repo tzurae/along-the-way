@@ -72,7 +72,6 @@ async function signIn(page: Page, request: APIRequestContext, email: string) {
   if (!isRecord(body) || typeof body.Text !== "string") throw new Error("Invalid Mailpit body");
   const link = body.Text.match(/https?:\/\/\S+/)?.[0];
   if (!link) throw new Error("Magic link missing");
-  await page.goto("about:blank");
   await page.goto(link);
   await expect(page.getByText(`登入帳號：${email}`)).toBeVisible();
 }
@@ -94,6 +93,7 @@ async function createTrip(page: Page, name: string) {
   const label = (day: number) => new Date(year, month - 1, day).toLocaleDateString("zh-TW");
   await page.locator(`[data-day="${label(3)}"]`).click();
   await page.locator(`[data-day="${label(9)}"]`).click();
+  await dialog.getByRole("button", { name: "確定" }).click();
   await dialog.getByRole("button", { name: "下一步" }).click();
   await dialog.getByLabel("新增國家").fill("Japan");
   await page.getByRole("option", { name: /\(JP\)/ }).dispatchEvent("click");

@@ -70,13 +70,23 @@ and `flights: { outbound, return }`. Each flight is:
 
 ```ts
 {
-  serviceNumber: string;
+  serviceNumber: string; // optional; send "" when unknown
   carrier: string | null;
-  departureAirport: { name: string; timeZone: string };
-  arrivalAirport: { name: string; timeZone: string };
+  departureAirport: {
+    name: string;
+    timeZone: string;
+    latitude?: number;
+    longitude?: number;
+  };
+  arrivalAirport: {
+    name: string;
+    timeZone: string;
+    latitude?: number;
+    longitude?: number;
+  };
   departureLocalDateTime: string; // YYYY-MM-DDTHH:mm
   arrivalLocalDateTime: string;   // YYYY-MM-DDTHH:mm
-  departureUtcOffset?: string | null; // e.g. "-04:00" for a repeated local hour
+  departureUtcOffset?: string | null; // required only for a repeated local hour
   arrivalUtcOffset?: string | null;
 }
 ```
@@ -88,11 +98,25 @@ persists the trip, stops, days, owner, airports and both flights in one transact
 any error rolls everything back. Historical `create_trip` responses replay before
 the new flight requirement is checked. The outbound arrival uses the first stop;
 the return departure uses the last; the other two endpoints are outside the route
-(`countryStopId: null`). Flight titles are service numbers. New travel items select
-all active members explicitly at save time, not the `null` pending-confirmation party.
-For repeated DST hours, supply the chosen UTC offset. Omitting an offset on PATCH
-retains the current occurrence only when its local time and timezone are unchanged;
-explicit `null` clears that choice and normal endpoint validation applies.
+(`countryStopId: null`). A nonblank service number remains the flight title; when
+it is blank the API stores `""` and derives a readable route title from the airport
+codes or names. Airport coordinates are additive and optional, but latitude and
+longitude must be supplied together and within their geographic ranges. Legacy
+payloads containing only airport name and zone remain valid. New travel items
+select all active members explicitly at save time, not the `null`
+pending-confirmation party. For repeated DST hours, supply one of the valid UTC
+offsets. Omitting an offset on PATCH retains the current occurrence only when its
+local time and timezone are unchanged; explicit `null` clears that choice and
+normal endpoint validation applies.
+
+The web form lazy-loads a pinned offline IATA airport dataset when a flight editor
+opens. It searches code, English name and city, derives IANA zone and coordinates,
+and keeps manual airport/time-zone entry as an advanced fallback. The generated
+module is 669,959 bytes raw and 232,180 bytes (226.7 KiB) with gzip level 9.
+Regenerate it with `./scripts/generate-airports.py`; the script verifies the pinned
+CSV SHA-256 before writing deterministic output. Source commit, retained fields,
+license and TimeZoneDB provenance are recorded in the generated header and
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 Trip members use these idempotent, versioned travel routes:
 

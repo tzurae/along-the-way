@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { expect, test, type APIRequestContext, type BrowserContext } from "@playwright/test";
-import { parseSessionResponse, parseTripResponse, type TripDto } from "@along-the-way/contracts/private-trips";
+import { parseMagicLinkConsumeResponse, parseSessionResponse, parseTripResponse, type TripDto } from "@along-the-way/contracts/private-trips";
 import { parseItineraryItemResponse, parsePlaceResponse } from "@along-the-way/contracts/trip-skeleton";
 
 const mailpit = process.env.MAILPIT_API_URL ?? "http://127.0.0.1:8025";
@@ -39,11 +39,21 @@ async function deliveredLink(request: APIRequestContext, email: string, subject:
   return new URL(link);
 }
 async function signIn(context: BrowserContext, origin: string, email: string, inviteToken?: string) {
-  const link = await deliveredLink(context.request, email, "登入 Along the Way", () => mutate(context.request, origin, "/api/auth/magic-links", { email, ...(inviteToken ? { inviteToken } : {}) }));
+  const link = await deliveredLink(
+    context.request,
+    email,
+    "登入 Along the Way",
+    () => mutate(
+      context.request,
+      origin,
+      inviteToken ? "/api/auth/invite-magic-links" : "/api/auth/magic-links",
+      inviteToken ? { inviteToken } : { email },
+    ),
+  );
   const token = new URLSearchParams(link.hash.slice(1)).get("magicToken");
-  const session = parseSessionResponse(await mutate(context.request, origin, "/api/auth/magic-links/consume", { token }));
-  if (inviteToken) await mutate(context.request, origin, "/api/invites/accept", { token: inviteToken });
-  return session.user;
+  return parseMagicLinkConsumeResponse(
+    await mutate(context.request, origin, "/api/auth/magic-links/consume", { token }),
+  ).user;
 }
 async function createTrip(request: APIRequestContext, origin: string, name: string, country = "JP", zone = "Asia/Tokyo", start = "2026-10-21", end = "2026-10-23") {
   const flight = (date: string, hour: string) => ({ serviceNumber: `TEST-${hour}`, carrier: null, departureAirport: { name: "Test departure", timeZone: zone }, arrivalAirport: { name: "Test arrival", timeZone: zone }, departureLocalDateTime: `${date}T${hour}:00`, arrivalLocalDateTime: `${date}T${String(Number(hour) + 1).padStart(2, "0")}:00` });

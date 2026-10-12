@@ -152,17 +152,11 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     await database.destroy();
   });
 
-  async function login(
-    address = "owner@example.test",
-    inviteToken?: string,
-  ) {
+  async function login(address = "owner@example.test") {
     const requested = await app.request("/api/auth/magic-links", {
       method: "POST",
       headers: { "content-type": "application/json", origin: "https://app.example.test" },
-      body: body({
-        email: address,
-        ...(inviteToken ? { inviteToken } : {}),
-      }),
+      body: body({ email: address }),
     });
     expect(requested.status).toBe(202);
     await emailWorker.runOnce();
@@ -271,7 +265,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     const link = email.invites.at(-1)?.url;
     const token = link && new URLSearchParams(new URL(link).hash.slice(1)).get("inviteToken");
     if (!token) throw new Error("Invite token missing");
-    const cookie = existingCookie ?? await login(address, token);
+    const cookie = existingCookie ?? await login(address);
     const accepted = await mutate(cookie, "/api/invites/accept", `accept-${key}`, { token });
     expect(accepted.status).toBe(200);
     const member = parseTripResponse(await accepted.json()).trip.members
@@ -317,7 +311,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     }
   });
 
-  it("creates a shared pair atomically, reuses travel airports and replays old flightless request bodies", async () => {
+  it("accepts legacy name-and-zone airports, creates a shared pair atomically and replays old flightless bodies", async () => {
     const cookie = await login();
     const flights = tripFlights();
     flights.return.departureAirport.name = "  FIXTURE DESTINATION AIRPORT  ";
@@ -348,6 +342,75 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     expect(replay.status).toBe(201);
     expect(parseTripResponse(await replay.json()).trip).toEqual(trip);
     expect(await readSkeleton(cookie, trip.id)).toEqual(skeleton);
+  });
+
+  it("accepts a blank service number, derives the route title and persists airport coordinates", async () => {
+    const cookie = await login();
+    const flights = tripFlights();
+    flights.outbound.serviceNumber = "";
+    flights.outbound.departureAirport = {
+      name: "TPE · Taiwan Taoyuan International Airport",
+      timeZone: "Asia/Taipei",
+      latitude: 25.0777,
+      longitude: 121.233,
+    };
+    flights.outbound.arrivalAirport = {
+      name: "KIX · Kansai International Airport",
+      timeZone: "Asia/Tokyo",
+      latitude: 34.4273,
+      longitude: 135.244,
+    };
+    flights.outbound.arrivalLocalDateTime = "2026-10-21T06:30";
+    flights.return.departureAirport = { ...flights.outbound.arrivalAirport };
+    flights.return.arrivalAirport = { ...flights.outbound.departureAirport };
+
+    const response = await mutate(cookie, "/api/trips", "coordinate-flight-pair", {
+      name: "Located airports",
+      startDate: "2026-10-21",
+      endDate: "2026-10-27",
+      countryCodes: ["JP"],
+      flights,
+    });
+    expect(response.status).toBe(201);
+    const trip = parseTripResponse(await response.json()).trip;
+    const skeleton = await readSkeleton(cookie, trip.id);
+    const outbound = skeleton.items.find((item) => item.title === "TPE → KIX");
+    expect(outbound).toMatchObject({
+      type: "flight",
+      details: { serviceNumber: "", carrier: null },
+    });
+    expect(skeleton.places.find((place) => place.name.startsWith("TPE ·"))).toMatchObject({
+      latitude: 25.0777,
+      longitude: 121.233,
+      timeZone: "Asia/Taipei",
+    });
+    expect(skeleton.places.find((place) => place.name.startsWith("KIX ·"))).toMatchObject({
+      latitude: 34.4273,
+      longitude: 135.244,
+      timeZone: "Asia/Tokyo",
+    });
+  });
+
+  it.each([
+    ["one-sided", { latitude: 25.0777 }],
+    ["latitude-range", { latitude: 91, longitude: 121.233 }],
+    ["longitude-range", { latitude: 25.0777, longitude: 181 }],
+  ])("rejects %s airport coordinates with 400", async (label, coordinates) => {
+    const cookie = await login();
+    const flights = tripFlights();
+    flights.outbound.departureAirport = {
+      ...flights.outbound.departureAirport,
+      ...coordinates,
+    };
+    const response = await mutate(cookie, "/api/trips", `invalid-airport-coordinates-${label}`, {
+      name: "Invalid airport coordinates",
+      startDate: "2026-10-21",
+      endDate: "2026-10-27",
+      countryCodes: ["JP"],
+      flights,
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "validation_error" } });
   });
 
   it("edits overview flight fields without discarding item metadata and respects version, locks and retry", async () => {
@@ -2328,7 +2391,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       new URLSearchParams(new URL(inviteLink).hash.slice(1)).get("inviteToken");
     if (!inviteToken) throw new Error("Invite token missing");
 
-    const editorCookie = await login("editor@example.test", inviteToken);
+    const editorCookie = await login("editor@example.test");
     const denied = await app.request(`/api/trips/${trip.id}/skeleton`, {
       headers: { cookie: editorCookie },
     });
