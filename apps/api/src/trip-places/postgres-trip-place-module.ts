@@ -38,6 +38,7 @@ import {
   type PlaceProvider,
   type ProviderPlaceCandidate,
 } from "./google-places-provider";
+import { GooglePhotoCapability } from "./google-photo-capability";
 import {
   GoogleMapsUrlError,
   defaultGoogleMapsUrlResolverDependencies,
@@ -53,6 +54,7 @@ interface ModuleOptions {
   provider: PlaceProvider;
   urlResolver?: GoogleMapsUrlResolverDependencies;
   now?: () => Date;
+  photoCapabilitySecret?: string;
 }
 
 interface ManualPlaceFacts {
@@ -289,6 +291,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
   private readonly provider: PlaceProvider;
   private readonly urlResolver: GoogleMapsUrlResolverDependencies;
   private readonly now: () => Date;
+  private readonly photoCapability: GooglePhotoCapability | undefined;
 
   constructor(options: ModuleOptions) {
     this.database = options.database;
@@ -296,6 +299,9 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     this.urlResolver =
       options.urlResolver ?? defaultGoogleMapsUrlResolverDependencies;
     this.now = options.now ?? (() => new Date());
+    this.photoCapability = options.photoCapabilitySecret
+      ? new GooglePhotoCapability(options.photoCapabilitySecret, this.now)
+      : undefined;
   }
 
   async list(userId: string, tripId: string) {
@@ -315,7 +321,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     const options = await this.googleRequestOptions(tripId);
     try {
       const providerCandidates = await this.provider.search(query, { ...options, pageSize: 3 });
-      const candidates = await this.searchResults(tripId, exactNameFirst(query, providerCandidates).slice(0, 3));
+      const candidates = await this.searchResults(userId, tripId, exactNameFirst(query, providerCandidates).slice(0, 3));
       await this.clearProviderUnavailable(tripId);
       return { candidates, attribution: this.provider.attribution };
     } catch (error) {
@@ -354,7 +360,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         await this.clearProviderUnavailable(tripId);
       }
       return {
-        candidates: await this.searchResults(tripId, orderedCandidates.slice(0, 3)),
+        candidates: await this.searchResults(userId, tripId, orderedCandidates.slice(0, 3)),
         resolvedUrl: resolution.resolvedUrl,
         attribution: this.provider.attribution,
       };
@@ -459,6 +465,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
   }
 
   private async searchResults(
+    userId: string,
     tripId: string,
     candidates: ProviderPlaceCandidate[],
   ): Promise<ProviderPlaceSearchResultDto[]> {
@@ -479,7 +486,14 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       const { providerPhoto, ...dto } = candidate;
       return {
         ...dto,
-        photo: providerPhoto ? googlePlacePhotoDto(tripId, candidate.providerPlaceId, providerPhoto) : null,
+        photo: providerPhoto
+          ? googlePlacePhotoDto(
+              tripId,
+              candidate.providerPlaceId,
+              providerPhoto,
+              this.photoCapability?.issue(tripId, userId, candidate.providerPlaceId),
+            )
+          : null,
         alreadyInWishlist: alreadyInWishlist.has(candidate.providerPlaceId),
       };
     });

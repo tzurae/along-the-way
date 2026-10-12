@@ -6,7 +6,7 @@ import type { Hono } from "hono";
 import type { Kysely } from "kysely";
 import { parsePlaceDetailResponse, parsePlacePreviewResponse, type CuratedPlaceManifest, type PlaceDetailReference } from "@along-the-way/contracts/place-details";
 import { parseTripResponse } from "@along-the-way/contracts/private-trips";
-import { parseTripPlaceResponse, type ProviderPlaceCandidateDto, type TripPlaceDto } from "@along-the-way/contracts/trip-places";
+import { parseProviderCandidatesResponse, parseTripPlaceResponse, type ProviderPlaceCandidateDto, type TripPlaceDto } from "@along-the-way/contracts/trip-places";
 import { createApp } from "../src/app";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
 import { runMigrations } from "../src/database/migrate";
@@ -28,6 +28,7 @@ import { tripFlights } from "./travel-test-support";
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required; use an isolated verification database");
 const now = () => new Date("2026-10-09T12:00:00.000Z");
+const photoCapabilitySecret = "place-photo-capability-secret-at-least-32-bytes";
 // Original test-only pixel, never an application image or a claimed photograph of a real place.
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH9sAAAAASUVORK5CYII=", "base64");
 const checksum = createHash("sha256").update(png).digest("hex");
@@ -76,6 +77,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
   let currentPhotoToken: string;
   let currentPhotoAuthors: Array<{ displayName: string; uri: string | null }>;
   let failedProviderPhotoId: string | null;
+  let unassociatedSearchPlaceId: string;
   const createdTrips: string[] = [];
   const createdUsers: string[] = [];
   const canonicalIds: string[] = [];
@@ -129,10 +131,35 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     currentPhotoToken = "controlled-photo";
     currentPhotoAuthors = [{ displayName: "Google 攝影者", uri: "https://example.test/google-author" }];
     failedProviderPhotoId = null;
+    unassociatedSearchPlaceId = `search-photo-${randomUUID()}`;
     const provider: PlaceProvider = {
       available: true,
       attribution: "Controlled provider",
-      async search() { throw new Error("Not part of detail reads"); },
+      async search() {
+        return [{
+          provider: "google",
+          providerPlaceId: unassociatedSearchPlaceId,
+          name: "搜尋中的未加入地點",
+          type: "activity",
+          typeLabel: "景點",
+          address: "尚未加入旅程",
+          latitude: 25.1,
+          longitude: 121.1,
+          timeZone: "Asia/Taipei",
+          sourceUrl: "https://example.test/map/search-result",
+          attribution: "Controlled provider",
+          observedAt: "2026-10-09T12:00:00.000Z",
+          expiresAt: "2026-11-08T12:00:00.000Z",
+          photo: null,
+          providerPhoto: {
+            name: `places/${unassociatedSearchPlaceId}/photos/${currentPhotoToken}`,
+            width: 1600,
+            height: 1200,
+            authors: currentPhotoAuthors,
+            googleMapsUri: "https://maps.google.com/?cid=search-photo",
+          },
+        }];
+      },
       async getPlace(providerPlaceId): Promise<ProviderPlaceCandidateDto> {
         return { provider: "google", providerPlaceId, name: "同名庭園", type: "activity", typeLabel: null,
           address: `測試地址 ${providerPlaceId}`, latitude: 25, longitude: 121, timeZone: "Asia/Taipei", sourceUrl: "https://example.test/map/garden",
@@ -147,7 +174,9 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
           width: 1600,
           height: 1200,
           authors: currentPhotoAuthors,
-          googleMapsUri: "https://maps.google.com/?cid=controlled-photo",
+          googleMapsUri: providerPlaceId === unassociatedSearchPlaceId
+            ? "https://maps.google.com/?cid=search-photo"
+            : "https://maps.google.com/?cid=controlled-photo",
         };
       },
       async fetchPhotoMedia(photoName, maxWidthPx) {
@@ -157,11 +186,22 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
         return { bytes: new Uint8Array(png), contentType: "image/png" };
       },
     };
-    const tripPlaces = new PostgresTripPlaceModule({ database, provider, now });
+    const tripPlaces = new PostgresTripPlaceModule({
+      database,
+      provider,
+      now,
+      photoCapabilitySecret,
+    });
     app = createApp({
       collaboration: new PostgresCollaborationModule(database), dayPlans: unrelatedDayPlanModule, discovery: unrelatedDiscoveryModule,
       identityAccess: new PostgresIdentityAccessModule({ database, now, tokenIssuer: new TokenIssuer("place-detail-integration-secret-at-least-32-bytes") }),
-      placeDetails: new PostgresPlaceDetailModule({ database, assetRoot, provider, now }),
+      placeDetails: new PostgresPlaceDetailModule({
+        database,
+        assetRoot,
+        provider,
+        now,
+        photoCapabilitySecret,
+      }),
       rateLimiter: new PostgresRateLimiter(database, "place-detail-rate-secret-at-least-32-bytes", now),
       readiness: new PostgresReadinessProbe(database, now), siteAddress: "https://app.example.test",
       tripWorkspace: new PostgresTripWorkspaceModule({ database, now }), tripSkeleton: new PostgresTripSkeletonModule({ database, now }), tripPlaces,
@@ -252,6 +292,54 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     const previews = parsePlacePreviewResponse(await response.json()).previews;
     expect(previews[0]?.photo).toBeNull();
     expect(previews[1]?.photo).toMatchObject({ source: "curated", id: "original-test-pixel" });
+  });
+
+  it("serves a signed search-result photo only to the member who received its capability", async () => {
+    const searchResponse = await app.request(`/api/trips/${tripId}/trip-places/search`, {
+      method: "POST",
+      headers: {
+        cookie: owner.cookie,
+        "content-type": "application/json",
+        origin: "https://app.example.test",
+      },
+      body: JSON.stringify({ query: "未加入地點" }),
+    });
+    expect(searchResponse.status).toBe(200);
+    const candidate = parseProviderCandidatesResponse(await searchResponse.json()).candidates[0]!;
+    expect(candidate.providerPlaceId).toBe(unassociatedSearchPlaceId);
+    expect(candidate.photo?.thumbnailUrl).toMatch(/&exp=[1-9][0-9]{9}&sig=[A-Za-z0-9_-]{43}$/);
+
+    const thumbnailUrl = candidate.photo!.thumbnailUrl;
+    const photo = await app.request(thumbnailUrl, { headers: { cookie: owner.cookie } });
+    expect(photo.status).toBe(200);
+    expect(Buffer.from(await photo.arrayBuffer()).equals(png)).toBe(true);
+
+    await createTrip(outsider.cookie);
+    expect((await app.request(thumbnailUrl, { headers: { cookie: outsider.cookie } })).status).toBe(404);
+    await database.insertInto("trip_members").values({
+      trip_id: tripId,
+      user_id: outsider.id,
+      role: "editor",
+      removed_at: null,
+    }).execute();
+    expect((await app.request(thumbnailUrl, { headers: { cookie: outsider.cookie } })).status).toBe(404);
+
+    const tampered = new URL(thumbnailUrl, "https://app.example.test");
+    const signature = tampered.searchParams.get("sig")!;
+    tampered.searchParams.set("sig", `${signature.slice(0, -1)}${signature.endsWith("A") ? "B" : "A"}`);
+    expect((await app.request(`${tampered.pathname}${tampered.search}`, {
+      headers: { cookie: owner.cookie },
+    })).status).toBe(404);
+
+    const expired = Math.floor(now().getTime() / 1_000) - 1;
+    const expiredUrl = new URL(thumbnailUrl, "https://app.example.test");
+    expiredUrl.searchParams.set("exp", String(expired));
+    expiredUrl.searchParams.set("sig", new TokenIssuer(photoCapabilitySecret).issue(
+      `${tripId}|${owner.id}|${candidate.providerPlaceId}|${expired}`,
+    ));
+    expect((await app.request(`${expiredUrl.pathname}${expiredUrl.search}`, {
+      headers: { cookie: owner.cookie },
+    })).status).toBe(404);
   });
 
   it("degrades rate-limited detail and preview metadata reads without calling Google", async () => {

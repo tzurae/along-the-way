@@ -1,4 +1,3 @@
-import { createHmac } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { sql, type Kysely } from "kysely";
 import { Pool } from "pg";
@@ -350,7 +349,6 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         tripPlaces,
         routeProviders: [routes],
         placeHours: hours,
-        providerBudget: rateLimiter,
         now,
       }),
       discovery: unrelatedDiscoveryModule,
@@ -2601,28 +2599,6 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect((await assign("day-reassign", [{ ...moved, day: trip.days[2]!.id }])).status).toBe(200);
     expect((await positions()).get(tofukuji.id)).toBeNull();
 
-    const budgetScope = "planning_provider:account";
-    const budgetSecret = Buffer.from("trip-place-rate-secret-at-least-32-bytes");
-    await database.insertInto("rate_limit_windows").values({
-      scope: budgetScope,
-      key_hash: createHmac("sha256", budgetSecret)
-        .update(`${budgetScope}:${owner.user.id}`)
-        .digest("hex"),
-      window_start: new Date("2026-09-28T12:00:00.000Z"),
-      request_count: 40,
-    }).onConflict((conflict) => conflict
-      .columns(["scope", "key_hash", "window_start"])
-      .doUpdateSet({ request_count: 40 }))
-      .execute();
-    const hoursBeforeLimit = hours.calls.length;
-    const routesBeforeLimit = routes.queries.length;
-    const limited = await draft("current");
-    expect(limited.window).toMatchObject({
-      startMinute: changedWindow.startMinute,
-      endMinute: changedWindow.endMinute,
-    });
-    expect(hours.calls).toHaveLength(hoursBeforeLimit);
-    expect(routes.queries).toHaveLength(routesBeforeLimit);
   });
 
   it("adds unplanned wishlist places to nearby days around kept places and a friend's dinner", async () => {

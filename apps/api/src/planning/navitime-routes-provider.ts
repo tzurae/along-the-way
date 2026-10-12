@@ -37,7 +37,6 @@ function validateLocation(value: RouteLocation) {
 }
 
 export class NavitimeRoutesProvider implements RouteObservationProvider {
-  readonly providerCallCost = 1;
   private readonly apiKey: string | undefined;
   private readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   private readonly now: () => Date;

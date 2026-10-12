@@ -84,7 +84,6 @@ function walkingLegs(route: Record<string, unknown>): number[] | null {
 }
 
 export class GoogleRoutesProvider implements RouteObservationProvider {
-  readonly providerCallCost = 2;
   private readonly apiKey: string | undefined;
   private readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   private readonly now: () => Date;

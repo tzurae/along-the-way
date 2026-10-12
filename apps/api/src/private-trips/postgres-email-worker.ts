@@ -6,7 +6,22 @@ import type { TokenIssuer } from "./token-issuer";
 
 const EMAIL_WORKER = "email_delivery";
 const HEARTBEAT_INTERVAL_MS = 30_000;
-const MAX_DELIVERY_ATTEMPTS = 5;
+const EMAIL_RETRY_DELAYS_MS = [
+  30 * 1_000,
+  2 * 60 * 1_000,
+  10 * 60 * 1_000,
+  60 * 60 * 1_000,
+  6 * 60 * 60 * 1_000,
+  24 * 60 * 60 * 1_000,
+] as const;
+
+function isDefinitiveSmtpRejection(error: unknown) {
+  if (typeof error !== "object" || error === null) return false;
+  const responseCode = Reflect.get(error, "responseCode");
+  return typeof responseCode === "number" &&
+    responseCode >= 500 &&
+    responseCode < 600;
+}
 
 interface WorkerOptions {
   database: Kysely<AlongTheWayDatabase>;
@@ -120,11 +135,12 @@ export class PostgresEmailWorker {
           .set({ delivered_at: this.now() })
           .where("id", "=", job.id)
           .execute();
-      } catch {
+      } catch (error) {
         const attemptCount = job.attempt_count + 1;
         const attemptedAt = this.now();
-        const terminal = attemptCount >= MAX_DELIVERY_ATTEMPTS;
-        const delaySeconds = Math.min(30 * 2 ** (attemptCount - 1), 3_600);
+        const retryDelay = EMAIL_RETRY_DELAYS_MS[attemptCount - 1];
+        const terminal = isDefinitiveSmtpRejection(error) ||
+          retryDelay === undefined;
         await transaction
           .updateTable("email_jobs")
           .set(terminal
@@ -134,7 +150,7 @@ export class PostgresEmailWorker {
               }
             : {
                 attempt_count: attemptCount,
-                available_at: new Date(attemptedAt.valueOf() + delaySeconds * 1_000),
+                available_at: new Date(attemptedAt.valueOf() + retryDelay!),
               })
           .where("id", "=", job.id)
           .execute();

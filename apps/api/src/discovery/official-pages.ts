@@ -68,12 +68,22 @@ export interface PublicPageDependencies {
    */
   fetch(input: RequestInfo | URL, init: RequestInit | undefined, addresses: readonly string[]): Promise<Response>;
   resolveHost(host: string): Promise<string[]>;
+  /** Test-only nonstandard HTTPS ports; production leaves this unset. */
+  allowedPorts?: readonly string[];
+  /** Test-only address validator; production always uses the private-network denylist. */
+  addressIsPublic?: (address: string) => boolean;
 }
 
-function fetchPinnedAddress(
+export interface PinnedTlsOptions {
+  /** Additional trust anchor used by the real-socket transport test. */
+  ca?: string;
+}
+
+export function fetchPinnedAddress(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
   addresses: readonly string[],
+  tls: PinnedTlsOptions = {},
 ): Promise<Response> {
   const target = new URL(String(input));
   const resolved = addresses.map((address) => ({ address, family: isIP(address) as 4 | 6 }));
@@ -96,36 +106,70 @@ function fetchPinnedAddress(
   const { promise, resolve, reject } = Promise.withResolvers<Response>();
   const request = httpsRequest(target, {
     agent: false,
+    ca: tls.ca,
     headers: Object.fromEntries(new Headers(init?.headers)),
     lookup: pinnedLookup,
     method: init?.method,
     signal: init?.signal ?? undefined,
   }, (message) => {
-    const headers = new Headers();
-    for (const [name, value] of Object.entries(message.headers)) {
-      if (Array.isArray(value)) {
-        for (const item of value) headers.append(name, item);
-      } else if (value !== undefined) {
-        headers.set(name, value);
+    try {
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(message.headers)) {
+        if (Array.isArray(value)) {
+          for (const item of value) headers.append(name, item);
+        } else if (value !== undefined) {
+          headers.set(name, value);
+        }
       }
-    }
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        message.on("data", (chunk: Buffer) => {
-          controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+      const status = message.statusCode ?? 500;
+      const method = init?.method?.toUpperCase() ?? "GET";
+      const hasNoBody = method === "HEAD" || status === 204 || status === 205 || status === 304;
+      let body: ReadableStream<Uint8Array> | null = null;
+      if (hasNoBody) {
+        message.resume();
+      } else {
+        body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            let settled = false;
+            const fail = (error: Error) => {
+              if (settled) return;
+              settled = true;
+              controller.error(error);
+            };
+            message.on("data", (chunk: Buffer) => {
+              if (settled) return;
+              try {
+                controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+              } catch (error) {
+                fail(error instanceof Error ? error : new Error("HTTPS response stream failed"));
+                message.destroy();
+              }
+            });
+            message.once("end", () => {
+              if (settled) return;
+              settled = true;
+              controller.close();
+            });
+            message.once("aborted", () => fail(new Error("HTTPS response stream was aborted")));
+            message.once("error", fail);
+            message.once("close", () => {
+              if (!message.complete) fail(new Error("HTTPS response stream closed before completion"));
+            });
+          },
+          cancel() {
+            message.destroy();
+          },
         });
-        message.once("end", () => controller.close());
-        message.once("error", (error) => controller.error(error));
-      },
-      cancel() {
-        message.destroy();
-      },
-    });
-    resolve(new Response(body, {
-      headers,
-      status: message.statusCode ?? 500,
-      statusText: message.statusMessage,
-    }));
+      }
+      resolve(new Response(body, {
+        headers,
+        status,
+        statusText: message.statusMessage,
+      }));
+    } catch (error) {
+      message.destroy();
+      reject(error);
+    }
   });
   request.once("error", reject);
   request.end();
@@ -153,8 +197,9 @@ const DEFAULT_LIMITS: PublicPageLimits = {
   totalTimeoutMs: 8_000,
 };
 
-function allowedUrl(value: URL) {
-  return value.protocol === "https:" && (!value.port || value.port === "443") && !value.username && !value.password;
+function allowedUrl(value: URL, dependencies: PublicPageDependencies) {
+  const allowedPort = !value.port || value.port === "443" || dependencies.allowedPorts?.includes(value.port) === true;
+  return value.protocol === "https:" && allowedPort && !value.username && !value.password;
 }
 
 /** Resolves the host within the remaining time; any non-public address refuses the page. */
@@ -167,7 +212,8 @@ async function publicAddresses(host: string, dependencies: PublicPageDependencie
       signal.addEventListener("abort", onAbort, { once: true });
     });
     const addresses = await Promise.race([dependencies.resolveHost(host), aborted]);
-    return addresses !== null && addresses.length > 0 && addresses.every(isPublicAddress) ? addresses : null;
+    const addressIsPublic = dependencies.addressIsPublic ?? isPublicAddress;
+    return addresses !== null && addresses.length > 0 && addresses.every(addressIsPublic) ? addresses : null;
   } catch {
     return null;
   } finally {
@@ -277,7 +323,7 @@ export async function fetchPublicPageText(
   const totalTimer = setTimeout(() => total.abort(), options.totalTimeoutMs);
   try {
     for (let redirects = 0; redirects <= options.maxRedirects; redirects += 1) {
-      if (!allowedUrl(current)) return null;
+      if (!allowedUrl(current, dependencies)) return null;
       const addresses = await publicAddresses(current.hostname, dependencies, total.signal);
       if (!addresses || total.signal.aborted) return null;
       const request = new AbortController();

@@ -32,6 +32,8 @@ const MAGIC_LINK_LIFETIME_MS = 15 * 60 * 1_000;
 const INVITE_LIFETIME_MS = 7 * 24 * 60 * 60 * 1_000;
 const SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1_000;
 const SESSION_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+const SESSION_STORED_LIFETIME_MS =
+  SESSION_LIFETIME_MS + SESSION_REFRESH_INTERVAL_MS;
 
 interface ModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
@@ -309,7 +311,8 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         .values({
           user_id: link.userId,
           token_hash: hashToken(sessionToken),
-          expires_at: new Date(now.valueOf() + SESSION_LIFETIME_MS),
+          expires_at: new Date(now.valueOf() + SESSION_STORED_LIFETIME_MS),
+          last_seen_at: now,
           revoked_at: null,
         })
         .execute();
@@ -355,7 +358,7 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         .updateTable("sessions")
         .set({
           last_seen_at: now,
-          expires_at: new Date(now.valueOf() + SESSION_LIFETIME_MS),
+          expires_at: new Date(now.valueOf() + SESSION_STORED_LIFETIME_MS),
         })
         .where("id", "=", session.id)
         .where("revoked_at", "is", null)

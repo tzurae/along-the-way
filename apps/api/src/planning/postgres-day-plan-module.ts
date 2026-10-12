@@ -31,7 +31,6 @@ import {
   requireDayVersion,
   requireOwner,
 } from "../private-trips/postgres-private-trip-store";
-import type { RateLimiter } from "../private-trips/postgres-rate-limiter";
 import type { TripPlaceModule } from "../trip-places/trip-place-module";
 import type { TripSkeletonModule } from "../trip-skeleton/trip-skeleton-module";
 import { orderByStraightLine, straightLineMeters, type GeoPoint } from "./day-route-order";
@@ -80,7 +79,6 @@ interface ModuleOptions {
   /** Consulted in order; the first available observation per mode wins. */
   routeProviders: RouteObservationProvider[];
   placeHours: PlaceHoursLookup;
-  providerBudget?: Pick<RateLimiter, "consumePlanning">;
   now?: () => Date;
 }
 
@@ -91,11 +89,6 @@ interface RoutePoint extends GeoPoint {
 
 interface PlannedStop extends RoutePoint {
   place: TripPlaceDto;
-}
-
-interface PlanningRequest {
-  userId: string;
-  tripId: string;
 }
 
 /** Everything about a day that does not depend on which places are drafted into it. */
@@ -220,7 +213,6 @@ export class PostgresDayPlanModule implements DayPlanModule {
   private readonly tripPlaces: TripPlaceModule;
   private readonly routeProviders: RouteObservationProvider[];
   private readonly placeHours: PlaceHoursLookup;
-  private readonly providerBudget: Pick<RateLimiter, "consumePlanning"> | undefined;
   private readonly now: () => Date;
 
   constructor(options: ModuleOptions) {
@@ -229,7 +221,6 @@ export class PostgresDayPlanModule implements DayPlanModule {
     this.tripPlaces = options.tripPlaces;
     this.routeProviders = options.routeProviders;
     this.placeHours = options.placeHours;
-    this.providerBudget = options.providerBudget;
     this.now = options.now ?? (() => new Date());
   }
 
@@ -256,7 +247,6 @@ export class PostgresDayPlanModule implements DayPlanModule {
       throw new AppError("conflict", "The day changed while its draft was being read", 409, undefined, window.version, dayId);
     }
 
-    const request = { userId, tripId };
     const planned = this.plannedOn(places, day.id);
     const stops = planned.filter(located).map(plannedStop);
     const context = this.dayContext(skeleton, day, window, stops, null);
@@ -265,8 +255,8 @@ export class PostgresDayPlanModule implements DayPlanModule {
       : stops.map((stop) => stop.id);
     const stopsById = new Map(stops.map((stop) => [stop.id, stop]));
     const ordered = orderedIds.map((id) => stopsById.get(id)!);
-    const hours = await this.hoursFor(ordered.map((stop) => stop.place), request);
-    const result = await this.draftDay(context, ordered, hours, request);
+    const hours = await this.hoursFor(ordered.map((stop) => stop.place));
+    const result = await this.draftDay(context, ordered, hours);
     return this.timetableDto(context, orderedIds, result, planned, order);
   }
 
@@ -300,8 +290,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
     const contexts = skeleton.days.map((day) =>
       this.dayContext(skeleton, day, windows.get(day.id)!, kept.get(day.id)!.filter(located).map(plannedStop), fallbackZone));
     const contextById = new Map(contexts.map((context) => [context.day.id, context]));
-    const request = { userId, tripId };
-    const candidateHours = await this.hoursFor(candidates.map((stop) => stop.place), request);
+    const candidateHours = await this.hoursFor(candidates.map((stop) => stop.place));
     const distribution = distributePlaces(
       contexts.map((context) => ({
         id: context.day.id,
@@ -341,9 +330,9 @@ export class PostgresDayPlanModule implements DayPlanModule {
       if (addedIds.length === 0) return null;
       const keptPlaces = kept.get(context.day.id)!;
       const keptStops = keptPlaces.filter(located).map(plannedStop);
-      const hours = await this.hoursFor(keptStops.map((stop) => stop.place), request, candidateHours);
+      const hours = await this.hoursFor(keptStops.map((stop) => stop.place), candidateHours);
       const stops = [...keptStops, ...addedIds.map((id) => candidateById.get(id)!)];
-      const result = await this.draftDay(context, stops, hours, request);
+      const result = await this.draftDay(context, stops, hours);
       return { context, addedIds, keptPlaces, keptStops, result };
     }));
     const days: TripPlanDayDto[] = [];
@@ -439,11 +428,10 @@ export class PostgresDayPlanModule implements DayPlanModule {
   /** Opening hours per place ID, reusing `known` and looking each other place up once. */
   private async hoursFor(
     places: TripPlaceDto[],
-    request: PlanningRequest,
     known = new Map<string, PlaceOpeningHours | null>(),
   ) {
     const missing = places.filter((place) => !known.has(place.id));
-    const fetched = await Promise.all(missing.map((place) => this.openingHours(place, request)));
+    const fetched = await Promise.all(missing.map((place) => this.openingHours(place)));
     const hours = new Map(known);
     missing.forEach((place, index) => hours.set(place.id, fetched[index]!));
     return hours;
@@ -454,7 +442,6 @@ export class PostgresDayPlanModule implements DayPlanModule {
     context: DayContext,
     stops: PlannedStop[],
     hours: Map<string, PlaceOpeningHours | null>,
-    request: PlanningRequest,
   ): Promise<TimetableResult> {
     const { day, window, start, night, blocks } = context;
     const points = new Map(context.points);
@@ -469,7 +456,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
       const key = `${fromId}>${toId}`;
       let pending = legs.get(key);
       if (!pending) {
-        pending = this.leg(points.get(fromId)!, points.get(toId)!, departureTime, request);
+        pending = this.leg(points.get(fromId)!, points.get(toId)!, departureTime);
         legs.set(key, pending);
       }
       return pending;
@@ -656,11 +643,10 @@ export class PostgresDayPlanModule implements DayPlanModule {
       [row.id, { startMinute: row.day_start_minute, endMinute: row.day_end_minute, version: row.version }]));
   }
 
-  /** Opening hours from the place's provider; unknown when it has none or its budget is exhausted. */
-  private async openingHours(place: TripPlaceDto, request: PlanningRequest): Promise<PlaceOpeningHours | null> {
+  /** Opening hours from the place's provider; unknown when it has none or lookup fails. */
+  private async openingHours(place: TripPlaceDto): Promise<PlaceOpeningHours | null> {
     if (place.provider !== "google" || !place.providerPlaceId) return null;
     try {
-      await this.providerBudget?.consumePlanning(request.userId, request.tripId, 1);
       return await this.placeHours.openingHours(place.providerPlaceId);
     } catch {
       return null;
@@ -742,24 +728,15 @@ export class PostgresDayPlanModule implements DayPlanModule {
     from: RoutePoint,
     to: RoutePoint,
     departureTime: string,
-    request: PlanningRequest,
   ): Promise<DayLegDto> {
     const query = {
       origin: { placeId: from.id, latitude: from.latitude, longitude: from.longitude },
       destination: { placeId: to.id, latitude: to.latitude, longitude: to.longitude },
       departureTime,
     };
-    const settled = await Promise.allSettled(this.routeProviders.map(async (provider) => {
-      await this.providerBudget?.consumePlanning(
-        request.userId,
-        request.tripId,
-        provider.providerCallCost ?? 1,
-      );
-      return provider.observe(query);
-    }));
-    const observations = settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
-    const budgetLimited = settled.some((result) =>
-      result.status === "rejected" && result.reason instanceof AppError && result.reason.code === "rate_limited");
+    const observations = (await Promise.all(
+      this.routeProviders.map((provider) => provider.observe(query)),
+    )).flat();
     const walking = firstAvailable(observations, "walking");
     const transit = firstAvailable(observations, "transit");
     const chosen = walking && walking.durationMinutes <= PREFERRED_WALK_MINUTES
@@ -775,7 +752,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
       transitMinutes: transit?.durationMinutes ?? null,
       estimated: chosen?.manualChecks.includes("transit_duration_estimated") ?? false,
       attribution: chosen?.attribution ?? null,
-      unavailableReason: chosen ? null : budgetLimited ? "quota" : (reasons.join(", ") || "no_route"),
+      unavailableReason: chosen ? null : (reasons.join(", ") || "no_route"),
     };
   }
 }

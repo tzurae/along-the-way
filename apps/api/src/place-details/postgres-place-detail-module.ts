@@ -21,6 +21,7 @@ import {
   PlacePhotoNotFoundError,
   type PlaceProvider,
 } from "../trip-places/google-places-provider";
+import { GooglePhotoCapability } from "../trip-places/google-photo-capability";
 import type { PlaceDetailModule } from "./place-detail-module";
 import { readPackagedPhoto } from "./photo-assets";
 
@@ -52,17 +53,22 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
   private readonly assetRoot: string;
   private readonly provider: PlaceProvider | undefined;
   private readonly now: () => Date;
+  private readonly photoCapability: GooglePhotoCapability | undefined;
 
   constructor(options: {
     database: Kysely<AlongTheWayDatabase>;
     assetRoot: string;
     provider?: PlaceProvider;
     now?: () => Date;
+    photoCapabilitySecret?: string;
   }) {
     this.database = options.database;
     this.assetRoot = options.assetRoot;
     this.provider = options.provider;
     this.now = options.now ?? (() => new Date());
+    this.photoCapability = options.photoCapabilitySecret
+      ? new GooglePhotoCapability(options.photoCapabilitySecret, this.now)
+      : undefined;
   }
 
   async getDetail(userId: string, tripId: string, reference: PlaceDetailReference, date: string | null, includeGooglePhoto = true): Promise<PlaceDetailDto> {
@@ -164,6 +170,8 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
     providerPlaceId: string,
     photoFingerprint: string,
     maxWidth: 192 | 1024,
+    capabilityExpiry: string | null = null,
+    capabilitySignature: string | null = null,
   ) {
     await this.authorize(userId, tripId);
     if (!/^[A-Za-z0-9_-]{8,300}$/.test(providerPlaceId)
@@ -185,7 +193,14 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
         .where("provider_place_id", "=", providerPlaceId)
         .executeTakeFirst(),
     ]);
-    if (!wishlistAssociation && !proposalAssociation) {
+    if (!wishlistAssociation && !proposalAssociation
+      && !this.photoCapability?.matches(
+        tripId,
+        userId,
+        providerPlaceId,
+        capabilityExpiry,
+        capabilitySignature,
+      )) {
       throw new AppError("place_photo_not_found", "Place photo not found", 404);
     }
     if (!this.provider

@@ -404,11 +404,12 @@ export function createApp({
   }
 
   // Reject oversized bodies before parsing, authentication or rate limiting. Auth bodies hold only
-  // an email or token; the largest legitimate API bodies (trip/itinerary/brief JSON) are a few KiB.
+  // an email or token. The largest legitimate API body is a whole-trip plan apply at the domain
+  // bounds (366 days × 100 place ids ≈ 1.5 MB), so the general limit is 2 MiB.
   const payloadTooLarge = (context: Context) =>
     context.json({ error: { code: "payload_too_large", message: "Request body is too large" } }, 413);
   app.use("/api/auth/*", bodyLimit({ maxSize: 8 * 1024, onError: payloadTooLarge }));
-  app.use("/api/*", bodyLimit({ maxSize: 256 * 1024, onError: payloadTooLarge }));
+  app.use("/api/*", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: payloadTooLarge }));
 
   app.use("/api/*", async (context, next) => {
     if (!["GET", "HEAD", "OPTIONS"].includes(context.req.method)) {
@@ -702,6 +703,8 @@ export function createApp({
       context.req.param("providerPlaceId"),
       context.req.query("photo") ?? "",
       maxWidth,
+      context.req.query("exp") ?? null,
+      context.req.query("sig") ?? null,
     );
     return new Response(photo.bytes, { headers: {
       "Content-Type": photo.mediaType,

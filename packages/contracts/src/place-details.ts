@@ -372,9 +372,16 @@ function photoDto(value: unknown): PlacePhotoDto {
 
 function googlePhotoUrl(value: unknown, field: string, maxWidth: 192 | 1024) {
   const url = text(value, field, 1_800);
-  const match = /^\/api\/trips\/([0-9a-f-]{36})\/google-place-photos\/([A-Za-z0-9_-]{8,300})\?photo=([A-Za-z0-9_-]{1,512})&maxWidth=(192|1024)$/.exec(url);
+  const match = /^\/api\/trips\/([0-9a-f-]{36})\/google-place-photos\/([A-Za-z0-9_-]{8,300})\?photo=([A-Za-z0-9_-]{1,512})&maxWidth=(192|1024)(?:&exp=([1-9][0-9]{9})&sig=([A-Za-z0-9_-]{43}))?$/.exec(url);
   if (!match || Number(match[4]) !== maxWidth) return invalid(field);
-  return { url, tripId: match[1]!, providerPlaceId: match[2]!, photoFingerprint: match[3]! };
+  return {
+    url,
+    tripId: match[1]!,
+    providerPlaceId: match[2]!,
+    photoFingerprint: match[3]!,
+    capabilityExpiry: match[5] ?? null,
+    capabilitySignature: match[6] ?? null,
+  };
 }
 
 export function parseGooglePlacePhoto(value: unknown): GooglePlacePhotoDto {
@@ -393,7 +400,9 @@ export function parseGooglePlacePhoto(value: unknown): GooglePlacePhotoDto {
     || thumbnail.providerPlaceId !== providerPlaceId
     || image.providerPlaceId !== providerPlaceId
     || thumbnail.photoFingerprint !== photoFingerprint
-    || image.photoFingerprint !== photoFingerprint) return invalid("Google photo URL identity");
+    || image.photoFingerprint !== photoFingerprint
+    || thumbnail.capabilityExpiry !== image.capabilityExpiry
+    || thumbnail.capabilitySignature !== image.capabilitySignature) return invalid("Google photo URL identity");
   return {
     source: "google",
     id,

@@ -148,50 +148,6 @@ describe("owner-only schedule surfaces", () => {
   });
 
 
-  it("explains when provider limits omit route times without hiding the plan", async () => {
-    const request = async <T,>(_url: string, options?: RequestInit) => {
-      const input = options?.body ? JSON.parse(String(options.body)) as { order?: "current" | "suggested" } : {};
-      const planned = timetable(input.order ?? "current");
-      planned.rows = [{
-        kind: "fixed",
-        itemId: "activity",
-        title: "已保留的活動",
-        itemType: "activity",
-        travel: {
-          fromName: "飯店",
-          toName: "活動",
-          mode: null,
-          durationMinutes: null,
-          walkingMinutes: null,
-          transitMinutes: null,
-          estimated: false,
-          attribution: null,
-          unavailableReason: "quota",
-        },
-        startMinute: 600,
-        endMinute: 660,
-        startsBeforeDay: false,
-        endsAfterDay: false,
-        bufferMinutes: 0,
-        bufferEstimated: false,
-        afterBufferMinutes: 0,
-      }];
-      return { timetable: planned } as T;
-    };
-    render(<DayPlanDialog
-      tripId="A"
-      day={{ id: "day21", date: "2026-10-21", label: "第 1 天" }}
-      isOwner
-      request={request}
-      onClose={() => {}}
-      onOrderSaved={async () => {}}
-    />);
-
-    expect(await screen.findByText("1 段交通時間因查詢用量已達上限而省略")).toBeInTheDocument();
-    expect(screen.getByText("已保留行程內容；稍後再試即可重新查詢交通時間。")).toBeInTheDocument();
-    expect(screen.getAllByText("已保留的活動").length).toBeGreaterThan(0);
-  });
-
   it("maps a forbidden day-order apply to the shared owner action message", async () => {
     const request = async <T,>(url: string, options?: RequestInit) => {
       if (url.endsWith("/place-order")) {

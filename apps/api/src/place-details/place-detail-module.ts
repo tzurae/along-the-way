@@ -19,5 +19,7 @@ export interface PlaceDetailModule {
     providerPlaceId: string,
     photoFingerprint: string,
     maxWidth: 192 | 1024,
+    capabilityExpiry?: string | null,
+    capabilitySignature?: string | null,
   ): Promise<{ bytes: Uint8Array<ArrayBuffer>; mediaType: string }>;
 }

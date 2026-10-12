@@ -15,7 +15,6 @@ export type RateLimitedAction =
   | "place_photo_metadata";
 export interface RateLimiter {
   consume(action: RateLimitedAction, clientIp: string, account?: string, cost?: number): Promise<void>;
-  consumePlanning(account: string, tripId: string, cost: number): Promise<void>;
 }
 
 interface Rule {
@@ -116,71 +115,6 @@ export class PostgresRateLimiter implements RateLimiter {
     }
   }
 
-  async consumePlanning(account: string, tripId: string, cost: number) {
-    if (!Number.isSafeInteger(cost) || cost < 1 || cost > 100) {
-      throw new Error("Rate limit cost must be an integer from 1 to 100");
-    }
-    const now = this.now();
-    const attempts = [
-      {
-        scope: "planning_provider:account",
-        key: account.trim().toLowerCase(),
-        limit: 40,
-        windowSeconds: 60 * 60,
-      },
-      {
-        scope: "planning_provider:trip",
-        key: tripId.trim().toLowerCase(),
-        limit: 120,
-        windowSeconds: 24 * 60 * 60,
-      },
-    ];
-    const retryAfterSeconds = await this.database.transaction().execute(async (transaction) => {
-      let retryAfter = 0;
-      for (const attempt of attempts) {
-        const windowMilliseconds = attempt.windowSeconds * 1_000;
-        const windowStart = new Date(
-          Math.floor(now.valueOf() / windowMilliseconds) * windowMilliseconds,
-        );
-        const result = await transaction
-          .insertInto("rate_limit_windows")
-          .values({
-            scope: attempt.scope,
-            key_hash: this.keyHash(attempt.scope, attempt.key),
-            window_start: windowStart,
-            request_count: cost,
-          })
-          .onConflict((conflict) =>
-            conflict
-              .columns(["scope", "key_hash", "window_start"])
-              .doUpdateSet((expression) => ({
-                request_count: expression("rate_limit_windows.request_count", "+", cost),
-              })),
-          )
-          .returning("request_count")
-          .executeTakeFirstOrThrow();
-        if (result.request_count > attempt.limit) {
-          retryAfter = Math.max(
-            retryAfter,
-            Math.ceil((windowStart.valueOf() + windowMilliseconds - now.valueOf()) / 1_000),
-          );
-        }
-      }
-      await transaction
-        .deleteFrom("rate_limit_windows")
-        .where("window_start", "<", new Date(now.valueOf() - 2 * 24 * 60 * 60 * 1_000))
-        .execute();
-      return retryAfter;
-    });
-    if (retryAfterSeconds > 0) {
-      throw new AppError(
-        "rate_limited",
-        "Planning provider quota reached. Try again later.",
-        429,
-        retryAfterSeconds,
-      );
-    }
-  }
 
   private keyHash(scope: string, key: string) {
     return createHmac("sha256", this.secret)

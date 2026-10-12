@@ -38,6 +38,7 @@ const placeProvider = new GooglePlacesProvider({
 const tripPlaces = new PostgresTripPlaceModule({
   database,
   provider: placeProvider,
+  photoCapabilitySecret: tokenSecret,
 });
 const discovery = new PostgresDiscoveryModule({
   database,
@@ -59,8 +60,6 @@ const dayPlans = new PostgresDayPlanModule({
     new GoogleRoutesProvider({ apiKey: process.env.GOOGLE_MAPS_API_KEY }),
   ],
   placeHours: placeProvider,
-  // Billed provider calls (routes, opening hours) draw from a per-account/per-trip budget.
-  providerBudget: rateLimiter,
 });
 const readiness = new PostgresReadinessProbe(database);
 const app = createApp({
@@ -72,6 +71,7 @@ const app = createApp({
     database,
     assetRoot: packagedPhotoRoot,
     ...(placeProvider.available ? { provider: placeProvider } : {}),
+    photoCapabilitySecret: tokenSecret,
   }),
   rateLimiter,
   readiness,
@@ -85,8 +85,8 @@ const port = Number(process.env.PORT ?? 3000);
 const server = Bun.serve({
   port,
   idleTimeout: 30,
-  // Backstop for the per-route limits in createApp (largest is 256 KiB).
-  maxRequestBodySize: 1024 * 1024,
+  // Backstop for the per-route limits in createApp (largest is 2 MiB).
+  maxRequestBodySize: 4 * 1024 * 1024,
   fetch: app.fetch,
 });
 

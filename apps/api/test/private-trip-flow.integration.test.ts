@@ -60,18 +60,28 @@ class CapturingEmailSender implements EmailSender {
     this.invites.push(message);
   }
 }
-class PermanentlyFailingEmailSender implements EmailSender {
+class ScriptedEmailSender implements EmailSender {
   attempts = 0;
 
-  async sendMagicLink() {
+  constructor(private readonly failures: unknown[]) {}
+
+  private async deliver() {
+    const failure = this.failures[this.attempts];
     this.attempts += 1;
-    throw new Error("Permanent SMTP rejection");
+    if (failure) throw failure;
+  }
+
+  async sendMagicLink() {
+    await this.deliver();
   }
 
   async sendTripInvite() {
-    this.attempts += 1;
-    throw new Error("Permanent SMTP rejection");
+    await this.deliver();
   }
+}
+
+function smtpError(responseCode: number) {
+  return Object.assign(new Error(`SMTP ${responseCode}`), { responseCode });
 }
 
 
@@ -336,15 +346,70 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         "idempotency-key": "oversized-trip",
         origin: "https://app.example.test",
       },
-      body: body({ name: "x".repeat(300 * 1_024) }),
+      body: body({ name: "x".repeat(2 * 1_024 * 1_024 + 1) }),
     });
     expect(oversizedTrip.status).toBe(413);
     expect(await oversizedTrip.json()).toMatchObject({
       error: { code: "payload_too_large" },
     });
+    const largeButAllowedTrip = await app.request("/api/trips", {
+      method: "POST",
+      headers: {
+        cookie: cookieFrom(consume),
+        "content-type": "application/json",
+        "idempotency-key": "large-allowed-trip",
+        origin: "https://app.example.test",
+      },
+      body: body({ name: "x".repeat(1_500_000) }),
+    });
+    expect(largeButAllowedTrip.status).toBe(400);
+    expect(await largeButAllowedTrip.json()).toMatchObject({
+      error: { code: "validation_error" },
+    });
   });
 
-  it("stops retrying an email job after five permanent delivery failures", async () => {
+  it("keeps retrying transient email failures and delivers after recovery", async () => {
+    const owner = await login("owner@example.test");
+    const trip = (await createTrip(owner.cookie, "transient-email-failure")).trip;
+    const queued = await app.request(`/api/trips/${trip.id}/invites`, {
+      method: "POST",
+      headers: {
+        cookie: owner.cookie,
+        "content-type": "application/json",
+        "idempotency-key": "transient-email-failure",
+        origin: "https://app.example.test",
+      },
+      body: body({ email: "temporarily-unavailable@example.test" }),
+    });
+    expect(queued.status).toBe(201);
+
+    const scriptedEmail = new ScriptedEmailSender(
+      Array.from({ length: 5 }, () => smtpError(451)),
+    );
+    const retryingWorker = new PostgresEmailWorker({
+      database,
+      emailSender: scriptedEmail,
+      siteAddress: "https://app.example.test",
+      tokenIssuer,
+      now: () => new Date(now),
+    });
+    for (const delaySeconds of [30, 120, 600, 3_600, 21_600]) {
+      expect(await retryingWorker.runOnce()).toBe(true);
+      now = new Date(now.valueOf() + delaySeconds * 1_000);
+    }
+    expect(await retryingWorker.runOnce()).toBe(true);
+    const deliveredJob = await database
+      .selectFrom("email_jobs")
+      .select(["attempt_count", "delivered_at", "failed_at"])
+      .where("recipient", "=", "temporarily-unavailable@example.test")
+      .executeTakeFirstOrThrow();
+    expect(deliveredJob.attempt_count).toBe(5);
+    expect(deliveredJob.delivered_at).not.toBeNull();
+    expect(deliveredJob.failed_at).toBeNull();
+    expect(scriptedEmail.attempts).toBe(6);
+  });
+
+  it("terminal-fails a definitive permanent SMTP rejection immediately", async () => {
     const owner = await login("owner@example.test");
     const trip = (await createTrip(owner.cookie, "permanent-email-failure")).trip;
     const queued = await app.request(`/api/trips/${trip.id}/invites`, {
@@ -359,33 +424,28 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     });
     expect(queued.status).toBe(201);
 
-    const failingEmail = new PermanentlyFailingEmailSender();
+    const scriptedEmail = new ScriptedEmailSender([smtpError(550)]);
     const failingWorker = new PostgresEmailWorker({
       database,
-      emailSender: failingEmail,
+      emailSender: scriptedEmail,
       siteAddress: "https://app.example.test",
       tokenIssuer,
       now: () => new Date(now),
     });
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      expect(await failingWorker.runOnce()).toBe(true);
-      now = new Date(now.valueOf() + 60 * 60 * 1_000);
-    }
+    expect(await failingWorker.runOnce()).toBe(true);
     const failedJob = await database
       .selectFrom("email_jobs")
       .select(["attempt_count", "delivered_at", "failed_at"])
       .where("recipient", "=", "undeliverable@example.test")
       .executeTakeFirstOrThrow();
-    expect(failedJob).toMatchObject({
-      attempt_count: 5,
-      delivered_at: null,
-    });
+    expect(failedJob.attempt_count).toBe(1);
+    expect(failedJob.delivered_at).toBeNull();
     expect(failedJob.failed_at).not.toBeNull();
-    expect(failingEmail.attempts).toBe(5);
+    expect(scriptedEmail.attempts).toBe(1);
 
     now = new Date(now.valueOf() + 24 * 60 * 60 * 1_000);
     expect(await failingWorker.runOnce()).toBe(false);
-    expect(failingEmail.attempts).toBe(5);
+    expect(scriptedEmail.attempts).toBe(1);
   });
 
   it("rate-limits invalid magic-link consumption by IP without blocking a later valid link", async () => {
@@ -408,6 +468,27 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     expect(valid.status).toBe(200);
     expect(parseMagicLinkConsumeResponse(await valid.json()).user.email)
       .toBe("owner@example.test");
+  });
+
+  it("keeps a session valid for 30 days after a request inside the persistence interval", async () => {
+    const initial = new Date(now);
+    const owner = await login("owner@example.test");
+
+    now = new Date(initial.valueOf() + 11 * 60 * 60 * 1_000);
+    expect((await app.request("/api/session", {
+      headers: { cookie: owner.cookie },
+    })).status).toBe(200);
+
+    now = new Date(initial.valueOf() + 30 * 24 * 60 * 60 * 1_000);
+    expect((await app.request("/api/session", {
+      headers: { cookie: owner.cookie },
+    })).status).toBe(200);
+    await database.updateTable("sessions")
+      .set({ expires_at: new Date(now.valueOf() - 1) })
+      .execute();
+    expect((await app.request("/api/session", {
+      headers: { cookie: owner.cookie },
+    })).status).toBe(401);
   });
 
   it("uses indistinguishable requests, hashed one-time links, sliding sessions, and logout", async () => {
