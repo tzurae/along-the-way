@@ -434,7 +434,10 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
           && error instanceof ApiRequestError
           && (error.code === "forbidden" || error.status === 403)
           ? t.errors.ownerOnly
-          : errorMessage(error, t.errors.failed),
+          // Answers refused because the brief's questions changed: explain it in zh-TW, not "要求內容有誤".
+          : operation === "save-questions" && error instanceof ApiRequestError && error.code === "validation_error"
+            ? t.errors.questionsChanged
+            : errorMessage(error, t.errors.failed),
       });
     } finally {
       setPending(null);

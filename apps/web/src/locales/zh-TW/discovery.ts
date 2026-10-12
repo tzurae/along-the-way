@@ -4,6 +4,7 @@ export const discovery = {
     researchUnavailable: (services: string) => `無法進行 AI 研究：此伺服器尚未設定${services}。你的旅程說明會保留。`,
     feedbackUnavailable: (services: string) => `無法解讀意見：此伺服器尚未設定${services}。你的意見會保留。`,
     ownerOnly: "只有旅程建立者可以操作 AI 建議。",
+    questionsChanged: "這些問題已經更新，你的回答無法對應目前的問題。請重新確認回答後再送出。",
   },
   services: {
     openAi: "AI 服務金鑰與模型",
