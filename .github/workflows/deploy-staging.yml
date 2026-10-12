@@ -33,20 +33,23 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Require a verified main commit
+      - name: Require verified main content
         if: inputs.operation == 'deploy'
         env:
           GH_TOKEN: ${{ github.token }}
+        # A release merge commit has a new SHA but the same tree as the release PR head
+        # that Verify already passed, so the gate matches content (tree), not the SHA.
         run: |
-          conclusion=$(gh run list \
-            --workflow Verify \
-            --branch main \
-            --commit "$GITHUB_SHA" \
-            --status completed \
-            --limit 1 \
-            --json conclusion \
-            --jq '.[0].conclusion')
-          test "$conclusion" = "success"
+          tree=$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$GITHUB_SHA" --jq .tree.sha)
+          for sha in $(gh run list --workflow Verify --status success --limit 100 \
+            --json headSha --jq '.[].headSha' | awk '!seen[$0]++'); do
+            if [ "$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$sha" --jq .tree.sha)" = "$tree" ]; then
+              echo "Tree $tree passed Verify at $sha"
+              exit 0
+            fi
+          done
+          echo "No successful Verify run covers tree $tree; run Verify on main (workflow_dispatch) first" >&2
+          exit 1
 
       - name: Configure SSH
         env:
