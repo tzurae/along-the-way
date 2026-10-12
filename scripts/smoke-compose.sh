@@ -78,13 +78,31 @@ assert_private_api() {
     grep --fixed-strings '"code":"unauthenticated"' >/dev/null
 }
 
-compose up --detach --build --wait --wait-timeout 180
+run_e2e() {
+  if [ "${RUN_BROWSER_TESTS:-0}" = "1" ]; then
+    E2E_COMPOSE_PROJECT="$smoke_project" bun run test:e2e ${E2E_SHARD:+--shard="$E2E_SHARD"}
+  fi
+}
+
+# CI may build the images beforehand with a layer cache (SMOKE_PREBUILT_IMAGES=1).
+if [ "${SMOKE_PREBUILT_IMAGES:-0}" = "1" ]; then
+  compose up --detach --wait --wait-timeout 180
+else
+  compose up --detach --build --wait --wait-timeout 180
+fi
 wait_for_ready
 
 curl --connect-timeout 2 --max-time 5 --fail --silent --show-error \
   http://localhost/health |
   grep --fixed-strings '"status":"ok"' >/dev/null
 assert_private_api
+
+# The worker-heartbeat, future-migration and rollback drill below checks release
+# operations, not the e2e slice; CI runs it in one shard only (SMOKE_OPERATIONS_DRILL=0 elsewhere).
+if [ "${SMOKE_OPERATIONS_DRILL:-1}" != "1" ]; then
+  run_e2e
+  exit 0
+fi
 
 compose stop worker
 compose exec --no-TTY db psql \
@@ -199,9 +217,7 @@ fi
 
 assert_private_api
 
-if [ "${RUN_BROWSER_TESTS:-0}" = "1" ]; then
-  E2E_COMPOSE_PROJECT="$smoke_project" bun run test:e2e ${E2E_SHARD:+--shard="$E2E_SHARD"}
-fi
+run_e2e
 
 compose restart db api worker
 wait_for_ready
