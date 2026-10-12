@@ -68,11 +68,55 @@ it("uses an email fallback instead of an opaque participant ID", async () => {
   expect(await openDetails(model)).toHaveTextContent(`參與者：${todayUser.email}（你）`);
 });
 
+it("updates an open item detail when a live refresh changes its participants", async () => {
+  const initial = createTodayModel(trip, todaySkeleton(trip, [todayActivity()]), [], todayUser.id);
+  const details = await openDetails(initial);
+  expect(details).toHaveTextContent(todayUser.email);
+
+  const refreshed = structuredClone(initial);
+  refreshed.items[0]!.participants = [{ id: "new-member", name: "新的旅伴", removed: false }];
+  await act(async () => mounted.at(-1)!.root.render(
+    <TodayWorkspace
+      model={refreshed}
+      selectedDate="2026-10-21"
+      onDayChanged={() => {}}
+      fetchedAt="2026-10-21T01:30:00Z"
+      retry={() => {}}
+    />,
+  ));
+
+  expect(document.querySelector(".today-item-detail")).toHaveTextContent("參與者：新的旅伴");
+  expect(document.querySelector(".today-item-detail")).not.toHaveTextContent(todayUser.email);
+});
+
 it("shows one actionable pending-participant state rather than duplicate warnings", async () => {
   const item = todayActivity(); item.participants = null;
   const details = await openDetails(createTodayModel(trip, todaySkeleton(trip, [item]), [], todayUser.id));
   expect(details.textContent?.match(/參與者待確認/g)).toHaveLength(1);
   expect(details).not.toHaveTextContent("參與者：參與者待確認");
+});
+
+it("keeps transport availability guidance fully in Traditional Chinese", async () => {
+  const item = {
+    ...todayActivity("電車"),
+    type: "transport" as const,
+    details: { mode: "train", ticketInfo: null },
+  };
+  const details = await openDetails(createTodayModel(trip, todaySkeleton(trip, [item]), [], todayUser.id));
+  expect(details).toHaveTextContent("無法取得即時交通資料");
+  expect(details).not.toHaveTextContent("unavailable");
+});
+
+it("marks a retained historical participant after that member is removed from the trip", async () => {
+  const item = todayActivity("歷史行程");
+  item.participants = [{
+    memberId: "removed-member",
+    displayName: "已退出的旅伴",
+    email: "removed@example.test",
+    removed: true,
+  }];
+  const details = await openDetails(createTodayModel(trip, todaySkeleton(trip, [item]), [], todayUser.id));
+  expect(details).toHaveTextContent("參與者：已退出的旅伴・已移除");
 });
 
 it("distinguishes online synchronization from offline reconnect", () => {

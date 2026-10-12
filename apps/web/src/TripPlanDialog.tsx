@@ -147,6 +147,7 @@ export function TripPlanDialog({
               </div>
             </section>
 
+
             {plan.days.length === 0 ? <p className="route-optimal">{t.tripPlan.noDayGetsNewPlace}</p> : null}
             <div className="trip-plan-days">
               {plan.days.map((day) => (

@@ -32,22 +32,31 @@ export function emptyFlight(departureZone = "", arrivalZone = ""): TripFlightInp
   };
 }
 
-export function ambiguousUtcOffsets(localDateTime: string, timeZone: string) {
-  if (!localDateTime || !timeZone) return [];
+function validUtcOffsets(localDateTime: string, timeZone: string): string[] | null {
+  if (!localDateTime || !timeZone) return null;
   try {
     const local = Temporal.PlainDateTime.from(localDateTime);
     const earlier = local.toZonedDateTime(timeZone, { disambiguation: "earlier" });
     const later = local.toZonedDateTime(timeZone, { disambiguation: "later" });
-    if (!earlier.toPlainDateTime().equals(local)
-      || !later.toPlainDateTime().equals(local)
-      || earlier.epochNanoseconds === later.epochNanoseconds) return [];
+    if (!earlier.toPlainDateTime().equals(local) || !later.toPlainDateTime().equals(local)) {
+      return null;
+    }
     return earlier.offset === later.offset ? [earlier.offset] : [earlier.offset, later.offset];
   } catch {
-    return [];
+    return null;
   }
 }
 
-export function flightComplete(flight: TripFlightInput) {
+export function ambiguousUtcOffsets(localDateTime: string, timeZone: string) {
+  const offsets = validUtcOffsets(localDateTime, timeZone);
+  return offsets && offsets.length > 1 ? offsets : [];
+}
+
+export function flightComplete(
+  flight: TripFlightInput,
+  startDate?: string,
+  endDate?: string,
+) {
   const required = [
     flight.departureAirport.name,
     flight.departureAirport.timeZone,
@@ -57,16 +66,25 @@ export function flightComplete(flight: TripFlightInput) {
     flight.arrivalLocalDateTime,
   ];
   if (!required.every((value) => value.trim().length > 0)) return false;
-  const departureOffsets = ambiguousUtcOffsets(
+  const endpointDates = [
+    flight.departureLocalDateTime.slice(0, 10),
+    flight.arrivalLocalDateTime.slice(0, 10),
+  ];
+  if (startDate && endpointDates.some((date) => date < startDate)) return false;
+  if (endDate && endpointDates.some((date) => date > endDate)) return false;
+  const departureOffsets = validUtcOffsets(
     flight.departureLocalDateTime,
     flight.departureAirport.timeZone,
   );
-  const arrivalOffsets = ambiguousUtcOffsets(
+  const arrivalOffsets = validUtcOffsets(
     flight.arrivalLocalDateTime,
     flight.arrivalAirport.timeZone,
   );
-  return (!departureOffsets.length || departureOffsets.includes(flight.departureUtcOffset ?? ""))
-    && (!arrivalOffsets.length || arrivalOffsets.includes(flight.arrivalUtcOffset ?? ""));
+  if (!departureOffsets || !arrivalOffsets) return false;
+  const selectedDeparture = flight.departureUtcOffset;
+  const selectedArrival = flight.arrivalUtcOffset;
+  return (selectedDeparture ? departureOffsets.includes(selectedDeparture) : departureOffsets.length === 1)
+    && (selectedArrival ? arrivalOffsets.includes(selectedArrival) : arrivalOffsets.length === 1);
 }
 
 function AirportPicker({

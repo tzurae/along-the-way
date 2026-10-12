@@ -188,7 +188,7 @@ export function CreateTripDialog({ open, onOpenChange, createTrip }: CreateTripD
   }
 
   async function submit() {
-    if (!dateRange?.from || !dateRange.to) {
+    if (!selectedStartDate || !selectedEndDate) {
       setError(t.createTrip.chooseStartAndEndDates);
       return;
     }
@@ -196,7 +196,8 @@ export function CreateTripDialog({ open, onOpenChange, createTrip }: CreateTripD
       setError(t.createTrip.addAtLeastOneCountry);
       return;
     }
-    if (!flightComplete(outbound) || !flightComplete(returnFlight)) {
+    if (!flightComplete(outbound, selectedStartDate, selectedEndDate)
+      || !flightComplete(returnFlight, selectedStartDate, selectedEndDate)) {
       setError(t.travel.completeFlights);
       return;
     }
@@ -206,8 +207,8 @@ export function CreateTripDialog({ open, onOpenChange, createTrip }: CreateTripD
     try {
       await createTrip({
         name,
-        startDate: format(dateRange.from, "yyyy-MM-dd"),
-        endDate: format(dateRange.to, "yyyy-MM-dd"),
+        startDate: selectedStartDate,
+        endDate: selectedEndDate,
         countryCodes: countryStops.map((stop) => stop.countryCode),
         flights: { outbound, return: returnFlight },
       });
@@ -220,6 +221,8 @@ export function CreateTripDialog({ open, onOpenChange, createTrip }: CreateTripD
     }
   }
 
+  const selectedStartDate = dateRange?.from ? format(dateRange.from, "yyyy-MM-dd") : undefined;
+  const selectedEndDate = dateRange?.to ? format(dateRange.to, "yyyy-MM-dd") : undefined;
   const tripStepValid = Boolean(name.trim() && dateRange?.from && dateRange.to);
   const routeStepValid = countryStops.length > 0;
   const routeSummary = countryStops
@@ -459,7 +462,13 @@ export function CreateTripDialog({ open, onOpenChange, createTrip }: CreateTripD
                 <ArrowRight />
               </Button>
             ) : (
-              <Button type="button" disabled={submitting || !flightComplete(outbound) || !flightComplete(returnFlight)} onClick={() => void submit()}>
+              <Button
+                type="button"
+                disabled={submitting
+                  || !flightComplete(outbound, selectedStartDate, selectedEndDate)
+                  || !flightComplete(returnFlight, selectedStartDate, selectedEndDate)}
+                onClick={() => void submit()}
+              >
                 {submitting ? t.createTrip.creating : t.createTrip.createTrip}
               </Button>
             )}

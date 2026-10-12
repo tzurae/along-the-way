@@ -38,6 +38,7 @@ const placeProvider = new GooglePlacesProvider({
 const tripPlaces = new PostgresTripPlaceModule({
   database,
   provider: placeProvider,
+  photoCapabilitySecret: tokenSecret,
 });
 const discovery = new PostgresDiscoveryModule({
   database,
@@ -48,6 +49,7 @@ const discovery = new PostgresDiscoveryModule({
   placeLookup: placeProvider,
   tripPlaces,
 });
+const rateLimiter = new PostgresRateLimiter(database, tokenSecret);
 const dayPlans = new PostgresDayPlanModule({
   database,
   tripSkeleton,
@@ -59,7 +61,6 @@ const dayPlans = new PostgresDayPlanModule({
   ],
   placeHours: placeProvider,
 });
-const rateLimiter = new PostgresRateLimiter(database, tokenSecret);
 const readiness = new PostgresReadinessProbe(database);
 const app = createApp({
   collaboration: new PostgresCollaborationModule(database),
@@ -70,6 +71,7 @@ const app = createApp({
     database,
     assetRoot: packagedPhotoRoot,
     ...(placeProvider.available ? { provider: placeProvider } : {}),
+    photoCapabilitySecret: tokenSecret,
   }),
   rateLimiter,
   readiness,
@@ -83,6 +85,8 @@ const port = Number(process.env.PORT ?? 3000);
 const server = Bun.serve({
   port,
   idleTimeout: 30,
+  // Backstop for the per-route limits in createApp (largest is 2 MiB).
+  maxRequestBodySize: 4 * 1024 * 1024,
   fetch: app.fetch,
 });
 

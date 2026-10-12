@@ -426,7 +426,10 @@ export class PostgresDayPlanModule implements DayPlanModule {
   }
 
   /** Opening hours per place ID, reusing `known` and looking each other place up once. */
-  private async hoursFor(places: TripPlaceDto[], known = new Map<string, PlaceOpeningHours | null>()) {
+  private async hoursFor(
+    places: TripPlaceDto[],
+    known = new Map<string, PlaceOpeningHours | null>(),
+  ) {
     const missing = places.filter((place) => !known.has(place.id));
     const fetched = await Promise.all(missing.map((place) => this.openingHours(place)));
     const hours = new Map(known);
@@ -640,7 +643,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
       [row.id, { startMinute: row.day_start_minute, endMinute: row.day_end_minute, version: row.version }]));
   }
 
-  /** Opening hours from the place's provider; unknown when it has none or the lookup fails. */
+  /** Opening hours from the place's provider; unknown when it has none or lookup fails. */
   private async openingHours(place: TripPlaceDto): Promise<PlaceOpeningHours | null> {
     if (place.provider !== "google" || !place.providerPlaceId) return null;
     try {
@@ -721,14 +724,19 @@ export class PostgresDayPlanModule implements DayPlanModule {
     };
   }
 
-  private async leg(from: RoutePoint, to: RoutePoint, departureTime: string): Promise<DayLegDto> {
+  private async leg(
+    from: RoutePoint,
+    to: RoutePoint,
+    departureTime: string,
+  ): Promise<DayLegDto> {
     const query = {
       origin: { placeId: from.id, latitude: from.latitude, longitude: from.longitude },
       destination: { placeId: to.id, latitude: to.latitude, longitude: to.longitude },
       departureTime,
     };
-    const settled = await Promise.allSettled(this.routeProviders.map((provider) => provider.observe(query)));
-    const observations = settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+    const observations = (await Promise.all(
+      this.routeProviders.map((provider) => provider.observe(query)),
+    )).flat();
     const walking = firstAvailable(observations, "walking");
     const transit = firstAvailable(observations, "transit");
     const chosen = walking && walking.durationMinutes <= PREFERRED_WALK_MINUTES

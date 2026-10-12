@@ -209,7 +209,7 @@
 .plan-row-button,
 .plan-schedule-button {
   display: inline-flex;
-  min-height: 40px;
+  min-height: 44px;
   align-items: center;
   justify-content: center;
   gap: 6px;

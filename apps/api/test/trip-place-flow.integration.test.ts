@@ -83,6 +83,7 @@ class ControlledProvider implements PlaceProvider {
   unavailable = false;
   readonly searchRequests: Array<{ query: string; options: PlaceSearchOptions }> = [];
   readonly detailRequests: Array<{ providerPlaceId: string; options: Pick<PlaceSearchOptions, "languageCode" | "regionCode"> }> = [];
+  detailGate: ((requestNumber: number) => Promise<void>) | null = null;
   readonly kyoto: ProviderPlaceCandidate = {
     provider: "google",
     providerPlaceId: "ChIJ-Kyoto-Temple-1234",
@@ -132,6 +133,7 @@ class ControlledProvider implements PlaceProvider {
   ) {
     if (this.unavailable) throw new ProviderUnavailableError();
     this.detailRequests.push({ providerPlaceId, options });
+    await this.detailGate?.(this.detailRequests.length);
     const place = [this.kyoto, this.branch].find(
       (candidate) => candidate.providerPlaceId === providerPlaceId,
     );
@@ -242,6 +244,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
   let hours: ControlledHoursLookup;
   let tripPlaces: PostgresTripPlaceModule;
   let collaboration: PostgresCollaborationModule;
+  let identityAuthenticateCalls = 0;
+  let afterReadObserver: (() => void) | null = null;
   const now = () => new Date("2026-09-28T12:00:00.000Z");
 
   beforeAll(async () => {
@@ -294,6 +298,13 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       now,
       randomSessionToken: () => `trip-place-session-${++sessionNumber}`,
     });
+    identityAuthenticateCalls = 0;
+    afterReadObserver = null;
+    const authenticate = identityAccess.authenticate.bind(identityAccess);
+    identityAccess.authenticate = async (token) => {
+      identityAuthenticateCalls += 1;
+      return authenticate(token);
+    };
     worker = new PostgresEmailWorker({
       database,
       emailSender: email,
@@ -318,6 +329,17 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     });
     const tripSkeleton = new PostgresTripSkeletonModule({ database, now });
     collaboration = new PostgresCollaborationModule(database);
+    const collaborationAfter = collaboration.after.bind(collaboration);
+    collaboration.after = async (userId, tripId, order) => {
+      const events = await collaborationAfter(userId, tripId, order);
+      afterReadObserver?.();
+      return events;
+    };
+    const rateLimiter = new PostgresRateLimiter(
+      database,
+      "trip-place-rate-secret-at-least-32-bytes",
+      now,
+    );
     app = createApp({
       placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
       collaboration,
@@ -331,11 +353,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       }),
       discovery: unrelatedDiscoveryModule,
       identityAccess,
-      rateLimiter: new PostgresRateLimiter(
-        database,
-        "trip-place-rate-secret-at-least-32-bytes",
-        now,
-      ),
+      rateLimiter,
       readiness: new PostgresReadinessProbe(database, now),
       siteAddress: "https://app.example.test",
       tripPlaces,
@@ -1294,6 +1312,38 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     } finally { await Promise.all(streams.map((stream) => stream.close())); }
   }, 20_000);
 
+  it("caps concurrent event streams per account and releases capacity when one closes", async () => {
+    const owner = await login("stream-cap-owner@example.test");
+    const trip = await createTrip(owner.cookie, "Bounded event streams");
+    const checkpoint = (await history(owner.cookie, trip.id))[0]!.id;
+    const streams = await Promise.all(
+      Array.from({ length: 6 }, () => openEvents(owner.cookie, trip.id, checkpoint)),
+    );
+    try {
+      const rejected = await app.request(`/api/trips/${trip.id}/events`, {
+        headers: { cookie: owner.cookie, "Last-Event-ID": checkpoint },
+      });
+      expect(rejected.status).toBe(429);
+      expect(await rejected.json()).toMatchObject({ error: { code: "rate_limited" } });
+      let remainingIdleReads = streams.length;
+      const idleReads = Promise.withResolvers<void>();
+      afterReadObserver = () => {
+        remainingIdleReads -= 1;
+        if (remainingIdleReads === 0) idleReads.resolve();
+      };
+      const callsAfterOpening = identityAuthenticateCalls;
+      await idleReads.promise;
+      expect(identityAuthenticateCalls).toBe(callsAfterOpening);
+
+      await streams.pop()!.close();
+      const replacement = await openEvents(owner.cookie, trip.id, checkpoint);
+      await replacement.close();
+    } finally {
+      afterReadObserver = null;
+      await Promise.all(streams.map((stream) => stream.close()));
+    }
+  }, 15_000);
+
   async function list(cookie: string, tripId: string) {
     const response = await app.request(`/api/trips/${tripId}/trip-places`, {
       headers: { cookie },
@@ -1400,6 +1450,35 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect(after.places).toContainEqual(airport);
   });
 
+  it("replays wishlist intake when the trip path UUID uses different casing", async () => {
+    const owner = await login("owner@example.test");
+    const trip = await createTrip(owner.cookie, "Canonical idempotency trip");
+    const first = await addManual(
+      owner.cookie,
+      trip.id,
+      "case-variant-add",
+      "One family cafe",
+      "Kyoto",
+    );
+    const replay = await addManual(
+      owner.cookie,
+      trip.id.toUpperCase(),
+      "case-variant-add",
+      "One family cafe",
+      "Kyoto",
+    );
+
+    expect(replay.status).toBe(201);
+    expect(parseTripPlaceResponse(await replay.json()).tripPlace)
+      .toEqual(parseTripPlaceResponse(await first.json()).tripPlace);
+    expect(await database.selectFrom("trip_places").select("id")
+      .where("trip_id", "=", trip.id).execute()).toHaveLength(1);
+    expect(await database.selectFrom("change_events").select("id")
+      .where("trip_id", "=", trip.id)
+      .where("event_type", "=", "trip_place.created")
+      .execute()).toHaveLength(1);
+  });
+
   it.each(["search", "google-maps-url"] as const)("refuses duplicate %s intake without another contribution and allows re-add after removal", async (method) => {
     const owner = await login("owner@example.test");
     const second = await login("second@example.test");
@@ -1480,6 +1559,43 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       .where("trip_id", "=", trip.id).execute()).toEqual([{ trip_place_id: winner.id, original_note: winner.notes }]);
   });
 
+  it("coalesces concurrent replays before fetching provider place details", async () => {
+    const owner = await login("owner@example.test");
+    const trip = await createTrip(owner.cookie, "Concurrent idempotent provider intake");
+    const releaseFirst = Promise.withResolvers<void>();
+    const firstReached = Promise.withResolvers<void>();
+    provider.detailGate = async (requestNumber) => {
+      if (requestNumber !== 1) return;
+      firstReached.resolve();
+      await releaseFirst.promise;
+    };
+
+    const first = addProvider(owner.cookie, trip.id, "concurrent-replay", "Family note");
+    await firstReached.promise;
+    const replay = addProvider(owner.cookie, trip.id, "concurrent-replay", "Family note");
+    const gatePool = new Pool({ connectionString: databaseUrl });
+    await vi.waitFor(async () => {
+      const result = await gatePool.query<{ waiting: boolean }>(`select exists (
+        select 1 from pg_stat_activity
+        where datname = current_database()
+          and wait_event_type = 'Lock'
+          and wait_event = 'advisory'
+      ) as waiting`);
+      expect(provider.detailRequests.length === 2 || result.rows[0]?.waiting).toBe(true);
+    });
+    releaseFirst.resolve();
+    await gatePool.end();
+    const responses = await Promise.all([first, replay]);
+    provider.detailGate = null;
+
+    expect(responses.map((response) => response.status)).toEqual([201, 201]);
+    const places = await Promise.all(
+      responses.map(async (response) => parseTripPlaceResponse(await response.json()).tripPlace),
+    );
+    expect(places[1]).toEqual(places[0]);
+    expect(provider.detailRequests).toHaveLength(1);
+  });
+
   it("orders active votes descending, ignores removed members, and disables voting for one member", async () => {
     const owner = await login("owner@example.test");
     const second = await login("second@example.test");
@@ -1542,11 +1658,22 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       expect((await setVote(actor.cookie, trip.id, place.id, true, `union-${actor.user.id}-${place.id}`)).status).toBe(200);
     }
     const current = await list(owner.cookie, trip.id);
+    const selfMerge = await app.request(`/api/trips/${trip.id}/trip-places/${source.id}/merge`, {
+      method: "POST",
+      headers: { cookie: second.cookie, "content-type": "application/json", "idempotency-key": "union-self-merge", origin: "https://app.example.test" },
+      body: json({
+        targetTripPlaceId: source.id.toUpperCase(),
+        expectedSourceVersion: current.find((place) => place.id === source.id)!.version,
+        expectedTargetVersion: current.find((place) => place.id === source.id)!.version,
+      }),
+    });
+    expect(selfMerge.status).toBe(400);
+    expect(await selfMerge.json()).toMatchObject({ error: { code: "validation_error" } });
     const merged = await app.request(`/api/trips/${trip.id}/trip-places/${source.id}/merge`, {
       method: "POST",
       headers: { cookie: second.cookie, "content-type": "application/json", "idempotency-key": "union-merge", origin: "https://app.example.test" },
       body: json({
-        targetTripPlaceId: target.id,
+        targetTripPlaceId: target.id.toUpperCase(),
         expectedSourceVersion: current.find((place) => place.id === source.id)!.version,
         expectedTargetVersion: current.find((place) => place.id === target.id)!.version,
       }),
@@ -1651,8 +1778,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       typeLabel: "咖啡店",
       photo: {
         source: "google",
-        id: `google:${provider.branch.providerPlaceId}:0b7de4d767f7a98b`,
-        thumbnailUrl: `/api/trips/${trip.id}/google-place-photos/${provider.branch.providerPlaceId}?photo=0b7de4d767f7a98b&maxWidth=192`,
+        id: `google:${provider.branch.providerPlaceId}:ab695b0da15727f7`,
+        thumbnailUrl: `/api/trips/${trip.id}/google-place-photos/${provider.branch.providerPlaceId}?photo=ab695b0da15727f7&maxWidth=192`,
       },
     });
     expect(provider.searchRequests.at(-1)).toEqual({
@@ -1700,8 +1827,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         providerPlaceId: provider.kyoto.providerPlaceId,
         typeLabel: "佛寺",
         photo: {
-          id: `google:${provider.kyoto.providerPlaceId}:0b7de4d767f7a98b`,
-          thumbnailUrl: `/api/trips/${firstTrip.id}/google-place-photos/${provider.kyoto.providerPlaceId}?photo=0b7de4d767f7a98b&maxWidth=192`,
+          id: `google:${provider.kyoto.providerPlaceId}:ab695b0da15727f7`,
+          thumbnailUrl: `/api/trips/${firstTrip.id}/google-place-photos/${provider.kyoto.providerPlaceId}?photo=ab695b0da15727f7&maxWidth=192`,
         },
       }],
       attribution: "Google Maps",
@@ -2471,6 +2598,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     const moved = (await list(owner.cookie, trip.id)).find((entry) => entry.id === tofukuji.id)!;
     expect((await assign("day-reassign", [{ ...moved, day: trip.days[2]!.id }])).status).toBe(200);
     expect((await positions()).get(tofukuji.id)).toBeNull();
+
   });
 
   it("adds unplanned wishlist places to nearby days around kept places and a friend's dinner", async () => {

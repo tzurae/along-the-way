@@ -361,7 +361,7 @@ export function DayPlanDialog({
               <aside className="route-unknown">
                 <HelpCircle />
                 <div>
-                  <strong>{unknownLegCount} 段交通時間查不到</strong>
+                  <strong>{`${unknownLegCount} 段交通時間查不到`}</strong>
                   <span>資料不完整的路段不顯示推測的抵達時間。</span>
                 </div>
               </aside>

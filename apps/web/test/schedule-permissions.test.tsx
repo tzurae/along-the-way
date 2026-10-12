@@ -11,6 +11,7 @@ import { TripOnboardingChecklist } from "../src/TripOnboardingChecklist";
 import { TripPlanDialog } from "../src/TripPlanDialog";
 import { createTodayModel } from "../src/today-model";
 import { todayActivity, todaySkeleton, todayTrip, todayUser } from "./today-fixtures";
+import tripSkeletonWorkspaceSource from "../src/TripSkeletonWorkspace.tsx?raw";
 
 const ownerOnly = "只有旅程擁有者可以排入、改期或移出行程。你仍可加入地點、投票與編輯備註。";
 
@@ -29,6 +30,11 @@ afterEach(() => {
 });
 
 describe("owner-only schedule surfaces", () => {
+  it("keeps primary day actions at least 44 pixels tall on touch screens", () => {
+    expect(tripSkeletonWorkspaceSource).toContain('className="plan-route-link min-h-11"');
+    expect(tripSkeletonWorkspaceSource).toContain('className="plan-outline-button min-h-11"');
+  });
+
   it("renders the schedule sheet only for owners and summarizes bulk selections without hiding names", async () => {
     const trip = todayTrip();
     const places = [
@@ -140,6 +146,7 @@ describe("owner-only schedule surfaces", () => {
     expect(await screen.findByRole("button", { name: "使用這個順序" })).toBeInTheDocument();
     expect(screen.queryByText(ownerOnly)).not.toBeInTheDocument();
   });
+
 
   it("maps a forbidden day-order apply to the shared owner action message", async () => {
     const request = async <T,>(url: string, options?: RequestInit) => {

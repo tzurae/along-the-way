@@ -1270,7 +1270,7 @@ export function TripSkeletonWorkspace({
                     ) : (
                       <button
                         type="button"
-                        className="plan-route-link"
+                        className="plan-route-link min-h-11"
                         disabled={busyId !== null}
                         onClick={() => setPlanningDay({
                           id: day.id,
@@ -1285,7 +1285,7 @@ export function TripSkeletonWorkspace({
                     {isOwner ? (
                       <button
                         type="button"
-                        className="plan-outline-button"
+                        className="plan-outline-button min-h-11"
                         disabled={busyId !== null}
                         onClick={() => {
                           setError("");

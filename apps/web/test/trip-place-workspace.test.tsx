@@ -155,6 +155,35 @@ it("reports result count, disables listed places, and clears stale search result
   expect(await within(dialog).findByRole("status")).toHaveTextContent("找到 0 個地點");
 });
 
+it("shows a zh-TW provider error instead of leaking the server's English message", async () => {
+  const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
+    if (path.endsWith("/trip-places") && !init?.method) return { tripPlaces: [] } as T;
+    if (path.includes("/place-previews?")) return applyParser({ previews: [] }, init);
+    if (path.endsWith("/trip-places/search")) {
+      throw new ApiRequestError(
+        "provider_unavailable",
+        "Google Places is temporarily unavailable; use manual entry instead",
+        undefined,
+        undefined,
+        undefined,
+        503,
+      );
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  };
+
+  render(<TripPlaceWorkspace trip={trip("owner")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  await screen.findByRole("heading", { name: /^口袋名單$/ });
+  fireEvent.click(screen.getByRole("button", { name: /^加入地點$/ }));
+  const dialog = await screen.findByRole("dialog", { name: /^加入地點$/ });
+  fireEvent.change(within(dialog).getByLabelText("搜尋 Google Maps"), { target: { value: "東福寺" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: /^搜尋地點$/ }));
+
+  const alert = await within(dialog).findByRole("alert");
+  expect(alert).toHaveTextContent("Google 地點服務暫時無法使用，請稍後再試或改用手動輸入。");
+  expect(alert).not.toHaveTextContent("temporarily unavailable");
+});
+
 it("preserves search and note drafts when confirmation returns already_in_wishlist", async () => {
   const candidate: ProviderCandidatesResponse["candidates"][number] = {
     provider: "google", providerPlaceId, name: "清水寺", type: "activity", typeLabel: "佛寺", address: "京都府京都市東山區", latitude: 34.9948, longitude: 135.785, timeZone: "Asia/Tokyo",
@@ -214,6 +243,7 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
   expect(screen.queryByRole("button", { name: /^排入行程$/ })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: /^加入地點$/ })).toBeInTheDocument();
   expect(screen.getAllByRole("button", { name: /^想去，/ }).length).toBeGreaterThan(0);
+  expect(screen.getByRole("button", { name: /^查看 未排程咖啡店 的詳情$/ })).toHaveClass("min-h-11");
 
   fireEvent.click(screen.getByRole("button", { name: /^查看 未排程咖啡店 的詳情$/ }));
   let detail = await screen.findByRole("dialog", { name: /^未排程咖啡店$/ });
@@ -221,6 +251,7 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
   expect(within(detail).getByRole("button", { name: /^從口袋名單移除$/ })).toBeInTheDocument();
   expect(within(detail).queryByRole("button", { name: /^排入行程$/ })).not.toBeInTheDocument();
   expect(within(detail).queryByRole("button", { name: /^合併$/ })).not.toBeInTheDocument();
+  expect(within(detail).getByRole("button", { name: /^關閉$/ })).toHaveClass("min-h-11", "min-w-11");
   expect(within(detail).getByRole("button", { name: /^保持分開$/ })).toBeInTheDocument();
   fireEvent.click(within(detail).getByRole("button", { name: /^關閉$/ }));
 

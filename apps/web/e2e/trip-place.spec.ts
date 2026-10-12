@@ -565,7 +565,7 @@ test("editors keep collaboration controls while only the owner can change schedu
   await searchDialog.getByLabel("搜尋 Google Maps").fill("Kiyomizu-dera");
   await searchDialog.getByLabel("為什麼想去？（選填）").fill("Keep this text during provider failure");
   await searchDialog.getByRole("button", { name: "搜尋地點" }).click();
-  await expect(searchDialog.getByRole("alert")).toContainText("服務供應商目前無法使用，請稍後再試。");
+  await expect(searchDialog.getByRole("alert")).toContainText("Google 地點服務暫時無法使用，請稍後再試或改用手動輸入。");
   await expect(searchDialog.getByLabel("搜尋 Google Maps")).toHaveValue("Kiyomizu-dera");
   await expect(searchDialog.getByLabel("為什麼想去？（選填）")).toHaveValue("Keep this text during provider failure");
   await searchDialog.getByRole("button", { name: "關閉" }).click();

@@ -249,7 +249,7 @@ function TravelEditor({ trip, type, item, skeleton, request, saved, close }: Tra
         </>}
         {error ? <p role="alert" className="text-destructive">{error}</p> : null}
         <DialogFooter><Button type="button" variant="outline" disabled={busy} onClick={close}>{t.travel.cancel}</Button>
-          <Button type="submit" disabled={busy || (type === "flight" && !flightComplete(flight))}>{busy ? t.travel.saving : t.travel.save}</Button></DialogFooter>
+          <Button type="submit" disabled={busy || (type === "flight" && !flightComplete(flight, trip.startDate, trip.endDate))}>{busy ? t.travel.saving : t.travel.save}</Button></DialogFooter>
       </form>
     </DialogContent>
   </Dialog>;

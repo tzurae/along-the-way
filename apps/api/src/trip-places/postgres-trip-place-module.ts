@@ -38,6 +38,7 @@ import {
   type PlaceProvider,
   type ProviderPlaceCandidate,
 } from "./google-places-provider";
+import { GooglePhotoCapability } from "./google-photo-capability";
 import {
   GoogleMapsUrlError,
   defaultGoogleMapsUrlResolverDependencies,
@@ -53,6 +54,7 @@ interface ModuleOptions {
   provider: PlaceProvider;
   urlResolver?: GoogleMapsUrlResolverDependencies;
   now?: () => Date;
+  photoCapabilitySecret?: string;
 }
 
 interface ManualPlaceFacts {
@@ -289,6 +291,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
   private readonly provider: PlaceProvider;
   private readonly urlResolver: GoogleMapsUrlResolverDependencies;
   private readonly now: () => Date;
+  private readonly photoCapability: GooglePhotoCapability | undefined;
 
   constructor(options: ModuleOptions) {
     this.database = options.database;
@@ -296,6 +299,9 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     this.urlResolver =
       options.urlResolver ?? defaultGoogleMapsUrlResolverDependencies;
     this.now = options.now ?? (() => new Date());
+    this.photoCapability = options.photoCapabilitySecret
+      ? new GooglePhotoCapability(options.photoCapabilitySecret, this.now)
+      : undefined;
   }
 
   async list(userId: string, tripId: string) {
@@ -315,7 +321,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     const options = await this.googleRequestOptions(tripId);
     try {
       const providerCandidates = await this.provider.search(query, { ...options, pageSize: 3 });
-      const candidates = await this.searchResults(tripId, exactNameFirst(query, providerCandidates).slice(0, 3));
+      const candidates = await this.searchResults(userId, tripId, exactNameFirst(query, providerCandidates).slice(0, 3));
       await this.clearProviderUnavailable(tripId);
       return { candidates, attribution: this.provider.attribution };
     } catch (error) {
@@ -354,7 +360,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         await this.clearProviderUnavailable(tripId);
       }
       return {
-        candidates: await this.searchResults(tripId, orderedCandidates.slice(0, 3)),
+        candidates: await this.searchResults(userId, tripId, orderedCandidates.slice(0, 3)),
         resolvedUrl: resolution.resolvedUrl,
         attribution: this.provider.attribution,
       };
@@ -385,7 +391,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     const earlyReplay = await replayed(this.database, userId, operation, key);
     if (earlyReplay) return replayedTripPlace(earlyReplay);
 
-    let candidate: ProviderPlaceCandidateDto | null = null;
+    let loadCandidate: (() => Promise<ProviderPlaceCandidateDto>) | null = null;
     let manual: ManualPlaceFacts | null = null;
     if (input.method === "manual") {
       const point = coordinates(input.latitude, input.longitude);
@@ -399,41 +405,51 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         originalNote: optionalText(input.originalNote, "originalNote", 10_000),
       };
     } else {
+      let providerPlaceId: string;
       try {
-        const options = await this.googleRequestOptions(tripId);
-        candidate = await this.provider.getPlace(
-          requiredText(input.providerPlaceId, "providerPlaceId", 300),
-          options,
-        );
+        providerPlaceId = requiredText(input.providerPlaceId, "providerPlaceId", 300);
       } catch (error) {
         if (error instanceof TypeError) {
           throw new AppError("validation_error", error.message);
         }
-        await this.markProviderUnavailable(tripId);
-        throw new AppError(
-          "provider_unavailable",
-          error instanceof ProviderUnavailableError
-            ? error.message
-            : "Google Places is temporarily unavailable; use manual entry instead",
-          503,
-        );
+        throw error;
       }
+      const options = await this.googleRequestOptions(tripId);
+      loadCandidate = async () => {
+        try {
+          return await this.provider.getPlace(providerPlaceId, options);
+        } catch (error) {
+          if (error instanceof TypeError || error instanceof ProviderUnavailableError) throw error;
+          throw new ProviderUnavailableError();
+        }
+      };
     }
-    const sourceUrl = optionalUrl(input.sourceUrl) ?? candidate?.sourceUrl ?? manual?.sourceUrl ?? null;
+    const requestedSourceUrl = optionalUrl(input.sourceUrl);
     const originalNote = optionalText(input.originalNote, "originalNote", 10_000);
 
-    return this.persistPlace(
-      userId,
-      tripId,
-      key,
-      operation,
-      input.method,
-      candidate,
-      manual,
-      sourceUrl,
-      originalNote,
-      true,
-    );
+    try {
+      return await this.persistPlace(
+        userId,
+        tripId,
+        key,
+        operation,
+        input.method,
+        loadCandidate,
+        manual,
+        requestedSourceUrl,
+        originalNote,
+        true,
+      );
+    } catch (error) {
+      if (input.method !== "manual" && error instanceof TypeError) {
+        throw new AppError("validation_error", error.message);
+      }
+      if (input.method !== "manual" && error instanceof ProviderUnavailableError) {
+        await this.markProviderUnavailable(tripId);
+        throw new AppError("provider_unavailable", error.message, 503);
+      }
+      throw error;
+    }
   }
 
   private async googleRequestOptions(tripId: string) {
@@ -449,6 +465,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
   }
 
   private async searchResults(
+    userId: string,
     tripId: string,
     candidates: ProviderPlaceCandidate[],
   ): Promise<ProviderPlaceSearchResultDto[]> {
@@ -469,7 +486,14 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       const { providerPhoto, ...dto } = candidate;
       return {
         ...dto,
-        photo: providerPhoto ? googlePlacePhotoDto(tripId, candidate.providerPlaceId, providerPhoto) : null,
+        photo: providerPhoto
+          ? googlePlacePhotoDto(
+              tripId,
+              candidate.providerPlaceId,
+              providerPhoto,
+              this.photoCapability?.issue(tripId, userId, candidate.providerPlaceId),
+            )
+          : null,
         alreadyInWishlist: alreadyInWishlist.has(candidate.providerPlaceId),
       };
     });
@@ -494,9 +518,9 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     key: string,
     operation: string,
     intakeMethod: CreateTripPlaceInput["method"],
-    candidate: ProviderPlaceCandidateDto | null,
+    loadCandidate: (() => Promise<ProviderPlaceCandidateDto>) | null,
     manual: ManualPlaceFacts | null,
-    sourceUrl: string | null,
+    requestedSourceUrl: string | null,
     originalNote: string | null,
     refuseActiveProviderDuplicate: boolean,
   ) {
@@ -505,6 +529,8 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedTripPlace(replay);
+      const candidate = loadCandidate ? await loadCandidate() : null;
+      const sourceUrl = requestedSourceUrl ?? candidate?.sourceUrl ?? manual?.sourceUrl ?? null;
       await this.reconcileLegacyPlaces(transaction, tripId);
 
       const tripPlaceId = await this.persistPlaceInTransaction(
@@ -1043,8 +1069,8 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     rawKey: string,
     input: MergeTripPlacesInput,
   ) {
-    uuid(sourceTripPlaceId, "sourceTripPlaceId");
-    const targetTripPlaceId = uuid(input.targetTripPlaceId, "targetTripPlaceId");
+    sourceTripPlaceId = uuid(sourceTripPlaceId, "sourceTripPlaceId").toLowerCase();
+    const targetTripPlaceId = uuid(input.targetTripPlaceId, "targetTripPlaceId").toLowerCase();
     if (sourceTripPlaceId === targetTripPlaceId) {
       throw new AppError("validation_error", "A place cannot be merged into itself");
     }

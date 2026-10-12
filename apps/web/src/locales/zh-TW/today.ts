@@ -30,7 +30,7 @@ export const today = {
   navigateNext: "導航到下一站", navigateTo: (name: string) => `導航到 ${name}`, goTo: (name: string) => `前往 ${name}`,
   viewItemDetail: (name: string) => `查看「${name}」詳情`, viewTimeline: "查看全團時間線",
   navigationOffline: "導航需網路或已安裝的地圖 App",
-  routeUnavailable: "即時交通資料 unavailable（無法取得）；下列為正式行程的預定時間，不是即時路況。",
+  routeUnavailable: "無法取得即時交通資料；下列為正式行程的預定時間，不是即時路況。",
   notes: "重要備註", noNotes: "沒有其他重要備註。", endpointsSection: "起點與終點", confirmationSection: "訂位與確認資料",
   start: "開始", end: "結束", departure: "起飛", arrival: "抵達", checkIn: "入住", checkOut: "退房", origin: "起點", destination: "終點",
   viewPlaceDetail: (name: string) => `查看「${name}」景點詳情`, detailTitle: (name: string) => `${name}景點詳情`, closeDetail: "關閉景點詳情",

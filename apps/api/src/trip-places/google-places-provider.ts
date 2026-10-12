@@ -83,7 +83,7 @@ export function googlePlacePhotoFingerprint(photo: GoogleProviderPhoto): string 
     .map((author) => `${author.displayName}\u0000${author.uri ?? ""}`)
     .join("\u0001");
   return createHash("sha256")
-    .update(`${photo.width}x${photo.height}|${attribution}`)
+    .update(`${photo.width}x${photo.height}|${attribution}${photo.googleMapsUri ? `|${photo.googleMapsUri}` : ""}`)
     .digest("hex")
     .slice(0, 16);
 }
@@ -92,17 +92,19 @@ export function googlePlacePhotoDto(
   tripId: string,
   providerPlaceId: string,
   photo: GoogleProviderPhoto,
+  capability?: { exp: number; sig: string },
 ): GooglePlacePhotoDto {
   const prefixName = `places/${providerPlaceId}/photos/`;
   const providerToken = photo.name.startsWith(prefixName) ? photo.name.slice(prefixName.length) : "";
   if (!/^[A-Za-z0-9_-]{1,1000}$/.test(providerToken)) throw new TypeError("Invalid Google photo identity");
   const fingerprint = googlePlacePhotoFingerprint(photo);
   const prefix = `/api/trips/${tripId}/google-place-photos/${providerPlaceId}`;
+  const capabilityQuery = capability ? `&exp=${capability.exp}&sig=${capability.sig}` : "";
   return {
     source: "google",
     id: `google:${providerPlaceId}:${fingerprint}`,
-    thumbnailUrl: `${prefix}?photo=${fingerprint}&maxWidth=192`,
-    imageUrl: `${prefix}?photo=${fingerprint}&maxWidth=1024`,
+    thumbnailUrl: `${prefix}?photo=${fingerprint}&maxWidth=192${capabilityQuery}`,
+    imageUrl: `${prefix}?photo=${fingerprint}&maxWidth=1024${capabilityQuery}`,
     width: photo.width,
     height: photo.height,
     authors: photo.authors,

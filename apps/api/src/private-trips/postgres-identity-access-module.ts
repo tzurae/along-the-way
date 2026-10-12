@@ -31,6 +31,9 @@ import { hashToken, type TokenIssuer } from "./token-issuer";
 const MAGIC_LINK_LIFETIME_MS = 15 * 60 * 1_000;
 const INVITE_LIFETIME_MS = 7 * 24 * 60 * 60 * 1_000;
 const SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1_000;
+const SESSION_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+const SESSION_STORED_LIFETIME_MS =
+  SESSION_LIFETIME_MS + SESSION_REFRESH_INTERVAL_MS;
 
 interface ModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
@@ -308,7 +311,8 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         .values({
           user_id: link.userId,
           token_hash: hashToken(sessionToken),
-          expires_at: new Date(now.valueOf() + SESSION_LIFETIME_MS),
+          expires_at: new Date(now.valueOf() + SESSION_STORED_LIFETIME_MS),
+          last_seen_at: now,
           revoked_at: null,
         })
         .execute();
@@ -335,6 +339,7 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
       .select([
         "sessions.id",
         "sessions.expires_at",
+        "sessions.last_seen_at",
         "sessions.revoked_at",
         "users.id as userId",
         "users.email",
@@ -347,14 +352,23 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
       return null;
     }
 
-    await this.database
-      .updateTable("sessions")
-      .set({
-        last_seen_at: now,
-        expires_at: new Date(now.valueOf() + SESSION_LIFETIME_MS),
-      })
-      .where("id", "=", session.id)
-      .execute();
+    // Persist only when the stored expiry would no longer cover a full 30 days from now. Renewals
+    // store 31 days, so this writes at most about once a day, and sessions created by an earlier
+    // release (stored with exactly 30 days) gain the slack on their first use after upgrade.
+    const mustCover = new Date(now.valueOf() + SESSION_LIFETIME_MS);
+    if (new Date(session.expires_at) < mustCover) {
+      await this.database
+        .updateTable("sessions")
+        .set({
+          last_seen_at: now,
+          expires_at: new Date(now.valueOf() + SESSION_STORED_LIFETIME_MS),
+        })
+        .where("id", "=", session.id)
+        .where("revoked_at", "is", null)
+        .where("expires_at", ">", now)
+        .where("expires_at", "<", mustCover)
+        .execute();
+    }
 
     return {
       id: session.userId,
