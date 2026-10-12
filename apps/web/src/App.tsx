@@ -34,7 +34,7 @@ import { parseTripPlaceListResponse, type TripPlaceListResponse } from "@along-t
 import { TodayWorkspace } from "./TodayWorkspace";
 import { TripOnboardingChecklist } from "./TripOnboardingChecklist";
 import { createTodayModel, tripClock } from "./today-model";
-import { TodaySnapshotStore, TODAY_SCHEMA_VERSION, type TodaySnapshot } from "./today-snapshot";
+import { TodaySnapshotStore, TODAY_SCHEMA_VERSION, TODAY_SIGNED_OUT_STORAGE_KEY, type TodaySnapshot } from "./today-snapshot";
 import {
   defaultSegment,
   itinerarySegmentIds,
@@ -47,7 +47,7 @@ import {
   type TripSegment,
   type TripTab,
 } from "./trip-location";
-import { ApiRequestError } from "./api-error";
+import { ApiRequestError, localizedApiErrorMessage } from "./api-error";
 import { useTripLiveUpdates } from "./useTripLiveUpdates";
 import { TripHistory } from "./TripHistory";
 interface OnboardingFacts {
@@ -70,41 +70,25 @@ const TERMINAL_MAGIC_CODES: Record<string, true> = {
 };
 
 
-function localizedErrorMessage(
-  messages: Messages["errors"],
-  code: string,
-  detail: string,
-  correlationId?: string,
-  currentVersion?: number,
-) {
-  const knownCode = code as keyof typeof messages.byCode;
-  const base = Object.prototype.hasOwnProperty.call(messages.byCode, knownCode)
-    ? messages.byCode[knownCode]
-    : messages.unknown;
-  const message =
-    code === "validation_error" || code === "conflict"
-      ? messages.withDetail(base, detail)
-      : base;
-  return [
-    message,
-    currentVersion === undefined ? "" : messages.currentVersion(currentVersion),
-    correlationId ? messages.reference(correlationId) : "",
-  ].filter(Boolean).join(" ");
-}
 
 async function requestJson<T>(
   messages: Messages["errors"],
   url: string,
   options: RequestOptions = {},
 ) {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      Accept: "application/json",
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...options.headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      headers: {
+        Accept: "application/json",
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...options.headers,
+      },
+    });
+  } catch {
+    throw new ApiRequestError("unknown", messages.unknown);
+  }
   const value = response.status === 204 ? null : await response.json().catch(() => {
     throw new ApiRequestError("unknown", messages.unknown, undefined, undefined, undefined, response.status);
   });
@@ -117,7 +101,7 @@ async function requestJson<T>(
     }
     throw new ApiRequestError(
       parsed.error.code,
-      localizedErrorMessage(
+      localizedApiErrorMessage(
         messages,
         parsed.error.code,
         parsed.error.message,
@@ -130,7 +114,12 @@ async function requestJson<T>(
       response.status,
     );
   }
-  return (options.parse ? options.parse(value) : value) as T;
+  if (!options.parse) return value as T;
+  try {
+    return options.parse(value) as T;
+  } catch {
+    throw new ApiRequestError("unknown", messages.unknown, undefined, undefined, undefined, response.status);
+  }
 }
 
 interface AuthFragment {
@@ -233,22 +222,30 @@ function TripMembersWorkspace({ trip, currentUser, onChanged, request }: TripMem
 
   async function removeMember(userId: string) {
     const identity = `remove-member:${userId}`;
-    await request(`/api/trips/${trip.id}/members/${userId}`, {
-      method: "DELETE",
-      headers: { "Idempotency-Key": actionKey(identity) },
-    });
-    actionKeys.current.delete(identity);
-    await onChanged();
+    try {
+      await request(`/api/trips/${trip.id}/members/${userId}`, {
+        method: "DELETE",
+        headers: { "Idempotency-Key": actionKey(identity) },
+      });
+      actionKeys.current.delete(identity);
+      await onChanged();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : t.errors.unknown);
+    }
   }
 
   async function revokeInvite(inviteId: string) {
     const identity = `revoke-invite:${inviteId}`;
-    await request(`/api/trips/${trip.id}/invites/${inviteId}`, {
-      method: "DELETE",
-      headers: { "Idempotency-Key": actionKey(identity) },
-    });
-    actionKeys.current.delete(identity);
-    await onChanged();
+    try {
+      await request(`/api/trips/${trip.id}/invites/${inviteId}`, {
+        method: "DELETE",
+        headers: { "Idempotency-Key": actionKey(identity) },
+      });
+      actionKeys.current.delete(identity);
+      await onChanged();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : t.errors.unknown);
+    }
   }
 
   return (
@@ -508,7 +505,7 @@ export function App() {
         if (owner && tripId) store?.clearTrip(owner, tripId);
         if (owner && reason.status === 401) store?.clearAccount(owner);
         window.dispatchEvent(new CustomEvent("today-access-denied", { detail: { tripId, status: reason.status } }));
-      } else if (coreRead && (!(reason instanceof ApiRequestError) || (reason.status ?? 0) >= 500)) {
+      } else if (coreRead && (!(reason instanceof ApiRequestError) || reason.status === undefined || reason.status >= 500)) {
         window.dispatchEvent(new Event("today-api-unavailable"));
       }
       const projection = /^\/api\/trips\/([^/?]+)(?:\/([^/?]+))?/.exec(url);
@@ -556,6 +553,23 @@ export function App() {
     const segment = readTripLocation().segment;
     return segment === "flight" || segment === "lodging";
   });
+  const clearLocalSession = useCallback(() => {
+    ++sessionEpoch.current;
+    signedOut.current = true;
+    const owner = accountId.current ?? store?.lastAccount();
+    if (owner) store?.clearAccount(owner);
+    accountId.current = null;
+    ++loadSequence.current;
+    readOnly.current = false;
+    setTodaySnapshot(null);
+    setOnboardingFacts(null);
+    setUser(null);
+    setTrips([]);
+    setSelectedTrip(null);
+    setCreatedTripId(null);
+    setOffline(false);
+    setRetrying(false);
+  }, [store]);
   const enterSignedIn = useCallback((authenticatedUser: UserDto) => {
     const reducedMotion = typeof window.matchMedia === "function"
       && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -727,6 +741,16 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const synchronizeSignOut = (event: StorageEvent) => {
+      if (event.key === TODAY_SIGNED_OUT_STORAGE_KEY && event.newValue === "true") {
+        clearLocalSession();
+      }
+    };
+    window.addEventListener("storage", synchronizeSignOut);
+    return () => window.removeEventListener("storage", synchronizeSignOut);
+  }, [clearLocalSession]);
+
+  useEffect(() => {
     const unavailable = () => { restoreSnapshot(); };
     const online = () => { void reconnect(); };
     const denied = (event: Event) => {
@@ -885,7 +909,12 @@ export function App() {
               setSignInError(`${reason.message} ${t.app.requestNewMagicLink}`);
               setRetryMagicToken(null);
             } else {
-              setSignInError(t.app.unableConsumeMagicLink);
+              setSignInError(
+                reason instanceof ApiRequestError
+                  && (reason.code === "rate_limited" || reason.status === 429)
+                  ? t.app.magicLinkConsumeRateLimited
+                  : t.app.unableConsumeMagicLink,
+              );
               setRetryMagicToken(magicToken);
             }
             return;
@@ -939,7 +968,7 @@ export function App() {
       } catch (reason) {
         if (!active) return;
         if (!magicToken) completedAuthKeys.current.add(authKey);
-        if (!(reason instanceof ApiRequestError) || (reason.status ?? 0) >= 500) {
+        if (!(reason instanceof ApiRequestError) || reason.status === undefined || reason.status >= 500) {
           if (restoreSnapshot()) return;
         }
         if (authenticatedUser) {
@@ -969,6 +998,7 @@ export function App() {
     restoreSnapshot,
     store,
     t.app.linkedInvitationUnavailable,
+    t.app.magicLinkConsumeRateLimited,
     t.app.requestNewMagicLink,
     t.app.unableConsumeMagicLink,
     t.today.unavailable,
@@ -1018,22 +1048,9 @@ export function App() {
   }
 
   async function logout() {
-    ++sessionEpoch.current;
-    signedOut.current = true;
-    store?.setLocallySignedOut(true);
-    const owner = accountId.current ?? store?.lastAccount();
-    if (owner) store?.clearAccount(owner);
-    accountId.current = null;
-    ++loadSequence.current;
-    setTodaySnapshot(null);
-    setOnboardingFacts(null);
-    setUser(null);
-    setTrips([]);
-    setSelectedTrip(null);
-    setCreatedTripId(null);
-    setOffline(false);
     const wasOffline = readOnly.current || !navigator.onLine;
-    readOnly.current = false;
+    store?.setLocallySignedOut(true);
+    clearLocalSession();
     if (!wasOffline) await request("/api/logout", { method: "POST" }).catch(() => {});
   }
 

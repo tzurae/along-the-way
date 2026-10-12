@@ -40,7 +40,11 @@ import {
   PostgresTripPlaceModule,
   suggestPossibleTripPlaceDuplicates,
 } from "../trip-places/postgres-trip-place-module";
-import type { TripSkeletonModule } from "./trip-skeleton-module";
+import {
+  MAX_ITINERARY_ITEM_CONSTRAINTS,
+  MAX_ITINERARY_ITEM_PARTICIPANTS,
+  type TripSkeletonModule,
+} from "./trip-skeleton-module";
 import {
   canonicalNamedTimeZone,
   durationEndsWithinDates,
@@ -55,6 +59,7 @@ interface ModuleOptions {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_CURRENCIES = new Set(Intl.supportedValuesOf("currency"));
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
 
 function retainedTravelOffset(current: ItineraryItemDto | undefined, role: "start" | "end", localDateTime: string, timeZone: string, supplied?: string | null) {
   if (supplied !== undefined) {
@@ -174,8 +179,13 @@ function validateConstraint(input: ConstraintInput) {
   }
   const minimumBufferMinutes = input.minimumBufferMinutes ?? null;
   if (input.type === "minimum_buffer") {
-    if (!Number.isSafeInteger(minimumBufferMinutes) || minimumBufferMinutes! < 0) {
-      throw new AppError("validation_error", "minimumBufferMinutes must be a non-negative integer");
+    if (!Number.isSafeInteger(minimumBufferMinutes)
+      || minimumBufferMinutes! < 0
+      || minimumBufferMinutes! > POSTGRES_INTEGER_MAX) {
+      throw new AppError(
+        "validation_error",
+        `minimumBufferMinutes must be an integer from 0 to ${POSTGRES_INTEGER_MAX}`,
+      );
     }
   } else if (minimumBufferMinutes !== null) {
     throw new AppError("validation_error", "Only minimum-buffer constraints accept minutes");
@@ -183,9 +193,19 @@ function validateConstraint(input: ConstraintInput) {
   return { type: input.type, status: input.status, minimumBufferMinutes };
 }
 
+function validateExpectedVersion(value: number) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > POSTGRES_INTEGER_MAX) {
+    throw new AppError(
+      "validation_error",
+      `expected version must be an integer from 0 to ${POSTGRES_INTEGER_MAX}`,
+    );
+  }
+  return value;
+}
+
 function validateUuid(value: string, name: string) {
   if (!UUID.test(value)) throw new AppError("validation_error", `${name} must be a UUID`);
-  return value;
+  return value.toLowerCase();
 }
 
 function validateMoney(input: CreateItineraryItemInput["money"]) {
@@ -387,7 +407,8 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       }
     }
     for (const day of days) {
-      day.entries.sort((left, right) => left.sortInstant.localeCompare(right.sortInstant));
+      day.entries.sort((left, right) =>
+        left.sortInstant.localeCompare(right.sortInstant) || left.itemId.localeCompare(right.itemId));
     }
     return {
       tripVersion: trip.version,
@@ -1154,6 +1175,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     expectedVersion: number,
     input: ConstraintInput,
   ) {
+    validateExpectedVersion(expectedVersion);
     const key = requireIdempotencyKey(rawKey);
     const operation = `cu:${tripId}:${constraintId}`;
     return this.database.transaction().execute(async (transaction) => {
@@ -1203,6 +1225,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     expectedItemVersion: number,
     expectedVersion: number,
   ) {
+    validateExpectedVersion(expectedVersion);
     const key = requireIdempotencyKey(rawKey);
     const operation = `cd:${tripId}:${constraintId}`;
     return this.database.transaction().execute(async (transaction) => {
@@ -1337,13 +1360,22 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     // A flight or transport may start or end outside the trip's countries, e.g. at the home
     // airport; every other item happens at one of the trip's country stops.
     const mayLeaveRoute = type === "flight" || type === "transport";
+    const expectedEndpointCount = type === "flight" || type === "lodging" || type === "transport" ? 2 : 1;
+    if (!Array.isArray(input.endpoints) || input.endpoints.length !== expectedEndpointCount) {
+      throw new AppError(
+        "validation_error",
+        `${type} must have exactly ${expectedEndpointCount} endpoint${expectedEndpointCount === 1 ? "" : "s"}`,
+      );
+    }
     const endpoints = input.endpoints.map((endpoint) => {
-      if (endpoint.countryStopId !== null) validateUuid(endpoint.countryStopId, "countryStopId");
-      else if (!mayLeaveRoute) {
+      const countryStopId = endpoint.countryStopId === null
+        ? null
+        : validateUuid(endpoint.countryStopId, "countryStopId");
+      if (countryStopId === null && !mayLeaveRoute) {
         throw new AppError("validation_error", `${type} endpoints must use one of this trip's Country Stops`);
       }
-      validateUuid(endpoint.placeId, "placeId");
-      return resolveEndpoint(endpoint);
+      const placeId = validateUuid(endpoint.placeId, "placeId");
+      return resolveEndpoint({ ...endpoint, countryStopId, placeId });
     });
     const stopIds = endpoints.flatMap((endpoint) => endpoint.countryStopId ?? []);
     const expectedRoles = type === "flight" || type === "lodging" || type === "transport"
@@ -1441,6 +1473,13 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     ) {
       throw new AppError("validation_error", "Duration must end within the trip date range");
     }
+    if (input.constraints !== undefined
+      && (!Array.isArray(input.constraints) || input.constraints.length > MAX_ITINERARY_ITEM_CONSTRAINTS)) {
+      throw new AppError(
+        "validation_error",
+        `constraints cannot contain more than ${MAX_ITINERARY_ITEM_CONSTRAINTS} entries`,
+      );
+    }
     const constraints = (input.constraints ?? []).map(validateConstraint);
     return {
       type,
@@ -1461,6 +1500,12 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     input: string[] | null,
     itemId?: string,
   ) {
+    if (input !== null && (!Array.isArray(input) || input.length > MAX_ITINERARY_ITEM_PARTICIPANTS)) {
+      throw new AppError(
+        "validation_error",
+        `participantMemberIds cannot contain more than ${MAX_ITINERARY_ITEM_PARTICIPANTS} members`,
+      );
+    }
     if (input === null) return null;
     if (!Array.isArray(input) || input.length === 0) {
       throw new AppError("validation_error", "participantMemberIds must be null or a nonempty collection");
@@ -1598,7 +1643,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
 
   private async readPlaces(executor: DatabaseExecutor, tripId: string) {
     const rows = await executor.selectFrom("places").selectAll().where("trip_id", "=", tripId)
-      .orderBy("created_at").execute();
+      .orderBy("created_at").orderBy("id").execute();
     return rows.map((row) => this.placeDto(row));
   }
 
@@ -1644,14 +1689,14 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
 
   private async readItems(executor: DatabaseExecutor, tripId: string) {
     const rows = await executor.selectFrom("itinerary_items").selectAll()
-      .where("trip_id", "=", tripId).orderBy("created_at").execute();
+      .where("trip_id", "=", tripId).orderBy("created_at").orderBy("id").execute();
     if (rows.length === 0) return [];
     const ids = rows.map((row) => row.id);
     const [endpointRows, constraintRows, participantRows] = await Promise.all([
       executor.selectFrom("itinerary_endpoints").selectAll()
         .where("itinerary_item_id", "in", ids).orderBy("endpoint_role", "desc").execute(),
       executor.selectFrom("itinerary_constraints").selectAll()
-        .where("itinerary_item_id", "in", ids).orderBy("created_at").execute(),
+        .where("itinerary_item_id", "in", ids).orderBy("created_at").orderBy("id").execute(),
       executor.selectFrom("itinerary_item_participants as participant")
         .innerJoin("trip_members as member", (join) => join
           .onRef("member.trip_id", "=", "participant.trip_id")
@@ -1759,7 +1804,8 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
   }
 
   private requireExpectedVersion(current: number, expected: number) {
-    if (!Number.isSafeInteger(expected) || current !== expected) {
+    validateExpectedVersion(expected);
+    if (current !== expected) {
       throw new AppError(
         "conflict",
         `Version conflict; current version is ${current}`,
@@ -1781,6 +1827,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     tripId: string,
     expectedVersion: number,
   ) {
+    validateExpectedVersion(expectedVersion);
     const updated = await transaction.updateTable("trips").set({
       version: sql`version + 1`,
       updated_at: this.now(),

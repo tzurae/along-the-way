@@ -72,6 +72,38 @@ it("keeps image failure local and resets it when the photo URL changes", async (
   await waitFor(() => expect(container.querySelector("img")).toHaveAttribute("src", second.thumbnailUrl));
 });
 
+it("keeps a preview image failure that fires before thumbnail effects flush", async () => {
+  const photo = googlePhoto();
+  const id = "00000000-0000-4000-8000-000000000001";
+  let resolveRequest!: (response: PlacePreviewResponse) => void;
+  const request: PlaceDetailRequest = <T,>(_path: string, init?: PlaceDetailRequestOptions) =>
+    new Promise<T>((resolve) => {
+      resolveRequest = (response) => resolve((init?.parse ? init.parse(response) : response) as T);
+    });
+  function Harness() {
+    const previews = usePlacePreviews({ tripId, kind: "trip-place", ids: [id], request });
+    return <PlaceThumbnail photo={previews.photos.get(id)} loading={previews.loading} />;
+  }
+  const observer = new MutationObserver(() => {
+    const image = document.querySelector<HTMLImageElement>(".place-thumbnail__image");
+    if (image && image.dataset.raced !== "1") {
+      image.dataset.raced = "1";
+      image.dispatchEvent(new Event("error"));
+    }
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+  try {
+    const { container } = render(<Harness />);
+    resolveRequest({ previews: [{ reference: { kind: "trip-place", id }, photo }] });
+    await waitFor(() => expect(
+      container.querySelector(`[data-place-thumbnail="${photo.id}"] .place-thumbnail__empty`),
+    ).toBeInTheDocument());
+    expect(container.querySelector("img")).not.toBeInTheDocument();
+  } finally {
+    observer.disconnect();
+  }
+});
+
 it("retries one failed preview batch without erasing another batch's photos", async () => {
   const ids = Array.from({ length: 101 }, (_, index) => `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`);
   const calls: string[][] = [];

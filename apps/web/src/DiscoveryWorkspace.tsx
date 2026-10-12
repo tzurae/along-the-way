@@ -481,6 +481,16 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     if (researched) setResearchSettingsOpen(false);
   }
 
+  async function acceptProposal(proposal: CandidateProposalDto) {
+    return mutate(
+      `accept:${proposal.id}`,
+      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/accept`,
+      { expectedVersion: proposal.version },
+      "general",
+      onPlacesChanged,
+    );
+  }
+
   async function rejectProposal(proposal: CandidateProposalDto) {
     return mutate(
       `reject:${proposal.id}`,
@@ -521,17 +531,30 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
             {t.proposal.decline}
           </button>
         ) : null : <span className="font-bold">{t.status[proposal.status]}</span>}
-        {canSchedule && located ? (
-          <button
-            type="button"
-            className="schedule-primary-button"
-            disabled={pending !== null}
-            onClick={() => openProposalSchedule(proposal)}
-          >
-            <CalendarPlus aria-hidden="true" className="size-4" />
-            {place?.assignedDayId ? scheduleT.changeDate : scheduleT.pageAction}
-          </button>
-        ) : null}
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {proposal.status === "pending" && trip.role === "owner" ? (
+            <button
+              type="button"
+              className="pd-secondary"
+              disabled={pending !== null}
+              onClick={() => void acceptProposal(proposal)}
+            >
+              <Check aria-hidden="true" className="size-4" />
+              {t.proposal.accept}
+            </button>
+          ) : null}
+          {canSchedule && located ? (
+            <button
+              type="button"
+              className="schedule-primary-button"
+              disabled={pending !== null}
+              onClick={() => openProposalSchedule(proposal)}
+            >
+              <CalendarPlus aria-hidden="true" className="size-4" />
+              {place?.assignedDayId ? scheduleT.changeDate : scheduleT.pageAction}
+            </button>
+          ) : null}
+        </div>
       </div>
     );
   }
@@ -1149,9 +1172,20 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                             <p className="pd-fit-line">{t.proposal.fitLine(proposal.matchedNeeds)}</p>
                           </div>
                           <PlacePhotoCredit photo={previews.photos.get(proposal.id)} />
-                          {proposal.status === "pending" && proposal.votingAvailable ? (
+                          {proposal.status === "pending" && (proposal.votingAvailable || trip.role === "owner") ? (
                             <div className="pd-row-bottom">
-                              <VoteControl compact name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} />
+                              {proposal.votingAvailable ? <VoteControl compact name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} /> : null}
+                              {trip.role === "owner" ? (
+                                <button
+                                  type="button"
+                                  className="pd-secondary"
+                                  disabled={pending !== null}
+                                  onClick={() => void acceptProposal(proposal)}
+                                >
+                                  <Check aria-hidden="true" className="size-4" />
+                                  {t.proposal.accept}
+                                </button>
+                              ) : null}
                             </div>
                           ) : null}
                         </div>

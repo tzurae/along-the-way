@@ -83,7 +83,7 @@ export function googlePlacePhotoFingerprint(photo: GoogleProviderPhoto): string 
     .map((author) => `${author.displayName}\u0000${author.uri ?? ""}`)
     .join("\u0001");
   return createHash("sha256")
-    .update(`${photo.width}x${photo.height}|${attribution}`)
+    .update(`${photo.width}x${photo.height}|${attribution}${photo.googleMapsUri ? `|${photo.googleMapsUri}` : ""}`)
     .digest("hex")
     .slice(0, 16);
 }

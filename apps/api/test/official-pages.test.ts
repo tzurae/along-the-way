@@ -81,6 +81,22 @@ describe("public page fetching", () => {
     expect(privateHost.requested).toEqual([]);
   });
 
+  it("pins the public DNS result for the request so rebinding cannot reach a private address", async () => {
+    const connectedAddresses: string[][] = [];
+    const network: PublicPageDependencies = {
+      async resolveHost() {
+        return ["93.184.216.34"];
+      },
+      async fetch(_input, _init, addresses) {
+        connectedAddresses.push([...addresses]);
+        return new Response("東福寺", { headers: { "content-type": "text/plain" } });
+      },
+    };
+
+    expect(await fetchPublicPageText("https://rebind.example.test/", network)).toBe("東福寺");
+    expect(connectedAddresses).toEqual([["93.184.216.34"]]);
+  });
+
   it("re-checks every redirect target before following it", async () => {
     const network = dependencies({
       "https://kyoto.travel/moved": () => new Response(null, { status: 302, headers: { location: "https://metadata.internal/" } }),

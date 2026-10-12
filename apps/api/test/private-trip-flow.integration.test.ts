@@ -60,6 +60,20 @@ class CapturingEmailSender implements EmailSender {
     this.invites.push(message);
   }
 }
+class PermanentlyFailingEmailSender implements EmailSender {
+  attempts = 0;
+
+  async sendMagicLink() {
+    this.attempts += 1;
+    throw new Error("Permanent SMTP rejection");
+  }
+
+  async sendTripInvite() {
+    this.attempts += 1;
+    throw new Error("Permanent SMTP rejection");
+  }
+}
+
 
 function body(value: unknown) {
   return JSON.stringify(value);
@@ -82,6 +96,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
   let email: CapturingEmailSender;
   let now: Date;
   let tokenNumber: number;
+  let tokenIssuer: TokenIssuer;
   let app: Hono;
   let emailWorker: PostgresEmailWorker;
 
@@ -126,7 +141,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     now = new Date("2026-09-27T12:00:00.000Z");
     tokenNumber = 0;
     const tokenSecret = "integration-test-token-secret-at-least-thirty-two-bytes";
-    const tokenIssuer = new TokenIssuer(tokenSecret);
+    tokenIssuer = new TokenIssuer(tokenSecret);
     const identityAccess = new PostgresIdentityAccessModule({
       database,
       tokenIssuer,
@@ -156,7 +171,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         () => new Date(now),
       ),
       readiness: new PostgresReadinessProbe(database, () => new Date(now)),
-      siteAddress: "https://app.example.test",
+      siteAddress: "HTTPS://app.example.test",
       tripSkeleton: new PostgresTripSkeletonModule({
         database,
         now: () => new Date(now),
@@ -285,6 +300,116 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     });
   }
 
+  it("rejects oversized API bodies before auth work or route parsing", async () => {
+    const oversizedAuth = await app.request("/api/auth/magic-links", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://app.example.test",
+      },
+      body: body({ email: `${"a".repeat(9 * 1_024)}@example.test` }),
+    });
+    expect(oversizedAuth.status).toBe(413);
+    expect(await oversizedAuth.json()).toMatchObject({
+      error: { code: "payload_too_large" },
+    });
+    expect(Number((await database
+      .selectFrom("rate_limit_windows")
+      .select(({ fn }) => fn.countAll<number>().as("count"))
+      .executeTakeFirstOrThrow()).count)).toBe(0);
+    expect(Number((await database
+      .selectFrom("magic_link_tokens")
+      .select(({ fn }) => fn.countAll<number>().as("count"))
+      .executeTakeFirstOrThrow()).count)).toBe(0);
+
+    const normalAuth = await requestMagicLink("owner@example.test");
+    expect(normalAuth.status).toBe(202);
+    const token = linkToken(email.magicLinks.at(-1)!.url, "magicToken")!;
+    const consume = await consumeMagicLink(token);
+    expect(consume.status).toBe(200);
+
+    const oversizedTrip = await app.request("/api/trips", {
+      method: "POST",
+      headers: {
+        cookie: cookieFrom(consume),
+        "content-type": "application/json",
+        "idempotency-key": "oversized-trip",
+        origin: "https://app.example.test",
+      },
+      body: body({ name: "x".repeat(300 * 1_024) }),
+    });
+    expect(oversizedTrip.status).toBe(413);
+    expect(await oversizedTrip.json()).toMatchObject({
+      error: { code: "payload_too_large" },
+    });
+  });
+
+  it("stops retrying an email job after five permanent delivery failures", async () => {
+    const owner = await login("owner@example.test");
+    const trip = (await createTrip(owner.cookie, "permanent-email-failure")).trip;
+    const queued = await app.request(`/api/trips/${trip.id}/invites`, {
+      method: "POST",
+      headers: {
+        cookie: owner.cookie,
+        "content-type": "application/json",
+        "idempotency-key": "permanent-email-failure",
+        origin: "https://app.example.test",
+      },
+      body: body({ email: "undeliverable@example.test" }),
+    });
+    expect(queued.status).toBe(201);
+
+    const failingEmail = new PermanentlyFailingEmailSender();
+    const failingWorker = new PostgresEmailWorker({
+      database,
+      emailSender: failingEmail,
+      siteAddress: "https://app.example.test",
+      tokenIssuer,
+      now: () => new Date(now),
+    });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect(await failingWorker.runOnce()).toBe(true);
+      now = new Date(now.valueOf() + 60 * 60 * 1_000);
+    }
+    const failedJob = await database
+      .selectFrom("email_jobs")
+      .select(["attempt_count", "delivered_at", "failed_at"])
+      .where("recipient", "=", "undeliverable@example.test")
+      .executeTakeFirstOrThrow();
+    expect(failedJob).toMatchObject({
+      attempt_count: 5,
+      delivered_at: null,
+    });
+    expect(failedJob.failed_at).not.toBeNull();
+    expect(failingEmail.attempts).toBe(5);
+
+    now = new Date(now.valueOf() + 24 * 60 * 60 * 1_000);
+    expect(await failingWorker.runOnce()).toBe(false);
+    expect(failingEmail.attempts).toBe(5);
+  });
+
+  it("rate-limits invalid magic-link consumption by IP without blocking a later valid link", async () => {
+    expect((await requestMagicLink("owner@example.test")).status).toBe(202);
+    const validToken = linkToken(email.magicLinks.at(-1)!.url, "magicToken")!;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const invalid = await consumeMagicLink(`invalid-token-${attempt}`);
+      expect(invalid.status).toBe(400);
+    }
+
+    const limited = await consumeMagicLink("invalid-token-limited");
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBeTruthy();
+    expect(await limited.json()).toMatchObject({
+      error: { code: "rate_limited" },
+    });
+
+    now = new Date(now.valueOf() + 10 * 60 * 1_000);
+    const valid = await consumeMagicLink(validToken);
+    expect(valid.status).toBe(200);
+    expect(parseMagicLinkConsumeResponse(await valid.json()).user.email)
+      .toBe("owner@example.test");
+  });
+
   it("uses indistinguishable requests, hashed one-time links, sliding sessions, and logout", async () => {
     const unknown = await requestMagicLink("unknown@example.test");
     const known = await requestMagicLink("owner@example.test");
@@ -333,6 +458,17 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     const session = await app.request("/api/session", { headers: { cookie } });
     expect(session.status).toBe(200);
     expect(session.headers.get("set-cookie")).toContain("Max-Age=2592000");
+    const persistedSession = await database
+      .selectFrom("sessions")
+      .select(["last_seen_at", "expires_at"])
+      .executeTakeFirstOrThrow();
+    now = new Date("2026-10-10T13:00:00.000Z");
+    expect((await app.request("/api/session", { headers: { cookie } })).status).toBe(200);
+    const repeatedSession = await database
+      .selectFrom("sessions")
+      .select(["last_seen_at", "expires_at"])
+      .executeTakeFirstOrThrow();
+    expect(repeatedSession).toEqual(persistedSession);
 
     const missingOrigin = await app.request("/api/logout", {
       method: "POST",
@@ -781,6 +917,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     const created = await createTrip(owner.cookie);
     const tripId = created.trip.id;
 
+
     const overlongInvite = await app.request(`/api/trips/${tripId}/invites`, {
       method: "POST",
       headers: {
@@ -873,6 +1010,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       }
     }
 
+
     const secondTrip = await createTrip(owner.cookie, "create-second-invite-scope");
     const secondInvitation = await invite(
       owner.cookie,
@@ -933,6 +1071,20 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       "outsider@example.test",
       "invite-outsider",
     );
+    const ownerWithPendingInvite = parseTripResponse(
+      await (await app.request(`/api/trips/${tripId}`, {
+        headers: { cookie: owner.cookie },
+      })).json(),
+    ).trip;
+    expect(ownerWithPendingInvite.invites).toContainEqual(
+      expect.objectContaining({ id: outsiderInvite.inviteId, email: "outsider@example.test" }),
+    );
+    const editorWithPendingInvite = parseTripResponse(
+      await (await app.request(`/api/trips/${tripId}`, {
+        headers: { cookie: editorSessions[0]!.cookie },
+      })).json(),
+    ).trip;
+    expect(editorWithPendingInvite.invites).toEqual([]);
     const outsider = await login("outsider@example.test");
     const hidden = await app.request(`/api/trips/${tripId}`, {
       headers: { cookie: outsider.cookie },
@@ -975,7 +1127,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     );
     expect(revoke.status).toBe(204);
     const replayedRevoke = await app.request(
-      `/api/trips/${tripId}/invites/${revokedInvite.inviteId}`,
+      `/api/trips/${tripId.toUpperCase()}/invites/${revokedInvite.inviteId.toUpperCase()}`,
       {
         method: "DELETE",
         headers: {

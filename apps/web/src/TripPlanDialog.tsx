@@ -5,7 +5,7 @@ import {
   type TripPlanResponse,
 } from "@along-the-way/contracts/day-plans";
 import { parseTripPlaceListResponse } from "@along-the-way/contracts/trip-places";
-import { CalendarDays, Check, Clock3, Route, TriangleAlert } from "lucide-react";
+import { CalendarDays, Check, Clock3, HelpCircle, Route, TriangleAlert } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -116,6 +116,9 @@ export function TripPlanDialog({
 
   const names = new Map(plan?.days.flatMap((day) => day.timetable.rows.flatMap((row) =>
     row.kind === "visit" ? [[row.tripPlaceId, row.name] as const] : [])) ?? []);
+  const quotaLegCount = plan?.days.reduce((count, day) =>
+    count + day.timetable.rows.filter((row) =>
+      row.kind !== "start" && row.travel?.durationMinutes === null && row.travel.unavailableReason === "quota").length, 0) ?? 0;
 
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
@@ -146,6 +149,16 @@ export function TripPlanDialog({
                 </span>
               </div>
             </section>
+
+            {quotaLegCount > 0 ? (
+              <aside className="route-unknown">
+                <HelpCircle />
+                <div>
+                  <strong>{t.dayPlan.providerQuotaLegs(quotaLegCount)}</strong>
+                  <span>{t.dayPlan.providerQuotaDescription}</span>
+                </div>
+              </aside>
+            ) : null}
 
             {plan.days.length === 0 ? <p className="route-optimal">{t.tripPlan.noDayGetsNewPlace}</p> : null}
             <div className="trip-plan-days">

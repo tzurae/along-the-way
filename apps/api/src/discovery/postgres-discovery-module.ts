@@ -52,7 +52,6 @@ import {
   type RatedPlaceLookup,
 } from "../trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "../trip-places/postgres-trip-place-module";
-import { reopenRemovedProposals } from "./reopen-removed-proposals";
 
 interface PostgresDiscoveryModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
@@ -71,14 +70,18 @@ const SHORTFALL_CODES: readonly DiscoveryShortfallDto["code"][] = [
   "permanently_closed", "temporarily_closed", "outside_trip", "no_location",
 ];
 
-/** Research runs one trip may start per hour; each run costs model and Google calls. */
+/** Research runs one trip may start per hour; each run also incurs Google calls. */
 const RESEARCH_PER_TRIP_PER_HOUR = 6;
-/** Research runs one member may start per hour, across all trips. */
-const RESEARCH_PER_ACCOUNT_PER_HOUR = 10;
+/** All billed AI requests one trip or one member may start per hour. */
+const AI_REQUESTS_PER_TRIP_PER_HOUR = 10;
+const AI_REQUESTS_PER_ACCOUNT_PER_HOUR = 10;
 const GENERATE_OPERATION_PREFIX = "discovery:generate:";
+const FEEDBACK_OPERATION_PREFIX = "discovery:feedback:";
+const AI_LIMIT_LOCK_PREFIX = "discovery:ai-limit:";
 const WEB_EVIDENCE_FRESHNESS_MS = 30 * 24 * 60 * 60 * 1_000;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
 const EMPTY_PLAN: DiscoverySearchPlan = {
   queries: [],
   areas: [],
@@ -100,8 +103,13 @@ function requiredText(value: unknown, field: string, maximum: number) {
 }
 
 function expectedVersion(value: unknown) {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
-    throw new AppError("validation_error", "expectedVersion must be a positive integer");
+  if (
+    typeof value !== "number"
+    || !Number.isSafeInteger(value)
+    || value < 1
+    || value > POSTGRES_INTEGER_MAX
+  ) {
+    throw new AppError("validation_error", `expectedVersion must be an integer between 1 and ${POSTGRES_INTEGER_MAX}`);
   }
   return value;
 }
@@ -259,28 +267,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
   async getWorkspace(userId: string, tripId: string) {
     uuid(tripId, "tripId");
     await this.requireMember(this.database, userId, tripId);
-    const staleAccepted = await this.database.selectFrom("candidate_proposals as proposal")
-      .leftJoin("trip_places as place", (join) => join
-        .onRef("place.trip_id", "=", "proposal.trip_id")
-        .onRef("place.id", "=", "proposal.accepted_trip_place_id"))
-      .select("proposal.id")
-      .where("proposal.trip_id", "=", tripId)
-      .where("proposal.status", "=", "accepted")
-      .where((expression) => expression.or([
-        expression("place.id", "is", null),
-        expression("place.archived_at", "is not", null),
-      ]))
-      .limit(1)
-      .executeTakeFirst();
-    if (staleAccepted) {
-      // Repair separately from the projection, always in trip -> proposal lock order.
-      await this.database.transaction().execute(async (transaction) => {
-        await transaction.selectFrom("trips").select("id").where("id", "=", tripId)
-          .forUpdate().executeTakeFirstOrThrow();
-        await this.requireMember(transaction, userId, tripId);
-        await reopenRemovedProposals(transaction, tripId, this.now(), userId);
-      });
-    }
     return this.readWorkspace(this.database, tripId, userId);
   }
 
@@ -451,7 +437,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       await lockMutation(transaction, userId, operation, key);
       const existing = await replayed(transaction, userId, operation, key);
       if (existing) return existing;
-      await this.claimResearchSlot(transaction, userId, tripId, operation);
+      await this.claimAiSlot(transaction, userId, tripId, "research");
       await remember(transaction, userId, operation, key, {
         type: AI_REQUEST_STATE,
         state: "in-progress",
@@ -859,10 +845,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       if (versions.has(proposalId)) {
         throw new AppError("validation_error", `Proposal ${proposalId} appears more than once`);
       }
-      if (!Number.isSafeInteger(entry.expectedVersion) || entry.expectedVersion < 1) {
-        throw new AppError("validation_error", `Proposal ${proposalId} expectedVersion must be a positive integer`);
-      }
-      versions.set(proposalId, entry.expectedVersion);
+      const version = expectedVersion(entry.expectedVersion);
+      versions.set(proposalId, version);
     }
     const key = requireIdempotencyKey(rawKey);
     const operation = `discovery:schedule:${tripId}`;
@@ -1110,7 +1094,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     if ("proposalId" in input) {
       throw new AppError("validation_error", "Feedback must apply to the whole trip");
     }
-    const operation = `discovery:feedback:${tripId}`;
+    const operation = `${FEEDBACK_OPERATION_PREFIX}${tripId}`;
     await this.requireMember(this.database, userId, tripId);
     const earlyReplay = await replayed(this.database, userId, operation, key);
     if (earlyReplay) return aiRequestReplay(earlyReplay);
@@ -1118,6 +1102,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       await lockMutation(transaction, userId, operation, key);
       const existing = await replayed(transaction, userId, operation, key);
       if (existing) return existing;
+      await this.claimAiSlot(transaction, userId, tripId, "feedback");
       await remember(transaction, userId, operation, key, {
         type: AI_REQUEST_STATE,
         state: "in-progress",
@@ -1132,20 +1117,20 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       const failure = error instanceof DiscoveryModelUnavailableError || error instanceof DiscoveryModelResponseError
         ? new AppError("model_unavailable", error.message, 503)
         : null;
-      if (!failure) throw error;
       await this.database.updateTable("mutation_requests").set({
         response: {
           type: AI_REQUEST_STATE,
           state: "failed",
           code: "model_unavailable",
-          message: failure.message,
+          message: failure?.message ?? "The feedback interpretation failed; try again",
         },
       })
         .where("actor_id", "=", userId)
         .where("operation", "=", operation)
         .where("idempotency_key", "=", key)
         .execute();
-      throw failure;
+      if (failure) throw failure;
+      throw error;
     }
     return this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
@@ -1253,52 +1238,70 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
   }
 
   /**
-   * Research costs money, so every member's research on a trip, and one member's research
-   * across trips, queue on locks here: one research per trip at a time, and a cap on research
-   * started per hour. A research counts once claimed, whatever its outcome; a replay of the
-   * same request never gets here.
+   * Model calls cost money, so research and feedback interpretation share account and trip
+   * limits. Research keeps its tighter trip limit because it also incurs Google lookups.
+   * A request counts once claimed, whatever its outcome; an idempotent replay never gets here.
    */
-  private async claimResearchSlot(
+  private async claimAiSlot(
     transaction: Transaction<AlongTheWayDatabase>,
     userId: string,
     tripId: string,
-    operation: string,
+    kind: "research" | "feedback",
   ) {
-    for (const lock of [`${GENERATE_OPERATION_PREFIX}account:${userId}`, operation]) {
+    for (const lock of [
+      `${AI_LIMIT_LOCK_PREFIX}account:${userId}`,
+      `${AI_LIMIT_LOCK_PREFIX}trip:${tripId}`,
+    ]) {
       await sql`select pg_advisory_xact_lock(hashtextextended(${lock}, 0))`.execute(transaction);
     }
+    const tripOperations = [
+      `${GENERATE_OPERATION_PREFIX}${tripId.toLowerCase()}`,
+      `${FEEDBACK_OPERATION_PREFIX}${tripId.toLowerCase()}`,
+    ];
     // Both arms lead with actor_id, the primary key's first column: the trip's claims can
     // only come from its members, removed ones included. The database clock stamps created_at.
     const recent = await transaction.selectFrom("mutation_requests")
       .select([
         "operation",
         "actor_id",
-        sql<string | null>`response->>'type'`.as("claim_type"),
         sql<string | null>`response->>'state'`.as("claim_state"),
         sql<boolean>`created_at > now() - interval '10 minutes'`.as("started_recently"),
         sql<number>`ceil(extract(epoch from (created_at + interval '1 hour' - now())))::int`.as("seconds_left"),
       ])
-      .where("operation", "like", `${GENERATE_OPERATION_PREFIX}%`)
+      .where((where) => where.or([
+        where("operation", "like", `${GENERATE_OPERATION_PREFIX}%`),
+        where("operation", "like", `${FEEDBACK_OPERATION_PREFIX}%`),
+      ]))
       .where("created_at", ">", sql<Date>`now() - interval '1 hour'`)
       .where((where) => where.or([
         where.and([
           where("actor_id", "in", where.selectFrom("trip_members").select("user_id").where("trip_id", "=", tripId)),
-          where("operation", "=", operation),
+          where("operation", "in", tripOperations),
         ]),
         where("actor_id", "=", userId),
       ]))
       .execute();
-    const forTrip = recent.filter((row) => row.operation === operation);
+    const forTrip = recent.filter((row) => tripOperations.includes(row.operation));
     // Still marked running after ten minutes means the process running it died.
-    if (forTrip.some((row) => row.started_recently && row.claim_type === AI_REQUEST_STATE && row.claim_state === "in-progress")) {
-      throw new AppError("research_in_progress", "Research for this trip is already running", 409);
+    if (forTrip.some((row) => row.started_recently && row.claim_state === "in-progress")) {
+      throw new AppError("research_in_progress", "An AI request for this trip is already running", 409);
     }
     const byAccount = recent.filter((row) => row.actor_id === userId);
-    for (const [rows, limit] of [[forTrip, RESEARCH_PER_TRIP_PER_HOUR], [byAccount, RESEARCH_PER_ACCOUNT_PER_HOUR]] as const) {
+    const limits: Array<[typeof recent, number]> = [
+      [forTrip, AI_REQUESTS_PER_TRIP_PER_HOUR],
+      [byAccount, AI_REQUESTS_PER_ACCOUNT_PER_HOUR],
+    ];
+    if (kind === "research") {
+      limits.unshift([
+        forTrip.filter((row) => row.operation.startsWith(GENERATE_OPERATION_PREFIX)),
+        RESEARCH_PER_TRIP_PER_HOUR,
+      ]);
+    }
+    for (const [rows, limit] of limits) {
       if (rows.length >= limit) {
         throw new AppError(
           "research_limit_reached",
-          "The research limit for this hour is reached",
+          "The AI request limit for this hour is reached",
           429,
           Math.max(1, Math.min(...rows.map((row) => row.seconds_left))),
         );

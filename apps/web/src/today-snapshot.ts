@@ -1,9 +1,9 @@
 import type { TodayModel } from "./today-model";
 
-export const TODAY_SCHEMA_VERSION = 3;
+export const TODAY_SCHEMA_VERSION = 4;
 const PREFIX = "along-the-way:today:";
 const ACCOUNT_KEY = "along-the-way:today-account";
-const SIGNED_OUT_KEY = "along-the-way:locally-signed-out";
+export const TODAY_SIGNED_OUT_STORAGE_KEY = "along-the-way:locally-signed-out";
 export interface TodaySnapshot {
   schemaVersion: typeof TODAY_SCHEMA_VERSION;
   accountId: string;
@@ -28,12 +28,13 @@ function zone(value: unknown) {
 function coordinate(value: unknown, limit: number) { return value === null || (typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= limit); }
 
 /**
- * Upgrade only compatible schema-2 endpoints, then validate the complete account-scoped result.
- * Missing references remain unknown; never accept new reference fields from a purported old format
- * or infer IDs from names, coordinates, or another snapshot.
+ * Upgrade only compatible schema-2/3 snapshots, then validate the complete
+ * account-scoped result. Missing references and participant status remain unknown;
+ * never infer them from names, coordinates, or another snapshot.
  */
 function migrateLegacySnapshot(value: unknown): unknown {
-  if (!record(value, "schemaVersion accountId fetchedAt model") || value.schemaVersion !== 2) return value;
+  if (!record(value, "schemaVersion accountId fetchedAt model") || (value.schemaVersion !== 2 && value.schemaVersion !== 3)) return value;
+  const legacyVersion = value.schemaVersion;
   const model = value.model;
   if (!record(model, "tripId tripName tripVersion memberId days items") || !Array.isArray(model.items)) return value;
   const items = [];
@@ -43,10 +44,22 @@ function migrateLegacySnapshot(value: unknown): unknown {
     for (const endpoint of item.endpoints) {
       if (!record(endpoint, "role instant timeZone place")) return value;
       const place = endpoint.place;
-      if (place !== null && !record(place, "name address latitude longitude")) return value;
-      endpoints.push({ ...endpoint, place: place === null ? null : { ...place, id: null } });
+      const placeKeys = legacyVersion === 2 ? "name address latitude longitude" : "id name address latitude longitude";
+      if (place !== null && !record(place, placeKeys)) return value;
+      endpoints.push({
+        ...endpoint,
+        place: place === null ? null : legacyVersion === 2 ? { ...place, id: null } : place,
+      });
     }
-    items.push({ ...item, endpoints });
+    if (item.participants !== null && !Array.isArray(item.participants)) return value;
+    const participants = item.participants === null
+      ? null
+      : item.participants.map((person) => {
+        if (!record(person, "id name")) return null;
+        return { ...person, removed: null };
+      });
+    if (participants?.some((person) => person === null)) return value;
+    items.push({ ...item, endpoints, participants });
   }
   return { ...value, schemaVersion: TODAY_SCHEMA_VERSION, model: { ...model, items } };
 }
@@ -61,7 +74,7 @@ function validSnapshot(value: unknown): value is TodaySnapshot {
   return list(model.items, (item) => record(item, "id title type start end endpoints participants locked constraints facts notes sourceUrl")
     && text(item.id) && text(item.title) && text(item.type) && ["flight", "lodging", "transport", "reservation", "meal", "activity", "free-time"].includes(item.type)
     && (item.start === null || instant(item.start)) && (item.end === null || instant(item.end)) && typeof item.locked === "boolean" && nullableText(item.notes) && nullableText(item.sourceUrl)
-    && (item.participants === null || list(item.participants, (person) => record(person, "id name") && text(person.id) && text(person.name)))
+    && (item.participants === null || list(item.participants, (person) => record(person, "id name removed") && text(person.id) && text(person.name) && (person.removed === null || typeof person.removed === "boolean")))
     && list(item.endpoints, (endpoint) => record(endpoint, "role instant timeZone place") && ["start", "end"].includes(String(endpoint.role)) && instant(endpoint.instant) && text(endpoint.timeZone) && zone(endpoint.timeZone)
       && (endpoint.place === null || (record(endpoint.place, "id name address latitude longitude") && nullableText(endpoint.place.id) && text(endpoint.place.name) && nullableText(endpoint.place.address) && coordinate(endpoint.place.latitude, 90) && coordinate(endpoint.place.longitude, 180))))
     && list(item.constraints, (constraint) => record(constraint, "type status minutes") && ["fixed_time", "immovable", "minimum_buffer"].includes(String(constraint.type)) && ["confirmed", "unknown", "conflicted"].includes(String(constraint.status)) && (constraint.minutes === null || (typeof constraint.minutes === "number" && Number.isFinite(constraint.minutes) && constraint.minutes >= 0)))
@@ -74,9 +87,19 @@ export class TodaySnapshotStore {
   save(accountId: string, model: TodayModel, now = Date.now()): TodaySnapshot | null {
     const snapshot: TodaySnapshot = { schemaVersion: TODAY_SCHEMA_VERSION, accountId, fetchedAt: new Date(now).toISOString(), model };
     if (!validSnapshot(snapshot)) return null;
+    let previousAccount: string | null;
     try {
-      this.storage.setItem(`${PREFIX}${accountId}:${model.tripId}`, JSON.stringify(snapshot));
+      previousAccount = this.storage.getItem(ACCOUNT_KEY);
       this.storage.setItem(ACCOUNT_KEY, accountId);
+      try {
+        this.storage.setItem(`${PREFIX}${accountId}:${model.tripId}`, JSON.stringify(snapshot));
+      } catch (error) {
+        try {
+          if (previousAccount === null) this.storage.removeItem(ACCOUNT_KEY);
+          else this.storage.setItem(ACCOUNT_KEY, previousAccount);
+        } catch { /* Best effort: the snapshot write itself remained atomic. */ }
+        throw error;
+      }
       return snapshot;
     } catch { return null; }
   }
@@ -104,13 +127,13 @@ export class TodaySnapshotStore {
     try { return this.storage.getItem(ACCOUNT_KEY); } catch { return null; }
   }
   isLocallySignedOut() {
-    try { return this.storage.getItem(SIGNED_OUT_KEY) === "true"; } catch { return false; }
+    try { return this.storage.getItem(TODAY_SIGNED_OUT_STORAGE_KEY) === "true"; } catch { return false; }
   }
 
   setLocallySignedOut(signedOut: boolean) {
     try {
-      if (signedOut) this.storage.setItem(SIGNED_OUT_KEY, "true");
-      else this.storage.removeItem(SIGNED_OUT_KEY);
+      if (signedOut) this.storage.setItem(TODAY_SIGNED_OUT_STORAGE_KEY, "true");
+      else this.storage.removeItem(TODAY_SIGNED_OUT_STORAGE_KEY);
     } catch { /* Storage can be disabled. */ }
   }
 

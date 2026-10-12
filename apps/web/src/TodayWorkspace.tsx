@@ -100,7 +100,7 @@ function TodayItemDetails({ item, now, parallel, memberId, date, previews, previ
         {parallel ? <span><Users size={16} aria-hidden="true" />{text.parallel}</span> : null}
         {item.locked ? <span><Lock size={16} aria-hidden="true" />{text.locked}</span> : null}
       </div>
-      <p className="today-detail-participants">{item.participants === null ? text.participantsUnknown : <>{text.participants}：{item.participants.length === 0 ? text.noParticipants : item.participants.map((person) => `${person.name}${person.id === memberId ? `（${text.you}）` : ""}`).join("、")}</>}</p>
+      <p className="today-detail-participants">{item.participants === null ? text.participantsUnknown : <>{text.participants}：{item.participants.length === 0 ? text.noParticipants : item.participants.map((person) => `${person.name}${person.removed ? `・${t.tripSkeleton.participantRemoved}` : ""}${person.id === memberId ? `（${text.you}）` : ""}`).join("、")}</>}</p>
       {item.facts.length ? <dl className="today-detail-facts">
         {item.facts.map((fact) => <div key={fact.kind}><dt>{text.facts[fact.kind]}</dt><dd className="whitespace-pre-wrap">{fact.value}</dd></div>)}
       </dl> : null}
@@ -199,7 +199,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, isOwner, onA
   const text = t.today;
   const [now, setNow] = useState(Date.now);
   const [selectedDetail, setSelectedDetail] = useState<TodayDetailSelection | null>(null);
-  const [selectedItem, setSelectedItem] = useState<TodayItem | null>(null);
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const detailReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const itemReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const timelineRef = useRef<HTMLElement | null>(null);
@@ -219,7 +219,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, isOwner, onA
   useEffect(() => {
     if (selectedDetail && day?.date !== selectedDetail.date) setSelectedDetail(null);
   }, [day?.date, selectedDetail]);
-  useEffect(() => { setSelectedItem(null); }, [day?.date]);
+  useEffect(() => { setSelectedItemId(null); }, [day?.date]);
   const endpointIds = useMemo(() => [...new Set(model.items.flatMap((item) => item.endpoints.flatMap((endpoint) => endpoint.place?.id ? [endpoint.place.id] : [])))], [model.items]);
   const wishlistIds = useMemo(() => [...new Set(model.days.flatMap((entry) => entry.wishlist.map((place) => place.id)))], [model.days]);
   const endpointPreviews = usePlacePreviews({ tripId: model.tripId, kind: "itinerary-place", ids: endpointIds, request, enabled: Boolean(request) && !offline });
@@ -326,15 +326,17 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, isOwner, onA
       new Intl.DateTimeFormat(locale, { timeZone: lastPastZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(lastPastInstant)),
     )
     : null;
-
+  const selectedItem = selectedItemId
+    ? model.items.find((item) => item.id === selectedItemId) ?? null
+    : null;
   function openItem(item: TodayItem) {
     itemReturnPosition.current = { x: window.scrollX, y: window.scrollY };
-    setSelectedItem(item);
+    setSelectedItemId(item.id);
   }
   function closeItem() {
-    const id = selectedItem?.id;
+    const id = selectedItemId;
     const position = itemReturnPosition.current;
-    setSelectedItem(null);
+    setSelectedItemId(null);
     itemReturnPosition.current = null;
     window.requestAnimationFrame(() => {
       if (id) document.querySelector<HTMLElement>(`[data-today-item-trigger="${id}"]`)?.focus({ preventScroll: true });

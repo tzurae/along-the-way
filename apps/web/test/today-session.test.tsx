@@ -22,8 +22,11 @@ let requests: string[] = [];
 let liveVersion = 0;
 let liveSources: Array<EventTarget & { url: string }> = [];
 let previewFails = false;
-let magicConsumeFailure: "network" | 403 | 500 | null = null;
+let magicConsumeFailure: "network" | "terminal" | 403 | 429 | 500 | null = null;
 let magicInviteOutcome = false;
+let inviteNetworkFailure = false;
+let memberActionFailure = false;
+let sessionNetworkFailure = false;
 let tripPlacesOverride: TripPlaceDto[] | null = null;
 const reply = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 
@@ -37,6 +40,9 @@ beforeEach(() => {
   liveVersion = 0; liveSources = []; previewFails = false;
   magicConsumeFailure = null;
   magicInviteOutcome = false;
+  inviteNetworkFailure = false;
+  memberActionFailure = false;
+  sessionNetworkFailure = false;
   tripPlacesOverride = null;
   history.replaceState({}, "", "/?trip=A&tab=today&day=2026-10-21");
   Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
@@ -48,16 +54,26 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
     requests.push(input);
     if (gate && input.startsWith("/api/trips/A")) await gate;
-    if (input === "/api/session") return reply({ user: todayUser });
+    if (input === "/api/session") {
+      if (sessionNetworkFailure) throw new TypeError("Failed to fetch");
+      return reply({ user: todayUser });
+    }
     if (input === "/api/auth/magic-links/consume") {
       if (magicConsumeFailure === "network") throw new TypeError("Failed to fetch");
       if (magicConsumeFailure) {
+        const status = magicConsumeFailure === "terminal" ? 400 : magicConsumeFailure;
         return reply({
           error: {
-            code: magicConsumeFailure === 403 ? "forbidden" : "internal",
-            message: "Consume failed",
+            code: magicConsumeFailure === "terminal"
+              ? "invalid_magic_link"
+              : magicConsumeFailure === 429
+                ? "rate_limited"
+                : magicConsumeFailure === 403 ? "forbidden" : "internal",
+            message: magicConsumeFailure === "terminal"
+              ? "This sign-in link is invalid."
+              : "Consume failed",
           },
-        }, magicConsumeFailure);
+        }, status);
       }
       return reply({
         user: todayUser,
@@ -66,6 +82,13 @@ beforeEach(() => {
     }
     if (input === "/api/trips") return reply({ trips });
     if (input === "/api/invites/accept") return reply({ error: { code: "used_invite", message: "This invitation was already used" } }, 409);
+    if (input === "/api/trips/A/invites" && init?.method === "POST") {
+      if (inviteNetworkFailure) throw new TypeError("Failed to fetch");
+      return reply({ invite: { email: "companion@example.test" } }, 201);
+    }
+    if (input === "/api/trips/A/members/editor-user" && init?.method === "DELETE" && memberActionFailure) {
+      return reply({ error: { code: "internal", message: "Database connection failed" } }, 500);
+    }
     const trip = trips.find((entry) => input.startsWith(`/api/trips/${entry.id}`));
     if (!trip) return reply({ error: { code: "trip_not_found", message: "Trip unavailable" } }, 404);
     if (input === `/api/trips/${trip.id}`) return reply({ trip });
@@ -177,6 +200,38 @@ it.each(["network", 403, 500] as const)(
     );
   },
 );
+
+it("keeps a rate-limited magic token and explains when to retry", async () => {
+  await mount();
+  magicConsumeFailure = 429;
+  history.replaceState({}, "", "/?trip=A&tab=today#magicToken=limited-token");
+
+  await act(async () => {
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  });
+
+  await waitFor(() => expect(document.querySelector('[role="alert"]')).toHaveTextContent(
+    "登入嘗試次數過多，請稍後再試；登入連結仍會保留。",
+  ));
+  expect(button("重試登入")).toBeEnabled();
+  expect(new URLSearchParams(location.hash.slice(1)).get("magicToken")).toBe("limited-token");
+});
+
+it("localizes terminal magic-link failures without rendering server English", async () => {
+  await mount();
+  magicConsumeFailure = "terminal";
+  history.replaceState({}, "", "/?trip=A&tab=today#magicToken=invalid-token");
+
+  await act(async () => {
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  });
+
+  await waitFor(() => expect(document.querySelector('[role="alert"]')).toHaveTextContent(
+    "這個登入連結無效。 請寄一封新的登入信。",
+  ));
+  expect(document.querySelector('[role="alert"]')).not.toHaveTextContent("This sign-in link is invalid.");
+  expect(new URLSearchParams(location.hash.slice(1)).has("magicToken")).toBe(false);
+});
 
 it("signs in but explains when a linked invitation expired or was revoked", async () => {
   await mount();
@@ -436,6 +491,69 @@ it.each(["change", "revocation"] as const)("does not let the old trip's %s super
     expect(new URLSearchParams(location.search).get("trip")).toBe("B");
     expect(document.querySelector("#trip-panel-today select")).toHaveValue("2026-11-21");
   }
+});
+
+it("handles member action failures with localized feedback instead of an unhandled rejection", async () => {
+  trips[0]!.members.push({
+    id: "editor-member",
+    userId: "editor-user",
+    email: "editor@example.test",
+    displayName: null,
+    role: "editor",
+  });
+  trips[0]!.memberCount = 2;
+  memberActionFailure = true;
+  await mount();
+  await click(document.querySelector<HTMLButtonElement>('[data-trip-tab="members"]')!);
+  const panel = document.getElementById("trip-panel-members")!;
+  await click(button("移除", panel));
+
+  await waitFor(() => expect(panel.querySelector('[role="status"]')).toHaveTextContent("發生未預期的錯誤。"));
+  expect(panel.querySelector('[role="status"]')).not.toHaveTextContent("Database connection failed");
+});
+
+it("reopens the private read-only snapshot when the session read loses the network", async () => {
+  new TodaySnapshotStore(localStorage).save(
+    todayUser.id,
+    createTodayModel(trips[0]!, skeleton, todayWishlist(), todayUser.id),
+  );
+  sessionNetworkFailure = true;
+
+  await mount();
+
+  expect(document.body).toHaveTextContent("離線資料");
+  expect(document.body).toHaveTextContent("Trip A");
+  expect(document.querySelector('input[type="email"]')).toBeNull();
+});
+
+it("shows localized copy instead of a browser network error for a failed mutation", async () => {
+  await mount();
+  inviteNetworkFailure = true;
+  await click(document.querySelector<HTMLButtonElement>('[data-trip-tab="members"]')!);
+  const panel = document.getElementById("trip-panel-members")!;
+  const input = panel.querySelector<HTMLInputElement>('input[type="email"]')!;
+  fireEvent.change(input, { target: { value: "companion@example.test" } });
+  fireEvent.submit(input.form!);
+
+  await waitFor(() => expect(panel.querySelector('[role="status"]')).toHaveTextContent("無法完成要求。"));
+  expect(panel.querySelector('[role="status"]')).not.toHaveTextContent("Failed to fetch");
+});
+
+it("clears private state when another tab signs out of the shared browser account", async () => {
+  await mount();
+  expect(snapshot().model.tripId).toBe("A");
+
+  localStorage.setItem("along-the-way:locally-signed-out", "true");
+  await act(async () => {
+    window.dispatchEvent(new StorageEvent("storage", {
+      key: "along-the-way:locally-signed-out",
+      newValue: "true",
+    }));
+  });
+
+  await waitFor(() => expect(button("寄送登入連結")).toBeInTheDocument());
+  expect(new TodaySnapshotStore(localStorage).read(todayUser.id, "A")).toBeNull();
+  expect(document.body).not.toHaveTextContent("Trip A");
 });
 
 it("keeps a failed online mutation's error visible after a live read refresh", async () => {

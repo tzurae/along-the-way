@@ -156,12 +156,17 @@ export function useTripLiveUpdates({ tripId, request, onChanged, onRevoked }: {
     }
     function regain() {
       if (document.visibilityState === "hidden") return;
+      if (projectionTimer !== undefined) {
+        window.clearTimeout(projectionTimer);
+        projectionTimer = undefined;
+        projectionRetryAt = 0;
+      }
       void check();
       if (!live && navigator.onLine && !stopped) { window.clearTimeout(reconnect); connect(); }
     }
     function offline() { source?.close(); live = false; setConnected(false); window.clearTimeout(reconnect); }
     void check().then(() => { if (!stopped) connect(); });
-    const fallback = window.setInterval(() => { if (!live) void check(); }, 60_000);
+    const fallback = window.setInterval(() => { void check(); }, 60_000);
     window.addEventListener("focus", regain);
     window.addEventListener("online", regain);
     window.addEventListener("offline", offline);

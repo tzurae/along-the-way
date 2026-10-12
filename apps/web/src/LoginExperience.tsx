@@ -82,6 +82,8 @@ export function LoginExperience(props: {
   const sentHeadingRef = useRef<HTMLHeadingElement>(null);
   const focusEmailAfterEdit = useRef(false);
   const previousInviteToken = useRef(props.inviteToken);
+  const currentInviteToken = useRef(props.inviteToken);
+  currentInviteToken.current = props.inviteToken;
   const inviteMode = Boolean(props.inviteToken);
 
   useEffect(() => {
@@ -143,15 +145,17 @@ export function LoginExperience(props: {
       } else {
         await props.requestLink(address);
       }
+      if (currentInviteToken.current !== inviteToken) return;
       const expiresAt = Date.now() + 60_000;
       setSubmittedEmail(address);
       setResendDeadline({ key: requestKey, expiresAt });
       setCooldown(60);
       setScreen("sent");
     } catch (requestError) {
+      if (currentInviteToken.current !== inviteToken) return;
       setError({ kind: "form", message: props.describeError(requestError) });
     } finally {
-      setPending(false);
+      if (currentInviteToken.current === inviteToken) setPending(false);
     }
   }
 

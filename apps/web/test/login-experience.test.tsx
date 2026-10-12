@@ -47,6 +47,40 @@ it("offers an invite-only CTA without asking for an email address", async () => 
   expect(screen.getByRole("button", { name: "60 秒後可重新寄送" })).toBeDisabled();
 });
 
+it("ignores an invite-link response after the tab changes to a different invitation", async () => {
+  let resolveFirst!: () => void;
+  const requestInviteLink = vi.fn(
+    (token: string) => token === "first-invite"
+      ? new Promise<void>((resolve) => { resolveFirst = resolve; })
+      : Promise.resolve(),
+  );
+  const describeError = () => "無法索取登入連結。";
+  const rendered = render(
+    <LoginExperience
+      inviteToken="first-invite"
+      requestLink={vi.fn(async () => {})}
+      requestInviteLink={requestInviteLink}
+      describeError={describeError}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "寄送登入連結到受邀信箱" }));
+  await waitFor(() => expect(requestInviteLink).toHaveBeenCalledWith("first-invite"));
+
+  rendered.rerender(
+    <LoginExperience
+      inviteToken="second-invite"
+      requestLink={vi.fn(async () => {})}
+      requestInviteLink={requestInviteLink}
+      describeError={describeError}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "寄送登入連結到受邀信箱" })).toBeEnabled();
+
+  await act(async () => resolveFirst());
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "寄送登入連結到受邀信箱" })).toBeEnabled();
+});
+
 it("keeps the submitted address stable and disables editing while the request is in flight", async () => {
   let resolveRequest!: () => void;
   const requestLink = vi.fn(() => new Promise<void>((resolve) => { resolveRequest = resolve; }));

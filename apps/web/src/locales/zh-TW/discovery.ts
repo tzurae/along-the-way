@@ -69,7 +69,7 @@ export const discovery = {
     description: "只要說明一次旅程需求，AI 就會研究可信來源、在 Google Maps 確認每個地點，並只顯示至少有兩個獨立來源推薦的地點。",
     researchAgain: "重新研究",
     loading: "正在載入 AI 研究…",
-    ownerSchedulingOnly: "由旅程建立者把 AI 建議排入行程；大家都能投讚或倒讚。",
+    ownerSchedulingOnly: "由旅程建立者把 AI 建議排入行程；大家都能投票支持喜歡的地點。",
   },
   scheduling: {
     failed: (reason: string) => `無法排入行程：${reason}。請再試一次。`,
@@ -139,6 +139,7 @@ export const discovery = {
     citationLabel: (number: number, title: string) => `佐證 ${number}：${title}`,
     inference: "AI 推論，未查證",
     staleEvidence: "已過期，請重新確認",
+    accept: "加入口袋名單",
     decline: "不要再推薦",
     nonePassed: "這次沒有地點通過品質檢查。",
     noneNew: "這次沒有新的候選地點；原因列在「缺少的內容」。",

@@ -1,4 +1,6 @@
 import { lookup } from "node:dns/promises";
+import { request as httpsRequest } from "node:https";
+import { isIP, type LookupFunction } from "node:net";
 
 import { isPublicAddress } from "../trip-places/safe-google-maps-url";
 import type { WebSourceType } from "./discovery-model";
@@ -60,12 +62,78 @@ export function isOfficialTourismSource(url: string, type: WebSourceType, placeW
 }
 
 export interface PublicPageDependencies {
-  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  /**
+   * `addresses` is the public DNS answer already validated for this request. Production
+   * connects to one of these addresses while retaining the URL hostname for Host and TLS SNI.
+   */
+  fetch(input: RequestInfo | URL, init: RequestInit | undefined, addresses: readonly string[]): Promise<Response>;
   resolveHost(host: string): Promise<string[]>;
 }
 
+function fetchPinnedAddress(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  addresses: readonly string[],
+): Promise<Response> {
+  const target = new URL(String(input));
+  const resolved = addresses.map((address) => ({ address, family: isIP(address) as 4 | 6 }));
+  const pinnedLookup: LookupFunction = (_host, options, callback) => {
+    const requestedFamily = typeof options === "number" ? options : options.family ?? 0;
+    const eligible = requestedFamily === 4 || requestedFamily === 6
+      ? resolved.filter((entry) => entry.family === requestedFamily)
+      : resolved;
+    if (typeof options !== "number" && options.all) {
+      callback(null, eligible);
+      return;
+    }
+    const selected = eligible[0];
+    if (!selected) {
+      callback(new Error("No validated address matches the requested family"), "", 0);
+      return;
+    }
+    callback(null, selected.address, selected.family);
+  };
+  const { promise, resolve, reject } = Promise.withResolvers<Response>();
+  const request = httpsRequest(target, {
+    agent: false,
+    headers: Object.fromEntries(new Headers(init?.headers)),
+    lookup: pinnedLookup,
+    method: init?.method,
+    signal: init?.signal ?? undefined,
+  }, (message) => {
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(message.headers)) {
+      if (Array.isArray(value)) {
+        for (const item of value) headers.append(name, item);
+      } else if (value !== undefined) {
+        headers.set(name, value);
+      }
+    }
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        message.on("data", (chunk: Buffer) => {
+          controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+        });
+        message.once("end", () => controller.close());
+        message.once("error", (error) => controller.error(error));
+      },
+      cancel() {
+        message.destroy();
+      },
+    });
+    resolve(new Response(body, {
+      headers,
+      status: message.statusCode ?? 500,
+      statusText: message.statusMessage,
+    }));
+  });
+  request.once("error", reject);
+  request.end();
+  return promise;
+}
+
 export const defaultPublicPageDependencies: PublicPageDependencies = {
-  fetch: (input, init) => fetch(input, init),
+  fetch: fetchPinnedAddress,
   async resolveHost(host) {
     return (await lookup(host, { all: true, verbatim: true })).map((entry) => entry.address);
   },
@@ -90,8 +158,8 @@ function allowedUrl(value: URL) {
 }
 
 /** Resolves the host within the remaining time; any non-public address refuses the page. */
-async function publicHost(host: string, dependencies: PublicPageDependencies, signal: AbortSignal) {
-  if (signal.aborted) return false;
+async function publicAddresses(host: string, dependencies: PublicPageDependencies, signal: AbortSignal) {
+  if (signal.aborted) return null;
   let onAbort: (() => void) | undefined;
   try {
     const aborted = new Promise<null>((resolve) => {
@@ -99,9 +167,9 @@ async function publicHost(host: string, dependencies: PublicPageDependencies, si
       signal.addEventListener("abort", onAbort, { once: true });
     });
     const addresses = await Promise.race([dependencies.resolveHost(host), aborted]);
-    return addresses !== null && addresses.length > 0 && addresses.every(isPublicAddress);
+    return addresses !== null && addresses.length > 0 && addresses.every(isPublicAddress) ? addresses : null;
   } catch {
-    return false;
+    return null;
   } finally {
     if (onAbort) signal.removeEventListener("abort", onAbort);
   }
@@ -209,7 +277,9 @@ export async function fetchPublicPageText(
   const totalTimer = setTimeout(() => total.abort(), options.totalTimeoutMs);
   try {
     for (let redirects = 0; redirects <= options.maxRedirects; redirects += 1) {
-      if (!allowedUrl(current) || !(await publicHost(current.hostname, dependencies, total.signal)) || total.signal.aborted) return null;
+      if (!allowedUrl(current)) return null;
+      const addresses = await publicAddresses(current.hostname, dependencies, total.signal);
+      if (!addresses || total.signal.aborted) return null;
       const request = new AbortController();
       const requestTimer = setTimeout(() => request.abort(), options.requestTimeoutMs);
       const abort = () => request.abort();
@@ -223,7 +293,7 @@ export async function fetchPublicPageText(
             Accept: "text/html,application/xhtml+xml,text/plain",
             "User-Agent": "AlongTheWay-SourceCheck/1.0",
           },
-        });
+        }, addresses);
         if (response.status >= 300 && response.status < 400) {
           await response.body?.cancel().catch(() => undefined);
           const location = response.headers.get("location");

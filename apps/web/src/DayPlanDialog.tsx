@@ -249,6 +249,8 @@ export function DayPlanDialog({
   const hoursChecked = timetable?.rows.some((row) => row.kind === "visit" && row.hours === "listed") ?? false;
   const unknownLegCount = timetable?.rows.filter((row) =>
     row.kind !== "start" && row.travel?.durationMinutes === null).length ?? 0;
+  const quotaLegCount = timetable?.rows.filter((row) =>
+    row.kind !== "start" && row.travel?.durationMinutes === null && row.travel.unavailableReason === "quota").length ?? 0;
 
   function selectDisplayedOrder(nextOrder: DayTimetableOrder) {
     const selected = comparisons[nextOrder];
@@ -361,8 +363,12 @@ export function DayPlanDialog({
               <aside className="route-unknown">
                 <HelpCircle />
                 <div>
-                  <strong>{unknownLegCount} 段交通時間查不到</strong>
-                  <span>資料不完整的路段不顯示推測的抵達時間。</span>
+                  <strong>{quotaLegCount > 0
+                    ? t.dayPlan.providerQuotaLegs(quotaLegCount)
+                    : `${unknownLegCount} 段交通時間查不到`}</strong>
+                  <span>{quotaLegCount > 0
+                    ? t.dayPlan.providerQuotaDescription
+                    : "資料不完整的路段不顯示推測的抵達時間。"}</span>
                 </div>
               </aside>
             ) : null}

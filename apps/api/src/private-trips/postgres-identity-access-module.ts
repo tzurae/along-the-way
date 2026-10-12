@@ -31,6 +31,7 @@ import { hashToken, type TokenIssuer } from "./token-issuer";
 const MAGIC_LINK_LIFETIME_MS = 15 * 60 * 1_000;
 const INVITE_LIFETIME_MS = 7 * 24 * 60 * 60 * 1_000;
 const SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1_000;
+const SESSION_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
 interface ModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
@@ -335,6 +336,7 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
       .select([
         "sessions.id",
         "sessions.expires_at",
+        "sessions.last_seen_at",
         "sessions.revoked_at",
         "users.id as userId",
         "users.email",
@@ -347,14 +349,20 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
       return null;
     }
 
-    await this.database
-      .updateTable("sessions")
-      .set({
-        last_seen_at: now,
-        expires_at: new Date(now.valueOf() + SESSION_LIFETIME_MS),
-      })
-      .where("id", "=", session.id)
-      .execute();
+    const refreshBefore = new Date(now.valueOf() - SESSION_REFRESH_INTERVAL_MS);
+    if (new Date(session.last_seen_at) <= refreshBefore) {
+      await this.database
+        .updateTable("sessions")
+        .set({
+          last_seen_at: now,
+          expires_at: new Date(now.valueOf() + SESSION_LIFETIME_MS),
+        })
+        .where("id", "=", session.id)
+        .where("revoked_at", "is", null)
+        .where("expires_at", ">", now)
+        .where("last_seen_at", "<=", refreshBefore)
+        .execute();
+    }
 
     return {
       id: session.userId,

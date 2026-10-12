@@ -57,6 +57,8 @@ export type RouteObservation = RouteObservationSource & (
 );
 
 export interface RouteObservationProvider {
+  /** Maximum external requests made by one observation when the provider is configured. */
+  readonly providerCallCost?: number;
   /** Returns walking then transit, independently; invalid input throws TypeError. */
   observe(query: RouteObservationQuery): Promise<RouteObservation[]>;
 }

@@ -18,6 +18,8 @@ export const dayPlan = {
   notInDraft: "未排入這份草稿",
   routeTimes: (attributions: string) => `路線時間：${attributions}。`,
   openingHoursAttribution: "營業時間：Google Maps。",
+  providerQuotaLegs: (count: number) => `${count} 段交通時間因查詢用量已達上限而省略`,
+  providerQuotaDescription: "已保留行程內容；稍後再試即可重新查詢交通時間。",
   backToCurrentOrder: "回到目前順序",
   saving: "儲存中…",
   useThisOrder: "使用這個順序",

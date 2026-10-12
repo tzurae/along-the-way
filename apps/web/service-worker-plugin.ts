@@ -15,11 +15,12 @@ export function appShellWorker(): Plugin {
       this.emitFile({ type: "asset", fileName: "sw.js", source: `
 const CACHE = ${JSON.stringify(`along-the-way-shell-${version}`)};
 const ASSETS = ${JSON.stringify(assets)};
+const LEGACY_CACHES = ["hk-trip-static-v12", "hk-trip-images-v12"];
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(["/", ...ASSETS])).then(() => self.skipWaiting()));
 });
 self.addEventListener("activate", (event) => {
-  event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key.startsWith("along-the-way-shell-") && key !== CACHE).map((key) => caches.delete(key)))).then(() => self.clients.claim()));
+  event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => (key.startsWith("along-the-way-shell-") || LEGACY_CACHES.includes(key)) && key !== CACHE).map((key) => caches.delete(key)))).then(() => self.clients.claim()));
 });
 self.addEventListener("fetch", (event) => {
   const request = event.request;

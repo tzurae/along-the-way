@@ -470,6 +470,12 @@ describe("Google Places provider adapter", () => {
     );
     expect({ id: renamed.id, thumbnailUrl: renamed.thumbnailUrl, imageUrl: renamed.imageUrl })
       .toEqual({ id: dto.id, thumbnailUrl: dto.thumbnailUrl, imageUrl: dto.imageUrl });
+    const differentPhoto = googlePlacePhotoDto(
+      "11111111-1111-4111-8111-111111111111",
+      "ChIJ-photo-place-1234",
+      { ...photo, googleMapsUri: "https://maps.google.com/?cid=a-different-photo" },
+    );
+    expect(differentPhoto.id).not.toBe(dto.id);
     expect(JSON.stringify(dto)).not.toMatch(/key=|server-only-key|first-token/);
   });
 

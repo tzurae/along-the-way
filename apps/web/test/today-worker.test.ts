@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
@@ -45,7 +45,11 @@ it("reopens the newly deployed shell offline even when only finalized HTML chang
   try {
     await writeFile(join(directory, "main.js"), 'console.log("unchanged asset");');
     const initial = await worker();
+    cacheData.set("hk-trip-images-v12", new Map([
+      ["/api/trips/private/photo", new Response("private image")],
+    ]));
     await install(initial);
+    expect(cacheData.has("hk-trip-images-v12")).toBe(false);
     documentVersion = "SHELL_V2";
     const updated = await worker();
     // Browsers install a new service worker only when its bytes change.
@@ -56,4 +60,48 @@ it("reopens the newly deployed shell offline even when only finalized HTML chang
     expect(await navigate("https://trip.test/api/trips", "cors")).toBeUndefined();
     expect(await navigate("https://trip.test/api", "cors")).toBeUndefined();
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+it("keeps API JSON and authenticated API images out of the legacy worker caches", async () => {
+  const source = await readFile(new URL("../../../sw.js", import.meta.url), "utf8");
+  let fetchHandler: ((event: {
+    request: { method: string; url: string; destination: string; mode: string };
+    respondWith(response: Promise<Response>): void;
+  }) => void) | undefined;
+  let cacheOpens = 0;
+  runInNewContext(source, {
+    URL,
+    fetch: async () => new Response("private response"),
+    self: {
+      location: { origin: "https://trip.test" },
+      addEventListener: (name: string, handler: typeof fetchHandler) => {
+        if (name === "fetch") fetchHandler = handler;
+      },
+      skipWaiting: () => {},
+      clients: { claim: () => {} },
+    },
+    caches: {
+      open: async () => {
+        cacheOpens += 1;
+        return { match: async () => null, put: async () => {} };
+      },
+      keys: async () => [],
+      delete: async () => true,
+      match: async () => null,
+    },
+  });
+
+  for (const [url, destination] of [
+    ["https://trip.test/api/trips", ""],
+    ["https://trip.test/api/trips/private/photo", "image"],
+  ] as const) {
+    let response: Promise<Response> | undefined;
+    fetchHandler!({
+      request: { method: "GET", url, destination, mode: "cors" },
+      respondWith: (value) => { response = value; },
+    });
+    if (response) await response;
+    expect(response).toBeUndefined();
+  }
+  expect(cacheOpens).toBe(0);
 });
