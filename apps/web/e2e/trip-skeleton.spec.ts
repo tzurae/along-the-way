@@ -343,6 +343,14 @@ async function createPlace(
   await expect(placeInventory.getByRole("heading", { name: input.name })).toBeVisible();
 }
 
+// Flights now create airport places from the bundled dataset ("CODE · Name").
+const AIRPORT_FIXTURES: Record<string, { code: string; placeName: string }> = {
+  "Taoyuan Airport": { code: "TPE", placeName: "TPE · Taiwan Taoyuan International Airport" },
+  "Kansai Airport": { code: "KIX", placeName: "KIX · Kansai International Airport" },
+  "San Francisco Airport": { code: "SFO", placeName: "SFO · San Francisco International Airport" },
+  "Haneda Airport": { code: "HND", placeName: "HND · Tokyo International Airport" },
+};
+
 async function chooseEndpoint(
   dialog: ReturnType<Page["getByRole"]>,
   role: "Start" | "End",
@@ -351,7 +359,7 @@ async function chooseEndpoint(
   const endpoint = role === "Start" ? "開始" : "結束";
   const group = dialog.getByRole("group", { name: `${endpoint}（當地時間）` });
   await group.getByLabel("停留國家").selectOption({ label: input.stop });
-  await group.getByLabel("地點").selectOption({ label: input.place });
+  await group.getByLabel("地點").selectOption({ label: AIRPORT_FIXTURES[input.place]?.placeName ?? input.place });
   await group.getByLabel("當地日期與時間").fill(input.local);
   const timeZone = group.getByLabel("IANA 時區");
   if (await timeZone.inputValue() !== input.zone) await timeZone.fill(input.zone);
@@ -395,18 +403,15 @@ async function addFlight(
   const fixture = page.locator("#itinerary-segment-panel-flight [data-travel-item-id]").filter({ hasText: "FIXTURE-" }).first();
   await fixture.getByRole("button", { name: /^修改 / }).click();
   const dialog = page.getByRole("dialog", { name: "修改航班" });
-  const codeByPlace: Record<string, string> = {
-    "Taoyuan Airport": "TPE",
-    "Kansai Airport": "KIX",
-    "San Francisco Airport": "SFO",
-    "Haneda Airport": "HND",
-  };
   for (const [index, endpoint] of [input.start, input.end].entries()) {
-    const code = codeByPlace[endpoint.place];
+    const code = AIRPORT_FIXTURES[endpoint.place]?.code;
     if (!code) throw new Error(`No airport fixture for ${endpoint.place}`);
     const airport = dialog.getByLabel("機場代碼或名稱").nth(index);
     await airport.fill(code);
-    await page.getByRole("option", { name: new RegExp(`^${code}\\b`) }).click();
+    const option = page.getByRole("option", { name: new RegExp(`^${code}\\b`) });
+    await expect(option).toBeVisible();
+    await option.dispatchEvent("click");
+    await expect(airport).toHaveValue(new RegExp(`^${code} ·`));
   }
   await dialog.getByText("航班資訊（選填）", { exact: true }).click();
   await dialog.getByLabel("航班號碼（選填）", { exact: true }).fill(input.serviceNumber);
@@ -1300,7 +1305,10 @@ test("travel editors keep airports and hotels out of the wishlist and old flight
   for (const [index, code] of ["KIX", "KIX"].entries()) {
     const airport = editor.getByLabel("機場代碼或名稱").nth(index);
     await airport.fill(code);
-    await page.getByRole("option", { name: new RegExp(`^${code}\\b`) }).click();
+    const option = page.getByRole("option", { name: new RegExp(`^${code}\\b`) });
+    await expect(option).toBeVisible();
+    await option.dispatchEvent("click");
+    await expect(airport).toHaveValue(new RegExp(`^${code} ·`));
   }
   await editor.getByText("航班資訊（選填）", { exact: true }).click();
   await editor.getByLabel("航班號碼（選填）", { exact: true }).fill("RESTORED-OUT");
@@ -1328,7 +1336,10 @@ test("travel forms preserve the chosen occurrence of a repeated local hour", asy
       for (const [index, code] of ["JFK", "EWR"].entries()) {
         const airport = outbound.getByLabel("機場代碼或名稱").nth(index);
         await airport.fill(code);
-        await page.getByRole("option", { name: new RegExp(`^${code}\\b`) }).click();
+        const option = page.getByRole("option", { name: new RegExp(`^${code}\\b`) });
+        await expect(option).toBeVisible();
+        await option.dispatchEvent("click");
+        await expect(airport).toHaveValue(new RegExp(`^${code} ·`));
       }
       await outbound.getByLabel("起飛時間（當地）").fill("2026-11-01T01:30");
       await outbound.getByLabel("抵達時間（當地）").fill("2026-11-01T01:45");
