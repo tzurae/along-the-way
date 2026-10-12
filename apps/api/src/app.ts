@@ -632,6 +632,7 @@ export function createApp({
       user.id,
       uuidParam(context, "tripId"),
       context.req.param("providerPlaceId"),
+      context.req.query("photo") ?? "",
       maxWidth,
     );
     return new Response(photo.bytes, { headers: {

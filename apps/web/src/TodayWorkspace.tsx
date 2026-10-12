@@ -68,8 +68,9 @@ function TodayItemDetails({ item, now, parallel, memberId, date, previews, previ
           const maps = endpoint.place ? googleMapsCoordinatesUrl(endpoint.place) : null;
           const detailIdentity = endpoint.place?.id ?? null;
           const triggerKey = detailIdentity ? encodeURIComponent(`${item.id}:${endpoint.role}:${detailIdentity}`) : "";
+          const photo = detailIdentity ? previews.get(detailIdentity) : undefined;
           return <div key={endpoint.role} className="today-detail-endpoint">
-            {endpoint.place && detailIdentity && openPlace ? <PlaceThumbnail photo={previews.get(detailIdentity)} loading={previewsLoading} /> : null}
+            {endpoint.place && detailIdentity && openPlace ? <PlaceThumbnail photo={photo} loading={previewsLoading} /> : null}
             <div className="min-w-0">
               <dt>{endpoint.role === "start" ? startLabel : endLabel}</dt>
               <dd>
@@ -84,6 +85,7 @@ function TodayItemDetails({ item, now, parallel, memberId, date, previews, previ
               </dd>
               {endpoint.place?.address ? <dd>{endpoint.place.address}</dd> : null}
               <dd>{maps ? <a className="today-link" href={maps} target="_blank" rel="noopener noreferrer">{text.maps}<ExternalLink size={14} aria-hidden="true" /><span className="text-xs">{text.leavesApp}</span></a> : <span className="inline-flex items-center gap-1"><TriangleAlert size={15} aria-hidden="true" />{text.locationMissing}</span>}</dd>
+              {endpoint.place && detailIdentity && openPlace ? <PlacePhotoCredit photo={photo} /> : null}
             </div>
           </div>;
         })}

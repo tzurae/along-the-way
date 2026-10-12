@@ -17,6 +17,8 @@ import type { AlongTheWayDatabase } from "../database/database";
 import { AppError } from "../private-trips/private-trip-module";
 import {
   googlePlacePhotoDto,
+  googlePlacePhotoFingerprint,
+  PlacePhotoNotFoundError,
   type PlaceProvider,
 } from "../trip-places/google-places-provider";
 import type { PlaceDetailModule } from "./place-detail-module";
@@ -160,22 +162,32 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
     userId: string,
     tripId: string,
     providerPlaceId: string,
+    photoFingerprint: string,
     maxWidth: 192 | 1024,
   ) {
     await this.authorize(userId, tripId);
-    if (!/^[A-Za-z0-9_-]{8,300}$/.test(providerPlaceId) || (maxWidth !== 192 && maxWidth !== 1024)) {
+    if (!/^[A-Za-z0-9_-]{8,300}$/.test(providerPlaceId)
+      || !/^[a-f0-9]{16}$/.test(photoFingerprint)
+      || (maxWidth !== 192 && maxWidth !== 1024)) {
       throw new AppError("validation_error", "Invalid Google place photo request");
     }
-    if (!this.provider || this.provider.available === false || !this.provider.getFirstPhoto || !this.provider.fetchPhotoMedia) {
+    if (!this.provider
+      || this.provider.available === false
+      || !this.provider.getFirstPhoto
+      || !this.provider.fetchPhotoMedia) {
       throw new AppError("place_photo_not_found", "Place photo not found", 404);
     }
     try {
       const photo = await this.provider.getFirstPhoto(providerPlaceId);
-      if (!photo) throw new AppError("place_photo_not_found", "Place photo not found", 404);
+      if (!photo || googlePlacePhotoFingerprint(photo) !== photoFingerprint) {
+        throw new PlacePhotoNotFoundError();
+      }
       const media = await this.provider.fetchPhotoMedia(photo.name, maxWidth);
       return { bytes: media.bytes, mediaType: media.contentType };
     } catch (error) {
-      if (error instanceof AppError) throw error;
+      if (error instanceof PlacePhotoNotFoundError) {
+        throw new AppError("place_photo_not_found", "Place photo not found", 404);
+      }
       throw new AppError("place_photo_unavailable", "Place photo is temporarily unavailable", 502);
     }
   }

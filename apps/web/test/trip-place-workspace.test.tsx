@@ -13,6 +13,7 @@ const tripId = "11111111-1111-4111-8111-111111111111";
 const unscheduledId = "22222222-2222-4222-8222-222222222222";
 const scheduledId = "33333333-3333-4333-8333-333333333333";
 const providerPlaceId = "ChIJSearchPhoto123";
+const photoFingerprint = "a1b2c3d4e5f60708";
 
 function trip(role: "owner" | "editor"): TripDto {
   return {
@@ -74,9 +75,9 @@ function place(id: string, name: string, scheduled: boolean): TripPlaceDto {
 function googlePhoto(): GooglePlacePhotoDto {
   return {
     source: "google",
-    id: `google:${providerPlaceId}`,
-    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?maxWidth=192`,
-    imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?maxWidth=1024`,
+    id: `google:${providerPlaceId}:${photoFingerprint}`,
+    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?photo=${photoFingerprint}&maxWidth=192`,
+    imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?photo=${photoFingerprint}&maxWidth=1024`,
     width: 1200,
     height: 800,
     authors: [{ displayName: "搜尋攝影者", uri: "https://maps.google.com/contrib/search-author" }],
@@ -143,7 +144,7 @@ it("reports result count, disables listed places, and clears stale search result
   expect(within(dialog).queryByText(/資料擷取於/)).not.toBeInTheDocument();
   expect(within(dialog).getByText("· 佛寺", { exact: true })).toBeInTheDocument();
   expect(within(dialog).getByRole("button", { name: /^已在口袋名單：清水寺・佛寺$/ })).toBeDisabled();
-  expect(dialog.querySelector(`[data-place-thumbnail="google:${providerPlaceId}"] img`)).toBeInTheDocument();
+  expect(dialog.querySelector(`[data-place-thumbnail="google:${providerPlaceId}:${photoFingerprint}"] img`)).toBeInTheDocument();
 
   fireEvent.change(within(dialog).getByLabelText("搜尋 Google Maps"), { target: { value: "伏見稻荷" } });
   fireEvent.click(within(dialog).getByRole("button", { name: /^搜尋地點$/ }));
@@ -184,6 +185,12 @@ it("preserves search and note drafts when confirmation returns already_in_wishli
 
 it("hides owner-only scheduling and scheduled removal while retaining editor collaboration", async () => {
   const places = [place(unscheduledId, "未排程咖啡店", false), place(scheduledId, "固定行程餐廳", true)];
+  places[0]!.duplicateSuggestions = [{
+    id: "88888888-8888-4888-8888-888888888888",
+    otherTripPlaceId: scheduledId,
+    reason: "same normalized name",
+    status: "pending",
+  }];
   const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
     if (path.endsWith("/trip-places") && !init?.method) return { tripPlaces: places } as T;
     if (path.includes("/place-previews?")) {
@@ -212,6 +219,8 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
   expect(within(detail).getByRole("button", { name: /^修改原因$/ })).toBeInTheDocument();
   expect(within(detail).getByRole("button", { name: /^從口袋名單移除$/ })).toBeInTheDocument();
   expect(within(detail).queryByRole("button", { name: /^排入行程$/ })).not.toBeInTheDocument();
+  expect(within(detail).queryByRole("button", { name: /^合併$/ })).not.toBeInTheDocument();
+  expect(within(detail).getByRole("button", { name: /^保持分開$/ })).toBeInTheDocument();
   fireEvent.click(within(detail).getByRole("button", { name: /^關閉$/ }));
 
   fireEvent.click(screen.getByRole("button", { name: /^查看 固定行程餐廳 的詳情$/ }));

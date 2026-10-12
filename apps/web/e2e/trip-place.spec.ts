@@ -423,10 +423,10 @@ test("editors keep collaboration controls while only the owner can change schedu
   await refreshedMerged.getByRole("button", { name: "關閉", exact: true }).click();
 
   await ownerPage.getByRole("button", { name: "排入行程", exact: true }).click();
-  await expect(ownerPage.getByRole("heading", { name: "已選 0 個", exact: true })).toBeVisible();
+  await expect(ownerPage.getByRole("heading", { name: "已選 0 個地點", exact: true })).toBeVisible();
   const scheduleCandidate = wishlistEntry(ownerPage, "Cross-surface Cafe");
   await scheduleCandidate.getByRole("checkbox", { name: "選擇 Cross-surface Cafe", exact: true }).click();
-  await expect(ownerPage.getByRole("heading", { name: "已選 1 個", exact: true })).toBeVisible();
+  await expect(ownerPage.getByRole("heading", { name: "已選 1 個地點", exact: true })).toBeVisible();
   await ownerPage.getByRole("button", { name: "選擇日期", exact: true }).click();
   let scheduleSheet = ownerPage.getByRole("dialog", { name: "排入行程" });
   await scheduleSheet.getByRole("button", { name: /11\/3.*週二/ }).click();
@@ -533,7 +533,10 @@ test("editors keep collaboration controls while only the owner can change schedu
   await signIn(editorPage, request, memberEmails[0]!);
   await expect(editorPage.getByRole("button", { name: new RegExp(`${tripName}，切換旅程`) })).toBeVisible();
   await openTab(editorPage, "想去清單");
-  await expect(editorPage.getByText("只有旅程擁有者可以排入、改期或移出行程。你仍可加入地點、投票與編輯備註。", { exact: true })).toHaveCount(1);
+  const editorWishlistPanel = editorPage.locator("#places-segment-panel-wishlist");
+  const editorOwnerOnlyMessage = editorWishlistPanel.getByText("只有旅程擁有者可以排入、改期或移出行程。你仍可加入地點、投票與編輯備註。", { exact: true });
+  await expect(editorOwnerOnlyMessage).toHaveCount(1);
+  await expect(editorOwnerOnlyMessage).toBeVisible();
   await expect(editorPage.getByRole("button", { name: "排入行程", exact: true })).toHaveCount(0);
   await expect(editorPage.getByRole("button", { name: "加入地點", exact: true })).toBeVisible();
   const scheduledCard = await expandWishlistPlace(editorPage, "Cross-surface Cafe");
@@ -690,7 +693,7 @@ test("manual wishlist intake remains usable on a mobile viewport", async ({ brow
     await addManualPlace(page, { name: `Long address place ${index + 1}`, address, note: "Mobile selection layout" });
   }
   await page.getByRole("button", { name: "排入行程", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "已選 0 個", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "已選 0 個地點", exact: true })).toBeVisible();
   await expect(wishlistEntry(page, "Long address place 1").getByRole("checkbox", { name: "選擇 Long address place 1" })).toBeDisabled();
   const retryCheckbox = retryCard.getByRole("checkbox", { name: "選擇 Retry-safe place", exact: true });
   await expect(retryCheckbox).toBeEnabled();

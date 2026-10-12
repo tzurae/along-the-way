@@ -513,6 +513,14 @@ export function TripSkeletonWorkspace({
     ),
     [skeleton?.items],
   );
+  const scheduledPlaceIds = useMemo(
+    () => new Set(
+      tripPlaces
+        .filter((place) => place.assignedDayId !== null || place.selectedForItinerary || place.scheduled)
+        .map((place) => place.placeId),
+    ),
+    [tripPlaces],
+  );
 
   async function savePlace(input: CreatePlaceInput | UpdatePlaceInput, place?: PlaceDto, conflictBase?: number) {
     if (!skeleton) throw new Error(t.tripSkeleton.loadingError);
@@ -607,7 +615,10 @@ export function TripSkeletonWorkspace({
       await load();
       onPlacesChanged();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : t.tripSkeleton.deletePlaceError);
+      setError(reason instanceof ApiRequestError
+        && (reason.code === "forbidden" || reason.status === 403)
+        ? t.schedule.ownerOnlyAction
+        : reason instanceof Error ? reason.message : t.tripSkeleton.deletePlaceError);
     } finally {
       setBusyId(null);
     }
@@ -1128,14 +1139,16 @@ export function TripSkeletonWorkspace({
                             save={(input, conflictBase) => savePlace(input, place, conflictBase)}
                           />
                         )}
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={busyId === place.id || lockedPlaceIds.has(place.id)}
-                          onClick={() => void deletePlace(place)}
-                        >
-                          <Trash2 /> {t.tripSkeleton.delete}
-                        </Button>
+                        {isOwner || !scheduledPlaceIds.has(place.id) ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={busyId === place.id || lockedPlaceIds.has(place.id)}
+                            onClick={() => void deletePlace(place)}
+                          >
+                            <Trash2 /> {t.tripSkeleton.delete}
+                          </Button>
+                        ) : null}
                       </div>
                     </article>
                   ))}

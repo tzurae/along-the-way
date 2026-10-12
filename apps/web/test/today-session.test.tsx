@@ -76,6 +76,9 @@ beforeEach(() => {
     if (input.includes("/place-previews?")) return previewFails
       ? reply({ error: { code: "provider_unavailable", message: "Preview unavailable" } }, 503)
       : reply({ previews: [] });
+    if (input.endsWith("/places/canonical-UNSCHEDULED") && init?.method === "DELETE") {
+      return reply({ error: { code: "forbidden", message: "server copy" } }, 403);
+    }
     if (input.endsWith("/place-order")) {
       savedOrder = true;
       return reply({ orderedTripPlaceIds: ["SECOND", "FIRST"], version: ++dayVersion });
@@ -324,9 +327,28 @@ it("removes editor scheduling entry points while keeping itinerary previews read
       member.userId === todayUser.id ? { ...member, role: "editor" as const } : member
     ),
   };
-  tripPlacesOverride = todayWishlist().map((place, index) =>
-    index === 1 ? { ...place, assignedDayId: null, dayPosition: null } : place
-  );
+  const canonicalPlace = skeleton.places[0]!;
+  skeleton = {
+    ...skeleton,
+    places: [
+      { ...canonicalPlace, id: "canonical-FIRST", name: "Scheduled canonical" },
+      { ...canonicalPlace, id: "canonical-UNSCHEDULED", name: "Unscheduled canonical" },
+    ],
+  };
+  const [scheduled, pending] = todayWishlist();
+  tripPlacesOverride = [
+    scheduled!,
+    { ...pending!, assignedDayId: null, dayPosition: null },
+    {
+      ...pending!,
+      id: "UNSCHEDULED",
+      placeId: "canonical-UNSCHEDULED",
+      name: "Unscheduled canonical",
+      selectedForItinerary: false,
+      assignedDayId: null,
+      dayPosition: null,
+    },
+  ];
   await mount();
 
   const today = document.getElementById("trip-panel-today")!;
@@ -339,6 +361,21 @@ it("removes editor scheduling entry points while keeping itinerary previews read
   for (const ownerAction of ["安排日期", "安排這一天", "加入地點", "排整趟行程", "從這天移出並列為待安排"]) {
     expect([...itinerary.querySelectorAll("button")].some((entry) => entry.textContent?.includes(ownerAction))).toBe(false);
   }
+
+  const placeCards = [...itinerary.querySelectorAll<HTMLElement>(".place-card")];
+  const scheduledCard = placeCards.find((card) => card.querySelector("h4")?.textContent === "Scheduled canonical");
+  const unscheduledCard = placeCards.find((card) => card.querySelector("h4")?.textContent === "Unscheduled canonical");
+  expect(scheduledCard).toBeDefined();
+  expect(unscheduledCard).toBeDefined();
+  const scheduledDelete = [...scheduledCard!.querySelectorAll<HTMLButtonElement>("button")]
+    .find((entry) => entry.textContent?.includes("刪除"));
+  const unscheduledDelete = [...unscheduledCard!.querySelectorAll<HTMLButtonElement>("button")]
+    .find((entry) => entry.textContent?.includes("刪除"));
+  expect(scheduledDelete).toBeUndefined();
+  expect(unscheduledDelete).toBeDefined();
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  await click(unscheduledDelete!);
+  await waitFor(() => expect(itinerary).toHaveTextContent("只有旅程擁有者可以更改行程安排。"));
 
   const assignedPlace = [...itinerary.querySelectorAll<HTMLButtonElement>(".plan-item-row")]
     .find((entry) => entry.textContent?.includes("FIRST"));

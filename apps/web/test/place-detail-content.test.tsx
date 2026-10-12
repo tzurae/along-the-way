@@ -85,15 +85,16 @@ it("keeps a healthy selected work, credit, license, and full viewer aligned afte
 
 it("uses the Google fallback with required attribution and recovers from an image failure", async () => {
   const providerPlaceId = "ChIJGooglePhoto123";
+  const photoFingerprint = "a1b2c3d4e5f60708";
   const googleResponse: PlaceDetailResponse = {
     detail: {
       ...response.detail,
       photos: [],
       googlePhoto: {
         source: "google",
-        id: `google:${providerPlaceId}`,
-        thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?maxWidth=192`,
-        imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?maxWidth=1024`,
+        id: `google:${providerPlaceId}:${photoFingerprint}`,
+        thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?photo=${photoFingerprint}&maxWidth=192`,
+        imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?photo=${photoFingerprint}&maxWidth=1024`,
         width: 1200,
         height: 800,
         authors: [{ displayName: "攝影者甲", uri: "https://maps.google.com/contrib/example" }],

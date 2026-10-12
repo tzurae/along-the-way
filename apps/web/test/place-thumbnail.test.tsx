@@ -13,13 +13,14 @@ import {
 
 const tripId = "11111111-1111-4111-8111-111111111111";
 const providerPlaceId = "ChIJGooglePhoto123";
+const photoFingerprint = "a1b2c3d4e5f60708";
 
 function googlePhoto(overrides: Partial<GooglePlacePhotoDto> = {}): GooglePlacePhotoDto {
   return {
     source: "google",
-    id: `google:${providerPlaceId}`,
-    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?maxWidth=192`,
-    imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?maxWidth=1024`,
+    id: `google:${providerPlaceId}:${photoFingerprint}`,
+    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?photo=${photoFingerprint}&maxWidth=192`,
+    imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?photo=${photoFingerprint}&maxWidth=1024`,
     width: 1200,
     height: 800,
     authors: [{ displayName: "攝影者甲", uri: "https://maps.google.com/contrib/example" }],
@@ -49,6 +50,7 @@ it("renders a reserved lazy Google thumbnail and policy attribution", () => {
   expect(image).toHaveAttribute("decoding", "async");
   expect(image).toHaveAttribute("alt", "");
   expect(screen.getByText("Google Maps", { exact: true })).toBeInTheDocument();
+  expect(container.querySelector(".place-photo-credit--google")).toHaveTextContent("Google Maps・照片：攝影者甲");
   expect(screen.getByRole("link", { name: /^攝影者甲$/ })).toHaveAttribute("href", "https://maps.google.com/contrib/example");
   expect(screen.getByRole("link", { name: /^在 Google Maps 查看$/ })).toHaveAttribute("href", "https://maps.google.com/?cid=123");
 });
@@ -57,9 +59,9 @@ it("keeps image failure local and resets it when the photo URL changes", async (
   const first = googlePhoto();
   const secondProviderPlaceId = "ChIJGooglePhoto456";
   const second = googlePhoto({
-    id: `google:${secondProviderPlaceId}`,
-    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${secondProviderPlaceId}?maxWidth=192`,
-    imageUrl: `/api/trips/${tripId}/google-place-photos/${secondProviderPlaceId}?maxWidth=1024`,
+    id: `google:${secondProviderPlaceId}:${photoFingerprint}`,
+    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${secondProviderPlaceId}?photo=${photoFingerprint}&maxWidth=192`,
+    imageUrl: `/api/trips/${tripId}/google-place-photos/${secondProviderPlaceId}?photo=${photoFingerprint}&maxWidth=1024`,
   });
   const { container, rerender } = render(<PlaceThumbnail photo={first} />);
   fireEvent.error(container.querySelector("img")!);

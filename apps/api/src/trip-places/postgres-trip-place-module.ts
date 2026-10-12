@@ -1052,6 +1052,42 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     const operation = `tp:merge:${sourceTripPlaceId}`;
     return this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
+      await this.lockTripContent(transaction, tripId);
+      const authorization = await transaction.selectFrom("trip_places as trip_place")
+        .select([
+          "trip_place.id",
+          "trip_place.legacy_place_id",
+          "trip_place.selected_for_itinerary",
+        ])
+        .where("trip_place.trip_id", "=", tripId)
+        .where("trip_place.id", "in", [sourceTripPlaceId, targetTripPlaceId])
+        .where("trip_place.archived_at", "is", null)
+        .execute();
+      const authorizationIds = authorization.map((place) => place.id);
+      const authorizationLegacyIds = authorization.map((place) => place.legacy_place_id);
+      const [hasDayAssignment, hasTimedEndpoint] = await Promise.all([
+        authorizationIds.length === 0
+          ? undefined
+          : transaction.selectFrom("trip_place_day_assignments")
+            .select("trip_place_id")
+            .where("trip_id", "=", tripId)
+            .where("trip_place_id", "in", authorizationIds)
+            .executeTakeFirst(),
+        authorizationLegacyIds.length === 0
+          ? undefined
+          : transaction.selectFrom("itinerary_endpoints")
+            .select("place_id")
+            .where("trip_id", "=", tripId)
+            .where("place_id", "in", authorizationLegacyIds)
+            .executeTakeFirst(),
+      ]);
+      if (
+        authorization.some((place) => place.selected_for_itinerary)
+        || hasDayAssignment !== undefined
+        || hasTimedEndpoint !== undefined
+      ) {
+        await requireOwner(transaction, userId, tripId);
+      }
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedTripPlace(replay);

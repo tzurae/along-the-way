@@ -897,6 +897,11 @@ export function TripPlaceWorkspace({
   }
 
   async function merge(source: TripPlaceDto, target: TripPlaceDto) {
+    if (!canSchedule && (isScheduledForRemovalPolicy(source) || isScheduledForRemovalPolicy(target))) {
+      setMessage(schedule.ownerOnlyAction);
+      return;
+    }
+
     const operation = `merge:${source.id}:${target.id}`;
     const payload = {
       targetTripPlaceId: target.id,
@@ -917,7 +922,9 @@ export function TripPlaceWorkspace({
       await load();
       onPlacesChanged();
     } catch (error) {
-      setMessage(errorMessage(error, t.errors.requestFailed));
+      setMessage(error instanceof ApiRequestError && (error.code === "forbidden" || error.status === 403)
+        ? schedule.ownerOnlyAction
+        : errorMessage(error, t.errors.requestFailed));
     } finally {
       setMerging(false);
     }
@@ -1082,6 +1089,7 @@ export function TripPlaceWorkspace({
           {available && place.votingAvailable ? <section className="pd-detail-section"><VoteVoters voters={place.voters} /></section> : null}
           {available ? duplicateSuggestions.map((suggestion) => {
             const other = placesById.get(suggestion.otherTripPlaceId);
+            const mergeIsOwnerOnly = isScheduledForRemovalPolicy(place) || Boolean(other && isScheduledForRemovalPolicy(other));
             return (
               <section key={suggestion.id} className="rounded-xl border border-accent-strong bg-surface p-3" aria-label={t.duplicates.comparisonLabel}>
                 <strong className="block">{t.duplicates.compare}</strong>
@@ -1106,9 +1114,9 @@ export function TripPlaceWorkspace({
                   ))}
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <button className="min-h-11 rounded-lg bg-accent px-3 font-bold text-ink-strong outline-none hover:bg-accent/80 focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={!other} onClick={() => {
+                  {canSchedule || !mergeIsOwnerOnly ? <button className="min-h-11 rounded-lg bg-accent px-3 font-bold text-ink-strong outline-none hover:bg-accent/80 focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={!other} onClick={() => {
                     if (other) setMergeConfirmation({ source: place, target: other });
-                  }}>{t.duplicates.merge}</button>
+                  }}>{t.duplicates.merge}</button> : null}
                   <button className="min-h-11 rounded-lg border px-3 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={() => void keepSeparate(suggestion.id)}>{t.duplicates.keepSeparate}</button>
                 </div>
               </section>

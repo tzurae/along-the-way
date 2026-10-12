@@ -238,9 +238,9 @@ test("an owner reviews grounded AI evidence and schedules a proposal while edito
   await expect(proposal.getByRole("button", { name: /已表態想去，1 票/ })).toHaveAttribute("aria-pressed", "true");
 
   await page.getByRole("button", { name: "排入行程", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "已選 0 個", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "已選 0 個地點", exact: true })).toBeVisible();
   await page.getByRole("checkbox", { name: "選擇 Nishiki Market", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "已選 1 個", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "已選 1 個地點", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "選擇日期", exact: true }).click();
   const schedule = page.getByRole("dialog", { name: "排入行程", exact: true });
   await expect(schedule).toContainText("Nishiki Market");

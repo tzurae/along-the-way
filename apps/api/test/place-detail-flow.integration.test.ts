@@ -20,7 +20,7 @@ import { PostgresTripWorkspaceModule } from "../src/private-trips/postgres-trip-
 import { hashToken, TokenIssuer } from "../src/private-trips/token-issuer";
 import { PostgresTripSkeletonModule } from "../src/trip-skeleton/postgres-trip-skeleton-module";
 import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
-import type { PlaceProvider } from "../src/trip-places/google-places-provider";
+import { PlacePhotoNotFoundError, type PlaceProvider } from "../src/trip-places/google-places-provider";
 import { unrelatedDayPlanModule } from "./day-plan-test-support";
 import { unrelatedDiscoveryModule } from "./discovery-test-support";
 import { tripFlights } from "./travel-test-support";
@@ -71,6 +71,10 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
   let bindings: CuratedPlaceBindings;
   let providerReads: number;
   let mediaReads: number;
+  let mediaRequests: Array<{ photoName: string; maxWidthPx: 192 | 1024 }>;
+  let missingMediaPhotoName: string | null;
+  let currentPhotoToken: string;
+  let currentPhotoAuthors: Array<{ displayName: string; uri: string | null }>;
   let failedProviderPhotoId: string | null;
   const createdTrips: string[] = [];
   const createdUsers: string[] = [];
@@ -120,6 +124,10 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     outsider = await session();
     providerReads = 0;
     mediaReads = 0;
+    mediaRequests = [];
+    missingMediaPhotoName = null;
+    currentPhotoToken = "controlled-photo";
+    currentPhotoAuthors = [{ displayName: "Google 攝影者", uri: "https://example.test/google-author" }];
     failedProviderPhotoId = null;
     const provider: PlaceProvider = {
       available: true,
@@ -135,15 +143,17 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
         providerReads++;
         if (providerPlaceId === failedProviderPhotoId) throw new Error("Controlled photo failure");
         return {
-          name: `places/${providerPlaceId}/photos/controlled-photo`,
+          name: `places/${providerPlaceId}/photos/${currentPhotoToken}`,
           width: 1600,
           height: 1200,
-          authors: [{ displayName: "Google 攝影者", uri: "https://example.test/google-author" }],
+          authors: currentPhotoAuthors,
           googleMapsUri: "https://maps.google.com/?cid=controlled-photo",
         };
       },
-      async fetchPhotoMedia() {
+      async fetchPhotoMedia(photoName, maxWidthPx) {
         mediaReads++;
+        mediaRequests.push({ photoName, maxWidthPx });
+        if (photoName === missingMediaPhotoName) throw new PlacePhotoNotFoundError();
         return { bytes: new Uint8Array(png), contentType: "image/png" };
       },
     };
@@ -215,14 +225,14 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     expect(other.photos).toEqual([]);
     expect(other.googlePhoto).toMatchObject({
       source: "google",
-      id: `google:${branch.providerPlaceId}`,
+      id: `google:${branch.providerPlaceId}:04cbe9f8b348f98f`,
       authors: [{ displayName: "Google 攝影者" }],
     });
     expect(other.googlePhoto?.imageUrl).not.toContain("server-only");
     const previews = await app.request(`/api/trips/${tripId}/place-previews?kind=trip-place&ids=${branch.id},${place.id}`, { headers: { cookie: owner.cookie } });
     const parsed = parsePlacePreviewResponse(await previews.json()).previews;
     expect(parsed.map((item) => item.reference.id)).toEqual([branch.id, place.id]);
-    expect(parsed[0]?.photo).toMatchObject({ source: "google", id: `google:${branch.providerPlaceId}` });
+    expect(parsed[0]?.photo).toMatchObject({ source: "google", id: `google:${branch.providerPlaceId}:04cbe9f8b348f98f` });
     expect(parsed[1]?.photo).toMatchObject({ source: "curated", id: "original-test-pixel" });
     expect(providerReads).toBe(2);
     expect(await (await app.request(`/api/trips/${tripId}/skeleton`, { headers: { cookie: owner.cookie } })).json()).toEqual(before);
@@ -274,12 +284,14 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     expect(result.photos).toEqual([]);
     expect(result.googlePhoto).toMatchObject({
       source: "google",
-      id: `google:${providerPlaceId}`,
+      id: `google:${providerPlaceId}:04cbe9f8b348f98f`,
       authors: [{ displayName: "Google 攝影者", uri: "https://example.test/google-author" }],
     });
     const photoUrl = result.googlePhoto!.imageUrl;
+    const metadataReads = providerReads;
     expect((await app.request(photoUrl)).status).toBe(401);
     expect((await app.request(photoUrl, { headers: { cookie: outsider.cookie } })).status).toBe(404);
+    currentPhotoToken = "rotated-provider-token";
     const photo = await app.request(photoUrl, { headers: { cookie: owner.cookie } });
     expect(photo.status).toBe(200);
     expect(photo.headers.get("cache-control")).toBe("private, max-age=86400");
@@ -287,6 +299,36 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     expect(photo.headers.get("content-type")).toBe("image/png");
     expect(Buffer.from(await photo.arrayBuffer()).equals(png)).toBe(true);
     expect(mediaReads).toBe(1);
+    expect(mediaRequests).toEqual([{
+      photoName: `places/${providerPlaceId}/photos/rotated-provider-token`,
+      maxWidthPx: 1024,
+    }]);
+    expect(providerReads).toBe(metadataReads + 1);
+  });
+
+  it("does not serve a different author's photo under a cached fingerprint URL", async () => {
+    const result = await detail({ kind: "trip-place", id: branch.id });
+    const metadataReads = providerReads;
+    currentPhotoToken = "different-photo";
+    currentPhotoAuthors = [{ displayName: "另一位攝影者", uri: "https://example.test/another-author" }];
+    const photo = await app.request(result.googlePhoto!.imageUrl, { headers: { cookie: owner.cookie } });
+    expect(photo.status).toBe(404);
+    expect(await photo.json()).toMatchObject({ error: { code: "place_photo_not_found" } });
+    expect(mediaRequests).toEqual([]);
+    expect(providerReads).toBe(metadataReads + 1);
+  });
+
+  it("maps an expired matching Google media resource to not found", async () => {
+    const result = await detail({ kind: "trip-place", id: branch.id });
+    currentPhotoToken = "rotated-provider-token";
+    missingMediaPhotoName = `places/${branch.providerPlaceId}/photos/${currentPhotoToken}`;
+    const photo = await app.request(result.googlePhoto!.imageUrl, { headers: { cookie: owner.cookie } });
+    expect(photo.status).toBe(404);
+    expect(await photo.json()).toMatchObject({ error: { code: "place_photo_not_found" } });
+    expect(mediaRequests).toEqual([{
+      photoName: missingMediaPhotoName,
+      maxWidthPx: 1024,
+    }]);
   });
 
   it("rate-limits the Google photo proxy after the hourly account allowance", async () => {

@@ -114,6 +114,10 @@ class ControlledProvider implements PlaceProvider {
     type: "restaurant",
     address: "1-295 Kiyomizu, Kyoto",
     sourceUrl: "https://www.google.com/maps/place/?query_place_id=ChIJ-Kyoto-Temple-Branch-5678",
+    providerPhoto: {
+      ...this.kyoto.providerPhoto!,
+      name: "places/ChIJ-Kyoto-Temple-Branch-5678/photos/controlled",
+    },
   };
 
   async search(query: string, options: PlaceSearchOptions = {}) {
@@ -828,10 +832,32 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         )).json()).window.version)),
       events: await history(owner.cookie, trip.id),
     });
+    await database.insertInto("mutation_requests").values([
+      {
+        actor_id: editor.user.id,
+        operation: `tp:day-assignments:${trip.id}`,
+        idempotency_key: "matrix-editor-replayed-assignment",
+        response: { tripPlaces: current },
+      },
+      {
+        actor_id: editor.user.id,
+        operation: `tp:remove:${removeTarget.id}`,
+        idempotency_key: "matrix-editor-replayed-remove",
+        response: { removed: true },
+      },
+    ]).execute();
     const forbiddenCases: Array<{ name: string; request: () => Response | Promise<Response> }> = [
       {
         name: "assign",
         request: () => assignments(editor.cookie, "matrix-editor-assign", [{
+          id: assignTarget.id,
+          dayId: dayTwo,
+          version: byId.get(assignTarget.id)!.version,
+        }]),
+      },
+      {
+        name: "historical editor assignment replay",
+        request: () => assignments(editor.cookie, "matrix-editor-replayed-assignment", [{
           id: assignTarget.id,
           dayId: dayTwo,
           version: byId.get(assignTarget.id)!.version,
@@ -891,6 +917,15 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
           trip.id,
           byId.get(removeTarget.id)!,
           "matrix-editor-remove",
+        ),
+      },
+      {
+        name: "historical editor scheduled-removal replay",
+        request: () => removePlace(
+          editor.cookie,
+          trip.id,
+          byId.get(removeTarget.id)!,
+          "matrix-editor-replayed-remove",
         ),
       },
       {
@@ -1496,7 +1531,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect(solo.find((place) => place.id === two.id)?.voteCount).toBe(1);
   });
 
-  it("merges the union of votes without duplicating a member", async () => {
+  it("lets an editor merge two unscheduled places and unions votes without duplication", async () => {
     const owner = await login("owner@example.test");
     const second = await login("second@example.test");
     const trip = await createTrip(owner.cookie, "Vote merge trip");
@@ -1509,7 +1544,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     const current = await list(owner.cookie, trip.id);
     const merged = await app.request(`/api/trips/${trip.id}/trip-places/${source.id}/merge`, {
       method: "POST",
-      headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": "union-merge", origin: "https://app.example.test" },
+      headers: { cookie: second.cookie, "content-type": "application/json", "idempotency-key": "union-merge", origin: "https://app.example.test" },
       body: json({
         targetTripPlaceId: target.id,
         expectedSourceVersion: current.find((place) => place.id === source.id)!.version,
@@ -1616,8 +1651,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       typeLabel: "咖啡店",
       photo: {
         source: "google",
-        id: `google:${provider.branch.providerPlaceId}`,
-        thumbnailUrl: `/api/trips/${trip.id}/google-place-photos/${provider.branch.providerPlaceId}?maxWidth=192`,
+        id: `google:${provider.branch.providerPlaceId}:0b7de4d767f7a98b`,
+        thumbnailUrl: `/api/trips/${trip.id}/google-place-photos/${provider.branch.providerPlaceId}?photo=0b7de4d767f7a98b&maxWidth=192`,
       },
     });
     expect(provider.searchRequests.at(-1)).toEqual({
@@ -1661,8 +1696,19 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     );
     expect(resolved.status).toBe(200);
     expect(parseProviderCandidatesResponse(await resolved.json())).toMatchObject({
-      candidates: [{ providerPlaceId: provider.kyoto.providerPlaceId }],
+      candidates: [{
+        providerPlaceId: provider.kyoto.providerPlaceId,
+        typeLabel: "佛寺",
+        photo: {
+          id: `google:${provider.kyoto.providerPlaceId}:0b7de4d767f7a98b`,
+          thumbnailUrl: `/api/trips/${firstTrip.id}/google-place-photos/${provider.kyoto.providerPlaceId}?photo=0b7de4d767f7a98b&maxWidth=192`,
+        },
+      }],
       attribution: "Google Maps",
+    });
+    expect(provider.detailRequests.at(-1)).toEqual({
+      providerPlaceId: provider.kyoto.providerPlaceId,
+      options: { languageCode: "zh-TW", regionCode: "JP" },
     });
 
     const first = parseTripPlaceResponse(
@@ -2848,7 +2894,9 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
 
   it("rejects merging an unscheduled day assignment into a scheduled place", async () => {
     const owner = await login("owner@example.test");
+    const editor = await login("scheduled-merge-editor@example.test");
     const trip = await createTrip(owner.cookie, "Scheduled merge conflict trip");
+    await addMember(trip.id, editor.user.id);
     const source = parseTripPlaceResponse(
       await (await addManual(
         owner.cookie,
@@ -2865,6 +2913,15 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         "scheduled-merge-target",
         "Scheduled merge cafe",
         "Timed target",
+      )).json(),
+    ).tripPlace;
+    const unscheduledSource = parseTripPlaceResponse(
+      await (await addManual(
+        owner.cookie,
+        trip.id,
+        "scheduled-merge-unscheduled-source",
+        "Scheduled merge cafe",
+        "Unscheduled source",
       )).json(),
     ).tripPlace;
     const assignment = await app.request(
@@ -2890,6 +2947,27 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     const assignedSource = parseTripPlaceListResponse(
       await assignment.json(),
     ).tripPlaces.find((place) => place.id === source.id)!;
+    const sourceOnlyEditorMerge = await app.request(
+      `/api/trips/${trip.id}/trip-places/${assignedSource.id}/merge`,
+      {
+        method: "POST",
+        headers: {
+          cookie: editor.cookie,
+          "content-type": "application/json",
+          "idempotency-key": "editor-scheduled-source-merge",
+          origin: "https://app.example.test",
+        },
+        body: json({
+          targetTripPlaceId: target.id,
+          expectedSourceVersion: assignedSource.version,
+          expectedTargetVersion: target.version,
+        }),
+      },
+    );
+    expect(sourceOnlyEditorMerge.status).toBe(403);
+    expect(await sourceOnlyEditorMerge.json()).toEqual({
+      error: { code: "forbidden", message: "Only the trip owner can do that" },
+    });
     const skeletonResponse = await app.request(`/api/trips/${trip.id}/skeleton`, {
       headers: { cookie: owner.cookie },
     });
@@ -2930,6 +3008,38 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     const currentTarget = (await list(owner.cookie, trip.id))
       .find((place) => place.id === target.id)!;
     expect(currentTarget.scheduled).toBe(true);
+    const mergeInput = {
+      targetTripPlaceId: currentTarget.id,
+      expectedSourceVersion: assignedSource.version,
+      expectedTargetVersion: currentTarget.version,
+    };
+    const targetOnlyMergeInput = {
+      targetTripPlaceId: currentTarget.id,
+      expectedSourceVersion: unscheduledSource.version,
+      expectedTargetVersion: currentTarget.version,
+    };
+    const beforeEditorMerge = await list(owner.cookie, trip.id);
+    const beforeEditorMergeHistory = await history(owner.cookie, trip.id);
+    const editorMerge = await app.request(
+      `/api/trips/${trip.id}/trip-places/${unscheduledSource.id}/merge`,
+      {
+        method: "POST",
+        headers: {
+          cookie: editor.cookie,
+          "content-type": "application/json",
+          "idempotency-key": "editor-scheduled-target-merge",
+          origin: "https://app.example.test",
+        },
+        body: json(targetOnlyMergeInput),
+      },
+    );
+    expect(editorMerge.status).toBe(403);
+    expect(await editorMerge.json()).toEqual({
+      error: { code: "forbidden", message: "Only the trip owner can do that" },
+    });
+    expect(await list(owner.cookie, trip.id)).toEqual(beforeEditorMerge);
+    expect(await history(owner.cookie, trip.id)).toEqual(beforeEditorMergeHistory);
+
 
     const merge = await app.request(
       `/api/trips/${trip.id}/trip-places/${assignedSource.id}/merge`,
@@ -2941,11 +3051,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
           "idempotency-key": "reject-scheduled-assignment-merge",
           origin: "https://app.example.test",
         },
-        body: json({
-          targetTripPlaceId: currentTarget.id,
-          expectedSourceVersion: assignedSource.version,
-          expectedTargetVersion: currentTarget.version,
-        }),
+        body: json(mergeInput),
       },
     );
     expect(merge.status).toBe(409);
@@ -3496,7 +3602,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect(await list(owner.cookie, trip.id)).toEqual([]);
   });
 
-  it("allows itinerary deletion despite another member's contribution and votes", async () => {
+  it("allows an editor to delete an unscheduled place despite another member's contribution and votes", async () => {
     const owner = await login("owner@example.test");
     const second = await login("second@example.test");
     const trip = await createTrip(owner.cookie, "Voted deletion trip");
@@ -3516,13 +3622,76 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       const legacy = parseTripSkeletonResponse(await response.json()).skeleton.places.find((candidate) => candidate.name === place.name)!;
       return app.request(`/api/trips/${trip.id}/places/${legacy.id}`, {
         method: "DELETE",
-        headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": key, origin: "https://app.example.test" },
+        headers: { cookie: second.cookie, "content-type": "application/json", "idempotency-key": key, origin: "https://app.example.test" },
         body: json({ expectedVersion: legacy.version }),
       });
     };
     expect((await deletePlace("delete-voted")).status).toBe(204);
     expect(await list(owner.cookie, trip.id)).toEqual([]);
     expect(await database.selectFrom("trip_place_votes").selectAll().where("trip_place_id", "=", place.id).execute()).toEqual([]);
+  });
+
+  it("requires the owner when legacy Place deletion would cascade a day assignment", async () => {
+    const owner = await login("legacy-delete-owner@example.test");
+    const editor = await login("legacy-delete-editor@example.test");
+    const trip = await createTrip(owner.cookie, "Legacy scheduled deletion");
+    await addMember(trip.id, editor.user.id);
+    const place = parseTripPlaceResponse(
+      await (await addManual(owner.cookie, trip.id, "legacy-delete-scheduled", "Scheduled cafe", "Kyoto")).json(),
+    ).tripPlace;
+    const assigned = await app.request(`/api/trips/${trip.id}/trip-place-day-assignments`, {
+      method: "PUT",
+      headers: {
+        cookie: owner.cookie,
+        "content-type": "application/json",
+        "idempotency-key": "legacy-delete-assign",
+        origin: "https://app.example.test",
+      },
+      body: json({
+        assignments: [{
+          tripPlaceId: place.id,
+          tripDayId: trip.days[0]!.id,
+          expectedVersion: place.version,
+        }],
+      }),
+    });
+    expect(assigned.status).toBe(200);
+    const assignedPlace = parseTripPlaceListResponse(await assigned.json()).tripPlaces
+      .find((candidate) => candidate.id === place.id)!;
+    const skeleton = parseTripSkeletonResponse(await (await app.request(
+      `/api/trips/${trip.id}/skeleton`,
+      { headers: { cookie: owner.cookie } },
+    )).json()).skeleton;
+    const legacy = skeleton.places.find((candidate) => candidate.name === place.name)!;
+    const removeLegacy = (cookie: string, key: string) => app.request(
+      `/api/trips/${trip.id}/places/${legacy.id}`,
+      {
+        method: "DELETE",
+        headers: {
+          cookie,
+          "content-type": "application/json",
+          "idempotency-key": key,
+          origin: "https://app.example.test",
+        },
+        body: json({ expectedVersion: legacy.version }),
+      },
+    );
+    const beforePlaces = await list(owner.cookie, trip.id);
+    const beforeHistory = await history(owner.cookie, trip.id);
+    const denied = await removeLegacy(editor.cookie, "legacy-delete-editor");
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toEqual({
+      error: { code: "forbidden", message: "Only the trip owner can do that" },
+    });
+    expect(await list(owner.cookie, trip.id)).toEqual(beforePlaces);
+    expect(await history(owner.cookie, trip.id)).toEqual(beforeHistory);
+    expect((await list(owner.cookie, trip.id)).find((candidate) => candidate.id === place.id))
+      .toEqual(assignedPlace);
+
+    expect((await removeLegacy(owner.cookie, "legacy-delete-owner")).status).toBe(204);
+    expect(await list(owner.cookie, trip.id)).toEqual([]);
+    expect(await database.selectFrom("trip_place_day_assignments")
+      .selectAll().where("trip_place_id", "=", place.id).execute()).toEqual([]);
   });
 
   it("flags possible duplicates added through the retained skeleton Place surface", async () => {
@@ -3653,8 +3822,17 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       headers: { cookie: second.cookie, "content-type": "application/json", "idempotency-key": "delete-in-use", origin: "https://app.example.test" },
       body: json({ expectedVersion: legacy.version }),
     });
-    expect(endpointRefused.status).toBe(409);
-    expect(await endpointRefused.json()).toMatchObject({ error: { code: "place_in_use" } });
+    expect(endpointRefused.status).toBe(403);
+    expect(await endpointRefused.json()).toEqual({
+      error: { code: "forbidden", message: "Only the trip owner can do that" },
+    });
+    const ownerEndpointRefused = await app.request(`/api/trips/${trip.id}/places/${legacy.id}`, {
+      method: "DELETE",
+      headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": "owner-delete-in-use", origin: "https://app.example.test" },
+      body: json({ expectedVersion: legacy.version }),
+    });
+    expect(ownerEndpointRefused.status).toBe(409);
+    expect(await ownerEndpointRefused.json()).toMatchObject({ error: { code: "place_in_use" } });
     const beforeEditorRemoval = await history(owner.cookie, trip.id);
     const editorRemoval = await removePlace(second.cookie, trip.id, current, "remove-scheduled");
     expect(editorRemoval.status).toBe(403);

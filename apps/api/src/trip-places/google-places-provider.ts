@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { GooglePlacePhotoDto } from "@along-the-way/contracts/place-details";
 import type { ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
 import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
@@ -58,6 +59,8 @@ export class ProviderUnavailableError extends Error {
   }
 }
 
+export class PlacePhotoNotFoundError extends Error {}
+
 export interface PlaceSearchOptions {
   /** BCP-47 language Google uses for place names and addresses. */
   languageCode?: string;
@@ -75,17 +78,31 @@ export interface GoogleProviderPhoto {
   googleMapsUri: string | null;
 }
 
+export function googlePlacePhotoFingerprint(photo: GoogleProviderPhoto): string {
+  const attribution = photo.authors
+    .map((author) => `${author.displayName}\u0000${author.uri ?? ""}`)
+    .join("\u0001");
+  return createHash("sha256")
+    .update(`${photo.width}x${photo.height}|${attribution}`)
+    .digest("hex")
+    .slice(0, 16);
+}
+
 export function googlePlacePhotoDto(
   tripId: string,
   providerPlaceId: string,
   photo: GoogleProviderPhoto,
 ): GooglePlacePhotoDto {
+  const prefixName = `places/${providerPlaceId}/photos/`;
+  const providerToken = photo.name.startsWith(prefixName) ? photo.name.slice(prefixName.length) : "";
+  if (!/^[A-Za-z0-9_-]{1,1000}$/.test(providerToken)) throw new TypeError("Invalid Google photo identity");
+  const fingerprint = googlePlacePhotoFingerprint(photo);
   const prefix = `/api/trips/${tripId}/google-place-photos/${providerPlaceId}`;
   return {
     source: "google",
-    id: `google:${providerPlaceId}`,
-    thumbnailUrl: `${prefix}?maxWidth=192`,
-    imageUrl: `${prefix}?maxWidth=1024`,
+    id: `google:${providerPlaceId}:${fingerprint}`,
+    thumbnailUrl: `${prefix}?photo=${fingerprint}&maxWidth=192`,
+    imageUrl: `${prefix}?photo=${fingerprint}&maxWidth=1024`,
     width: photo.width,
     height: photo.height,
     authors: photo.authors,
@@ -187,13 +204,16 @@ function addressCountry(value: unknown): string | null {
 }
 
 const LOOKUP_RESULT_COUNT = 3;
+// displayName and primaryTypeDisplayName are Pro fields; photos is Essentials IDs Only.
 const DETAILS_FIELD_MASK = [
   "id",
   "displayName",
   "formattedAddress",
   "location",
   "primaryType",
+  "primaryTypeDisplayName",
   "googleMapsUri",
+  "photos",
 ].join(",");
 
 function mappedPlaceType(value: string): PlaceType {
@@ -244,6 +264,11 @@ function providerHttpsUrl(value: unknown) {
   } catch {
     return null;
   }
+}
+
+function isGooglePhotoUri(url: URL) {
+  return url.protocol === "https:"
+    && (url.hostname === "googleusercontent.com" || url.hostname.endsWith(".googleusercontent.com"));
 }
 
 export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, PlaceHoursLookup {
@@ -362,7 +387,7 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
         headers: { "X-Goog-FieldMask": DETAILS_FIELD_MASK },
       },
     );
-    return this.candidate(value);
+    return this.candidate(value, true);
   }
 
   async getFirstPhoto(rawProviderPlaceId: string): Promise<GoogleProviderPhoto | null> {
@@ -371,7 +396,7 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
       `https://places.googleapis.com/v1/places/${encodeURIComponent(providerPlaceId)}`,
       { headers: { "X-Goog-FieldMask": "photos" } },
     ));
-    return this.firstPhoto(value?.photos);
+    return this.firstPhoto(value?.photos, providerPlaceId);
   }
 
   async fetchPhotoMedia(rawPhotoName: string, maxWidthPx: 192 | 1024): Promise<PlacePhotoMedia> {
@@ -383,6 +408,7 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
     const metadata = record(await this.request(
       `https://places.googleapis.com/v1/${photoName}/media?maxWidthPx=${maxWidthPx}&skipHttpRedirect=true`,
       { headers: {} },
+      true,
     ));
     if (typeof metadata?.photoUri !== "string") throw new ProviderUnavailableError();
     let photoUri: URL;
@@ -391,11 +417,11 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
     } catch {
       throw new ProviderUnavailableError();
     }
-    if (photoUri.protocol !== "https:") throw new ProviderUnavailableError();
+    if (!isGooglePhotoUri(photoUri)) throw new ProviderUnavailableError();
     return this.fetchImage(photoUri);
   }
 
-  private async request(url: string, init: RequestInit) {
+  private async request(url: string, init: RequestInit, photoNotFound = false) {
     if (!this.apiKey) throw new ProviderUnavailableError();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -409,10 +435,16 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
           ...init.headers,
         },
       });
-      if (!response.ok) throw new ProviderUnavailableError();
-      return await response.json();
+      if (!response.ok) {
+        if (photoNotFound && (response.status === 400 || response.status === 404)) {
+          throw new PlacePhotoNotFoundError();
+        }
+        throw new ProviderUnavailableError();
+      }
+      const bytes = await this.readBoundedBytes(response, 256 * 1024);
+      return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
     } catch (error) {
-      if (error instanceof ProviderUnavailableError) throw error;
+      if (error instanceof ProviderUnavailableError || error instanceof PlacePhotoNotFoundError) throw error;
       throw new ProviderUnavailableError();
     } finally {
       clearTimeout(timer);
@@ -427,12 +459,17 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
     return providerPlaceId;
   }
 
-  private firstPhoto(rawPhotos: unknown): GoogleProviderPhoto | null {
+  private firstPhoto(rawPhotos: unknown, providerPlaceId: string): GoogleProviderPhoto | null {
     if (!Array.isArray(rawPhotos) || rawPhotos.length === 0) return null;
     const photo = record(rawPhotos[0]);
+    const photoName = typeof photo?.name === "string" ? photo.name : null;
+    const identity = photoName === null
+      ? null
+      : /^places\/([A-Za-z0-9_-]{8,300})\/photos\/([A-Za-z0-9_-]{1,1000})$/.exec(photoName);
     if (!photo
-      || typeof photo.name !== "string"
-      || !/^places\/[A-Za-z0-9_-]{8,300}\/photos\/[A-Za-z0-9_-]{1,1000}$/.test(photo.name)
+      || photoName === null
+      || !identity
+      || identity[1] !== providerPlaceId
       || typeof photo.widthPx !== "number"
       || !Number.isSafeInteger(photo.widthPx)
       || photo.widthPx < 1
@@ -451,7 +488,7 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
       authors.push({ displayName: author.displayName, uri: providerHttpsUrl(author.uri) });
     }
     return {
-      name: photo.name,
+      name: photoName,
       width: photo.widthPx,
       height: photo.heightPx,
       authors,
@@ -459,46 +496,83 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
     };
   }
 
+  private async readBoundedBytes(response: Response, maximumBytes: number): Promise<Uint8Array<ArrayBuffer>> {
+    const rawContentLength = response.headers.get("Content-Length");
+    const contentLength = rawContentLength === null ? null : Number(rawContentLength);
+    if (contentLength !== null
+      && (!Number.isSafeInteger(contentLength) || contentLength < 0 || contentLength > maximumBytes)) {
+      throw new ProviderUnavailableError();
+    }
+    if (!response.body) throw new ProviderUnavailableError();
+    const reader = response.body.getReader();
+    // Fetch may transparently decode compressed bodies while retaining the wire
+    // Content-Length. Preallocate only when those lengths describe the same bytes.
+    const knownBytes = contentLength === null || response.headers.has("Content-Encoding")
+      ? null
+      : new Uint8Array(contentLength);
+    const chunks: Uint8Array[] | null = knownBytes ? null : [];
+    let byteLength = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const nextByteLength = byteLength + value.byteLength;
+      if (nextByteLength > maximumBytes || (knownBytes && nextByteLength > knownBytes.byteLength)) {
+        await reader.cancel();
+        throw new ProviderUnavailableError();
+      }
+      if (knownBytes) knownBytes.set(value, byteLength);
+      else chunks!.push(value);
+      byteLength = nextByteLength;
+    }
+    if (byteLength === 0 || (knownBytes && byteLength !== knownBytes.byteLength)) throw new ProviderUnavailableError();
+    if (knownBytes) return knownBytes;
+    const bytes = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of chunks!) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return bytes;
+  }
+
   private async fetchImage(url: URL): Promise<PlacePhotoMedia> {
+    if (!isGooglePhotoUri(url)) throw new ProviderUnavailableError();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8_000);
     try {
-      const response = await this.fetch(url, {
-        signal: controller.signal,
-        headers: { Accept: "image/*" },
-      });
-      const contentType = response.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
-      const rawContentLength = response.headers.get("Content-Length");
-      const contentLength = rawContentLength === null ? null : Number(rawContentLength);
-      const maximumBytes = 5 * 1024 * 1024;
-      if (!response.ok || !/^image\/[a-z0-9.+-]+$/.test(contentType)
-        || (contentLength !== null && (!Number.isSafeInteger(contentLength) || contentLength < 0 || contentLength > maximumBytes))
-        || !response.body) throw new ProviderUnavailableError();
-      const reader = response.body.getReader();
-      const knownBytes = contentLength === null ? null : new Uint8Array(contentLength);
-      const chunks: Uint8Array[] | null = knownBytes ? null : [];
-      let byteLength = 0;
+      let current = url;
+      let followedRedirects = 0;
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const nextByteLength = byteLength + value.byteLength;
-        if (nextByteLength > maximumBytes || (knownBytes && nextByteLength > knownBytes.byteLength)) {
-          await reader.cancel();
+        const response = await this.fetch(current, {
+          signal: controller.signal,
+          redirect: "manual",
+          headers: { Accept: "image/jpeg,image/png,image/webp" },
+        });
+        if (response.status >= 300 && response.status < 400) {
+          if (followedRedirects >= 2) throw new ProviderUnavailableError();
+          const location = response.headers.get("Location");
+          if (!location) throw new ProviderUnavailableError();
+          let target: URL;
+          try {
+            target = new URL(location, current);
+          } catch {
+            throw new ProviderUnavailableError();
+          }
+          if (!isGooglePhotoUri(target)) throw new ProviderUnavailableError();
+          current = target;
+          followedRedirects++;
+          continue;
+        }
+        const contentType = response.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+        if (!response.ok
+          || (contentType !== "image/jpeg" && contentType !== "image/png" && contentType !== "image/webp")) {
           throw new ProviderUnavailableError();
         }
-        if (knownBytes) knownBytes.set(value, byteLength);
-        else chunks!.push(value);
-        byteLength = nextByteLength;
+        return {
+          bytes: await this.readBoundedBytes(response, 5 * 1024 * 1024),
+          contentType,
+        };
       }
-      if (byteLength === 0 || (knownBytes && byteLength !== knownBytes.byteLength)) throw new ProviderUnavailableError();
-      if (knownBytes) return { bytes: knownBytes, contentType };
-      const bytes = new Uint8Array(byteLength);
-      let offset = 0;
-      for (const chunk of chunks!) {
-        bytes.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
-      return { bytes, contentType };
     } catch (error) {
       if (error instanceof ProviderUnavailableError) throw error;
       throw new ProviderUnavailableError();
@@ -515,6 +589,7 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
     if (
       !value ||
       typeof value.id !== "string" ||
+      !/^[A-Za-z0-9_-]{8,300}$/.test(value.id) ||
       typeof displayName?.text !== "string"
     ) {
       throw new ProviderUnavailableError(
@@ -550,7 +625,7 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
       observedAt: observedAt.toISOString(),
       expiresAt: expiresAt.toISOString(),
       photo: null,
-      ...(includePhoto ? { providerPhoto: this.firstPhoto(value.photos) } : {}),
+      ...(includePhoto ? { providerPhoto: this.firstPhoto(value.photos, value.id) } : {}),
     };
   }
 }

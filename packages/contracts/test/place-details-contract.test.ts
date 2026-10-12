@@ -34,12 +34,13 @@ const id = "22222222-2222-4222-8222-222222222222";
 
 function googlePhoto(): GooglePlacePhotoDto {
   const providerPlaceId = "ChIJ-place-photo-1234";
+  const photoFingerprint = "0baa8b4907390a5a";
   const prefix = `/api/trips/${tripId}/google-place-photos/${providerPlaceId}`;
   return {
     source: "google",
-    id: `google:${providerPlaceId}`,
-    thumbnailUrl: `${prefix}?maxWidth=192`,
-    imageUrl: `${prefix}?maxWidth=1024`,
+    id: `google:${providerPlaceId}:${photoFingerprint}`,
+    thumbnailUrl: `${prefix}?photo=${photoFingerprint}&maxWidth=192`,
+    imageUrl: `${prefix}?photo=${photoFingerprint}&maxWidth=1024`,
     width: 1600,
     height: 1200,
     authors: [{ displayName: "攝影者", uri: "https://example.test/author" }],
@@ -114,9 +115,21 @@ describe("curated place detail contract boundaries", () => {
   it("accepts same-origin Google photos and rejects leaked or insecure provider URLs", () => {
     const photo = googlePhoto();
     expect(parseGooglePlacePhoto(photo)).toEqual(photo);
+    const fixtureFingerprint = "fixture_token-1";
+    const fixturePhoto = {
+      ...photo,
+      id: photo.id.replace("0baa8b4907390a5a", fixtureFingerprint),
+      thumbnailUrl: photo.thumbnailUrl.replace("0baa8b4907390a5a", fixtureFingerprint),
+      imageUrl: photo.imageUrl.replace("0baa8b4907390a5a", fixtureFingerprint),
+    };
+    expect(parseGooglePlacePhoto(fixturePhoto)).toEqual(fixturePhoto);
     expect(parsePlacePreviewResponse({ previews: [{ reference: { kind: "trip-place", id }, photo }] }).previews[0]?.photo)
       .toEqual(photo);
     expect(() => parseGooglePlacePhoto({ ...photo, imageUrl: "https://places.googleapis.com/v1/photo/media?key=secret" })).toThrow();
+    expect(() => parseGooglePlacePhoto({
+      ...photo,
+      imageUrl: photo.imageUrl.replace("0baa8b4907390a5a", "different-fingerprint"),
+    })).toThrow();
     expect(() => parseGooglePlacePhoto({ ...photo, authors: [{ displayName: "攝影者", uri: "http://example.test/author" }] })).toThrow();
     expect(() => parseGooglePlacePhoto({ ...photo, googleMapsUri: "javascript:alert(1)" })).toThrow();
   });

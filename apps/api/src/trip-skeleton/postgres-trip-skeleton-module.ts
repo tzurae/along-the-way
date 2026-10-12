@@ -33,6 +33,7 @@ import {
   remember,
   replayed,
   requireIdempotencyKey,
+  requireOwner,
   type DatabaseExecutor,
 } from "../private-trips/postgres-private-trip-store";
 import {
@@ -871,9 +872,6 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     const operation = `pd:${tripId}:${placeId}`;
     await this.database.transaction().execute(async (transaction) => {
       await this.requireMemberForMutation(transaction, userId, tripId);
-      await lockMutation(transaction, userId, operation, key);
-      const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return;
       const current = await transaction
         .selectFrom("places")
         .select("version")
@@ -881,13 +879,29 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         .where("id", "=", placeId)
         .forUpdate()
         .executeTakeFirst();
+      const tripPlace = current
+        ? await transaction.selectFrom("trip_places as trip_place")
+          .select([
+            "trip_place.id",
+            "trip_place.selected_for_itinerary",
+            sql<boolean>`exists (
+              select 1 from trip_place_day_assignments as assignment
+              where assignment.trip_id = ${tripId}
+                and assignment.trip_place_id = trip_place.id
+            )`.as("has_day_assignment"),
+          ])
+          .where("trip_place.trip_id", "=", tripId)
+          .where("trip_place.legacy_place_id", "=", placeId)
+          .executeTakeFirst()
+        : undefined;
+      if (tripPlace?.selected_for_itinerary || tripPlace?.has_day_assignment) {
+        await requireOwner(transaction, userId, tripId);
+      }
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return;
       if (!current) throw new AppError("place_not_found", "Place not found", 404);
       this.requireExpectedVersion(current.version, expectedVersion);
-      const tripPlace = await transaction.selectFrom("trip_places")
-        .select(["id", "place_id"])
-        .where("trip_id", "=", tripId)
-        .where("legacy_place_id", "=", placeId)
-        .executeTakeFirst();
       const referenced = await transaction
         .selectFrom("itinerary_endpoints")
         .select((builder) => builder.fn.countAll().as("count"))

@@ -10,7 +10,7 @@ import { TodayWorkspace } from "../src/TodayWorkspace";
 import { TripOnboardingChecklist } from "../src/TripOnboardingChecklist";
 import { TripPlanDialog } from "../src/TripPlanDialog";
 import { createTodayModel } from "../src/today-model";
-import { todaySkeleton, todayTrip, todayUser } from "./today-fixtures";
+import { todayActivity, todaySkeleton, todayTrip, todayUser } from "./today-fixtures";
 
 const ownerOnly = "只有旅程擁有者可以排入、改期或移出行程。你仍可加入地點、投票與編輯備註。";
 
@@ -184,6 +184,49 @@ describe("owner-only schedule surfaces", () => {
     rerender(<TodayWorkspace {...common} isOwner onArrangeDay={() => {}} />);
     expect(screen.getByRole("button", { name: "安排這一天" })).toBeInTheDocument();
     expect(screen.queryByText(ownerOnly)).not.toBeInTheDocument();
+  });
+
+  it("shows Google author attribution beside a Today endpoint thumbnail", async () => {
+    const trip = todayTrip();
+    const model = createTodayModel(trip, todaySkeleton(trip, [todayActivity()]), [], todayUser.id);
+    const request = async <T,>(url: string) => {
+      if (!url.includes("/place-previews?")) throw new Error(`Unexpected request: ${url}`);
+      return {
+        previews: [{
+          reference: { kind: "itinerary-place", id: "place" },
+          name: "Park",
+          photo: {
+            source: "google",
+            id: "google:ChIJTodayEndpoint:today-photo",
+            thumbnailUrl: "/api/trips/A/google-place-photos/ChIJTodayEndpoint?photo=today-photo&maxWidth=192",
+            imageUrl: "/api/trips/A/google-place-photos/ChIJTodayEndpoint?photo=today-photo&maxWidth=1024",
+            width: 1200,
+            height: 800,
+            authors: [{ displayName: "端點攝影者", uri: "https://maps.google.com/contrib/today-author" }],
+            googleMapsUri: "https://maps.google.com/?cid=987",
+          },
+        }],
+      } as T;
+    };
+    const { container } = render(
+      <TodayWorkspace
+        model={model}
+        selectedDate="2026-10-21"
+        onDayChanged={() => {}}
+        fetchedAt="2026-10-21T01:30:00Z"
+        retry={() => {}}
+        request={request}
+      />,
+    );
+
+    const item = container.querySelector<HTMLButtonElement>("[data-today-item-trigger]");
+    expect(item).toBeInTheDocument();
+    fireEvent.click(item!);
+    expect(await screen.findByText("端點攝影者")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "端點攝影者" })).toHaveAttribute(
+      "href",
+      "https://maps.google.com/contrib/today-author",
+    );
   });
 
   it("offers the assign-place onboarding item only to owners", () => {
