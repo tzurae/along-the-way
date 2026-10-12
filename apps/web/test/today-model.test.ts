@@ -5,7 +5,7 @@ import type { TripSkeletonDto } from "@along-the-way/contracts/trip-skeleton";
 import { todayActivity, todaySkeleton, todayTrip, todayUser, todayWishlist } from "./today-fixtures";
 
 function activity(id: string, member: string | null, start: string, end: string): TodayItem {
-  return { id, title: id, type: "activity", start, end, endpoints: [], participants: member ? [{ id: member, name: member }] : null, locked: false, constraints: [], facts: [], notes: null, sourceUrl: null };
+  return { id, title: id, type: "activity", start, end, endpoints: [], participants: member ? [{ id: member, name: member, removed: false }] : null, locked: false, constraints: [], facts: [], notes: null, sourceUrl: null };
 }
 const a = activity("A", "甲", "2026-10-21T01:00:00Z", "2026-10-21T03:00:00Z");
 const b = activity("B", "乙", "2026-10-21T02:00:00Z", "2026-10-21T04:00:00Z");
@@ -125,7 +125,7 @@ describe("formal interval membership across local days", () => {
     const item = todayActivity();
     item.participants!.push({ memberId: "named", displayName: "旅伴", email: "named@example.test", removed: false });
     const readModel = createTodayModel(trip, todaySkeleton(trip, [item]), [], todayUser.id);
-    expect(readModel.items[0]!.participants).toEqual([{ id: "member", name: todayUser.email }, { id: "named", name: "旅伴" }]);
+    expect(readModel.items[0]!.participants).toEqual([{ id: "member", name: todayUser.email, removed: false }, { id: "named", name: "旅伴", removed: false }]);
     expect(JSON.stringify(readModel)).not.toContain("named@example.test");
   });
 });

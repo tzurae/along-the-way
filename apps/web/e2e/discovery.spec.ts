@@ -484,7 +484,8 @@ test("a refused question reapply explains the domain error beside the conflict p
   await refused;
   await expect(conflict).toBeVisible();
   await expect(page.getByRole("alert")).toBeVisible();
-  await expect(page.getByRole("alert")).toContainText("question");
+  await expect(page.getByRole("alert")).toContainText("這些問題已經更新");
+  await expect(page.getByRole("alert")).not.toContainText("question");
   await expect(conflict).toContainText("Keep my slow walking answer");
 });
 

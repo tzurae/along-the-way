@@ -123,6 +123,16 @@ describe("curated place detail contract boundaries", () => {
       imageUrl: photo.imageUrl.replace("0baa8b4907390a5a", fixtureFingerprint),
     };
     expect(parseGooglePlacePhoto(fixturePhoto)).toEqual(fixturePhoto);
+    const signed = {
+      ...photo,
+      thumbnailUrl: `${photo.thumbnailUrl}&exp=1791676799&sig=${"A".repeat(43)}`,
+      imageUrl: `${photo.imageUrl}&exp=1791676799&sig=${"A".repeat(43)}`,
+    };
+    expect(parseGooglePlacePhoto(signed)).toEqual(signed);
+    expect(() => parseGooglePlacePhoto({
+      ...signed,
+      imageUrl: `${photo.imageUrl}&exp=1791676799&sig=${"B".repeat(43)}`,
+    })).toThrow();
     expect(parsePlacePreviewResponse({ previews: [{ reference: { kind: "trip-place", id }, photo }] }).previews[0]?.photo)
       .toEqual(photo);
     expect(() => parseGooglePlacePhoto({ ...photo, imageUrl: "https://places.googleapis.com/v1/photo/media?key=secret" })).toThrow();

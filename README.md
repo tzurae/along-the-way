@@ -23,6 +23,21 @@ open the captured message at `http://localhost:8025`. A PostgreSQL-backed worker
 delivers queued authentication and invitation email. The same magic-link,
 session, Trip, membership, and invitation path is used outside local
 development; Mailpit replaces only the SMTP destination.
+Authentication requests are deliberately bounded: `/api/auth/*` accepts at most
+8 KiB, other `/api/*` requests accept at most 2 MiB, and magic-link consumption
+allows 30 attempts per client IP in 10 minutes. A successful authenticated
+request renews the 30-day browser cookie. PostgreSQL persists that sliding
+renewal at most once per day and keeps one extra day of server-side expiry slack,
+so write throttling never shortens the 30-day idle lifetime.
+
+The email worker retries unknown and transient SMTP failures with 30-second,
+2-minute, 10-minute, 1-hour, 6-hour, and 24-hour backoff steps. A definitive SMTP
+5xx rejection becomes terminal immediately; an unknown/transient failure becomes
+terminal only after the 24-hour retry. Terminal jobs retain `failed_at` for
+operations. A failed pending invitation remains pending: the Owner recovers by
+revoking it and sending a new invitation. Magic-link jobs naturally stop once
+their 15-minute token is no longer usable.
+
 
 Useful checks:
 
@@ -201,6 +216,18 @@ Stale evidence is labelled for re-checking and is never refreshed automatically.
 ## AI discovery feedback and questions (Issue #66)
 
 Discovery mutations require an `Idempotency-Key` and the current version:
+
+Generation and feedback interpretation share billed-AI limits of 10 starts per
+account per hour and 10 starts per trip per hour. Generation keeps the tighter
+limit of 6 starts per trip per hour because it also incurs Google lookups. A
+claimed request counts even when its provider call fails; replaying the same
+`Idempotency-Key` does not count or call the provider again.
+
+`GET /api/trips/:tripId/discovery` is read-only. Wishlist removal, legacy-place
+deletion, and trip-place reconciliation reopen stale accepted proposals in
+their own mutation/reconciliation transactions rather than attributing writes
+to the member who reads the discovery workspace.
+
 
 - `POST /api/trips/:tripId/discovery/feedback` accepts only whole-trip
   `originalText`; a `proposalId` field is rejected with `400 validation_error`.
@@ -549,11 +576,12 @@ sources. It never changes legacy places, formal items or endpoints. The event
 is `trip_place.removed` (「把地點移出想去清單」). The contribution-withdraw
 route and UI are gone; historical event labels remain readable.
 
-Removal, itinerary deletion, and discovery/read-time repair of an archived or
-missing accepted place reopen all its accepted proposals to `pending`, clear
-`decided_by`, `decided_at`, and `accepted_trip_place_id`, increment the proposal
-version, and record `discovery.proposal_reopened`. The canonical proposal for a
-provider identity is the newest proposal in the trip in **any status** (run
+Wishlist removal, itinerary deletion, and trip-place reconciliation of an
+archived or missing accepted place reopen all its accepted proposals to
+`pending`, clear `decided_by`, `decided_at`, and `accepted_trip_place_id`,
+increment the proposal version, and record `discovery.proposal_reopened`.
+The canonical proposal for a provider identity is the newest proposal in the
+trip in **any status** (run
 creation time and ID, then proposal creation time and ID). Only when that
 canonical proposal is itself being reopened does it receive `reopened_at`;
 all older reopened acceptances remain hidden, superseded pending rows. Newer
@@ -642,15 +670,18 @@ route observation is part of this formal read model, so transportation is labele
 unavailable rather than displaying generated route estimates or stale live traffic.
 
 Each successful, version-consistent read saves one localStorage snapshot per
-account and trip: `{ schemaVersion: 3, accountId, fetchedAt, model }`. The model
+account and trip: `{ schemaVersion: 4, accountId, fetchedAt, model }`. The model
 contains trip ID/name/version, the current member ID, resolved day zones, item
 IDs, separate untimed wishlist names, and allowlisted card fields. Participant
 labels use display name, falling back to email, only for participants in the stored
-formal items; unused profile emails are not copied. Invitations, change events,
-member profiles, drafts, credentials, provider keys and unsaved inputs are never copied.
-Compatible version-2 snapshots migrate with missing endpoint place references
-left unknown. If persisting that upgrade fails, the validated in-memory model
-remains readable and the original saved value is preserved. See the
+formal items; schema 4 also retains whether each historical participant is known
+to have been removed. Unused profile emails, invitations, change events, member
+profiles, drafts, credentials, provider keys and unsaved inputs are never copied.
+Compatible version-2 and version-3 snapshots migrate strictly to version 4.
+Missing endpoint place references and legacy participant-removal status remain
+`null`; migration never guesses either from names, coordinates or another snapshot.
+If persisting that upgrade fails, the validated in-memory model remains readable
+and the original saved value is preserved. See the
 [feature migration details](docs/engineering/place-details-and-photos.md#ui失敗與-today-snapshot).
 Malformed, extra-field or incompatible snapshots are discarded. Storage failure
 is visible and does not prevent reading the online itinerary.
@@ -665,9 +696,10 @@ unselected revoked trips. Core trip GETs returning 401/403/404 delete cached acc
 an inaccessible bookmarked trip does not invalidate a valid session or hide other
 authorized trips. Logout clears that account's snapshots and in-memory itinerary.
 Offline logout also records a local signed-out boolean so a surviving HttpOnly
-cookie cannot silently reopen private data on reconnect; a new magic-link sign-in
-clears that marker. It does not queue a remote logout. Online the action is
-「重新同步」; the read-only shell offers 「重新連線並同步」.
+cookie cannot silently reopen private data on reconnect; a `storage` event applies
+that teardown to every open tab. A new magic-link sign-in clears the marker. Offline
+logout does not queue a remote logout. Online the action is 「重新同步」; the
+read-only shell offers 「重新連線並同步」.
 A failed mutation while the browser remains online keeps its existing dialog,
 input, error feedback and idempotency key for an explicit retry; it does not switch
 to the offline shell. Provider-only failures likewise do not change this boundary.
@@ -681,9 +713,12 @@ resubmits a mutation.
 The production Vite build emits `/sw.js` from the built asset manifest and finalized
 HTML content, so an HTML-only deployment also changes the worker/cache revision.
 It registers at the application root and caches only the public HTML shell and
-hashed built assets, never `/api/*` or other responses. Offline root navigation
-uses that shell, then the private read-only snapshot store. Development mode does
-not register a worker. There are **no database migrations or new API endpoints**
+hashed built assets. Both `/api` and every `/api/*` request bypass all cache
+handlers, including authenticated image requests. Activation deletes the legacy
+`hk-trip-static-v12` and `hk-trip-images-v12` caches so private responses saved by
+an older worker cannot survive the cutover. Offline root navigation uses the shell,
+then the private read-only snapshot store. Development mode does not register a
+worker. There are **no database migrations or new API endpoints**
 for this issue; the shared zone resolver is the only new shared contract export.
 
 Unit coverage includes different device/trip dates, DST and midnight boundaries
@@ -796,18 +831,22 @@ drafts, with optimistic day checks and the whole-trip basis checked on apply.
   `id` is the change-event UUID. No notes, booking details, contact information,
   coordinates, access tokens, or complete private objects are streamed.
   Resume with `Last-Event-ID` or the browser's `?after=<event UUID>` fallback.
-  Cursors must belong to this trip. The server rechecks the session and active
-  membership before emitting events/heartbeats and closes revoked streams.
+  Cursors must belong to this trip. Membership is authorized on every poll; the
+  session token and active membership are rechecked before each payload and
+  15-second heartbeat, so revoked streams close without another event. One account
+  may hold at most six event streams; an abort or stream completion releases its
+  slot.
 - There is one subscription for the selected trip. Notifications only trigger
   authorised read-model refetches and revision counters; mounted tab panels are
-  not replaced. Reconnect backs off from 1 to 30 seconds. While disconnected,
-  a 60-second version check plus focus/visibility/online checks recover changes.
-  Failed projection reads schedule a separate 1–30-second backoff refresh and
-  are retried on focus even when the notification watermark has not advanced.
-  A notification cursor is not treated as proof that every projection loaded.
-  Trip changes and access revocation cancel outstanding retry timers.
-  Every connection emits a comment immediately and a heartbeat every 15 seconds.
-  Bun's idle timeout is 30 seconds; Caddy flushes streaming responses immediately.
+  not replaced. Reconnect backs off from 1 to 30 seconds. An authoritative
+  60-second version check runs even while SSE appears connected, and
+  focus/visibility/online checks recover changes immediately. Failed projection
+  reads schedule a separate 1–30-second backoff refresh and are retried on focus
+  even when the notification watermark has not advanced. A notification cursor is
+  not treated as proof that every projection loaded. Trip changes and access
+  revocation cancel outstanding retry timers. Every connection emits a comment
+  immediately. Bun's idle timeout is 30 seconds; Caddy flushes streaming responses
+  immediately.
 - `GET /api/trips/:tripId/history?limit=30&before=<event UUID>` returns
   `{ events, nextCursor }`, newest first (limit 1–100). Events include actor
   identity/display name/email, creation time, type, target, safe summary, and nullable

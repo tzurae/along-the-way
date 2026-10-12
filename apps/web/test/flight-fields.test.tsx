@@ -60,4 +60,23 @@ describe("simplified flight fields", () => {
     rerender(<FlightFields legend="去程" value={{ ...repeated, departureUtcOffset: "-04:00" }} onChange={() => {}} />);
     expect(flightComplete({ ...repeated, departureUtcOffset: "-04:00" })).toBe(true);
   });
+
+  it("rejects nonexistent local times and invalid manual time zones before submission", () => {
+    expect(flightComplete(completeFlight({
+      departureAirport: { name: "JFK · John F Kennedy International Airport", timeZone: "America/New_York" },
+      departureLocalDateTime: "2026-03-08T02:30",
+    }))).toBe(false);
+    expect(flightComplete(completeFlight({
+      departureAirport: { name: "Manual airport", timeZone: "Not/A_TimeZone" },
+    }))).toBe(false);
+  });
+
+  it("rejects flight endpoints outside the selected trip dates", () => {
+    expect(flightComplete(completeFlight({
+      departureLocalDateTime: "2026-10-20T23:00",
+    }), "2026-10-21", "2026-10-27")).toBe(false);
+    expect(flightComplete(completeFlight({
+      arrivalLocalDateTime: "2026-10-28T00:30",
+    }), "2026-10-21", "2026-10-27")).toBe(false);
+  });
 });

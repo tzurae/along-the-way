@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import type { PostgresCollaborationModule } from "./private-trips/postgres-collaboration-module";
 import { conflictResolutionContext } from "./private-trips/postgres-private-trip-store";
@@ -38,7 +39,11 @@ import {
   type TripWorkspaceModule,
 } from "./private-trips/private-trip-module";
 import type { RateLimiter } from "./private-trips/postgres-rate-limiter";
-import type { TripSkeletonModule } from "./trip-skeleton/trip-skeleton-module";
+import {
+  MAX_ITINERARY_ITEM_CONSTRAINTS,
+  MAX_ITINERARY_ITEM_PARTICIPANTS,
+  type TripSkeletonModule,
+} from "./trip-skeleton/trip-skeleton-module";
 import type { TripPlaceModule } from "./trip-places/trip-place-module";
 import {
   parsePlaceDetailDate,
@@ -160,6 +165,7 @@ function constraintInput(value: unknown): ConstraintInput {
 function itineraryItemInput(
   body: Record<string, unknown>,
 ): CreateItineraryItemInput {
+  const type = stringField(body, "type") as ItineraryItemType;
   const details = objectBody(body.details);
   const moneyValue = body.money;
   const money =
@@ -172,21 +178,31 @@ function itineraryItemInput(
             currency: stringField(value, "currency"),
           };
         })();
+  const participantMemberIds = body.participantMemberIds === null
+    ? null
+    : stringArrayField(body, "participantMemberIds");
+  if (participantMemberIds && participantMemberIds.length > MAX_ITINERARY_ITEM_PARTICIPANTS) {
+    throw new AppError("validation_error", `participantMemberIds cannot contain more than ${MAX_ITINERARY_ITEM_PARTICIPANTS} members`);
+  }
+  const endpointValues = arrayField(body, "endpoints");
+  const expectedEndpointCount = type === "flight" || type === "lodging" || type === "transport" ? 2 : 1;
+  if (endpointValues.length !== expectedEndpointCount) {
+    throw new AppError("validation_error", `${type} must have exactly ${expectedEndpointCount} endpoint${expectedEndpointCount === 1 ? "" : "s"}`);
+  }
+  const constraintValues = body.constraints === undefined ? undefined : arrayField(body, "constraints");
+  if (constraintValues && constraintValues.length > MAX_ITINERARY_ITEM_CONSTRAINTS) {
+    throw new AppError("validation_error", `constraints cannot contain more than ${MAX_ITINERARY_ITEM_CONSTRAINTS} entries`);
+  }
   return {
-    type: stringField(body, "type") as ItineraryItemType,
+    type,
     title: stringField(body, "title"),
-    participantMemberIds: body.participantMemberIds === null
-      ? null
-      : stringArrayField(body, "participantMemberIds"),
+    participantMemberIds,
     notes: optionalStringField(body, "notes"),
     sourceUrl: optionalStringField(body, "sourceUrl"),
     money,
-    endpoints: arrayField(body, "endpoints").map(endpointInput),
+    endpoints: endpointValues.map(endpointInput),
     details: details as unknown as ItineraryItemDetails,
-    constraints:
-      body.constraints === undefined
-        ? undefined
-        : arrayField(body, "constraints").map(constraintInput),
+    constraints: constraintValues?.map(constraintInput),
   };
 }
 function stringArrayField(body: Record<string, unknown>, name: string) {
@@ -299,7 +315,8 @@ function uuidParam(context: Context, name: string) {
   ) {
     throw new AppError("validation_error", `${name} must be a UUID`);
   }
-  return value;
+  // Postgres compares UUIDs case-insensitively; idempotency/operation keys must use the same canonical form.
+  return value.toLowerCase();
 }
 
 function clientIp(context: Context) {
@@ -341,8 +358,28 @@ export function createApp({
   tripWorkspace,
 }: AppDependencies) {
   const app = new Hono();
-  const secureCookie = siteAddress.startsWith("https://");
-  const expectedOrigin = new URL(siteAddress).origin;
+  const site = new URL(siteAddress);
+  const secureCookie = site.protocol === "https:";
+  const expectedOrigin = site.origin;
+  const activeEventStreams = new Map<string, number>();
+  const maxEventStreamsPerAccount = 6;
+
+  function acquireEventStream(userId: string) {
+    const active = activeEventStreams.get(userId) ?? 0;
+    if (active >= maxEventStreamsPerAccount) {
+      throw new AppError("rate_limited", "Too many open event streams", 429, 5);
+    }
+    activeEventStreams.set(userId, active + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (activeEventStreams.get(userId) ?? 1) - 1;
+      if (remaining > 0) activeEventStreams.set(userId, remaining);
+      else activeEventStreams.delete(userId);
+    };
+  }
+
 
   function refreshCookie(context: Context, token: string) {
     setCookie(context, SESSION_COOKIE, token, {
@@ -365,6 +402,14 @@ export function createApp({
     refreshCookie(context, token);
     return { user, token };
   }
+
+  // Reject oversized bodies before parsing, authentication or rate limiting. Auth bodies hold only
+  // an email or token. The largest legitimate API body is a whole-trip plan apply at the domain
+  // bounds (366 days × 100 place ids ≈ 1.5 MB), so the general limit is 2 MiB.
+  const payloadTooLarge = (context: Context) =>
+    context.json({ error: { code: "payload_too_large", message: "Request body is too large" } }, 413);
+  app.use("/api/auth/*", bodyLimit({ maxSize: 8 * 1024, onError: payloadTooLarge }));
+  app.use("/api/*", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: payloadTooLarge }));
 
   app.use("/api/*", async (context, next) => {
     if (!["GET", "HEAD", "OPTIONS"].includes(context.req.method)) {
@@ -439,6 +484,7 @@ export function createApp({
 
   app.post("/api/auth/magic-links/consume", async (context) => {
     const body = await jsonBody(context);
+    await rateLimiter.consume("magic_link_consume", clientIp(context));
     const result = await identityAccess.consumeMagicLink(stringField(body, "token"));
     refreshCookie(context, result.sessionToken);
     return context.json({
@@ -522,41 +568,50 @@ export function createApp({
 
   app.get("/api/trips/:tripId/events", async (context) => {
     const { user, token } = await authenticated(context);
-    const tripId = uuidParam(context, "tripId");
-    const cursor = context.req.header("Last-Event-ID") ?? context.req.query("after") ?? null;
-    let order = await collaboration.cursor(user.id, tripId, cursor);
-    context.header("Cache-Control", "no-store");
-    context.header("X-Accel-Buffering", "no");
-    return streamSSE(context, async (stream) => {
-      async function authorized() {
-        if (!await identityAccess.authenticate(token)) throw new AppError("unauthenticated", "Sign in to continue", 401);
-        await collaboration.authorize(user.id, tripId);
-      }
-      try {
-        await authorized();
-        await stream.write(": connected\n\n");
-        let heartbeatAt = Date.now();
-        while (!stream.aborted && !context.req.raw.signal.aborted) {
-          await authorized();
-          const events = await collaboration.after(user.id, tripId, order);
-          for (const event of events) {
-            await authorized();
-            await stream.writeSSE({ id: event.notification.id, event: "change", data: JSON.stringify(event.notification) });
-            order = event.order;
-          }
-          if (Date.now() - heartbeatAt >= 15_000) {
-            await authorized();
-            await stream.write(": heartbeat\n\n");
-            heartbeatAt = Date.now();
-          }
-          if (events.length < 100) await stream.sleep(1_000);
+    const releaseStream = acquireEventStream(user.id);
+    context.req.raw.signal.addEventListener("abort", releaseStream, { once: true });
+    try {
+      const tripId = uuidParam(context, "tripId");
+      const cursor = context.req.header("Last-Event-ID") ?? context.req.query("after") ?? null;
+      let order = await collaboration.cursor(user.id, tripId, cursor);
+      context.header("Cache-Control", "no-store");
+      context.header("X-Accel-Buffering", "no");
+      return streamSSE(context, async (stream) => {
+        async function authorized() {
+          if (!await identityAccess.authenticate(token)) throw new AppError("unauthenticated", "Sign in to continue", 401);
+          await collaboration.authorize(user.id, tripId);
         }
-      } catch (error) {
-        if (!(error instanceof AppError) && !stream.aborted) {
-          console.error(JSON.stringify({ event: "trip_stream_failed", tripId, actorId: user.id, correlationId: randomUUID() }));
+        try {
+          await stream.write(": connected\n\n");
+          let heartbeatAt = Date.now();
+          while (!stream.aborted && !context.req.raw.signal.aborted) {
+            // `after` authorizes current membership. Avoid refreshing the session row
+            // every second while idle; token validity is rechecked on each payload and heartbeat.
+            const events = await collaboration.after(user.id, tripId, order);
+            for (const event of events) {
+              await authorized();
+              await stream.writeSSE({ id: event.notification.id, event: "change", data: JSON.stringify(event.notification) });
+              order = event.order;
+            }
+            if (Date.now() - heartbeatAt >= 15_000) {
+              await authorized();
+              await stream.write(": heartbeat\n\n");
+              heartbeatAt = Date.now();
+            }
+            if (events.length < 100) await stream.sleep(1_000);
+          }
+        } catch (error) {
+          if (!(error instanceof AppError) && !stream.aborted) {
+            console.error(JSON.stringify({ event: "trip_stream_failed", tripId, actorId: user.id, correlationId: randomUUID() }));
+          }
+        } finally {
+          releaseStream();
         }
-      }
-    });
+      });
+    } catch (error) {
+      releaseStream();
+      throw error;
+    }
   });
 
   app.get("/api/trips/:tripId/skeleton", async (context) => {
@@ -585,8 +640,15 @@ export function createApp({
     } catch {
       throw new AppError("validation_error", "Invalid place detail reference or date");
     }
+    let includeGooglePhoto = true;
+    try {
+      await rateLimiter.consume("place_photo_metadata", clientIp(context), user.id);
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== "rate_limited") throw error;
+      includeGooglePhoto = false;
+    }
     context.header("Cache-Control", "private, no-store");
-    return context.json({ detail: await placeDetails.getDetail(user.id, uuidParam(context, "tripId"), reference, date) });
+    return context.json({ detail: await placeDetails.getDetail(user.id, uuidParam(context, "tripId"), reference, date, includeGooglePhoto) });
   });
 
   app.get("/api/trips/:tripId/place-previews", async (context) => {
@@ -599,8 +661,15 @@ export function createApp({
     } catch {
       throw new AppError("validation_error", "Invalid place preview references");
     }
+    let includeGooglePhoto = true;
+    try {
+      await rateLimiter.consume("place_photo_metadata", clientIp(context), user.id, ids.length);
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== "rate_limited") throw error;
+      includeGooglePhoto = false;
+    }
     context.header("Cache-Control", "private, no-store");
-    return context.json({ previews: await placeDetails.getPreviews(user.id, uuidParam(context, "tripId"), kind, ids) });
+    return context.json({ previews: await placeDetails.getPreviews(user.id, uuidParam(context, "tripId"), kind, ids, includeGooglePhoto) });
   });
 
   app.get("/api/trips/:tripId/place-photo-assets/:filename", async (context) => {
@@ -634,6 +703,8 @@ export function createApp({
       context.req.param("providerPlaceId"),
       context.req.query("photo") ?? "",
       maxWidth,
+      context.req.query("exp") ?? null,
+      context.req.query("sig") ?? null,
     );
     return new Response(photo.bytes, { headers: {
       "Content-Type": photo.mediaType,

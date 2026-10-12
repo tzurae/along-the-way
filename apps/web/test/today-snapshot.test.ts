@@ -15,7 +15,7 @@ describe("account-scoped read-only Today snapshots", () => {
     const store = new TodaySnapshotStore(localStorage);
     store.save("account", model, Date.parse("2026-10-21T02:30Z"));
     const reopened = new TodaySnapshotStore(localStorage);
-    expect(reopened.read("account", "trip")).toMatchObject({ schemaVersion: 3, fetchedAt: "2026-10-21T02:30:00.000Z", model: { tripVersion: 7, days: [{ timeZone: "Asia/Tokyo" }] } });
+    expect(reopened.read("account", "trip")).toMatchObject({ schemaVersion: 4, fetchedAt: "2026-10-21T02:30:00.000Z", model: { tripVersion: 7, days: [{ timeZone: "Asia/Tokyo" }] } });
     expect(reopened.read("other-account", "trip")).toBeNull();
     expect(reopened.lastAccount()).toBe("account");
     store.save("account", { ...model, tripVersion: 8 });
@@ -66,7 +66,7 @@ describe("account-scoped read-only Today snapshots", () => {
     const store = new TodaySnapshotStore(localStorage);
     store.save(todayUser.id, readModel);
     const saved = store.read(todayUser.id, trip.id)!;
-    expect(saved.model.items[0]!.participants).toEqual([{ id: "member", name: todayUser.email }, { id: "named", name: "旅伴" }]);
+    expect(saved.model.items[0]!.participants).toEqual([{ id: "member", name: todayUser.email, removed: false }, { id: "named", name: "旅伴", removed: true }]);
     expect(JSON.stringify(saved)).not.toContain("unused@example.test");
     expect(JSON.stringify(saved)).not.toContain("hidden-name@example.test");
   });
@@ -91,17 +91,35 @@ describe("account-scoped read-only Today snapshots", () => {
       schemaVersion: number;
       model: {
         days: Array<{ wishlist: Array<Record<string, unknown>> }>;
-        items: Array<{ title: string; endpoints: Array<{ place: Record<string, unknown> | null }> }>;
+        items: Array<{ title: string; endpoints: Array<{ place: Record<string, unknown> | null }>; participants: Array<Record<string, unknown>> | null }>;
       };
     };
     legacy.schemaVersion = 2;
     for (const item of legacy.model.items) for (const endpoint of item.endpoints) if (endpoint.place) delete endpoint.place.id;
+    for (const item of legacy.model.items) for (const person of item.participants ?? []) delete person.removed;
     localStorage.setItem(`along-the-way:today:${todayUser.id}:${trip.id}`, JSON.stringify(legacy));
 
     const migrated = store.read(todayUser.id, trip.id);
-    expect(migrated).toMatchObject({ schemaVersion: 3, model: { items: [{ title: "activity", endpoints: [{ place: { id: null, name: "Park" } }] }] } });
+    expect(migrated).toMatchObject({ schemaVersion: 4, model: { items: [{ title: "activity", participants: [{ removed: null }], endpoints: [{ place: { id: null, name: "Park" } }] }] } });
     expect(migrated?.model.days[0]!.wishlist[0]).toEqual({ id: "FIRST", name: "FIRST" });
-    expect(JSON.parse(localStorage.getItem(`along-the-way:today:${todayUser.id}:${trip.id}`)!).schemaVersion).toBe(3);
+    expect(JSON.parse(localStorage.getItem(`along-the-way:today:${todayUser.id}:${trip.id}`)!).schemaVersion).toBe(4);
+  });
+  it("migrates a schema 3 participant with unknown historical membership status", () => {
+    const trip = todayTrip();
+    const store = new TodaySnapshotStore(localStorage);
+    const current = store.save(todayUser.id, createTodayModel(trip, todaySkeleton(trip, [todayActivity()]), [], todayUser.id))!;
+    const legacy = structuredClone(current) as unknown as {
+      schemaVersion: number;
+      model: { items: Array<{ participants: Array<Record<string, unknown>> | null }> };
+    };
+    legacy.schemaVersion = 3;
+    for (const item of legacy.model.items) for (const person of item.participants ?? []) delete person.removed;
+    const snapshotKey = `along-the-way:today:${todayUser.id}:${trip.id}`;
+    localStorage.setItem(snapshotKey, JSON.stringify(legacy));
+
+    expect(store.read(todayUser.id, trip.id)?.model.items[0]!.participants)
+      .toEqual([{ id: "member", name: todayUser.email, removed: null }]);
+    expect(JSON.parse(localStorage.getItem(snapshotKey)!).schemaVersion).toBe(4);
   });
   it("rejects a purported legacy snapshot carrying a place identity outside the legacy format", () => {
     const trip = todayTrip();
@@ -112,6 +130,27 @@ describe("account-scoped read-only Today snapshots", () => {
 
     expect(store.read(todayUser.id, trip.id)).toBeNull();
     expect(localStorage.getItem(snapshotKey)).toBeNull();
+  });
+  it("does not leave a private snapshot orphaned when the account marker cannot be stored", () => {
+    localStorage.setItem("along-the-way:today-account", "other-account");
+    const storage: Storage = {
+      get length() { return localStorage.length; },
+      key: (index) => localStorage.key(index),
+      getItem: (name) => localStorage.getItem(name),
+      removeItem: (name) => localStorage.removeItem(name),
+      clear: () => localStorage.clear(),
+      setItem: (name, value) => {
+        if (name === "along-the-way:today-account") {
+          throw new DOMException("Storage quota exceeded", "QuotaExceededError");
+        }
+        localStorage.setItem(name, value);
+      },
+    };
+
+    const store = new TodaySnapshotStore(storage);
+    expect(store.save("account", model)).toBeNull();
+    expect(localStorage.getItem(key)).toBeNull();
+    expect(store.lastAccount()).toBe("other-account");
   });
   it("keeps a readable legacy itinerary when persisting its migration exceeds storage quota", () => {
     const raw = JSON.stringify({ schemaVersion: 2, accountId: "account", fetchedAt: "2026-10-21T02:30:00.000Z", model });

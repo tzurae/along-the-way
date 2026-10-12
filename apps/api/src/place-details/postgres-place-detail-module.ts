@@ -21,6 +21,7 @@ import {
   PlacePhotoNotFoundError,
   type PlaceProvider,
 } from "../trip-places/google-places-provider";
+import { GooglePhotoCapability } from "../trip-places/google-photo-capability";
 import type { PlaceDetailModule } from "./place-detail-module";
 import { readPackagedPhoto } from "./photo-assets";
 
@@ -52,20 +53,25 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
   private readonly assetRoot: string;
   private readonly provider: PlaceProvider | undefined;
   private readonly now: () => Date;
+  private readonly photoCapability: GooglePhotoCapability | undefined;
 
   constructor(options: {
     database: Kysely<AlongTheWayDatabase>;
     assetRoot: string;
     provider?: PlaceProvider;
     now?: () => Date;
+    photoCapabilitySecret?: string;
   }) {
     this.database = options.database;
     this.assetRoot = options.assetRoot;
     this.provider = options.provider;
     this.now = options.now ?? (() => new Date());
+    this.photoCapability = options.photoCapabilitySecret
+      ? new GooglePhotoCapability(options.photoCapabilitySecret, this.now)
+      : undefined;
   }
 
-  async getDetail(userId: string, tripId: string, reference: PlaceDetailReference, date: string | null): Promise<PlaceDetailDto> {
+  async getDetail(userId: string, tripId: string, reference: PlaceDetailReference, date: string | null, includeGooglePhoto = true): Promise<PlaceDetailDto> {
     await this.authorize(userId, tripId);
     this.validateRequest(reference, date);
     const [place] = await this.resolve(tripId, reference.kind, [reference.id]);
@@ -85,7 +91,7 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
           .where("place_id", "=", place!.canonicalPlaceId).executeTakeFirst()
       : undefined;
     if (!content) {
-      return { ...empty, googlePhoto: await this.googlePhoto(tripId, place!.providerPlaceId) };
+      return { ...empty, googlePhoto: includeGooglePhoto ? await this.googlePhoto(tripId, place!.providerPlaceId) : null };
     }
     // Validate stored content too: malformed data is an error, never a false empty state.
     const curated = parseCuratedPlaceManifest({ version: 1, places: [{
@@ -106,11 +112,11 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
         ...block, needsRecheck: block.sourceIds.some((id) => staleIds.has(id)),
       })) })),
       photos,
-      googlePhoto: photos.length === 0 ? await this.googlePhoto(tripId, place!.providerPlaceId) : null,
+      googlePhoto: photos.length === 0 && includeGooglePhoto ? await this.googlePhoto(tripId, place!.providerPlaceId) : null,
     };
   }
 
-  async getPreviews(userId: string, tripId: string, kind: PlaceDetailReferenceKind, ids: string[]): Promise<PlacePreviewDto[]> {
+  async getPreviews(userId: string, tripId: string, kind: PlaceDetailReferenceKind, ids: string[], includeGooglePhoto = true): Promise<PlacePreviewDto[]> {
     await this.authorize(userId, tripId);
     try {
       parsePlacePreviewIds(ids.join(","));
@@ -131,7 +137,7 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
         reference,
         photo: curated
           ? this.photoDto(tripId, reference, curated)
-          : await this.googlePhoto(tripId, place.providerPlaceId),
+          : includeGooglePhoto ? await this.googlePhoto(tripId, place.providerPlaceId) : null,
       };
     });
   }
@@ -164,12 +170,38 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
     providerPlaceId: string,
     photoFingerprint: string,
     maxWidth: 192 | 1024,
+    capabilityExpiry: string | null = null,
+    capabilitySignature: string | null = null,
   ) {
     await this.authorize(userId, tripId);
     if (!/^[A-Za-z0-9_-]{8,300}$/.test(providerPlaceId)
       || !/^[a-f0-9]{16}$/.test(photoFingerprint)
       || (maxWidth !== 192 && maxWidth !== 1024)) {
       throw new AppError("validation_error", "Invalid Google place photo request");
+    }
+    const [wishlistAssociation, proposalAssociation] = await Promise.all([
+      this.database.selectFrom("trip_places as tripPlace")
+        .innerJoin("place_identities as identity", "identity.id", "tripPlace.place_id")
+        .select("tripPlace.id")
+        .where("tripPlace.trip_id", "=", tripId)
+        .where("identity.provider", "=", "google")
+        .where("identity.provider_place_id", "=", providerPlaceId)
+        .executeTakeFirst(),
+      this.database.selectFrom("candidate_proposals")
+        .select("id")
+        .where("trip_id", "=", tripId)
+        .where("provider_place_id", "=", providerPlaceId)
+        .executeTakeFirst(),
+    ]);
+    if (!wishlistAssociation && !proposalAssociation
+      && !this.photoCapability?.matches(
+        tripId,
+        userId,
+        providerPlaceId,
+        capabilityExpiry,
+        capabilitySignature,
+      )) {
+      throw new AppError("place_photo_not_found", "Place photo not found", 404);
     }
     if (!this.provider
       || this.provider.available === false

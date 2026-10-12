@@ -399,6 +399,7 @@ export interface EmailJobTable {
   attempt_count: Generated<number>;
   available_at: Timestamp;
   delivered_at: Timestamp | null;
+  failed_at: Timestamp | null;
   created_at: Timestamp;
 }
 

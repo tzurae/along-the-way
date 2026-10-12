@@ -154,7 +154,7 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
       join trip_members on trip_members.trip_id = trips.id
       where trip_members.user_id = ${userId}
         and trip_members.removed_at is null
-      order by trips.start_date, trips.created_at
+      order by trips.start_date, trips.created_at, trips.id
     `.execute(this.database);
 
     return result.rows.map((row) => ({
@@ -316,20 +316,24 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
       .where("trip_members.trip_id", "=", tripId)
       .where("trip_members.removed_at", "is", null)
       .orderBy("trip_members.joined_at")
+      .orderBy("trip_members.id")
       .execute();
-    const invites = await executor
-      .selectFrom("invites")
-      .select([
-        "id",
-        "email",
-        "role",
-        "expires_at",
-        "accepted_at",
-        "revoked_at",
-      ])
-      .where("trip_id", "=", tripId)
-      .orderBy("created_at")
-      .execute();
+    const invites = trip.role === "owner"
+      ? await executor
+        .selectFrom("invites")
+        .select([
+          "id",
+          "email",
+          "role",
+          "expires_at",
+          "accepted_at",
+          "revoked_at",
+        ])
+        .where("trip_id", "=", tripId)
+        .orderBy("created_at")
+        .orderBy("id")
+        .execute()
+      : [];
     const now = this.now();
 
     return {

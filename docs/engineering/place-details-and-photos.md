@@ -23,12 +23,12 @@
 GET /api/trips/:tripId/place-details?kind=trip-place&id=<UUID>&date=YYYY-MM-DD
 GET /api/trips/:tripId/place-previews?kind=trip-place&ids=<UUID>,<UUID>
 GET /api/trips/:tripId/place-photo-assets/<sha256>.jpg?kind=trip-place&id=<UUID>
-GET /api/trips/:tripId/google-place-photos/<providerPlaceId>?photo=<photoFingerprint>&maxWidth=192|1024
+GET /api/trips/:tripId/google-place-photos/<providerPlaceId>?photo=<photoFingerprint>&maxWidth=192|1024[&exp=<unixSeconds>&sig=<base64urlHmac>]
 ```
 
 `kind` 亦接受 `proposal`、`itinerary-place`。詳情回傳 `{ detail }`，縮圖預覽回傳 `{ previews }`；契約與嚴格 parser 位於 `packages/contracts/src/place-details.ts`。日期必須是實際存在的完整日曆日期；省略日期不表示來源已證實當日有效。
 
-每條 route 先驗證登入與有效旅程成員資格，再解析同一旅程的 reference。策展照片路徑中的雜湊不是公開存取憑證：仍需登入、旅程成員資格，以及該 reference 對應照片的關聯；其回應使用 private／no-store。Google 照片代理同樣要求旅程成員資格，另按帳號每小時 600 次、IP 每小時 1,200 次限流，回應使用 `Cache-Control: private, max-age=86400` 及 `X-Content-Type-Options: nosniff`。未知檔案、缺失或毀損不冒充正常圖片。
+每條 route 先驗證登入與有效旅程成員資格，再解析同一旅程的 reference。策展照片路徑中的雜湊不是公開存取憑證：仍需登入、旅程成員資格，以及該 reference 對應照片的關聯；其回應使用 private／no-store。Google 照片代理同樣要求旅程成員資格，且 provider place id 必須已關聯同旅程的口袋地點／提案，或 URL 帶有綁定同一旅程、同一使用者、provider place id 與到期時間的 HMAC capability。代理另按帳號每小時 600 次、IP 每小時 1,200 次限流，回應使用 `Cache-Control: private, max-age=86400` 及 `X-Content-Type-Options: nosniff`。未知檔案、缺失或毀損不冒充正常圖片。
 
 已接受提案優先使用 `accepted_trip_place_id` 的 canonical identity；未接受提案的 Google provider id 直接來自該提案，無須為顯示照片建立 `place_identities`。legacy 行程地點只能經同旅程既有 `trip_places.legacy_place_id` 關聯解析。地點名稱不作為身分匹配鍵；不建立或合併身分來湊內容。手動地點、未知店、同名分店及未關聯的 travel-only 地點不借用其他地點的內容或照片；原有可確認的行程資料仍保留。
 
@@ -46,11 +46,11 @@ catalog 不會在啟動時依名稱自動套用。營運者必須逐一確認現
 
 ## Google Places 照片 fallback
 
-經人工查核的 catalog 對已加入旅程的預覽與詳情永遠優先；只有 catalog 為零張時，才顯示 Google Places (New) 回傳的第一張照片。加入前的搜尋結果尚未解析為旅程 canonical identity，因此直接顯示該次搜尋結果的第一張 Google 照片，不能把它解讀為已確認該地點沒有策展照片。API 搜尋結果只攜帶第一張照片的尺寸與作者署名，客戶端 URL 一律是同源 `/api/trips/.../google-place-photos/...`，不包含 Google API key。
+經人工查核的 catalog 對已加入旅程的預覽與詳情永遠優先；只有 catalog 為零張時，才顯示 Google Places (New) 回傳的第一張照片。加入前的搜尋結果尚未解析為旅程 canonical identity，因此直接顯示該次搜尋結果的第一張 Google 照片，不能把它解讀為已確認該地點沒有策展照片。API 搜尋／Google Maps URL 解析結果只攜帶第一張照片的尺寸與作者署名，客戶端 URL 一律是同源 `/api/trips/.../google-place-photos/...`，不包含 Google API key。未加入地點的 URL 另含 `exp` 與 `sig`：`sig` 是 `TOKEN_SECRET` 對 `tripId|userId|providerPlaceId|exp` 的 HMAC-SHA256 base64url，`exp` 固定為簽發當日之下一個 UTC 日結束，因此同一天簽發的 URL 穩定且可供瀏覽器快取；過期、竄改、跨旅程或換使用者皆回 404。
 
-Google 對同一張照片在不同 metadata response 可能回傳不同 photo name，因此 client URL 不直接使用該不穩定名稱。DTO 以尺寸與完整作者 attribution（依序包含 display name 與 URI）計算 SHA-256，取前 16 個小寫十六進位字元作穩定 fingerprint；provider place id、fingerprint、署名 metadata、縮圖 URL 與大圖 URL 因而綁定。代理以免費的 Place Details `photos` Essentials IDs Only mask 重新取得當下第一張照片並重算 fingerprint：相同才以當次 photo name 和 `skipHttpRedirect=true` 取得短效 `photoUri`，不同則回 404，因此舊 URL 不會送出另一位作者或不同尺寸的圖片。fingerprint 保護的是「作者署名＋尺寸」組合，而不是唯一的單張作品：同一作者以相同尺寸上傳的另一張照片若成為第一張，會沿用同一 URL 與署名（作者仍正確，但圖片內容與 Google Maps 照片連結可能是另一張）；`googleMapsUri` 不在 fingerprint 內。這使相同照片保有相同 URL，可實際使用 24 小時 private browser cache，避免每次 page view 因不穩定 photo name 產生新的 media 讀取。短效 URL 必須是 HTTPS `googleusercontent.com` 或其子網域；伺服器最多手動跟隨兩次且逐次重新驗證 host，只接受 JPEG、PNG 或 WebP，metadata 上限 256 KiB，圖片上限 5 MiB，圖片抓取逾時 8 秒。照片名稱、短效 URL與圖片 bytes 不寫入 PostgreSQL、檔案或其他 server cache；只有瀏覽器依 private cache header 暫存。依 [Google Places 政策](https://developers.google.com/maps/documentation/places/web-service/policies)，Google 回傳的作者署名與 Google Maps 連結必須隨圖片顯示；無圖片、fingerprint 已變更或 media resource 已失效回 404 `place_photo_not_found`，其他上游失敗回 502 `place_photo_unavailable`，沒有 API key 時功能關閉並回 404。
+Google 對同一張照片在不同 metadata response 可能回傳不同 photo name，因此 client URL 不直接使用該不穩定名稱。DTO 以尺寸、完整作者 attribution（依序包含 display name 與 URI），以及 Google 提供時的 `googleMapsUri` 計算 SHA-256，取前 16 個小寫十六進位字元作穩定 fingerprint；provider place id、fingerprint、署名 metadata、縮圖 URL 與大圖 URL 因而綁定。代理以 Place Details `photos` Essentials IDs Only mask 重新取得當下第一張照片並重算 fingerprint：相同才以當次 photo name 和 `skipHttpRedirect=true` 取得短效 `photoUri`，不同則回 404，因此舊 URL 不會送出另一張照片或錯誤署名。這使 provider 僅輪換不穩定 photo name 時仍保有相同 URL，可實際使用 24 小時 private browser cache。短效 URL 必須是 HTTPS `googleusercontent.com` 或其子網域；伺服器最多手動跟隨兩次且逐次重新驗證 host，只接受 JPEG、PNG 或 WebP，metadata 上限 256 KiB，圖片上限 5 MiB，圖片抓取逾時 8 秒。照片名稱、短效 URL 與圖片 bytes 不寫入 PostgreSQL、檔案或其他 server cache；只有瀏覽器依 private cache header 暫存。依 [Google Places 政策](https://developers.google.com/maps/documentation/places/web-service/policies)，Google 回傳的作者署名與 Google Maps 連結必須隨圖片顯示；無圖片、fingerprint 已變更或 media resource 已失效回 404 `place_photo_not_found`，其他上游失敗回 502 `place_photo_unavailable`，沒有 API key 時功能關閉並回 404。
 
-此讀取使用 Google Maps Platform 的 **Place Details Photos Enterprise** SKU。依 [Google Maps Platform pricing](https://developers.google.com/maps/billing-and-pricing/pricing)（2026-10-12 查閱），每月 1,000 次免費，之後為每 1,000 次 US$7；價格可能由供應商調整，營運預算應以當期官方價格為準。
+`photos` field mask 屬於 **Essentials IDs Only** SKU；依 [Google Maps Platform pricing](https://developers.google.com/maps/billing-and-pricing/pricing)（2026-10-12 查閱）不計費，但仍受供應商配額與延遲影響，因此 metadata 與 media 端點各自限流。
 
 ## 營運者匯入
 
@@ -100,7 +100,7 @@ Bindings 格式：
 
 相簿支持零／一／兩／多張；署名與完整資訊對應選中的作品。照片網路失敗只影響該作品，詳情文字及其他照片不等待它。56px 小資訊列必須是主詳情捲動的一部分，沒有內層垂直捲動；截斷的摘要不能取代完整資訊入口。放大／關閉不得改動加入原因、投票、行程或其版本。
 
-Today snapshot schema version 3 僅新增行程 endpoint 的 legacy Place reference；wishlist 沿用已足夠的 TripPlace `id`，不額外保存未使用的 canonical `placeId`。合格 version 2 在同帳號及 exact-key 檢查下遷移，缺少的 endpoint reference 為 null，不靠名稱／座標猜 identity。遷移結果通過驗證後，即使 `setItem` 因 quota 失敗，也返回可讀的記憶體結果並保留原始快照；不能將寫入失敗當成資料損壞而刪除。照片或 optional 詳情失敗不使核心 projection／snapshot 作廢。離線不發起 authenticated 詳情讀取。
+Today snapshot schema version 4 保留行程 endpoint 的 legacy Place reference，以及每位歷史參與者已知的移除狀態；wishlist 沿用已足夠的 TripPlace `id`，不額外保存未使用的 canonical `placeId`。合格 version 2／3 在同帳號及 exact-key 檢查下嚴格遷移到 version 4：version 2 缺少的 endpoint reference 為 null，兩個舊版本缺少的 participant removal status 也為 null，不靠名稱、座標或其他快照猜 identity／狀態。遷移結果通過完整驗證後，即使 `setItem` 因 quota 失敗，也返回可讀的記憶體結果並保留原始快照；不能將寫入失敗當成資料損壞而刪除。照片或 optional 詳情失敗不使核心 projection／snapshot 作廢。離線不發起 authenticated 詳情讀取。
 
 資訊列使用固定 CSS pixels，而非隨 root 字級成長的 rem 高度；兩列摘要之外，完整資訊控制占滿獨立的 56px 欄位。檢視器明確覆寫共用 Dialog 的 responsive max-width，且 metadata 欄寬同時受可用寬度比例與最大寬度限制，不能把圖片欄擠到零。metadata 標籤／內容依自身 container 寬度排版，不以整個 viewport 推定狹窄側欄能放兩欄。
 

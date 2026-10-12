@@ -76,7 +76,8 @@ jobs:
           tags: along-the-way-api:ci
           load: true
           cache-from: type=gha,scope=api
-          cache-to: type=gha,scope=api,mode=max
+          # Only shard 1 exports: concurrent GHA cache writers fail with "error writing layer blob".
+          cache-to: ${{ matrix.shard == 1 && 'type=gha,scope=api,mode=max,ignore-error=true' || '' }}
       - name: Build web image (layer cache)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -85,7 +86,7 @@ jobs:
           tags: along-the-way-web:ci
           load: true
           cache-from: type=gha,scope=web
-          cache-to: type=gha,scope=web,mode=max
+          cache-to: ${{ matrix.shard == 1 && 'type=gha,scope=web,mode=max,ignore-error=true' || '' }}
       - name: Cache Playwright browsers
         id: playwright-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

@@ -18,6 +18,8 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
+  const url = new URL(event.request.url);
+  if (url.origin === self.location.origin && (url.pathname === "/api" || url.pathname.startsWith("/api/"))) return;
 
   if (event.request.destination === "image") {
     event.respondWith(
@@ -45,7 +47,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  if (new URL(event.request.url).origin === self.location.origin) {
+  if (url.origin === self.location.origin) {
     event.respondWith(
       caches.match(event.request).then((cached) => cached || fetch(event.request).then((response) => {
         const copy = response.clone();

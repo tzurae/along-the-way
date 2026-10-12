@@ -1,4 +1,6 @@
 import { lookup } from "node:dns/promises";
+import { request as httpsRequest } from "node:https";
+import { isIP, type LookupFunction } from "node:net";
 
 import { isPublicAddress } from "../trip-places/safe-google-maps-url";
 import type { WebSourceType } from "./discovery-model";
@@ -60,12 +62,122 @@ export function isOfficialTourismSource(url: string, type: WebSourceType, placeW
 }
 
 export interface PublicPageDependencies {
-  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+  /**
+   * `addresses` is the public DNS answer already validated for this request. Production
+   * connects to one of these addresses while retaining the URL hostname for Host and TLS SNI.
+   */
+  fetch(input: RequestInfo | URL, init: RequestInit | undefined, addresses: readonly string[]): Promise<Response>;
   resolveHost(host: string): Promise<string[]>;
+  /** Test-only nonstandard HTTPS ports; production leaves this unset. */
+  allowedPorts?: readonly string[];
+  /** Test-only address validator; production always uses the private-network denylist. */
+  addressIsPublic?: (address: string) => boolean;
+}
+
+export interface PinnedTlsOptions {
+  /** Additional trust anchor used by the real-socket transport test. */
+  ca?: string;
+}
+
+export function fetchPinnedAddress(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  addresses: readonly string[],
+  tls: PinnedTlsOptions = {},
+): Promise<Response> {
+  const target = new URL(String(input));
+  const resolved = addresses.map((address) => ({ address, family: isIP(address) as 4 | 6 }));
+  const pinnedLookup: LookupFunction = (_host, options, callback) => {
+    const requestedFamily = typeof options === "number" ? options : options.family ?? 0;
+    const eligible = requestedFamily === 4 || requestedFamily === 6
+      ? resolved.filter((entry) => entry.family === requestedFamily)
+      : resolved;
+    if (typeof options !== "number" && options.all) {
+      callback(null, eligible);
+      return;
+    }
+    const selected = eligible[0];
+    if (!selected) {
+      callback(new Error("No validated address matches the requested family"), "", 0);
+      return;
+    }
+    callback(null, selected.address, selected.family);
+  };
+  const { promise, resolve, reject } = Promise.withResolvers<Response>();
+  const request = httpsRequest(target, {
+    agent: false,
+    ca: tls.ca,
+    headers: Object.fromEntries(new Headers(init?.headers)),
+    lookup: pinnedLookup,
+    method: init?.method,
+    signal: init?.signal ?? undefined,
+  }, (message) => {
+    try {
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(message.headers)) {
+        if (Array.isArray(value)) {
+          for (const item of value) headers.append(name, item);
+        } else if (value !== undefined) {
+          headers.set(name, value);
+        }
+      }
+      const status = message.statusCode ?? 500;
+      const method = init?.method?.toUpperCase() ?? "GET";
+      const hasNoBody = method === "HEAD" || status === 204 || status === 205 || status === 304;
+      let body: ReadableStream<Uint8Array> | null = null;
+      if (hasNoBody) {
+        message.resume();
+      } else {
+        body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            let settled = false;
+            const fail = (error: Error) => {
+              if (settled) return;
+              settled = true;
+              controller.error(error);
+            };
+            message.on("data", (chunk: Buffer) => {
+              if (settled) return;
+              try {
+                controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+              } catch (error) {
+                fail(error instanceof Error ? error : new Error("HTTPS response stream failed"));
+                message.destroy();
+              }
+            });
+            message.once("end", () => {
+              if (settled) return;
+              settled = true;
+              controller.close();
+            });
+            message.once("aborted", () => fail(new Error("HTTPS response stream was aborted")));
+            message.once("error", fail);
+            message.once("close", () => {
+              if (!message.complete) fail(new Error("HTTPS response stream closed before completion"));
+            });
+          },
+          cancel() {
+            message.destroy();
+          },
+        });
+      }
+      resolve(new Response(body, {
+        headers,
+        status,
+        statusText: message.statusMessage,
+      }));
+    } catch (error) {
+      message.destroy();
+      reject(error);
+    }
+  });
+  request.once("error", reject);
+  request.end();
+  return promise;
 }
 
 export const defaultPublicPageDependencies: PublicPageDependencies = {
-  fetch: (input, init) => fetch(input, init),
+  fetch: fetchPinnedAddress,
   async resolveHost(host) {
     return (await lookup(host, { all: true, verbatim: true })).map((entry) => entry.address);
   },
@@ -85,13 +197,14 @@ const DEFAULT_LIMITS: PublicPageLimits = {
   totalTimeoutMs: 8_000,
 };
 
-function allowedUrl(value: URL) {
-  return value.protocol === "https:" && (!value.port || value.port === "443") && !value.username && !value.password;
+function allowedUrl(value: URL, dependencies: PublicPageDependencies) {
+  const allowedPort = !value.port || value.port === "443" || dependencies.allowedPorts?.includes(value.port) === true;
+  return value.protocol === "https:" && allowedPort && !value.username && !value.password;
 }
 
 /** Resolves the host within the remaining time; any non-public address refuses the page. */
-async function publicHost(host: string, dependencies: PublicPageDependencies, signal: AbortSignal) {
-  if (signal.aborted) return false;
+async function publicAddresses(host: string, dependencies: PublicPageDependencies, signal: AbortSignal) {
+  if (signal.aborted) return null;
   let onAbort: (() => void) | undefined;
   try {
     const aborted = new Promise<null>((resolve) => {
@@ -99,9 +212,10 @@ async function publicHost(host: string, dependencies: PublicPageDependencies, si
       signal.addEventListener("abort", onAbort, { once: true });
     });
     const addresses = await Promise.race([dependencies.resolveHost(host), aborted]);
-    return addresses !== null && addresses.length > 0 && addresses.every(isPublicAddress);
+    const addressIsPublic = dependencies.addressIsPublic ?? isPublicAddress;
+    return addresses !== null && addresses.length > 0 && addresses.every(addressIsPublic) ? addresses : null;
   } catch {
-    return false;
+    return null;
   } finally {
     if (onAbort) signal.removeEventListener("abort", onAbort);
   }
@@ -209,7 +323,9 @@ export async function fetchPublicPageText(
   const totalTimer = setTimeout(() => total.abort(), options.totalTimeoutMs);
   try {
     for (let redirects = 0; redirects <= options.maxRedirects; redirects += 1) {
-      if (!allowedUrl(current) || !(await publicHost(current.hostname, dependencies, total.signal)) || total.signal.aborted) return null;
+      if (!allowedUrl(current, dependencies)) return null;
+      const addresses = await publicAddresses(current.hostname, dependencies, total.signal);
+      if (!addresses || total.signal.aborted) return null;
       const request = new AbortController();
       const requestTimer = setTimeout(() => request.abort(), options.requestTimeoutMs);
       const abort = () => request.abort();
@@ -223,7 +339,7 @@ export async function fetchPublicPageText(
             Accept: "text/html,application/xhtml+xml,text/plain",
             "User-Agent": "AlongTheWay-SourceCheck/1.0",
           },
-        });
+        }, addresses);
         if (response.status >= 300 && response.status < 400) {
           await response.body?.cancel().catch(() => undefined);
           const location = response.headers.get("location");

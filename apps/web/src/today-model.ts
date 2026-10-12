@@ -19,7 +19,7 @@ export interface TodayItem {
   start: string | null;
   end: string | null;
   endpoints: Array<{ role: "start" | "end"; instant: string; timeZone: string; place: TodayPlace | null }>;
-  participants: Array<{ id: string; name: string }> | null;
+  participants: Array<{ id: string; name: string; removed: boolean | null }> | null;
   locked: boolean;
   constraints: Array<{ type: "fixed_time" | "immovable" | "minimum_buffer"; status: "confirmed" | "unknown" | "conflicted"; minutes: number | null }>;
   facts: Array<{ kind: TodayFact; value: string }>;
@@ -80,7 +80,7 @@ export function createTodayModel(trip: TripDto, skeleton: TripSkeletonDto, place
         return { role: endpoint.role, instant: endpoint.instant, timeZone: endpoint.timeZone,
           place: place ? { id: place.id, name: place.name, address: place.address, latitude: place.latitude, longitude: place.longitude } : null };
       }),
-      participants: item.participants?.map((person) => ({ id: person.memberId, name: person.displayName ?? person.email })) ?? null,
+      participants: item.participants?.map((person) => ({ id: person.memberId, name: person.displayName ?? person.email, removed: person.removed })) ?? null,
       locked: item.lockedAt !== null,
       constraints: item.constraints.map((constraint) => ({ type: constraint.type, status: constraint.status, minutes: constraint.minimumBufferMinutes })),
       facts: itemFacts(item), notes: item.notes, sourceUrl: item.sourceUrl,

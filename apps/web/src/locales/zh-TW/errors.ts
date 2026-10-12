@@ -40,7 +40,6 @@ export const errors = {
     internal: "發生未預期的錯誤。",
   },
   unknown: "無法完成要求。",
-  withDetail: (message: string, detail: string) => `${message} ${detail}`,
   currentVersion: (version: number) => `目前版本：${version}。`,
   reference: (correlationId: string) => `參考編號：${correlationId}`,
 };

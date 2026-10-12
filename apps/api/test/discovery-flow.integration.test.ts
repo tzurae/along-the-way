@@ -156,6 +156,8 @@ class ControlledDiscoveryModel implements DiscoveryModel {
   /** When set, research finds exactly these places, each cited by an official tourism page. */
   researchedPlaces: string[] | null = null;
   feedbackCalls = 0;
+  /** An unexpected failure to raise from feedback interpretation. */
+  feedbackFailure: Error | null = null;
   readonly planInputs: Array<Parameters<DiscoveryModel["plan"]>[0]> = [];
   readonly researchInputs: Array<Parameters<DiscoveryModel["research"]>[0]> = [];
   readonly feedbackInputs: Array<Parameters<DiscoveryModel["interpretFeedback"]>[0]> = [];
@@ -306,6 +308,7 @@ class ControlledDiscoveryModel implements DiscoveryModel {
       this.firstFeedbackStarted?.();
       await this.feedbackRelease;
     }
+    if (this.feedbackFailure) throw this.feedbackFailure;
     return {
       modelId: this.modelId,
       interests: ["food markets"],
@@ -642,6 +645,14 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
 
     const proposal = generated.proposals[0];
     if (!proposal) throw new Error("Expected proposal");
+    const oversizedProposalVersion = await discoveryRequest(
+      cookie,
+      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/reject`,
+      "oversized-proposal-version",
+      { expectedVersion: 2_147_483_648 },
+    );
+    expect(oversizedProposalVersion.status).toBe(400);
+    expect(await oversizedProposalVersion.json()).toMatchObject({ error: { code: "validation_error" } });
     const acceptance = () => discoveryRequest(
       cookie,
       `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/accept`,
@@ -709,6 +720,14 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(parseDiscoveryWorkspaceResponse(await otherWorkspaceResponse.json()).discovery.feedback[0]?.isOwn).toBe(false);
 
     if (!pendingFeedback) throw new Error("Expected feedback");
+    const oversizedFeedbackVersion = await discoveryRequest(
+      cookie,
+      `/api/trips/${trip.id}/discovery/feedback/${pendingFeedback.id}/decision`,
+      "oversized-feedback-version",
+      { expectedVersion: 2_147_483_648, decision: "confirm" },
+    );
+    expect(oversizedFeedbackVersion.status).toBe(400);
+    expect(await oversizedFeedbackVersion.json()).toMatchObject({ error: { code: "validation_error" } });
     // Fixture from the retained release: targeted feedback remains readable and reaches the model.
     await database.updateTable("discovery_feedback").set({ proposal_id: proposal.id })
       .where("id", "=", pendingFeedback.id).execute();
@@ -799,7 +818,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     };
     const settle = () => act(async () => { while (pending.length) await Promise.all(pending.splice(0)); });
     function button(label: string) {
-      const found = [...host.querySelectorAll("button")].find((entry) => entry.textContent?.trim() === label);
+      const found = [...document.querySelectorAll("button")].find((entry) => entry.textContent?.trim() === label);
       expect(found, label).toBeDefined();
       return found!;
     }
@@ -821,6 +840,16 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       expect(button("修改需求")).toBeDefined();
       expect.soft(model.researchInputs.at(-1)?.confirmedFeedback[0]).toContain(originalText);
       expect.soft(model.researchInputs.at(-1)?.confirmedFeedback[0]).not.toContain("Member-corrected interpretation");
+      await click("加入口袋名單");
+      const acceptedPlaces = parseTripPlaceListResponse(await request(`/api/trips/${trip.id}/trip-places`)).tripPlaces;
+      expect(acceptedPlaces.map((place) => place.name)).toContain("Nishiki Market");
+      await act(async () => root.render(createElement(DiscoveryWorkspace, {
+        trip: { ...trip, role: "editor" },
+        request,
+        placesRevision: 0,
+        onPlacesChanged() {},
+      })));
+      expect(host.textContent).toContain("大家都能投票支持喜歡的地點。");
     } finally {
       await settle();
       await act(async () => root.unmount());
@@ -1397,6 +1426,8 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       expect(removed.status).toBe(204);
       expect(await database.selectFrom("trip_place_contributions").select("id").where("trip_place_id", "=", place.id).execute()).toEqual([]);
     }
+    const empty = await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } });
+    expect(parseTripPlaceListResponse(await empty.json()).tripPlaces).toEqual([]);
     const workspace = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
     const reopened = parseDiscoveryWorkspaceResponse(await workspace.json()).discovery.proposals[0]!;
     expect(reopened).toMatchObject({
@@ -1405,8 +1436,6 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     });
     expect(await database.selectFrom("candidate_proposals").select(["decided_by", "decided_at"])
       .where("id", "=", proposal.id).executeTakeFirstOrThrow()).toEqual({ decided_by: null, decided_at: null });
-    const empty = await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } });
-    expect(parseTripPlaceListResponse(await empty.json()).tripPlaces).toEqual([]);
     if (removal !== "archived") {
       expect(await database.selectFrom("trip_place_votes").selectAll().where("trip_place_id", "=", place.id).execute()).toEqual([]);
       expect(await database.selectFrom("trip_place_day_assignments").selectAll().where("trip_place_id", "=", place.id).execute()).toEqual([]);
@@ -1601,134 +1630,45 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       .toEqual([expect.objectContaining({ id: canonical.id, status: "rejected" })]);
   });
 
-  it.each(["rejected", "accepted"] as const)("read-time repair preserves a newer %s decision for the same identity", async (newestStatus) => {
+  it("keeps discovery GET read-only when historical data contains a stale acceptance", async () => {
     const cookie = await login();
-    const trip = await createTrip(cookie, "Newer historical decision");
-    const ownerId = trip.members[0]!.userId;
-    const second = await database.insertInto("users").values({
-      email: "newer-decision@example.test", display_name: "Newer decision", status: "active",
-      created_at: now(), updated_at: now(),
-    }).returning("id").executeTakeFirstOrThrow();
-    await database.insertInto("trip_members").values({
-      trip_id: trip.id, user_id: second.id, role: "editor", removed_at: null,
-    }).execute();
-    const intake = await discoveryRequest(cookie, `/api/trips/${trip.id}/trip-places`, "newer-decision-place", {
-      method: "search", providerPlaceId: market.providerPlaceId, sourceUrl: market.sourceUrl, originalNote: null,
-    });
-    expect(intake.status).toBe(201);
-    const wishlistPlace = parseTripPlaceResponse(await intake.json()).tripPlace;
-    if (newestStatus === "rejected") {
-      // Old withdrawal left the accepted proposal pointing at an archived row.
-      await database.updateTable("trip_places").set({ archived_at: now() }).where("id", "=", wishlistPlace.id).execute();
-    }
-    const proposalIds: string[] = [];
-    for (const [index, status] of ["accepted", newestStatus].entries()) {
-      const run = await sql<{ id: string }>`
-        insert into discovery_runs (trip_id, brief_version, policy_version, model_id, status, search_plan, created_by, created_at)
-        values (${trip.id}, 1, 'historical', 'historical', 'completed', '{}'::jsonb, ${ownerId},
-          ${new Date(Date.UTC(2026, 8, 20 + index))})
-        returning id
-      `.execute(database);
-      // A deleted old wishlist row may leave a null reference while a newer acceptance uses an active row.
-      const acceptedPlaceId = status !== "accepted" || (newestStatus === "accepted" && index === 0)
-        ? null : wishlistPlace.id;
-      const actorId = index === 0 ? ownerId : second.id;
-      const proposal = await sql<{ id: string }>`
-        insert into candidate_proposals (
-          trip_id, run_id, provider_place_id, name, place_type, recommendation, matched_needs,
-          tradeoffs, unknowns, confidence, status, decided_by, decided_at, accepted_trip_place_id, version, created_at
-        ) values (
-          ${trip.id}, ${run.rows[0]!.id}, ${market.providerPlaceId}, ${market.name}, 'activity', 'Historical recommendation',
-          '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'medium', ${status}, ${actorId}, now(), ${acceptedPlaceId}::uuid,
-          4, ${new Date(Date.UTC(2026, 8, 27 - index))}
-        ) returning id
-      `.execute(database);
-      const id = proposal.rows[0]!.id;
-      proposalIds.push(id);
-      await database.insertInto("discovery_proposal_votes").values({
-        trip_id: trip.id, proposal_id: id, member_user_id: actorId,
-      }).execute();
-    }
-    // The canonical identity decision can belong to an earlier run than the trip's latest run.
-    await sql`
-      insert into discovery_runs (trip_id, brief_version, policy_version, model_id, status, search_plan, created_by, created_at)
-      values (${trip.id}, 1, 'historical', 'historical', 'completed', '{}'::jsonb, ${ownerId}, '2026-09-25T12:00:00Z')
-    `.execute(database);
-    const canonicalId = proposalIds[1]!;
-    const canonicalBefore = await database.selectFrom("candidate_proposals").selectAll()
-      .where("id", "=", canonicalId).executeTakeFirstOrThrow();
-    const votesBefore = await database.selectFrom("discovery_proposal_votes").selectAll()
-      .where("trip_id", "=", trip.id).orderBy("proposal_id").orderBy("member_user_id").execute();
-    const response = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
-    expect(response.status).toBe(200);
-    const workspace = parseDiscoveryWorkspaceResponse(await response.json()).discovery;
-    expect(workspace.proposals).toEqual([]);
-    expect(workspace.decided).toEqual([expect.objectContaining({ proposalId: canonicalId, status: newestStatus })]);
-    expect(await database.selectFrom("candidate_proposals").selectAll()
-      .where("id", "=", canonicalId).executeTakeFirstOrThrow()).toEqual(canonicalBefore);
-    expect(await database.selectFrom("discovery_proposal_votes").selectAll()
-      .where("trip_id", "=", trip.id).orderBy("proposal_id").orderBy("member_user_id").execute()).toEqual(votesBefore);
-    expect(await database.selectFrom("candidate_proposals")
-      .select(["status", "version", "reopened_at", "decided_by", "decided_at", "accepted_trip_place_id"])
-      .where("id", "=", proposalIds[0]!).executeTakeFirstOrThrow()).toEqual({
-        status: "pending", version: 5, reopened_at: null, decided_by: null, decided_at: null, accepted_trip_place_id: null,
-      });
-    expect((await database.selectFrom("trip_places").select("archived_at")
-      .where("id", "=", wishlistPlace.id).executeTakeFirstOrThrow()).archived_at === null).toBe(newestStatus === "accepted");
-    expect(await database.selectFrom("change_events").select("target_id")
-      .where("trip_id", "=", trip.id).where("event_type", "=", "discovery.proposal_reopened").execute())
-      .toEqual([{ target_id: proposalIds[0] }]);
-  });
-
-  it("repairs stale accepted proposals in concurrent discovery and wishlist reads without reversing trip locks", async () => {
-    const cookie = await login();
-    const trip = await createTrip(cookie, "Concurrent proposal repair");
+    const trip = await createTrip(cookie, "Read-only discovery projection");
     model.releasePlan();
-    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "repair-brief", {
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "readonly-brief", {
       originalText: "Food markets.", expectedVersion: null,
     })).status).toBe(200);
-    const generated = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "repair-generate", { expectedBriefVersion: 1 });
+    const generated = await discoveryRequest(
+      cookie,
+      `/api/trips/${trip.id}/discovery/generate`,
+      "readonly-generate",
+      { expectedBriefVersion: 1 },
+    );
     expect(generated.status).toBe(200);
     const proposal = parseDiscoveryWorkspaceResponse(await generated.json()).discovery.proposals[0]!;
-    const accepted = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/accept`,
-      "repair-accept", { expectedVersion: proposal.version });
+    const accepted = await discoveryRequest(
+      cookie,
+      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/accept`,
+      "readonly-accept",
+      { expectedVersion: proposal.version },
+    );
     expect(accepted.status).toBe(200);
     const acceptedProposal = parseDiscoveryWorkspaceResponse(await accepted.json()).discovery.proposals[0]!;
     await database.updateTable("trip_places").set({ archived_at: now() })
       .where("id", "=", acceptedProposal.acceptedTripPlaceId!).execute();
+    const proposalBefore = await database.selectFrom("candidate_proposals").selectAll()
+      .where("id", "=", proposal.id).executeTakeFirstOrThrow();
+    const eventsBefore = await database.selectFrom("change_events").selectAll()
+      .where("trip_id", "=", trip.id).orderBy("id").execute();
 
-    let requests: Promise<Response>[] = [];
-    let responses: Response[] = [];
-    try {
-      await database.transaction().execute(async (gate) => {
-        await gate.selectFrom("trips").select("id").where("id", "=", trip.id).forUpdate().executeTakeFirstOrThrow();
-        requests = [
-          Promise.resolve(app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } })),
-          Promise.resolve(app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } })),
-        ];
-        const deadline = Date.now() + 5_000;
-        while (true) {
-          const waiting = await sql<{ count: number }>`
-            select count(*)::integer as count from pg_stat_activity
-            where datname = current_database() and wait_event_type = 'Lock'
-          `.execute(database);
-          if (waiting.rows[0]!.count >= 2) break;
-          if (Date.now() >= deadline) throw new Error("Concurrent reads did not reach the trip lock barrier");
-        }
-        // Both reads must wait for the trip before taking the proposal row lock.
-        // A lock-free discovery repair would already hold it while waiting for its event's trip FK.
-        await sql`select id from candidate_proposals where id = ${proposal.id} for update nowait`.execute(gate);
-      });
-    } finally {
-      responses = await Promise.all(requests);
-    }
-    expect(responses.map((response) => response.status)).toEqual([200, 200]);
-    expect(parseDiscoveryWorkspaceResponse(await responses[0]!.json()).discovery.proposals[0])
-      .toMatchObject({ id: proposal.id, status: "pending", acceptedTripPlaceId: null, version: acceptedProposal.version + 1 });
-    expect(parseTripPlaceListResponse(await responses[1]!.json()).tripPlaces).toEqual([]);
-    expect(await database.selectFrom("change_events").select("target_id")
-      .where("trip_id", "=", trip.id).where("event_type", "=", "discovery.proposal_reopened").execute())
-      .toEqual([{ target_id: proposal.id }]);
+    const response = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
+
+    expect(response.status).toBe(200);
+    expect(parseDiscoveryWorkspaceResponse(await response.json()).discovery.proposals[0])
+      .toMatchObject({ id: proposal.id, status: "accepted", acceptedTripPlaceId: acceptedProposal.acceptedTripPlaceId });
+    expect(await database.selectFrom("candidate_proposals").selectAll()
+      .where("id", "=", proposal.id).executeTakeFirstOrThrow()).toEqual(proposalBefore);
+    expect(await database.selectFrom("change_events").selectAll()
+      .where("trip_id", "=", trip.id).orderBy("id").execute()).toEqual(eventsBefore);
   });
 
   it("keeps earlier decisions and reopens only previously accepted candidates after a newer run", async () => {
@@ -2059,6 +1999,75 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       isOwn: false,
     });
     expect(model.planCalls).toBe(0);
+  });
+
+  it("replays billed feedback when the same UUID path uses different letter casing", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie, "Canonical feedback UUID");
+    model.releaseFeedback();
+    const body = { originalText: "Prefer quiet gardens." };
+    const first = await discoveryRequest(
+      cookie,
+      `/api/trips/${trip.id}/discovery/feedback`,
+      "canonical-feedback",
+      body,
+    );
+    const replay = await discoveryRequest(
+      cookie,
+      `/api/trips/${trip.id.toUpperCase()}/discovery/feedback`,
+      "canonical-feedback",
+      body,
+    );
+
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(await first.json());
+    expect(model.feedbackCalls).toBe(1);
+  });
+
+  it("caps billed feedback interpretation requests across distinct idempotency keys", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie, "Feedback request limit");
+    model.releaseFeedback();
+
+    for (let index = 0; index < 10; index += 1) {
+      const response = await discoveryRequest(
+        cookie,
+        `/api/trips/${trip.id}/discovery/feedback`,
+        `limited-feedback-${index}`,
+        { originalText: `Prefer quiet garden number ${index}.` },
+      );
+      expect(response.status).toBe(200);
+    }
+    const limited = await discoveryRequest(
+      cookie,
+      `/api/trips/${trip.id}/discovery/feedback`,
+      "limited-feedback-10",
+      { originalText: "This request must not incur another model call." },
+    );
+
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toMatchObject({ error: { code: "research_limit_reached" } });
+    expect(model.feedbackCalls).toBe(10);
+  });
+
+  it("releases feedback requests after an unexpected failure so retries do not stay in progress", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie, "Feedback failure retry");
+    model.releaseFeedback();
+    model.feedbackFailure = new TypeError("unexpected");
+    const feedback = () => discoveryRequest(
+      cookie,
+      `/api/trips/${trip.id}/discovery/feedback`,
+      "feedback-failure",
+      { originalText: "Prefer quiet gardens." },
+    );
+
+    expect((await feedback()).status).toBe(500);
+    const retry = await feedback();
+
+    expect(retry.status).toBe(503);
+    expect(model.feedbackCalls).toBe(1);
   });
 
   it("releases the request after an unexpected failure so a retry is not stuck in progress", async () => {

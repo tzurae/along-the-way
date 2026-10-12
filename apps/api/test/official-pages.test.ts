@@ -1,6 +1,11 @@
+import { once } from "node:events";
+import { readFile } from "node:fs/promises";
+import { createServer } from "node:https";
+
 import { describe, expect, it } from "vitest";
 
 import {
+  fetchPinnedAddress,
   fetchPublicPageText,
   htmlText,
   isOfficialTourismSource,
@@ -79,6 +84,73 @@ describe("public page fetching", () => {
     const privateHost = dependencies(pages, { "intranet.example.test": ["10.0.0.5"] });
     expect(await fetchPublicPageText("https://intranet.example.test/", privateHost)).toBeNull();
     expect(privateHost.requested).toEqual([]);
+  });
+
+  it("pins the public DNS result for the request so rebinding cannot reach a private address", async () => {
+    const connectedAddresses: string[][] = [];
+    const network: PublicPageDependencies = {
+      async resolveHost() {
+        return ["93.184.216.34"];
+      },
+      async fetch(_input, _init, addresses) {
+        connectedAddresses.push([...addresses]);
+        return new Response("東福寺", { headers: { "content-type": "text/plain" } });
+      },
+    };
+
+    expect(await fetchPublicPageText("https://rebind.example.test/", network)).toBe("東福寺");
+    expect(connectedAddresses).toEqual([["93.184.216.34"]]);
+  });
+
+  it("settles bodyless statuses and stream errors through the real pinned HTTPS transport", async () => {
+    const [certificate, key] = await Promise.all([
+      readFile(new URL("fixtures/localhost-test.crt", import.meta.url), "utf8"),
+      readFile(new URL("fixtures/localhost-test.key", import.meta.url), "utf8"),
+    ]);
+    const server = createServer({ cert: certificate, key }, (request, response) => {
+      if (request.url === "/broken") {
+        response.writeHead(200, { "content-type": "text/plain" });
+        response.flushHeaders();
+        response.write("partial");
+        setImmediate(() => response.destroy(new Error("test stream failure")));
+        return;
+      }
+      const status = Number(request.url?.slice(1)) || 200;
+      response.writeHead(status, status === 200 ? { "content-type": "text/plain" } : {});
+      response.end(status === 200 ? "東福寺" : undefined);
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Expected a TCP test server");
+    const port = String(address.port);
+    const network: PublicPageDependencies = {
+      allowedPorts: [port],
+      addressIsPublic: (candidate) => candidate === "127.0.0.1",
+      async resolveHost() {
+        return ["127.0.0.1"];
+      },
+      fetch(input, init, addresses) {
+        return fetchPinnedAddress(input, init, addresses, { ca: certificate });
+      },
+    };
+    try {
+      expect(await fetchPublicPageText(`https://localhost:${port}/200`, network)).toBe("東福寺");
+      for (const status of [204, 205, 304]) {
+        expect(await fetchPublicPageText(`https://localhost:${port}/${status}`, network)).toBeNull();
+      }
+      expect(await fetchPublicPageText(`https://localhost:${port}/broken`, network)).toBeNull();
+      const head = await fetchPinnedAddress(
+        `https://localhost:${port}/200`,
+        { method: "HEAD" },
+        ["127.0.0.1"],
+        { ca: certificate },
+      );
+      expect(await head.text()).toBe("");
+    } finally {
+      server.close();
+      await once(server, "close");
+    }
   });
 
   it("re-checks every redirect target before following it", async () => {

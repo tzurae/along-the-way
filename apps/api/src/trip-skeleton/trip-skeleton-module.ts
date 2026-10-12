@@ -11,6 +11,9 @@ import type {
   UpdatePlaceInput,
 } from "@along-the-way/contracts/trip-skeleton";
 
+export const MAX_ITINERARY_ITEM_CONSTRAINTS = 20;
+export const MAX_ITINERARY_ITEM_PARTICIPANTS = 100;
+
 export interface TripSkeletonModule {
   getSkeleton(userId: string, tripId: string): Promise<TripSkeletonDto>;
   createFlight(userId: string, tripId: string, idempotencyKey: string, expectedTripVersion: number, input: TripFlightInput): Promise<ItineraryItemDto>;

@@ -884,7 +884,7 @@
 .pd-discovery > div > section > h3 { font-size: 20px; }
 .pd-discovery details > summary { cursor: pointer; font-size: 14px; font-weight: 700; }
 .pd-discovery .pd-row-actions button { border-radius: 999px; font-size: 13px; }
-.pd-titlebutton { max-width: 100%; min-height: 36px; }
+.pd-titlebutton { max-width: 100%; min-height: 44px; }
 @media (max-width: 599.98px) {
   .pd-pagehead {
     flex-wrap: wrap;

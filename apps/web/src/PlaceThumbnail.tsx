@@ -88,10 +88,11 @@ export function usePlacePreviews({
 
 export function PlaceThumbnail({ photo, loading = false }: { photo: PlaceDisplayPhoto | null | undefined; loading?: boolean }) {
   const photoKey = photo ? `${photo.id}\u0000${photo.thumbnailUrl}` : null;
-  const [failedPhotoKey, setFailedPhotoKey] = useState<string | null>(null);
-  const failed = photoKey !== null && failedPhotoKey === photoKey;
-
-  useEffect(() => setFailedPhotoKey(null), [photoKey]);
+  const [failure, setFailure] = useState({ photoKey, failed: false });
+  if (failure.photoKey !== photoKey) {
+    setFailure({ photoKey, failed: false });
+  }
+  const failed = failure.photoKey === photoKey && failure.failed;
 
   return (
     <span
@@ -109,7 +110,7 @@ export function PlaceThumbnail({ photo, loading = false }: { photo: PlaceDisplay
           alt=""
           loading="lazy"
           decoding="async"
-          onError={() => setFailedPhotoKey(photoKey)}
+          onError={() => setFailure({ photoKey, failed: true })}
         />
       ) : null}
       {!loading && (!photo || failed) ? <span className="place-thumbnail__empty" /> : null}

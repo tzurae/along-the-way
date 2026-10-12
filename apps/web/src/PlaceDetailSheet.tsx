@@ -45,7 +45,7 @@ export function PlaceDetailSheet({ open, title, description, onClose, titleRef, 
             <DialogTitle ref={titleReference} tabIndex={-1} className="place-detail-sheet__title">{title}</DialogTitle>
             {description != null ? <div className="place-detail-sheet__description">{description}</div> : null}
           </div>
-          <button type="button" className="place-detail-sheet__close" aria-label={t.app.close} onClick={onClose}>
+          <button type="button" className="place-detail-sheet__close min-h-11 min-w-11" aria-label={t.app.close} onClick={onClose}>
             <X aria-hidden="true" className="size-5" />
           </button>
         </header>

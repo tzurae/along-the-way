@@ -589,6 +589,61 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     expect(await readSkeleton(cookie, trip.id)).toEqual(before);
   });
 
+
+  it("rejects an itinerary item with more constraints than a family trip can use", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    const place = await createPlace(cookie, trip.id, "bounded-item-place", {
+      name: "Bounded activity", type: "activity", timeZone: "Asia/Tokyo",
+    });
+    const rejected = await mutate(cookie, `/api/trips/${trip.id}/items`, "bounded-item-constraints", {
+      type: "activity",
+      title: "Too many constraints",
+      participantMemberIds: null,
+      endpoints: [{
+        role: "start",
+        countryStopId: trip.countryStops[0]!.id,
+        placeId: place.id,
+        localDateTime: "2026-10-22T10:00",
+        timeZone: "Asia/Tokyo",
+      }],
+      details: { durationMinutes: 60, bookedBy: null, confirmationStatus: "unknown" },
+      constraints: Array.from({ length: 21 }, () => ({
+        type: "fixed_time",
+        status: "unknown",
+        minimumBufferMinutes: null,
+      })),
+      expectedTripVersion: await currentTripVersion(cookie, trip.id),
+    });
+
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toMatchObject({ error: { code: "validation_error" } });
+    expect((await readSkeleton(cookie, trip.id)).items.some((item) => item.title === "Too many constraints")).toBe(false);
+  });
+
+  it("uses IDs to keep equally-timestamped places in a stable user-visible order", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    const createdAt = new Date("2026-10-01T00:00:00.000Z");
+    const ownerId = trip.members[0]!.userId;
+    const highId = "00000000-0000-4000-8000-000000000002";
+    const lowId = "00000000-0000-4000-8000-000000000001";
+    await database.insertInto("places").values([
+      {
+        id: highId, trip_id: trip.id, name: "Same-time high", place_type: "other",
+        created_by: ownerId, created_at: createdAt, updated_at: createdAt,
+      },
+      {
+        id: lowId, trip_id: trip.id, name: "Same-time low", place_type: "other",
+        created_by: ownerId, created_at: createdAt, updated_at: createdAt,
+      },
+    ]).execute();
+
+    expect((await readSkeleton(cookie, trip.id)).places
+      .filter((place) => place.name.startsWith("Same-time"))
+      .map((place) => place.id)).toEqual([lowId, highId]);
+  });
+
   it("keeps unchanged mixed-use legacy airport and hotel endpoints on dedicated PATCH", async () => {
     const cookie = await login();
     const trip = await createTrip(cookie);
@@ -748,6 +803,33 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     expect(oneSided.status).toBe(400);
     expect(await oneSided.json()).toMatchObject({ error: { code: "validation_error" } });
     expect((await readSkeleton(cookie, trip.id)).places.find((place) => place.id === placeId)).toEqual(afterClear);
+  });
+
+  it("accepts canonical-equivalent uppercase UUIDs in itinerary endpoint JSON", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    const place = await createPlace(cookie, trip.id, "uppercase-endpoint-place", {
+      name: "Uppercase endpoint", type: "activity", timeZone: "Asia/Tokyo",
+    });
+    const response = await mutate(cookie, `/api/trips/${trip.id}/items`, "uppercase-endpoint", {
+      type: "activity",
+      title: "Uppercase endpoint activity",
+      participantMemberIds: null,
+      endpoints: [{
+        role: "start",
+        countryStopId: trip.countryStops[0]!.id.toUpperCase(),
+        placeId: place.id.toUpperCase(),
+        localDateTime: "2026-10-22T10:00",
+        timeZone: "Asia/Tokyo",
+      }],
+      details: { durationMinutes: 60, bookedBy: null, confirmationStatus: "unknown" },
+      expectedTripVersion: await currentTripVersion(cookie, trip.id),
+    });
+    expect(response.status).toBe(201);
+    expect(parseItineraryItemResponse(await response.json()).item.endpoints[0]).toMatchObject({
+      countryStopId: trip.countryStops[0]!.id,
+      placeId: place.id,
+    });
   });
 
   it("reloads independent activities and changes a shared party without duplicating the item", async () => {
@@ -2603,6 +2685,80 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     expect(forbiddenPlace).toBeUndefined();
   });
 
+  it("rejects version numbers outside PostgreSQL integer bounds before querying", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    const place = await createPlace(cookie, trip.id, "oversized-version-place", {
+      name: "Oversized version place", type: "activity", timeZone: "Asia/Tokyo",
+    });
+    const oversized = 2_147_483_648;
+    const itemPayload = {
+      type: "activity",
+      title: "Must not be created",
+      participantMemberIds: null,
+      endpoints: [{
+        role: "start",
+        countryStopId: trip.countryStops[0]!.id,
+        placeId: place.id,
+        localDateTime: "2026-10-22T10:00",
+        timeZone: "Asia/Tokyo",
+      }],
+      details: { durationMinutes: 60, bookedBy: null, confirmationStatus: "unknown" },
+    };
+    const invalidCreate = await mutate(cookie, `/api/trips/${trip.id}/items`, "oversized-trip-version", {
+      ...itemPayload, expectedTripVersion: oversized,
+    });
+    expect(invalidCreate.status).toBe(400);
+    expect(await invalidCreate.json()).toMatchObject({ error: { code: "validation_error" } });
+
+    const invalidPlaceUpdate = await mutate(
+      cookie,
+      `/api/trips/${trip.id}/places/${place.id}`,
+      "oversized-place-version",
+      { ...place, expectedVersion: oversized },
+      "PATCH",
+    );
+    expect(invalidPlaceUpdate.status).toBe(400);
+    expect(await invalidPlaceUpdate.json()).toMatchObject({ error: { code: "validation_error" } });
+
+    const createdResponse = await mutate(cookie, `/api/trips/${trip.id}/items`, "version-bounds-item", {
+      ...itemPayload, expectedTripVersion: await currentTripVersion(cookie, trip.id),
+    });
+    const item = parseItineraryItemResponse(await createdResponse.json()).item;
+    const constrainedResponse = await mutate(
+      cookie,
+      `/api/trips/${trip.id}/items/${item.id}/constraints`,
+      "version-bounds-constraint",
+      {
+        expectedItemVersion: item.version,
+        type: "minimum_buffer",
+        status: "unknown",
+        minimumBufferMinutes: 30,
+      },
+    );
+    const constrained = parseItineraryItemResponse(await constrainedResponse.json()).item;
+    const constraint = constrained.constraints[0]!;
+    for (const [method, key] of [["PATCH", "oversized-constraint-update"], ["DELETE", "oversized-constraint-delete"]] as const) {
+      const response = await mutate(
+        cookie,
+        `/api/trips/${trip.id}/items/${item.id}/constraints/${constraint.id}`,
+        key,
+        {
+          expectedItemVersion: constrained.version,
+          expectedVersion: oversized,
+          ...(method === "PATCH"
+            ? { type: "minimum_buffer", status: "confirmed", minimumBufferMinutes: 30 }
+            : {}),
+        },
+        method,
+      );
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code: "validation_error" } });
+    }
+    expect((await readSkeleton(cookie, trip.id)).items.find((entry) => entry.id === item.id))
+      .toEqual(constrained);
+  });
+
   it("creates updates and deletes versioned constraint states", async () => {
     const cookie = await login();
     const trip = await createTrip(cookie);
@@ -2651,6 +2807,22 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     });
     const item = parseItineraryItemResponse(await itemResponse.json()).item;
 
+
+    const oversized = await mutate(
+      cookie,
+      `/api/trips/${trip.id}/items/${item.id}/constraints`,
+      "oversized-minimum-buffer",
+      {
+        expectedItemVersion: item.version,
+        type: "minimum_buffer",
+        status: "unknown",
+        minimumBufferMinutes: 2_147_483_648,
+      },
+    );
+    expect(oversized.status).toBe(400);
+    expect(await oversized.json()).toMatchObject({ error: { code: "validation_error" } });
+    expect((await readSkeleton(cookie, trip.id)).items.find((entry) => entry.id === item.id))
+      .toMatchObject({ version: item.version, constraints: [] });
     const createdResponse = await app.request(
       `/api/trips/${trip.id}/items/${item.id}/constraints`,
       {

@@ -7,8 +7,8 @@ import type {
 
 /** All reads authorize membership before resolving a trip-scoped reference; none mutate trip data. */
 export interface PlaceDetailModule {
-  getDetail(userId: string, tripId: string, reference: PlaceDetailReference, date: string | null): Promise<PlaceDetailDto>;
-  getPreviews(userId: string, tripId: string, kind: PlaceDetailReferenceKind, ids: string[]): Promise<PlacePreviewDto[]>;
+  getDetail(userId: string, tripId: string, reference: PlaceDetailReference, date: string | null, includeGooglePhoto?: boolean): Promise<PlaceDetailDto>;
+  getPreviews(userId: string, tripId: string, kind: PlaceDetailReferenceKind, ids: string[], includeGooglePhoto?: boolean): Promise<PlacePreviewDto[]>;
   getPhotoAsset(userId: string, tripId: string, reference: PlaceDetailReference, filename: string): Promise<{
     bytes: Uint8Array<ArrayBuffer>;
     mediaType: "image/jpeg" | "image/png" | "image/webp";
@@ -19,5 +19,7 @@ export interface PlaceDetailModule {
     providerPlaceId: string,
     photoFingerprint: string,
     maxWidth: 192 | 1024,
+    capabilityExpiry?: string | null,
+    capabilitySignature?: string | null,
   ): Promise<{ bytes: Uint8Array<ArrayBuffer>; mediaType: string }>;
 }

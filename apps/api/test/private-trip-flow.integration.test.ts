@@ -60,6 +60,30 @@ class CapturingEmailSender implements EmailSender {
     this.invites.push(message);
   }
 }
+class ScriptedEmailSender implements EmailSender {
+  attempts = 0;
+
+  constructor(private readonly failures: unknown[]) {}
+
+  private async deliver() {
+    const failure = this.failures[this.attempts];
+    this.attempts += 1;
+    if (failure) throw failure;
+  }
+
+  async sendMagicLink() {
+    await this.deliver();
+  }
+
+  async sendTripInvite() {
+    await this.deliver();
+  }
+}
+
+function smtpError(responseCode: number) {
+  return Object.assign(new Error(`SMTP ${responseCode}`), { responseCode });
+}
+
 
 function body(value: unknown) {
   return JSON.stringify(value);
@@ -82,6 +106,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
   let email: CapturingEmailSender;
   let now: Date;
   let tokenNumber: number;
+  let tokenIssuer: TokenIssuer;
   let app: Hono;
   let emailWorker: PostgresEmailWorker;
 
@@ -126,7 +151,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     now = new Date("2026-09-27T12:00:00.000Z");
     tokenNumber = 0;
     const tokenSecret = "integration-test-token-secret-at-least-thirty-two-bytes";
-    const tokenIssuer = new TokenIssuer(tokenSecret);
+    tokenIssuer = new TokenIssuer(tokenSecret);
     const identityAccess = new PostgresIdentityAccessModule({
       database,
       tokenIssuer,
@@ -156,7 +181,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         () => new Date(now),
       ),
       readiness: new PostgresReadinessProbe(database, () => new Date(now)),
-      siteAddress: "https://app.example.test",
+      siteAddress: "HTTPS://app.example.test",
       tripSkeleton: new PostgresTripSkeletonModule({
         database,
         now: () => new Date(now),
@@ -285,6 +310,203 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     });
   }
 
+  it("rejects oversized API bodies before auth work or route parsing", async () => {
+    const oversizedAuth = await app.request("/api/auth/magic-links", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://app.example.test",
+      },
+      body: body({ email: `${"a".repeat(9 * 1_024)}@example.test` }),
+    });
+    expect(oversizedAuth.status).toBe(413);
+    expect(await oversizedAuth.json()).toMatchObject({
+      error: { code: "payload_too_large" },
+    });
+    expect(Number((await database
+      .selectFrom("rate_limit_windows")
+      .select(({ fn }) => fn.countAll<number>().as("count"))
+      .executeTakeFirstOrThrow()).count)).toBe(0);
+    expect(Number((await database
+      .selectFrom("magic_link_tokens")
+      .select(({ fn }) => fn.countAll<number>().as("count"))
+      .executeTakeFirstOrThrow()).count)).toBe(0);
+
+    const normalAuth = await requestMagicLink("owner@example.test");
+    expect(normalAuth.status).toBe(202);
+    const token = linkToken(email.magicLinks.at(-1)!.url, "magicToken")!;
+    const consume = await consumeMagicLink(token);
+    expect(consume.status).toBe(200);
+
+    const oversizedTrip = await app.request("/api/trips", {
+      method: "POST",
+      headers: {
+        cookie: cookieFrom(consume),
+        "content-type": "application/json",
+        "idempotency-key": "oversized-trip",
+        origin: "https://app.example.test",
+      },
+      body: body({ name: "x".repeat(2 * 1_024 * 1_024 + 1) }),
+    });
+    expect(oversizedTrip.status).toBe(413);
+    expect(await oversizedTrip.json()).toMatchObject({
+      error: { code: "payload_too_large" },
+    });
+    const largeButAllowedTrip = await app.request("/api/trips", {
+      method: "POST",
+      headers: {
+        cookie: cookieFrom(consume),
+        "content-type": "application/json",
+        "idempotency-key": "large-allowed-trip",
+        origin: "https://app.example.test",
+      },
+      body: body({ name: "x".repeat(1_500_000) }),
+    });
+    expect(largeButAllowedTrip.status).toBe(400);
+    expect(await largeButAllowedTrip.json()).toMatchObject({
+      error: { code: "validation_error" },
+    });
+  });
+
+  it("keeps retrying transient email failures and delivers after recovery", async () => {
+    const owner = await login("owner@example.test");
+    const trip = (await createTrip(owner.cookie, "transient-email-failure")).trip;
+    const queued = await app.request(`/api/trips/${trip.id}/invites`, {
+      method: "POST",
+      headers: {
+        cookie: owner.cookie,
+        "content-type": "application/json",
+        "idempotency-key": "transient-email-failure",
+        origin: "https://app.example.test",
+      },
+      body: body({ email: "temporarily-unavailable@example.test" }),
+    });
+    expect(queued.status).toBe(201);
+
+    const scriptedEmail = new ScriptedEmailSender(
+      Array.from({ length: 5 }, () => smtpError(451)),
+    );
+    const retryingWorker = new PostgresEmailWorker({
+      database,
+      emailSender: scriptedEmail,
+      siteAddress: "https://app.example.test",
+      tokenIssuer,
+      now: () => new Date(now),
+    });
+    for (const delaySeconds of [30, 120, 600, 3_600, 21_600]) {
+      expect(await retryingWorker.runOnce()).toBe(true);
+      now = new Date(now.valueOf() + delaySeconds * 1_000);
+    }
+    expect(await retryingWorker.runOnce()).toBe(true);
+    const deliveredJob = await database
+      .selectFrom("email_jobs")
+      .select(["attempt_count", "delivered_at", "failed_at"])
+      .where("recipient", "=", "temporarily-unavailable@example.test")
+      .executeTakeFirstOrThrow();
+    expect(deliveredJob.attempt_count).toBe(5);
+    expect(deliveredJob.delivered_at).not.toBeNull();
+    expect(deliveredJob.failed_at).toBeNull();
+    expect(scriptedEmail.attempts).toBe(6);
+  });
+
+  it("terminal-fails a definitive permanent SMTP rejection immediately", async () => {
+    const owner = await login("owner@example.test");
+    const trip = (await createTrip(owner.cookie, "permanent-email-failure")).trip;
+    const queued = await app.request(`/api/trips/${trip.id}/invites`, {
+      method: "POST",
+      headers: {
+        cookie: owner.cookie,
+        "content-type": "application/json",
+        "idempotency-key": "permanent-email-failure",
+        origin: "https://app.example.test",
+      },
+      body: body({ email: "undeliverable@example.test" }),
+    });
+    expect(queued.status).toBe(201);
+
+    const scriptedEmail = new ScriptedEmailSender([smtpError(550)]);
+    const failingWorker = new PostgresEmailWorker({
+      database,
+      emailSender: scriptedEmail,
+      siteAddress: "https://app.example.test",
+      tokenIssuer,
+      now: () => new Date(now),
+    });
+    expect(await failingWorker.runOnce()).toBe(true);
+    const failedJob = await database
+      .selectFrom("email_jobs")
+      .select(["attempt_count", "delivered_at", "failed_at"])
+      .where("recipient", "=", "undeliverable@example.test")
+      .executeTakeFirstOrThrow();
+    expect(failedJob.attempt_count).toBe(1);
+    expect(failedJob.delivered_at).toBeNull();
+    expect(failedJob.failed_at).not.toBeNull();
+    expect(scriptedEmail.attempts).toBe(1);
+
+    now = new Date(now.valueOf() + 24 * 60 * 60 * 1_000);
+    expect(await failingWorker.runOnce()).toBe(false);
+    expect(scriptedEmail.attempts).toBe(1);
+  });
+
+  it("rate-limits invalid magic-link consumption by IP without blocking a later valid link", async () => {
+    expect((await requestMagicLink("owner@example.test")).status).toBe(202);
+    const validToken = linkToken(email.magicLinks.at(-1)!.url, "magicToken")!;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const invalid = await consumeMagicLink(`invalid-token-${attempt}`);
+      expect(invalid.status).toBe(400);
+    }
+
+    const limited = await consumeMagicLink("invalid-token-limited");
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBeTruthy();
+    expect(await limited.json()).toMatchObject({
+      error: { code: "rate_limited" },
+    });
+
+    now = new Date(now.valueOf() + 10 * 60 * 1_000);
+    const valid = await consumeMagicLink(validToken);
+    expect(valid.status).toBe(200);
+    expect(parseMagicLinkConsumeResponse(await valid.json()).user.email)
+      .toBe("owner@example.test");
+  });
+
+  it("keeps a session valid for 30 days after a request inside the persistence interval", async () => {
+    const initial = new Date(now);
+    const owner = await login("owner@example.test");
+
+    now = new Date(initial.valueOf() + 11 * 60 * 60 * 1_000);
+    expect((await app.request("/api/session", {
+      headers: { cookie: owner.cookie },
+    })).status).toBe(200);
+
+    now = new Date(initial.valueOf() + 30 * 24 * 60 * 60 * 1_000);
+    expect((await app.request("/api/session", {
+      headers: { cookie: owner.cookie },
+    })).status).toBe(200);
+    await database.updateTable("sessions")
+      .set({ expires_at: new Date(now.valueOf() - 1) })
+      .execute();
+    expect((await app.request("/api/session", {
+      headers: { cookie: owner.cookie },
+    })).status).toBe(401);
+  });
+
+  it("gives a session stored by the previous release a full 30 days after its next use", async () => {
+    const initial = new Date(now);
+    const owner = await login("owner@example.test");
+    // Previous-release row shape: expiry exactly 30 days after last_seen_at, no slack.
+    await database.updateTable("sessions")
+      .set({ last_seen_at: initial, expires_at: new Date(initial.valueOf() + 30 * 24 * 60 * 60 * 1_000) })
+      .execute();
+
+    now = new Date(initial.valueOf() + 23 * 60 * 60 * 1_000);
+    expect((await app.request("/api/session", { headers: { cookie: owner.cookie } })).status).toBe(200);
+
+    // 29 days 13 hours after that last use: still inside the promised 30-day idle window.
+    now = new Date(initial.valueOf() + 30 * 24 * 60 * 60 * 1_000 + 12 * 60 * 60 * 1_000);
+    expect((await app.request("/api/session", { headers: { cookie: owner.cookie } })).status).toBe(200);
+  });
+
   it("uses indistinguishable requests, hashed one-time links, sliding sessions, and logout", async () => {
     const unknown = await requestMagicLink("unknown@example.test");
     const known = await requestMagicLink("owner@example.test");
@@ -333,6 +555,17 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     const session = await app.request("/api/session", { headers: { cookie } });
     expect(session.status).toBe(200);
     expect(session.headers.get("set-cookie")).toContain("Max-Age=2592000");
+    const persistedSession = await database
+      .selectFrom("sessions")
+      .select(["last_seen_at", "expires_at"])
+      .executeTakeFirstOrThrow();
+    now = new Date("2026-10-10T13:00:00.000Z");
+    expect((await app.request("/api/session", { headers: { cookie } })).status).toBe(200);
+    const repeatedSession = await database
+      .selectFrom("sessions")
+      .select(["last_seen_at", "expires_at"])
+      .executeTakeFirstOrThrow();
+    expect(repeatedSession).toEqual(persistedSession);
 
     const missingOrigin = await app.request("/api/logout", {
       method: "POST",
@@ -781,6 +1014,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     const created = await createTrip(owner.cookie);
     const tripId = created.trip.id;
 
+
     const overlongInvite = await app.request(`/api/trips/${tripId}/invites`, {
       method: "POST",
       headers: {
@@ -873,6 +1107,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       }
     }
 
+
     const secondTrip = await createTrip(owner.cookie, "create-second-invite-scope");
     const secondInvitation = await invite(
       owner.cookie,
@@ -933,6 +1168,20 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       "outsider@example.test",
       "invite-outsider",
     );
+    const ownerWithPendingInvite = parseTripResponse(
+      await (await app.request(`/api/trips/${tripId}`, {
+        headers: { cookie: owner.cookie },
+      })).json(),
+    ).trip;
+    expect(ownerWithPendingInvite.invites).toContainEqual(
+      expect.objectContaining({ id: outsiderInvite.inviteId, email: "outsider@example.test" }),
+    );
+    const editorWithPendingInvite = parseTripResponse(
+      await (await app.request(`/api/trips/${tripId}`, {
+        headers: { cookie: editorSessions[0]!.cookie },
+      })).json(),
+    ).trip;
+    expect(editorWithPendingInvite.invites).toEqual([]);
     const outsider = await login("outsider@example.test");
     const hidden = await app.request(`/api/trips/${tripId}`, {
       headers: { cookie: outsider.cookie },
@@ -975,7 +1224,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     );
     expect(revoke.status).toBe(204);
     const replayedRevoke = await app.request(
-      `/api/trips/${tripId}/invites/${revokedInvite.inviteId}`,
+      `/api/trips/${tripId.toUpperCase()}/invites/${revokedInvite.inviteId.toUpperCase()}`,
       {
         method: "DELETE",
         headers: {

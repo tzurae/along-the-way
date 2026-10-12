@@ -121,7 +121,14 @@ function duplicateReason(reason: string, t: Messages["tripPlaces"]) {
 }
 
 function errorMessage(error: unknown, fallback: string) {
-  return error instanceof Error ? error.message : fallback;
+  if (!(error instanceof ApiRequestError)) return fallback;
+  if (error.code === "provider_unavailable") {
+    return "Google 地點服務暫時無法使用，請稍後再試或改用手動輸入。";
+  }
+  if (error.code === "rate_limited") return "操作太頻繁，請稍後再試。";
+  if (error.code === "conflict") return "旅程資料已更新，請重新載入後再試。";
+  if (error.code === "voting_unavailable") return "至少需要兩位旅程成員才能投票。";
+  return fallback;
 }
 
 type RetryKeys = Map<string, { fingerprint: string; key: string }>;
@@ -1027,7 +1034,7 @@ export function TripPlaceWorkspace({
     } catch (error) {
       setScheduleError(error instanceof ApiRequestError && (error.code === "forbidden" || error.status === 403)
         ? schedule.ownerOnlyAction
-        : error instanceof ApiRequestError ? error.message : t.errors.requestFailed);
+        : errorMessage(error, t.errors.requestFailed));
       try {
         await refreshPlaces();
       } catch {
@@ -1254,7 +1261,7 @@ export function TripPlaceWorkspace({
                     <div className="pd-titleline">
                       {selecting
                         ? <span className="pd-titlebutton">{place.name}</span>
-                        : <button type="button" data-place-detail-trigger={place.id} className="pd-titlebutton" aria-label={t.workspace.viewDetail(place.name)} onClick={() => openDetail(place.id)}>{place.name}</button>}
+                        : <button type="button" data-place-detail-trigger={place.id} className="pd-titlebutton min-h-11" aria-label={t.workspace.viewDetail(place.name)} onClick={() => openDetail(place.id)}>{place.name}</button>}
                       <span className="pd-chip">{t.placeType[place.type]}</span>
                       {canSchedule && selecting ? selectionCheckbox(place, "mobile") : null}
                     </div>

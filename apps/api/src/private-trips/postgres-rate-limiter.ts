@@ -7,26 +7,30 @@ import { AppError } from "./private-trip-module";
 
 export type RateLimitedAction =
   | "magic_link"
+  | "magic_link_consume"
   | "trip_invite"
   | "trip_create"
   | "trip_content"
-  | "place_photo";
+  | "place_photo"
+  | "place_photo_metadata";
 export interface RateLimiter {
-  consume(action: RateLimitedAction, clientIp: string, account: string): Promise<void>;
+  consume(action: RateLimitedAction, clientIp: string, account?: string, cost?: number): Promise<void>;
 }
 
 interface Rule {
   windowSeconds: number;
   ipLimit: number;
-  accountLimit: number;
+  accountLimit?: number;
 }
 
 const RULES: Record<RateLimitedAction, Rule> = {
   magic_link: { windowSeconds: 15 * 60, ipLimit: 30, accountLimit: 5 },
+  magic_link_consume: { windowSeconds: 10 * 60, ipLimit: 30 },
   trip_invite: { windowSeconds: 60 * 60, ipLimit: 100, accountLimit: 20 },
   trip_create: { windowSeconds: 60 * 60, ipLimit: 100, accountLimit: 20 },
   trip_content: { windowSeconds: 60 * 60, ipLimit: 600, accountLimit: 300 },
   place_photo: { windowSeconds: 60 * 60, ipLimit: 1_200, accountLimit: 600 },
+  place_photo_metadata: { windowSeconds: 60 * 60, ipLimit: 12_000, accountLimit: 6_000 },
 };
 
 export class PostgresRateLimiter implements RateLimiter {
@@ -43,7 +47,10 @@ export class PostgresRateLimiter implements RateLimiter {
     }
   }
 
-  async consume(action: RateLimitedAction, clientIp: string, account: string) {
+  async consume(action: RateLimitedAction, clientIp: string, account = "", cost = 1) {
+    if (!Number.isSafeInteger(cost) || cost < 1 || cost > 100) {
+      throw new Error("Rate limit cost must be an integer from 1 to 100");
+    }
     const rule = RULES[action];
     const now = this.now();
     const windowMilliseconds = rule.windowSeconds * 1_000;
@@ -56,11 +63,13 @@ export class PostgresRateLimiter implements RateLimiter {
         key: clientIp || "unknown",
         limit: rule.ipLimit,
       },
-      {
-        scope: `${action}:account`,
-        key: account.trim().toLowerCase(),
-        limit: rule.accountLimit,
-      },
+      ...(rule.accountLimit === undefined
+        ? []
+        : [{
+            scope: `${action}:account`,
+            key: account.trim().toLowerCase(),
+            limit: rule.accountLimit,
+          }]),
     ];
 
     const limited = await this.database.transaction().execute(async (transaction) => {
@@ -72,13 +81,13 @@ export class PostgresRateLimiter implements RateLimiter {
             scope: attempt.scope,
             key_hash: this.keyHash(attempt.scope, attempt.key),
             window_start: windowStart,
-            request_count: 1,
+            request_count: cost,
           })
           .onConflict((conflict) =>
             conflict
               .columns(["scope", "key_hash", "window_start"])
               .doUpdateSet((expression) => ({
-                request_count: expression("rate_limit_windows.request_count", "+", 1),
+                request_count: expression("rate_limit_windows.request_count", "+", cost),
               })),
           )
           .returning("request_count")
@@ -105,6 +114,7 @@ export class PostgresRateLimiter implements RateLimiter {
       );
     }
   }
+
 
   private keyHash(scope: string, key: string) {
     return createHmac("sha256", this.secret)
