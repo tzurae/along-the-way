@@ -137,7 +137,7 @@ async function selectDateRange(
   }
   await page.locator(`[data-day="${localDateLabel(startDate)}"]`).click();
   await page.locator(`[data-day="${localDateLabel(endDate)}"]`).click();
-  await dialog.getByRole("button", { name: "確定" }).click();
+  await page.getByRole("button", { name: "確定", exact: true }).click();
 }
 
 async function openMembers(page: Page) {
@@ -298,8 +298,8 @@ test("private trips work across four identities, viewports, and rejection paths"
   const rangeMiddle = page.locator('[data-range-middle="true"]').first();
   await expect(rangeMiddle).toHaveCSS("background-color", "rgb(181, 87, 55)");
   await expect(rangeMiddle).toHaveCSS("color", "rgb(255, 250, 242)");
-  await expect(createDialog.getByRole("button", { name: "確定" })).toBeVisible();
-  await createDialog.getByRole("button", { name: "確定" }).click();
+  await expect(page.getByRole("button", { name: "確定", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "確定", exact: true }).click();
   await page.mouse.click(5, 5);
   await expect(createDialog).toBeVisible();
   await expect(createDialog.getByLabel("旅程名稱")).toHaveValue("保留中的草稿");

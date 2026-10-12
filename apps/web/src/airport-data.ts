@@ -67,11 +67,6 @@ export function searchAirports(
   return matches.map((match) => match.airport);
 }
 
-export function airportLabel(airport: AirportRecord) {
-  const location = [airport[2], airport[3]].filter(Boolean).join(" · ");
-  return `${airport[0]} · ${airport[1]}${location ? ` — ${location}` : ""}`;
-}
-
 export function airportInput(airport: AirportRecord): TripAirportInput {
   const name = `${airport[0]} · ${airport[1]}`;
   return {

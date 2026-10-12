@@ -3,7 +3,10 @@ import { expect, type Locator } from "@playwright/test";
 async function chooseAirport(group: Locator, index: number, code: "TPE" | "KIX") {
   const input = group.getByLabel("機場代碼或名稱").nth(index);
   await input.fill(code);
-  await group.page().getByRole("option", { name: new RegExp(`^${code}\\b`) }).click();
+  const option = group.page().getByRole("option", { name: new RegExp(`^${code}\\b`) });
+  await expect(option).toBeVisible();
+  // Same as the country picker helpers: the Base UI popup repositions inside the scrolling dialog.
+  await option.dispatchEvent("click");
   await expect(input).toHaveValue(new RegExp(`^${code} ·`));
 }
 

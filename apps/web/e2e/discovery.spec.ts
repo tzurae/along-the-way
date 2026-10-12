@@ -93,7 +93,7 @@ async function createTrip(page: Page, name: string) {
   const label = (day: number) => new Date(year, month - 1, day).toLocaleDateString("zh-TW");
   await page.locator(`[data-day="${label(3)}"]`).click();
   await page.locator(`[data-day="${label(9)}"]`).click();
-  await dialog.getByRole("button", { name: "確定" }).click();
+  await page.getByRole("button", { name: "確定", exact: true }).click();
   await dialog.getByRole("button", { name: "下一步" }).click();
   await dialog.getByLabel("新增國家").fill("Japan");
   await page.getByRole("option", { name: /\(JP\)/ }).dispatchEvent("click");

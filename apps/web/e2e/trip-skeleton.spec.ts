@@ -272,7 +272,7 @@ async function createTrip(
   }
   await page.locator(`[data-day="${localDateLabel(input.startDate)}"]`).click();
   await page.locator(`[data-day="${localDateLabel(input.endDate)}"]`).click();
-  await dialog.getByRole("button", { name: "確定" }).click();
+  await page.getByRole("button", { name: "確定", exact: true }).click();
   await dialog.getByRole("button", { name: "下一步" }).click();
   for (const [index, country] of input.countries.entries()) {
     const search = dialog.getByLabel("新增國家");

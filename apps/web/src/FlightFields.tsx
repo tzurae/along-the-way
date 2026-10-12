@@ -15,7 +15,6 @@ import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
 import {
   airportInput,
-  airportLabel,
   loadAirportData,
   searchAirports,
 } from "./airport-data";
@@ -111,14 +110,19 @@ function AirportPicker({
       items={matches}
       value={selected}
       inputValue={inputValue}
-      onInputValueChange={(nextValue) => {
+      onInputValueChange={(nextValue, { reason }) => {
         setInputValue(nextValue);
-        if (nextValue !== value.name) onChange({ name: nextValue, timeZone: "" });
+        // Only typing is a manual edit. Selection, close and focus-out also rewrite the input
+        // (sometimes to ""), and must not clear the airport the user just picked.
+        const typed = reason === "input-change" || reason === "input-clear" || reason === "clear-press";
+        if (typed && nextValue !== value.name) onChange({ name: nextValue, timeZone: "" });
       }}
       onValueChange={(airport) => {
         if (airport) onChange(airportInput(airport));
       }}
-      itemToStringLabel={airportLabel}
+      // Must equal the stored name: the combobox writes this label back into the input,
+      // and any difference is treated as a manual edit that clears the derived time zone.
+      itemToStringLabel={(airport) => airportInput(airport).name}
       itemToStringValue={(airport) => airport[0]}
       isItemEqualToValue={(airport, current) => airport[0] === current[0]}
       autoHighlight
@@ -139,8 +143,8 @@ function AirportPicker({
           {(airport: AirportRecord) => (
             <ComboboxItem key={airport[0]} value={airport}>
               <span className="min-w-0">
-                <strong>{airport[0]}</strong>
-                <span className="ml-2">{airport[1]}</span>
+                <strong>{airport[0]}</strong>{" "}
+                <span className="ml-1">{airport[1]}</span>
                 <small className="block truncate text-muted-foreground">
                   {[airport[2], airport[3]].filter(Boolean).join(" · ")}
                 </small>
