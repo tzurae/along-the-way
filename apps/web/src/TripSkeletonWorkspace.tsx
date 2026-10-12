@@ -371,6 +371,7 @@ export function TripSkeletonWorkspace({
   onArrangeOpened,
 }: TripSkeletonWorkspaceProps) {
   const { t, locale } = useI18n();
+  const isOwner = trip.role === "owner";
   const [skeleton, setSkeleton] = useState<TripSkeletonDto | null>(null);
   const [tripPlaces, setTripPlaces] = useState<TripPlaceDto[]>([]);
   const [error, setError] = useState("");
@@ -470,13 +471,17 @@ export function TripSkeletonWorkspace({
 
   useEffect(() => {
     if (!arrangeDate || !skeleton) return;
+    if (!isOwner) {
+      onArrangeOpened?.();
+      return;
+    }
     const day = skeleton.days.find((entry) => entry.date === arrangeDate);
     if (!day) return;
     setAssignmentDayId(day.id);
     updateAssignmentErrorPlaceId(null);
     setError("");
     onArrangeOpened?.();
-  }, [arrangeDate, skeleton, onArrangeOpened, updateAssignmentErrorPlaceId]);
+  }, [arrangeDate, isOwner, skeleton, onArrangeOpened, updateAssignmentErrorPlaceId]);
 
   useEffect(() => {
     if (!skeleton || managePlacesHandled.current) return;
@@ -708,6 +713,11 @@ export function TripSkeletonWorkspace({
     tripDayId: string | null,
     place: TripPlaceDto,
   ) {
+    if (!isOwner) {
+      setError(t.schedule.ownerOnlyAction);
+      updateAssignmentErrorPlaceId(place.id);
+      return;
+    }
     const operation = `day-assignment:${place.id}`;
     setBusyId(operation);
     setError("");
@@ -757,8 +767,14 @@ export function TripSkeletonWorkspace({
       }
       onPlacesChanged();
     } catch (reason) {
-      const failure = reason instanceof Error ? reason.message : t.tripSkeleton.plannedDayUpdateError;
-      const assignmentError = removedOriginalDay
+      const forbidden = reason instanceof ApiRequestError
+        && (reason.code === "forbidden" || reason.status === 403);
+      const failure = forbidden
+        ? t.schedule.ownerOnlyAction
+        : reason instanceof Error
+          ? reason.message
+          : t.tripSkeleton.plannedDayUpdateError;
+      const assignmentError = removedOriginalDay && !forbidden
         ? t.tripSkeleton.removedBeforeReassignError(failure)
         : failure;
       if (reason instanceof ApiRequestError && reason.code === "conflict") {
@@ -948,6 +964,12 @@ export function TripSkeletonWorkspace({
           <p>{t.tripSkeleton.introduction}</p>
         </header>
 
+        {!isOwner ? (
+          <p className="mb-4 rounded-xl border border-ink/10 bg-surface-subtle p-3 text-sm text-muted-foreground">
+            {t.schedule.ownerOnly}
+          </p>
+        ) : null}
+
         {error && assignmentErrorPlaceId === null ? (
           <p role="alert" className="plan-page-error">{error}</p>
         ) : null}
@@ -997,7 +1019,7 @@ export function TripSkeletonWorkspace({
                           </span>
                         </div>
                       </div>
-                      {blocked ? renderLocationEditor(place) : (
+                      {blocked ? renderLocationEditor(place) : isOwner ? (
                         <button
                           type="button"
                           className="plan-schedule-button"
@@ -1012,7 +1034,7 @@ export function TripSkeletonWorkspace({
                           <CalendarPlus aria-hidden="true" />
                           {t.tripSkeleton.arrangePending}
                         </button>
-                      )}
+                      ) : null}
                     </li>
                   );
                 })}
@@ -1043,7 +1065,7 @@ export function TripSkeletonWorkspace({
                 places={skeleton.places}
                 save={(input) => saveItem(input)}
               />
-              {tripPlaces.some((place) =>
+              {isOwner && tripPlaces.some((place) =>
                 !place.scheduled
                 && place.assignedDayId === null
                 && place.latitude !== null
@@ -1246,29 +1268,10 @@ export function TripSkeletonWorkspace({
                         {t.tripSkeleton.optimizeRoute}
                       </button>
                     )}
-                    <button
-                      type="button"
-                      className="plan-outline-button"
-                      disabled={busyId !== null}
-                      onClick={() => {
-                        setError("");
-                        updateAssignmentErrorPlaceId(null);
-                        setAssignmentDayId(day.id);
-                      }}
-                    >
-                      <CalendarPlus aria-hidden="true" />
-                      {t.tripSkeleton.arrangeThisDay}
-                    </button>
-                  </div>
-                </header>
-                <ul className="plan-day-list">
-                  {itemCount === 0 ? (
-                    <li className="plan-no-plan">
-                      <CalendarDays aria-hidden="true" />
-                      <span>{t.tripSkeleton.emptyDay}</span>
+                    {isOwner ? (
                       <button
                         type="button"
-                        className="plan-row-button"
+                        className="plan-outline-button"
                         disabled={busyId !== null}
                         onClick={() => {
                           setError("");
@@ -1276,9 +1279,32 @@ export function TripSkeletonWorkspace({
                           setAssignmentDayId(day.id);
                         }}
                       >
-                        <Plus aria-hidden="true" />
-                        {t.tripSkeleton.addPlace}
+                        <CalendarPlus aria-hidden="true" />
+                        {t.tripSkeleton.arrangeThisDay}
                       </button>
+                    ) : null}
+                  </div>
+                </header>
+                <ul className="plan-day-list">
+                  {itemCount === 0 ? (
+                    <li className="plan-no-plan">
+                      <CalendarDays aria-hidden="true" />
+                      <span>{t.tripSkeleton.emptyDay}</span>
+                      {isOwner ? (
+                        <button
+                          type="button"
+                          className="plan-row-button"
+                          disabled={busyId !== null}
+                          onClick={() => {
+                            setError("");
+                            updateAssignmentErrorPlaceId(null);
+                            setAssignmentDayId(day.id);
+                          }}
+                        >
+                          <Plus aria-hidden="true" />
+                          {t.tripSkeleton.addPlace}
+                        </button>
+                      ) : null}
                     </li>
                   ) : null}
                   {chronologicalEntries.map((entry) => {
@@ -1335,7 +1361,7 @@ export function TripSkeletonWorkspace({
             {itemDetail(itemsById.get(viewingItem.itemId)!, viewingItem.continuation)}
           </PlaceDetailSheet>
         ) : null}
-        {assignmentDayId !== null && assignmentDay ? (
+        {isOwner && assignmentDayId !== null && assignmentDay ? (
           <PlaceDetailSheet
             appearance="workspace"
             open
@@ -1386,7 +1412,7 @@ export function TripSkeletonWorkspace({
               setViewingAssignedPlaceId(null);
               updateAssignmentErrorPlaceId(null);
             }}
-            footer={(
+            footer={isOwner ? (
               <button
                 type="button"
                 className="plan-remove-button"
@@ -1399,7 +1425,7 @@ export function TripSkeletonWorkspace({
                 <CalendarMinus aria-hidden="true" />
                 {t.tripSkeleton.removeFromDay}
               </button>
-            )}
+            ) : undefined}
           >
             <dl className="plan-assigned-detail">
               <div className="plan-assigned-detail-row">
@@ -1486,6 +1512,7 @@ export function TripSkeletonWorkspace({
           day={planningDay}
           request={request}
           onClose={() => setPlanningDay(null)}
+          isOwner={isOwner}
           onOrderSaved={async () => {
             await load();
             onPlacesChanged();
@@ -1499,6 +1526,7 @@ export function TripSkeletonWorkspace({
             skeleton.days.map((day, index) => [day.id, t.tripSkeleton.dayLabel(index + 1)])
           )}
           request={request}
+          isOwner={isOwner}
           onClose={() => setPlanningTrip(false)}
           onApplied={() => {
             setPlanningTrip(false);

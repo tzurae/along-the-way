@@ -1,3 +1,4 @@
+import { parseGooglePlacePhoto, type GooglePlacePhotoDto } from "./place-details";
 import { isRecord } from "./type-guards";
 import type { PlaceType } from "./trip-skeleton";
 
@@ -14,6 +15,7 @@ export interface ProviderPlaceCandidateDto {
   providerPlaceId: string;
   name: string;
   type: PlaceType;
+  typeLabel: string | null;
   address: string | null;
   latitude: number | null;
   longitude: number | null;
@@ -22,6 +24,11 @@ export interface ProviderPlaceCandidateDto {
   attribution: string;
   observedAt: string;
   expiresAt: string;
+  photo: GooglePlacePhotoDto | null;
+}
+
+export interface ProviderPlaceSearchResultDto extends ProviderPlaceCandidateDto {
+  alreadyInWishlist: boolean;
 }
 
 export interface MemberVoteDto {
@@ -86,7 +93,7 @@ export interface TripPlaceResponse {
 }
 
 export interface ProviderCandidatesResponse {
-  candidates: ProviderPlaceCandidateDto[];
+  candidates: ProviderPlaceSearchResultDto[];
   resolvedUrl?: string;
   attribution: string;
 }
@@ -200,7 +207,7 @@ function placeType(value: unknown): PlaceType {
 }
 
 
-function candidate(value: unknown): ProviderPlaceCandidateDto {
+export function parseProviderPlaceCandidate(value: unknown): ProviderPlaceCandidateDto {
   const row = record(value);
   if (row.provider !== "google") return invalid();
   return {
@@ -208,6 +215,7 @@ function candidate(value: unknown): ProviderPlaceCandidateDto {
     providerPlaceId: text(row.providerPlaceId),
     name: text(row.name),
     type: placeType(row.type),
+    typeLabel: nullableText(row.typeLabel),
     address: nullableText(row.address),
     latitude: row.latitude === null || typeof row.latitude === "number" ? row.latitude : invalid(),
     longitude: row.longitude === null || typeof row.longitude === "number" ? row.longitude : invalid(),
@@ -216,7 +224,13 @@ function candidate(value: unknown): ProviderPlaceCandidateDto {
     attribution: text(row.attribution),
     observedAt: text(row.observedAt),
     expiresAt: text(row.expiresAt),
+    photo: row.photo === null ? null : parseGooglePlacePhoto(row.photo),
   };
+}
+
+function searchResult(value: unknown): ProviderPlaceSearchResultDto {
+  const row = record(value);
+  return { ...parseProviderPlaceCandidate(row), alreadyInWishlist: boolean(row.alreadyInWishlist) };
 }
 
 export function parseMemberVote(value: unknown): MemberVoteDto {
@@ -318,7 +332,7 @@ export function parseTripPlaceResponse(value: unknown): TripPlaceResponse {
 export function parseProviderCandidatesResponse(value: unknown): ProviderCandidatesResponse {
   const row = record(value);
   return {
-    candidates: Array.isArray(row.candidates) ? row.candidates.map(candidate) : invalid(),
+    candidates: Array.isArray(row.candidates) ? row.candidates.map(searchResult) : invalid(),
     ...(row.resolvedUrl === undefined ? {} : { resolvedUrl: text(row.resolvedUrl) }),
     attribution: text(row.attribution),
   };

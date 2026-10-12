@@ -13,4 +13,10 @@ export interface PlaceDetailModule {
     bytes: Uint8Array<ArrayBuffer>;
     mediaType: "image/jpeg" | "image/png" | "image/webp";
   }>;
+  getGooglePhoto(
+    userId: string,
+    tripId: string,
+    providerPlaceId: string,
+    maxWidth: 192 | 1024,
+  ): Promise<{ bytes: Uint8Array<ArrayBuffer>; mediaType: string }>;
 }

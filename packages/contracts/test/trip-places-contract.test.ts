@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseTripPlaceListResponse } from "../src/trip-places";
+import { parseProviderCandidatesResponse, parseTripPlaceListResponse } from "../src/trip-places";
 
 function response(assignedDayId: string | null) {
   return {
@@ -42,6 +42,42 @@ function response(assignedDayId: string | null) {
     }],
   };
 }
+
+describe("provider candidate contract", () => {
+  it("requires nullable photo and wishlist state on search results", () => {
+    const candidate = {
+      provider: "google",
+      providerPlaceId: "ChIJ-provider-place-1234",
+      name: "東福寺",
+      type: "activity",
+      typeLabel: "佛寺",
+      address: "京都市東山区",
+      latitude: 34.976,
+      longitude: 135.774,
+      timeZone: "Asia/Tokyo",
+      sourceUrl: "https://maps.google.com/?cid=123",
+      attribution: "Google Maps",
+      observedAt: "2026-10-12T00:00:00.000Z",
+      expiresAt: "2026-11-11T00:00:00.000Z",
+      photo: null,
+      alreadyInWishlist: true,
+    };
+    expect(parseProviderCandidatesResponse({ candidates: [candidate], attribution: "Google Maps" }).candidates[0])
+      .toMatchObject({ providerPlaceId: candidate.providerPlaceId, typeLabel: "佛寺", photo: null, alreadyInWishlist: true });
+    expect(parseProviderCandidatesResponse({
+      candidates: [{ ...candidate, typeLabel: null }],
+      attribution: "Google Maps",
+    }).candidates[0]?.typeLabel).toBeNull();
+    expect(() => parseProviderCandidatesResponse({
+      candidates: [{ ...candidate, alreadyInWishlist: undefined }],
+      attribution: "Google Maps",
+    })).toThrow("Invalid trip place response");
+    expect(() => parseProviderCandidatesResponse({
+      candidates: [{ ...candidate, photo: undefined }],
+      attribution: "Google Maps",
+    })).toThrow();
+  });
+});
 
 describe("trip place day assignment contract", () => {
   it("preserves one explicit planned day", () => {

@@ -49,13 +49,12 @@ export function SchedulePlacesSheet(props: {
   const selectedDay = selectedDayId == null
     ? null
     : days.find((day) => day.id === selectedDayId) ?? null;
-  const description = useMemo(
-    () => props.places.map((place) => place.name).join("、"),
-    [props.places],
-  );
-  const canConfirm = selectedDayId === null
+  const description = props.places.length === 1
+    ? props.places[0]?.name ?? ""
+    : t.schedule.selectedCount(props.places.length);
+  const canConfirm = props.trip.role === "owner" && (selectedDayId === null
     ? Boolean(props.allowUnscheduled)
-    : Boolean(selectedDay);
+    : Boolean(selectedDay));
 
 
   let actionLabel = t.schedule.chooseDateFirst;
@@ -66,6 +65,8 @@ export function SchedulePlacesSheet(props: {
       ? t.schedule.confirmSingle(props.places[0]?.name ?? "", selectedDay.copy.label)
       : t.schedule.confirmMany(props.places.length, selectedDay.copy.label);
   }
+
+  if (props.trip.role !== "owner") return null;
 
   return (
     <PlaceDetailSheet
@@ -90,6 +91,11 @@ export function SchedulePlacesSheet(props: {
         </div>
       )}
     >
+      {props.places.length > 1 ? (
+        <ul className="schedule-sheet__places" aria-label={description}>
+          {props.places.map((place) => <li key={place.id}>{place.name}</li>)}
+        </ul>
+      ) : null}
       <section className="schedule-sheet__section">
         <h3>{t.schedule.chooseDate}</h3>
         <div className="schedule-day-picker" aria-label={t.schedule.pickerLabel}>

@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, CalendarDays, Check, ChevronRight, CircleDot, Clock3, ExternalLink, Lock, MapPin, Navigation, TriangleAlert, Users, WifiOff } from "lucide-react";
-import type { PlaceDetailReference, PlacePhotoDto } from "@along-the-way/contracts/place-details";
+import type { PlaceDetailReference, PlacePreviewDto } from "@along-the-way/contracts/place-details";
 import { useI18n } from "./i18n";
 import { googleMapsCoordinatesUrl, googleMapsNavigationUrl } from "./google-maps";
 import { dayItems, localDate, parallelItemIds, personalState, tripClock, type TodayItem, type TodayModel } from "./today-model";
@@ -44,7 +44,7 @@ function TodayItemDetails({ item, now, parallel, memberId, date, previews, previ
   parallel: boolean;
   memberId: string;
   date: string;
-  previews: Map<string, PlacePhotoDto | null>;
+  previews: Map<string, PlacePreviewDto["photo"]>;
   previewsLoading: boolean;
   openPlace?: (selection: TodayDetailSelection) => void;
 }) {
@@ -180,10 +180,11 @@ function TodayCard({ item, zone, selectedDate, parallel, state, onOpen }: {
   </li>;
 }
 
-export function TodayWorkspace({ model, selectedDate, onDayChanged, onArrangeDay, offline = false, fetchedAt, retry, retrying = false, persisted = true, request }: {
+export function TodayWorkspace({ model, selectedDate, onDayChanged, isOwner, onArrangeDay, offline = false, fetchedAt, retry, retrying = false, persisted = true, request }: {
   model: TodayModel;
   selectedDate: string | null;
   onDayChanged(date: string, replace?: boolean): void;
+  isOwner?: boolean;
   onArrangeDay?(date: string): void;
   offline?: boolean;
   fetchedAt: string;
@@ -424,6 +425,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, onArrangeDay
             <CalendarDays size={28} aria-hidden="true" />
             <h3>{text.empty}</h3>
             <p>{text.emptyHelp}</p>
+            {isOwner === false ? <p>{t.schedule.ownerOnly}</p> : null}
             {onArrangeDay && !offline ? <button type="button" className="today-primary-action" onClick={() => onArrangeDay(day.date)}><CalendarDays size={17} aria-hidden="true" />{t.tripSkeleton.arrangeThisDay}</button> : null}
           </div>
         </>}

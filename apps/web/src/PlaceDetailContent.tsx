@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronLeft, ChevronRight, CircleAlert, ExternalLink, ImageOff, Maximize2, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, CircleAlert, ExternalLink, Maximize2, X } from "lucide-react";
 
 import {
   parsePlaceDetailResponse,
+  type GooglePlacePhotoDto,
   type PlaceDetailBlockDto,
   type PlaceDetailDto,
   type PlaceDetailReference,
@@ -17,7 +18,7 @@ import {
   DialogTitle,
 } from "./components/ui/dialog";
 import { useI18n, type Locale, type Messages } from "./i18n";
-import type { PlaceDetailRequest } from "./PlaceThumbnail";
+import type { PlaceDetailRequest, PlaceDisplayPhoto } from "./PlaceThumbnail";
 import { safeExternalUrl } from "./external-url";
 import "./place-detail.css";
 
@@ -133,9 +134,10 @@ function PhotoMetadata({ photo }: { photo: PlacePhotoDto }) {
 function PhotoViewer({ photo, failed, open, onOpenChange }: { photo: PlacePhotoDto; failed: boolean; open: boolean; onOpenChange(open: boolean): void }) {
   const { t } = useI18n();
   const titleRef = useRef<HTMLHeadingElement | null>(null);
-  const [viewerFailed, setViewerFailed] = useState(false);
-  useEffect(() => setViewerFailed(false), [photo.id]);
-  const unavailable = failed || viewerFailed;
+  const [failedPhotoKey, setFailedPhotoKey] = useState<string | null>(null);
+  const [revision, setRevision] = useState(0);
+  const photoKey = `${photo.id}\u0000${photo.imageUrl}`;
+  const unavailable = failed || failedPhotoKey === photoKey;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -151,15 +153,20 @@ function PhotoViewer({ photo, failed, open, onOpenChange }: { photo: PlacePhotoD
         <div className="place-photo-viewer__layout">
           <div className="place-photo-viewer__image-frame">
             {unavailable ? (
-              <p className="place-photo-viewer__unavailable"><ImageOff aria-hidden="true" className="size-5" />{t.placeDetail.photoUnavailable}</p>
+              <div className="place-photo-viewer__unavailable">
+                <p>{t.placeDetail.photoUnavailable}</p>
+                {!failed ? <button type="button" className="place-photo-retry" onClick={() => { setFailedPhotoKey(null); setRevision((current) => current + 1); }}>{t.placeDetail.reloadPhoto}</button> : null}
+              </div>
             ) : (
               <img
+                key={`${photoKey}:${revision}`}
                 className="place-photo-viewer__image"
                 src={photo.imageUrl}
                 width={photo.width}
                 height={photo.height}
                 alt={photo.description || photo.title}
-                onError={() => setViewerFailed(true)}
+                decoding="async"
+                onError={() => setFailedPhotoKey(photoKey)}
               />
             )}
           </div>
@@ -173,11 +180,29 @@ function PhotoViewer({ photo, failed, open, onOpenChange }: { photo: PlacePhotoD
   );
 }
 
-function Gallery({ identity, photos }: { identity: string; photos: PlacePhotoDto[] }) {
+function GoogleGalleryCredit({ photo }: { photo: GooglePlacePhotoDto }) {
+  const maps = safeExternalUrl(photo.googleMapsUri);
+  return (
+    <div className="place-gallery__google-credit">
+      <span className="place-gallery__google-byline">
+        <strong>Google Maps</strong>
+        {photo.authors.length ? <span>照片：{photo.authors.map((author, index) => {
+          const uri = safeExternalUrl(author.uri);
+          return <span key={`${author.displayName}:${index}`}>{index > 0 ? "、" : ""}{uri ? <a href={uri} target="_blank" rel="noreferrer">{author.displayName}</a> : author.displayName}</span>;
+        })}</span> : null}
+      </span>
+      {maps ? <a className="place-gallery__google-maps" href={maps} target="_blank" rel="noreferrer">在 Google Maps 查看</a> : null}
+    </div>
+  );
+}
+
+function Gallery({ identity, placeName, photos }: { identity: string; placeName: string; photos: PlaceDisplayPhoto[] }) {
   const { t } = useI18n();
   const trackRef = useRef<HTMLDivElement>(null);
+  const fingerprint = photos.map((photo) => `${photo.id}\u0000${photo.imageUrl}`).join("\u0001");
   const [selection, setSelection] = useState<{ identity: string; photoId: string | null }>({ identity, photoId: photos[0]?.id ?? null });
   const [failed, setFailed] = useState<Set<string>>(() => new Set());
+  const [reloadRevision, setReloadRevision] = useState(0);
   const [viewerOpen, setViewerOpen] = useState(false);
 
   useEffect(() => {
@@ -185,18 +210,20 @@ function Gallery({ identity, photos }: { identity: string; photos: PlacePhotoDto
       ? current
       : { identity, photoId: photos[0]?.id ?? null });
     setFailed(new Set());
+    setReloadRevision(0);
     setViewerOpen(false);
     if (trackRef.current) trackRef.current.scrollLeft = 0;
-  }, [identity, photos]);
+  }, [fingerprint, identity]);
 
   if (photos.length === 0) {
-    return <div className="place-gallery__empty" data-place-gallery="empty"><ImageOff aria-hidden="true" className="size-5" />{t.placeDetail.noPhoto}</div>;
+    return <div className="place-gallery__empty" data-place-gallery="empty">{t.placeDetail.noPhoto}</div>;
   }
   const selectedIndex = Math.max(0, photos.findIndex((photo) => photo.id === selection.photoId));
   const selected = photos[selectedIndex]!;
-  const selectedFailed = failed.has(selected.id);
-  const sourceHref = safeExternalUrl(selected.sourceUrl);
-  const licenseHref = safeExternalUrl(selected.licenseUrl);
+  const selectedKey = `${selected.id}\u0000${selected.imageUrl}`;
+  const selectedFailed = failed.has(selectedKey);
+  const sourceHref = selected.source === "curated" ? safeExternalUrl(selected.sourceUrl) : null;
+  const licenseHref = selected.source === "curated" ? safeExternalUrl(selected.licenseUrl) : null;
 
   function choose(index: number, scroll: boolean) {
     const bounded = Math.max(0, Math.min(photos.length - 1, index));
@@ -205,6 +232,15 @@ function Gallery({ identity, photos }: { identity: string; photos: PlacePhotoDto
       const reduced = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       trackRef.current.scrollTo({ left: bounded * trackRef.current.clientWidth, behavior: reduced ? "auto" : "smooth" });
     }
+  }
+
+  function retryPhoto(photoKey: string) {
+    setFailed((current) => {
+      const next = new Set(current);
+      next.delete(photoKey);
+      return next;
+    });
+    setReloadRevision((current) => current + 1);
   }
 
   return (
@@ -218,24 +254,35 @@ function Gallery({ identity, photos }: { identity: string; photos: PlacePhotoDto
         }}
       >
         {photos.map((photo, index) => {
-          const imageFailed = failed.has(photo.id);
+          const photoKey = `${photo.id}\u0000${photo.imageUrl}`;
+          const imageFailed = failed.has(photoKey);
+          const image = (
+            <img
+              key={`${photoKey}:${reloadRevision}`}
+              className="place-gallery__image"
+              src={photo.imageUrl}
+              width={photo.width}
+              height={photo.height}
+              alt={photo.source === "curated"
+                ? t.placeDetail.photoAlt(photo.title, index + 1, photos.length)
+                : t.placeDetail.googlePhotoAlt(placeName)}
+              decoding="async"
+              onError={() => setFailed((current) => new Set(current).add(photoKey))}
+            />
+          );
           return (
-            <div key={photo.id} className="place-gallery__slide" data-photo-slide={photo.id}>
+            <div key={photoKey} className="place-gallery__slide" data-photo-slide={photo.id}>
               {imageFailed ? (
-                <div className="place-gallery__unavailable"><span className="flex items-center gap-2"><ImageOff aria-hidden="true" className="size-5" />{t.placeDetail.photoUnavailable}</span></div>
-              ) : (
+                <div className="place-gallery__unavailable">
+                  <p>{t.placeDetail.photoUnavailable}</p>
+                  <button type="button" className="place-photo-retry" onClick={() => retryPhoto(photoKey)}>{t.placeDetail.reloadPhoto}</button>
+                </div>
+              ) : photo.source === "curated" ? (
                 <button type="button" className="place-gallery__image-button" tabIndex={index === selectedIndex ? 0 : -1} aria-label={t.placeDetail.openPhoto(photo.title)} onClick={() => { choose(index, false); setViewerOpen(true); }}>
-                  <img
-                    className="place-gallery__image"
-                    src={photo.imageUrl}
-                    width={photo.width}
-                    height={photo.height}
-                    alt={t.placeDetail.photoAlt(photo.title, index + 1, photos.length)}
-                    onError={() => setFailed((current) => new Set(current).add(photo.id))}
-                  />
+                  {image}
                   <span className="place-gallery__enlarge"><Maximize2 aria-hidden="true" className="size-4" />{t.placeDetail.photoInformation}</span>
                 </button>
-              )}
+              ) : image}
             </div>
           );
         })}
@@ -245,18 +292,24 @@ function Gallery({ identity, photos }: { identity: string; photos: PlacePhotoDto
         <span className="place-gallery__count" aria-live="polite">{t.placeDetail.photoCount(selectedIndex + 1, photos.length)}</span>
         {photos.length > 1 ? <button type="button" className="place-gallery__control" disabled={selectedIndex === photos.length - 1} aria-label={t.placeDetail.nextPhoto} onClick={() => choose(selectedIndex + 1, true)}><ChevronRight aria-hidden="true" className="size-5" /></button> : null}
       </div>
-      <figcaption className="place-gallery__caption" data-photo-credit={selected.id}>
-        <p className="place-gallery__credit">{selected.creditText}</p>
-        <p className="place-gallery__links">
-          <span>歷史照片，非即時景色</span>
-          <span aria-hidden="true">·</span>
-          {sourceHref ? <a href={sourceHref} target="_blank" rel="noreferrer">來源</a> : <span>{selected.sourceName}</span>}
-          <span aria-hidden="true">·</span>
-          {licenseHref ? <a href={licenseHref} title={selected.licenseName} target="_blank" rel="noreferrer">{t.placeDetail.license}</a> : <span>{selected.licenseName}</span>}
-        </p>
-        <button type="button" className="place-gallery__open" aria-label={t.placeDetail.photoInformationFor(selected.title)} onClick={() => setViewerOpen(true)}>{t.placeDetail.photoInformation}</button>
-      </figcaption>
-      <PhotoViewer photo={selected} failed={selectedFailed} open={viewerOpen} onOpenChange={setViewerOpen} />
+      {selected.source === "google" ? (
+        <figcaption className="place-gallery__caption place-gallery__caption--google" data-photo-credit={selected.id}>
+          <GoogleGalleryCredit photo={selected} />
+        </figcaption>
+      ) : (
+        <figcaption className="place-gallery__caption" data-photo-credit={selected.id}>
+          <p className="place-gallery__credit">{selected.creditText}</p>
+          <p className="place-gallery__links">
+            <span>歷史照片，非即時景色</span>
+            <span aria-hidden="true">·</span>
+            {sourceHref ? <a href={sourceHref} target="_blank" rel="noreferrer">來源</a> : <span>{selected.sourceName}</span>}
+            <span aria-hidden="true">·</span>
+            {licenseHref ? <a href={licenseHref} title={selected.licenseName} target="_blank" rel="noreferrer">{t.placeDetail.license}</a> : <span>{selected.licenseName}</span>}
+          </p>
+          <button type="button" className="place-gallery__open" aria-label={t.placeDetail.photoInformationFor(selected.title)} onClick={() => setViewerOpen(true)}>{t.placeDetail.photoInformation}</button>
+        </figcaption>
+      )}
+      {selected.source === "curated" ? <PhotoViewer photo={selected} failed={selectedFailed} open={viewerOpen} onOpenChange={setViewerOpen} /> : null}
     </figure>
   );
 }
@@ -315,6 +368,7 @@ export function PlaceDetailContent({ tripId, reference, date, request, interlude
   const { t } = useI18n();
   const identity = `${reference.kind}:${reference.id}`;
   const [state, setState] = useState<{ identity: string; loading: boolean; detail: PlaceDetailDto | null; error: unknown }>({ identity, loading: true, detail: null, error: null });
+  const [requestRevision, setRequestRevision] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -335,7 +389,7 @@ export function PlaceDetailContent({ tripId, reference, date, request, interlude
       setState({ identity, loading: false, detail: null, error });
     });
     return () => controller.abort();
-  }, [date, identity, reference.id, reference.kind, request, tripId]);
+  }, [date, identity, reference.id, reference.kind, request, requestRevision, tripId]);
 
   const loading = state.identity !== identity || state.loading;
   const detail = !loading && !state.error ? state.detail : null;
@@ -350,8 +404,17 @@ export function PlaceDetailContent({ tripId, reference, date, request, interlude
   return (
     <div className="place-detail-content" data-place-detail-content={detail ? `${detail.reference.kind}:${detail.reference.id}` : undefined}>
       {loading ? <p className="place-detail__loading" role="status">{t.placeDetail.loading}</p> : null}
-      {errorMessage ? <p className="place-detail__error" role="alert">{errorMessage}</p> : null}
-      {detail ? <Gallery identity={`${detail.reference.kind}:${detail.reference.id}`} photos={detail.photos} /> : null}
+      {errorMessage ? (
+        <div className="place-detail__error" role="alert">
+          <p>{errorMessage}</p>
+          <button type="button" className="place-detail__retry" onClick={() => setRequestRevision((current) => current + 1)}>{t.placeDetail.retry}</button>
+        </div>
+      ) : null}
+      {detail ? <Gallery
+        identity={`${detail.reference.kind}:${detail.reference.id}`}
+        placeName={detail.name}
+        photos={detail.photos.length ? detail.photos : detail.googlePhoto ? [detail.googlePhoto] : []}
+      /> : null}
       {interlude}
       {detail ? <DetailArticle detail={detail} collapsible={collapsible} /> : null}
     </div>

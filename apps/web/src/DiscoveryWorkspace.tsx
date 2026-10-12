@@ -908,7 +908,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
           </div>
         ) : (
           <div className="schedule-head-buttons">
-            {trip.role === "owner" ? (
+            {trip.role === "owner" && hasSelectableProposals ? (
               <button className="schedule-primary-button" disabled={pending !== null || loading} onClick={beginSelection}>
                 <CalendarPlus aria-hidden="true" className="size-4" />
                 <span>{scheduleT.pageAction}</span>

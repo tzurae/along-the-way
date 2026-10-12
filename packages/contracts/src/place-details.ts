@@ -63,10 +63,22 @@ export interface PlacePhotoMetadata {
 }
 
 export interface PlacePhotoDto extends PlacePhotoMetadata {
+  source: "curated";
   imageUrl: string;
   thumbnailUrl: string;
   width: number;
   height: number;
+}
+
+export interface GooglePlacePhotoDto {
+  source: "google";
+  id: string;
+  thumbnailUrl: string;
+  imageUrl: string;
+  width: number;
+  height: number;
+  authors: Array<{ displayName: string; uri: string | null }>;
+  googleMapsUri: string | null;
 }
 
 export interface PlaceDetailDto {
@@ -77,6 +89,7 @@ export interface PlaceDetailDto {
   sections: PlaceDetailSectionDto[];
   sources: PlaceDetailSourceDto[];
   photos: PlacePhotoDto[];
+  googlePhoto: GooglePlacePhotoDto | null;
 }
 
 export interface PlaceDetailResponse {
@@ -85,7 +98,7 @@ export interface PlaceDetailResponse {
 
 export interface PlacePreviewDto {
   reference: PlaceDetailReference;
-  photo: PlacePhotoDto | null;
+  photo: PlacePhotoDto | GooglePlacePhotoDto | null;
 }
 
 export interface PlacePreviewResponse {
@@ -345,8 +358,10 @@ function assetUrl(value: unknown): string {
 }
 
 function photoDto(value: unknown): PlacePhotoDto {
-  const item = record(value, "photo", [...photoKeys, "imageUrl", "thumbnailUrl", "width", "height"]);
+  const item = record(value, "photo", ["source", ...photoKeys, "imageUrl", "thumbnailUrl", "width", "height"]);
+  if (item.source !== "curated") return invalid("curated photo source");
   return {
+    source: "curated",
     ...photoMetadata(item),
     imageUrl: assetUrl(item.imageUrl),
     thumbnailUrl: assetUrl(item.thumbnailUrl),
@@ -355,10 +370,53 @@ function photoDto(value: unknown): PlacePhotoDto {
   };
 }
 
+function googlePhotoUrl(value: unknown, field: string, maxWidth: 192 | 1024) {
+  const url = text(value, field, 1_000);
+  const match = /^\/api\/trips\/([0-9a-f-]{36})\/google-place-photos\/([A-Za-z0-9_-]{8,300})\?maxWidth=(192|1024)$/.exec(url);
+  if (!match || Number(match[3]) !== maxWidth) return invalid(field);
+  return { url, tripId: match[1]!, providerPlaceId: match[2]! };
+}
+
+export function parseGooglePlacePhoto(value: unknown): GooglePlacePhotoDto {
+  const item = record(value, "Google photo", [
+    "source", "id", "thumbnailUrl", "imageUrl", "width", "height", "authors", "googleMapsUri",
+  ]);
+  if (item.source !== "google") return invalid("Google photo source");
+  const id = text(item.id, "Google photo id", 307);
+  if (!/^google:[A-Za-z0-9_-]{8,300}$/.test(id)) return invalid("Google photo id");
+  const providerPlaceId = id.slice("google:".length);
+  const thumbnail = googlePhotoUrl(item.thumbnailUrl, "Google thumbnail URL", 192);
+  const image = googlePhotoUrl(item.imageUrl, "Google image URL", 1024);
+  if (thumbnail.tripId !== image.tripId
+    || thumbnail.providerPlaceId !== providerPlaceId
+    || image.providerPlaceId !== providerPlaceId) return invalid("Google photo URL identity");
+  return {
+    source: "google",
+    id,
+    thumbnailUrl: thumbnail.url,
+    imageUrl: image.url,
+    width: dimension(item.width),
+    height: dimension(item.height),
+    authors: array(item.authors, "Google photo authors", 50, (value) => {
+      const author = record(value, "Google photo author", ["displayName", "uri"]);
+      return {
+        displayName: text(author.displayName, "Google photo author name", 500),
+        uri: nullable(author.uri, (value) => httpsUrl(value, "Google photo author URI")),
+      };
+    }),
+    googleMapsUri: nullable(item.googleMapsUri, (value) => httpsUrl(value, "Google Maps URI")),
+  };
+}
+
 export function parsePlaceDetailResponse(value: unknown): PlaceDetailResponse {
   const response = record(value, "response", ["detail"]);
-  const detail = record(response.detail, "detail", ["reference", "canonicalPlaceId", "name", "asOfDate", "sections", "sources", "photos"]);
+  const detail = record(response.detail, "detail", [
+    "reference", "canonicalPlaceId", "name", "asOfDate", "sections", "sources", "photos", "googlePhoto",
+  ]);
   const sources = unique(array(detail.sources, "sources", 100, source), (item) => item.id, "source ids");
+  const curatedPhotos = photos(detail.photos, photoDto);
+  const googlePhoto = nullable(detail.googlePhoto, parseGooglePlacePhoto);
+  if (curatedPhotos.length > 0 && googlePhoto !== null) return invalid("curated and Google photos are mutually exclusive");
   return { detail: {
     reference: parsePlaceDetailReference(detail.reference),
     canonicalPlaceId: nullable(detail.canonicalPlaceId, (value) => uuid(value, "canonical place id")),
@@ -366,7 +424,8 @@ export function parsePlaceDetailResponse(value: unknown): PlaceDetailResponse {
     asOfDate: nullable(detail.asOfDate, parsePlaceDetailDate),
     sections: sections(detail.sections, sources, true),
     sources,
-    photos: photos(detail.photos, photoDto),
+    photos: curatedPhotos,
+    googlePhoto,
   } };
 }
 
@@ -374,6 +433,16 @@ export function parsePlacePreviewResponse(value: unknown): PlacePreviewResponse 
   const response = record(value, "response", ["previews"]);
   return { previews: unique(array(response.previews, "previews", 100, (value) => {
     const item = record(value, "preview", ["reference", "photo"]);
-    return { reference: parsePlaceDetailReference(item.reference), photo: nullable(item.photo, photoDto) };
+    return {
+      reference: parsePlaceDetailReference(item.reference),
+      photo: nullable(item.photo, (value) => {
+        const photo = record(value, "photo", ["source", ...(
+          (value as Record<string, unknown>).source === "curated"
+            ? [...photoKeys, "imageUrl", "thumbnailUrl", "width", "height"]
+            : ["id", "thumbnailUrl", "imageUrl", "width", "height", "authors", "googleMapsUri"]
+        )]);
+        return photo.source === "curated" ? photoDto(photo) : parseGooglePlacePhoto(photo);
+      }),
+    };
   }), (item) => `${item.reference.kind}:${item.reference.id}`, "preview references") };
 }

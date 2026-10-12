@@ -21,9 +21,10 @@ import {
   parseTripPlaceListResponse,
   parseTripPlaceResponse,
   type ProviderPlaceCandidateDto,
+  type ProviderPlaceSearchResultDto,
   type TripPlaceDto,
+  type UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
-import type { UpdateTripPlacePlanningInput } from "@along-the-way/contracts/trip-places";
 import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./ConflictPanel";
 import { ApiRequestError } from "./api-error";
 import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
@@ -78,6 +79,10 @@ function canSelectForSchedule(place: TripPlaceDto, available: boolean) {
     && place.longitude !== null
     && !place.scheduled
     && place.assignedDayId === null;
+}
+
+function isScheduledForRemovalPolicy(place: TripPlaceDto) {
+  return place.scheduled || place.selectedForItinerary || place.assignedDayId !== null;
 }
 interface TripPlaceWorkspaceProps {
   trip: TripDto;
@@ -177,16 +182,17 @@ function AddPlacePanel({
   close(): void;
   changed(): Promise<void>;
 }) {
-  const { locale, t: { tripPlaces: t } } = useI18n();
+  const { t: { tripPlaces: t } } = useI18n();
   const [mode, setMode] = useState<"url" | "search" | "manual">("search");
   const [url, setUrl] = useState("");
   const [query, setQuery] = useState("");
   const [note, setNote] = useState("");
   const [manualDraft, setManualDraft] = useState<ManualPlaceDraft>(emptyManualPlaceDraft);
   const [coordinateError, setCoordinateError] = useState("");
-  const [candidates, setCandidates] = useState<ProviderPlaceCandidateDto[]>([]);
+  const [candidates, setCandidates] = useState<ProviderPlaceSearchResultDto[]>([]);
   const [attribution, setAttribution] = useState("");
   const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
+  const [resultCount, setResultCount] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const retryKeys = useRef<RetryKeys>(new Map());
@@ -195,6 +201,10 @@ function AddPlacePanel({
     event.preventDefault();
     setBusy(true);
     setMessage("");
+    setCandidates([]);
+    setAttribution("");
+    setResolvedUrl(null);
+    setResultCount(null);
     try {
       const response = mode === "url"
         ? await request<unknown>(`/api/trips/${tripId}/trip-places/resolve-url`, {
@@ -209,6 +219,7 @@ function AddPlacePanel({
       setCandidates(parsed.candidates);
       setAttribution(parsed.attribution);
       setResolvedUrl(parsed.resolvedUrl ?? null);
+      setResultCount(parsed.candidates.length);
       if (parsed.candidates.length === 0) {
         setMessage(t.errors.noUniquePlace);
       }
@@ -240,7 +251,9 @@ function AddPlacePanel({
       await changed();
       close();
     } catch (error) {
-      setMessage(t.errors.selectionPreserved(errorMessage(error, t.errors.requestFailed)));
+      setMessage(error instanceof ApiRequestError && error.code === "already_in_wishlist"
+        ? t.errors.alreadyInWishlist
+        : t.errors.selectionPreserved(errorMessage(error, t.errors.requestFailed)));
     } finally {
       setBusy(false);
     }
@@ -307,6 +320,9 @@ function AddPlacePanel({
               // Mode drafts persist; lookup results and errors belong only to the mode that produced them.
               setMode(value);
               setCandidates([]);
+              setAttribution("");
+              setResolvedUrl(null);
+              setResultCount(null);
               setMessage("");
             }}
           >
@@ -320,7 +336,10 @@ function AddPlacePanel({
           <p className="pd-add-intro">適合加入住家、朋友推薦，或暫時在地圖上找不到的地點。</p>
           <label>{t.add.placeName}<input name="name" required maxLength={200} value={manualDraft.name} onChange={(event) => setManualDraft({ ...manualDraft, name: event.target.value })} /></label>
           <label>{t.add.placeType}<NativeSelect name="type" value={manualDraft.type} onChange={(event) => setManualDraft({ ...manualDraft, type: event.target.value as PlaceType })}>{placeTypeValues.map((value) => <option key={value} value={value}>{t.placeType[value]}</option>)}</NativeSelect></label>
-          <label>{t.add.originalNote}<textarea name="originalNote" value={note} maxLength={200} rows={2} placeholder={t.add.reasonPlaceholder} onChange={(event) => setNote(event.target.value)} /><span className="pd-field-help">{t.add.reasonHelp}</span></label>
+          <div className="pd-field">
+            <label htmlFor="add-place-note">{t.add.originalNote}<textarea id="add-place-note" name="originalNote" value={note} maxLength={200} rows={2} placeholder={t.add.reasonPlaceholder} aria-describedby="add-place-note-help" onChange={(event) => setNote(event.target.value)} /></label>
+            <span id="add-place-note-help" className="pd-field-help">{t.add.reasonHelp}</span>
+          </div>
           <details>
             <summary className="cursor-pointer font-bold">{t.add.locationAndSource}</summary>
             <div className="pd-form mt-3">
@@ -344,10 +363,14 @@ function AddPlacePanel({
           ) : (
             <label>{t.add.searchGoogleMaps}<input required maxLength={300} value={query} onChange={(event) => setQuery(event.target.value)} /></label>
           )}
-          <label>{t.add.originalNote}<textarea value={note} maxLength={200} rows={2} placeholder={t.add.reasonPlaceholder} onChange={(event) => setNote(event.target.value)} /><span className="pd-field-help">{t.add.reasonHelp}</span></label>
+          <div className="pd-field">
+            <label htmlFor="add-place-note">{t.add.originalNote}<textarea id="add-place-note" value={note} maxLength={200} rows={2} placeholder={t.add.reasonPlaceholder} aria-describedby="add-place-note-help" onChange={(event) => setNote(event.target.value)} /></label>
+            <span id="add-place-note-help" className="pd-field-help">{t.add.reasonHelp}</span>
+          </div>
           <button className="pd-primary" disabled={busy}>{busy ? t.add.checking : mode === "url" ? t.add.resolveLink : t.add.searchPlaces}</button>
         </form>
       )}
+      {resultCount !== null ? <p className="pd-result-status" role="status" aria-live="polite">{t.add.resultCount(resultCount)}</p> : null}
 
       {candidates.length > 0 ? (
         <section className="mt-5" aria-labelledby="provider-candidates">
@@ -357,8 +380,23 @@ function AddPlacePanel({
           <ul className="pd-result-list">
             {candidates.map((candidate) => (
               <li key={candidate.providerPlaceId}>
-                <span><strong>{candidate.name}</strong><small>{candidate.address ?? t.add.addressUnavailable}・{t.add.observedAt(new Date(candidate.observedAt).toLocaleString(locale))}</small></span>
-                <button className="pd-primary pd-accent" disabled={busy} onClick={() => void confirm(candidate)}>{t.add.addThisPlace}</button>
+                <PlaceThumbnail photo={candidate.photo} />
+                <span className="pd-result-copy">
+                  <span className="pd-result-title"><strong>{candidate.name}</strong>{candidate.typeLabel ? <span className="pd-result-type">· {candidate.typeLabel}</span> : null}</span>
+                  <small>{candidate.address ?? t.add.addressUnavailable}</small>
+                  <PlacePhotoCredit photo={candidate.photo} />
+                </span>
+                <button
+                  type="button"
+                  className="pd-primary pd-accent"
+                  disabled={busy || candidate.alreadyInWishlist}
+                  aria-label={candidate.alreadyInWishlist
+                    ? t.add.alreadyInWishlistCandidate(candidate.name, candidate.typeLabel)
+                    : t.add.addCandidate(candidate.name, candidate.typeLabel)}
+                  onClick={() => void confirm(candidate)}
+                >
+                  {candidate.alreadyInWishlist ? t.add.alreadyInWishlist : t.add.addThisPlace}
+                </button>
               </li>
             ))}
           </ul>
@@ -627,6 +665,18 @@ export function TripPlaceWorkspace({
   const [removalConfirmation, setRemovalConfirmation] = useState<TripPlaceDto | null>(null);
   const [removing, setRemoving] = useState(false);
 
+  const canSchedule = trip.role === "owner";
+
+  useEffect(() => {
+    if (canSchedule) return;
+    setSelecting(false);
+    setSelectedPlaceIds(new Set());
+    setScheduleContext(null);
+    setScheduleBusy(false);
+    setRemovalConfirmation(null);
+    setScheduleError("");
+  }, [canSchedule]);
+
   function openDetail(placeId: string) {
     if (placeId === selectedPlaceId) {
       window.requestAnimationFrame(() => detailTitleRef.current?.focus());
@@ -637,6 +687,7 @@ export function TripPlaceWorkspace({
   }
 
   function startSelection() {
+    if (!canSchedule) return;
     setSelectedPlaceIds(new Set());
     setSelecting(true);
   }
@@ -647,6 +698,7 @@ export function TripPlaceWorkspace({
   }
 
   function openScheduleForPlace(place: TripPlaceDto) {
+    if (!canSchedule) return;
     setScheduleError("");
     setRemovalConfirmation(null);
     setSelectedPlaceId(null);
@@ -819,7 +871,7 @@ export function TripPlaceWorkspace({
   }
 
   async function remove(place: TripPlaceDto) {
-    if (removing) return;
+    if (removing || (!canSchedule && isScheduledForRemovalPolicy(place))) return;
     setRemoving(true);
     setMessage("");
     const operation = `remove:${place.id}`;
@@ -836,7 +888,9 @@ export function TripPlaceWorkspace({
       onPlacesChanged();
       setRemovalConfirmation(null);
     } catch (error) {
-      setMessage(errorMessage(error, t.errors.requestFailed));
+      setMessage(error instanceof ApiRequestError && (error.code === "forbidden" || error.status === 403)
+        ? schedule.ownerOnlyAction
+        : errorMessage(error, t.errors.requestFailed));
     } finally {
       setRemoving(false);
     }
@@ -897,6 +951,7 @@ export function TripPlaceWorkspace({
     : [];
   const scheduledPlace = schedulePlaces.length === 1 ? schedulePlaces[0]! : null;
   const missingLocationCount = listedPlaces.filter((place) => place.latitude === null || place.longitude === null).length;
+  const hasSchedulablePlaces = canSchedule && listedPlaces.some((place) => canSelectForSchedule(place, placesById.has(place.id)));
   const previews = usePlacePreviews({
     tripId: trip.id,
     kind: "trip-place",
@@ -911,7 +966,7 @@ export function TripPlaceWorkspace({
   }
 
   function togglePlaceSelection(place: TripPlaceDto) {
-    if (!canSelectForSchedule(place, placesById.has(place.id))) return;
+    if (!canSchedule || !canSelectForSchedule(place, placesById.has(place.id))) return;
     setSelectedPlaceIds((current) => {
       const next = new Set(current);
       if (next.has(place.id)) next.delete(place.id);
@@ -921,13 +976,13 @@ export function TripPlaceWorkspace({
   }
 
   function openSelectionSchedule() {
-    if (selectedPlaceIds.size === 0) return;
+    if (!canSchedule || selectedPlaceIds.size === 0) return;
     setScheduleError("");
     setScheduleContext({ placeIds: [...selectedPlaceIds] });
   }
 
   async function confirmSchedule(dayId: string | null) {
-    if (scheduleBusy || schedulePlaces.length === 0) return;
+    if (!canSchedule || scheduleBusy || schedulePlaces.length === 0) return;
     setScheduleBusy(true);
     setScheduleError("");
     try {
@@ -963,7 +1018,9 @@ export function TripPlaceWorkspace({
         showScheduleToast(schedule.toastUnscheduled(scheduledPlace.name));
       }
     } catch (error) {
-      setScheduleError(error instanceof ApiRequestError ? error.message : t.errors.requestFailed);
+      setScheduleError(error instanceof ApiRequestError && (error.code === "forbidden" || error.status === 403)
+        ? schedule.ownerOnlyAction
+        : error instanceof ApiRequestError ? error.message : t.errors.requestFailed);
       try {
         await refreshPlaces();
       } catch {
@@ -1084,7 +1141,7 @@ export function TripPlaceWorkspace({
   }
 
   function detailScheduleAction(place: TripPlaceDto) {
-    if (!placesById.has(place.id)) return null;
+    if (!canSchedule || !placesById.has(place.id)) return null;
     if (place.latitude === null || place.longitude === null) {
       return (
         <a className="schedule-secondary-button" href={`?trip=${encodeURIComponent(trip.id)}&tab=itinerary&segment=daily&manage=places`}>
@@ -1122,10 +1179,12 @@ export function TripPlaceWorkspace({
               <p>{t.workspace.helper}</p>
             </div>
             <div className="schedule-head-buttons">
-              <button type="button" className="schedule-primary-button" onClick={startSelection}>
-                <CalendarPlus aria-hidden="true" />
-                {schedule.pageAction}
-              </button>
+              {hasSchedulablePlaces ? (
+                <button type="button" className="schedule-primary-button" onClick={startSelection}>
+                  <CalendarPlus aria-hidden="true" />
+                  {schedule.pageAction}
+                </button>
+              ) : null}
               <button type="button" className="schedule-secondary-button" onClick={() => setAdding(true)}>
                 <Plus aria-hidden="true" />
                 {t.workspace.addPlace}
@@ -1134,6 +1193,7 @@ export function TripPlaceWorkspace({
           </>
         )}
       </div>
+      {!canSchedule ? <p className="pd-subhead">{schedule.ownerOnly}</p> : null}
       {readError ? <div className="pd-notice pd-read-error" role="alert"><p>{readError}</p><button type="button" className="pd-secondary" disabled={loading} onClick={() => void load()}>{t.workspace.reload}</button></div> : null}
       {message ? <p className="pd-notice" role="alert">{message}</p> : null}
       {loading && places.length === 0 ? <p className="pd-subhead" role="status">{t.workspace.loading}</p> : null}
@@ -1179,7 +1239,7 @@ export function TripPlaceWorkspace({
                   }
                   openDetail(place.id);
                 }}>
-                {selecting ? selectionCheckbox(place, "desktop") : null}
+                {canSchedule && selecting ? selectionCheckbox(place, "desktop") : null}
                 <div className="pd-row-main">
                   <PlaceThumbnail photo={previews.photos.get(place.id)} loading={previews.loading} />
                   <div className="pd-row-copy">
@@ -1188,7 +1248,7 @@ export function TripPlaceWorkspace({
                         ? <span className="pd-titlebutton">{place.name}</span>
                         : <button type="button" data-place-detail-trigger={place.id} className="pd-titlebutton" aria-label={t.workspace.viewDetail(place.name)} onClick={() => openDetail(place.id)}>{place.name}</button>}
                       <span className="pd-chip">{t.placeType[place.type]}</span>
-                      {selecting ? selectionCheckbox(place, "mobile") : null}
+                      {canSchedule && selecting ? selectionCheckbox(place, "mobile") : null}
                     </div>
                     <p className={`pd-row-note${place.notes ? "" : " pd-muted"}`}>{place.notes ?? t.workspace.noReason}</p>
                     <div className="pd-row-status">
@@ -1238,29 +1298,33 @@ export function TripPlaceWorkspace({
           onClose={closeDetail}
           footer={
           removalConfirmation ? <div className="pd-confirm-footer"><p>{t.workspace.confirmRemove(removalConfirmation.name)}</p>{message ? <p role="alert">{message}</p> : null}<div><button className="pd-secondary" disabled={removing} onClick={() => setRemovalConfirmation(null)}>保留地點</button><button className="pd-danger-button" disabled={removing} onClick={() => void remove(removalConfirmation)}>{removing ? "移除中…" : t.workspace.remove}</button></div></div>
-          : <div>{message ? <p className="pd-notice" role="alert">{message}</p> : null}<div className="pd-fixed-actions">{detailScheduleAction(selectedPlace)}{quickActions(selectedPlace)}{placesById.has(selectedPlace.id) ? <button className="pd-danger-link" disabled={removing} onClick={() => { setMessage(""); setRemovalConfirmation(selectedPlace); }}>{t.workspace.remove}</button> : null}</div></div>
+          : <div>{message ? <p className="pd-notice" role="alert">{message}</p> : null}<div className="pd-fixed-actions">{detailScheduleAction(selectedPlace)}{quickActions(selectedPlace)}{placesById.has(selectedPlace.id) && (canSchedule || !isScheduledForRemovalPolicy(selectedPlace)) ? <button className="pd-danger-link" disabled={removing} onClick={() => { setMessage(""); setRemovalConfirmation(selectedPlace); }}>{t.workspace.remove}</button> : null}</div></div>
         }>
           {placeDetail(selectedPlace)}
         </PlaceDetailSheet>
       ) : null}
-      <SchedulePlacesSheet
-        open={scheduleContext !== null}
-        trip={trip}
-        places={schedulePlaces.map((place) => ({ id: place.id, name: place.name }))}
-        initialDayId={scheduledPlace?.assignedDayId}
-        allowUnscheduled={Boolean(scheduledPlace?.assignedDayId)}
-        busy={scheduleBusy}
-        error={scheduleError}
-        onConfirm={confirmSchedule}
-        onClose={closeSchedule}
-      />
-      <SelectionBar
-        count={selectedPlaceIds.size}
-        hint={missingLocationCount > 0 ? schedule.missingLocationHint(missingLocationCount) : undefined}
-        actionLabel={schedule.chooseDate}
-        onAction={openSelectionSchedule}
-        visible={selecting}
-      />
+      {canSchedule ? (
+        <>
+          <SchedulePlacesSheet
+            open={scheduleContext !== null}
+            trip={trip}
+            places={schedulePlaces.map((place) => ({ id: place.id, name: place.name }))}
+            initialDayId={scheduledPlace?.assignedDayId}
+            allowUnscheduled={Boolean(scheduledPlace?.assignedDayId)}
+            busy={scheduleBusy}
+            error={scheduleError}
+            onConfirm={confirmSchedule}
+            onClose={closeSchedule}
+          />
+          <SelectionBar
+            count={selectedPlaceIds.size}
+            hint={missingLocationCount > 0 ? schedule.missingLocationHint(missingLocationCount) : undefined}
+            actionLabel={schedule.chooseDate}
+            onAction={openSelectionSchedule}
+            visible={selecting}
+          />
+        </>
+      ) : null}
       {toast}
 
       <Dialog open={mergeConfirmation !== null} onOpenChange={(open) => { if (!open && !merging) setMergeConfirmation(null); }}>

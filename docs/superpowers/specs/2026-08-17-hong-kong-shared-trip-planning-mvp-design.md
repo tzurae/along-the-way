@@ -164,8 +164,8 @@
 - Session 使用 Secure、HttpOnly、SameSite=Lax Cookie。登出、移除成員或安全事件可撤銷所有相關 session。
 - 邀請綁定指定 Email、單次接受、7 天失效，owner 可隨時撤銷。已接受邀請後，兩位成員仍各自擁有獨立身分與偏好。
 - MVP 不開放公開註冊。初始 owner 由部署時的 bootstrap Email 建立；其後只有有效邀請能加入旅程。
-- owner 可邀請、撤銷邀請及移除成員；editor 可編輯旅程但不能管理 owner；viewer 只能閱讀。
-- 授權集中在後端 Membership Policy，不依賴前端隱藏按鈕。所有 trip-scoped application service 都先執行同一授權檢查。
+- owner 可邀請、撤銷邀請及移除成員。TripPlace 的日期指派、取消指派、跨日移動、整份行程套用、日內排序，以及移除已排程地點（已有日期指派、`selected_for_itinerary` 為 true，或被正式行程 endpoint 引用）都僅限 owner；editor 仍可加入地點、投票、編輯規劃備註及移除未排程地點；viewer 只能閱讀。
+- 授權集中在後端 Membership Policy，且 owner 檢查必須早於 idempotency replay，不依賴前端隱藏按鈕。正式行程項目（航班、住宿、活動）、鎖定／限制、每日時間窗與地點合併的權限仍是開放產品問題，本次不變。
 
 ### 7. Place intake and duplicate handling
 

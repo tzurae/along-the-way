@@ -1,3 +1,4 @@
+import type { GooglePlacePhotoDto } from "@along-the-way/contracts/place-details";
 import type { ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
 import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 
@@ -60,13 +61,55 @@ export class ProviderUnavailableError extends Error {
 export interface PlaceSearchOptions {
   /** BCP-47 language Google uses for place names and addresses. */
   languageCode?: string;
+  /** CLDR two-letter region code used to bias results. */
+  regionCode?: string;
+  /** Number of Text Search results requested from Google. */
+  pageSize?: number;
+}
+
+export interface GoogleProviderPhoto {
+  name: string;
+  width: number;
+  height: number;
+  authors: Array<{ displayName: string; uri: string | null }>;
+  googleMapsUri: string | null;
+}
+
+export function googlePlacePhotoDto(
+  tripId: string,
+  providerPlaceId: string,
+  photo: GoogleProviderPhoto,
+): GooglePlacePhotoDto {
+  const prefix = `/api/trips/${tripId}/google-place-photos/${providerPlaceId}`;
+  return {
+    source: "google",
+    id: `google:${providerPlaceId}`,
+    thumbnailUrl: `${prefix}?maxWidth=192`,
+    imageUrl: `${prefix}?maxWidth=1024`,
+    width: photo.width,
+    height: photo.height,
+    authors: photo.authors,
+    googleMapsUri: photo.googleMapsUri,
+  };
+}
+
+export interface ProviderPlaceCandidate extends ProviderPlaceCandidateDto {
+  /** Provider-only photo metadata. It is never persisted or sent directly to clients. */
+  providerPhoto?: GoogleProviderPhoto | null;
+}
+
+export interface PlacePhotoMedia {
+  bytes: Uint8Array<ArrayBuffer>;
+  contentType: string;
 }
 
 export interface PlaceProvider {
   readonly attribution: string;
   readonly available?: boolean;
-  search(query: string, options?: PlaceSearchOptions): Promise<ProviderPlaceCandidateDto[]>;
-  getPlace(providerPlaceId: string): Promise<ProviderPlaceCandidateDto>;
+  search(query: string, options?: PlaceSearchOptions): Promise<ProviderPlaceCandidate[]>;
+  getPlace(providerPlaceId: string, options?: Pick<PlaceSearchOptions, "languageCode" | "regionCode">): Promise<ProviderPlaceCandidate>;
+  getFirstPhoto?(providerPlaceId: string): Promise<GoogleProviderPhoto | null>;
+  fetchPhotoMedia?(photoName: string, maxWidthPx: 192 | 1024): Promise<PlacePhotoMedia>;
 }
 
 export interface RatedPlaceCandidate {
@@ -102,21 +145,28 @@ interface GooglePlaceValue {
   formattedAddress?: unknown;
   location?: unknown;
   primaryType?: unknown;
+  primaryTypeDisplayName?: unknown;
   googleMapsUri?: unknown;
+  photos?: unknown;
 }
 
-const SEARCH_FIELD_MASK = [
+const PLACE_FIELD_MASK = [
   "places.id",
   "places.displayName",
   "places.formattedAddress",
   "places.location",
   "places.primaryType",
   "places.googleMapsUri",
+];
+const SEARCH_FIELD_MASK = [
+  ...PLACE_FIELD_MASK,
+  "places.primaryTypeDisplayName",
+  "places.photos",
 ].join(",");
 // rating, userRatingCount and websiteUri move the request to the Enterprise SKU; the
 // businessStatus and addressComponents (Pro) fields then cost nothing more.
 const LOOKUP_FIELD_MASK = [
-  SEARCH_FIELD_MASK,
+  ...PLACE_FIELD_MASK,
   "places.rating",
   "places.userRatingCount",
   "places.websiteUri",
@@ -166,7 +216,17 @@ function mappedPlaceType(value: string): PlaceType {
     value.includes("tourist_attraction") ||
     value.includes("amusement") ||
     value.includes("zoo") ||
-    value.includes("aquarium")
+    value.includes("aquarium") ||
+    // Temples, shrines and other sights a traveller visits (e.g. 東福寺 is `buddhist_temple`).
+    value.includes("temple") ||
+    value.includes("shrine") ||
+    value.includes("church") ||
+    value === "place_of_worship" ||
+    value === "historical_landmark" ||
+    value === "historical_place" ||
+    value === "monument" ||
+    value === "garden" ||
+    value === "botanical_garden"
   ) return "activity";
   return "other";
 }
@@ -175,6 +235,15 @@ function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function providerHttpsUrl(value: unknown) {
+  if (typeof value !== "string" || value.length > 2_000) return null;
+  try {
+    return new URL(value).protocol === "https:" ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, PlaceHoursLookup {
@@ -198,14 +267,19 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
     if (!query || query.length > 300) {
       throw new TypeError("Search query must contain 1 to 300 characters");
     }
+    const pageSize = options.pageSize;
+    if (pageSize !== undefined && (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 20)) {
+      throw new TypeError("Search page size must be an integer from 1 to 20");
+    }
     const value = await this.request(
       "https://places.googleapis.com/v1/places:searchText",
       {
         method: "POST",
         body: JSON.stringify({
           textQuery: query,
-          maxResultCount: 8,
           ...(options.languageCode ? { languageCode: options.languageCode } : {}),
+          ...(options.regionCode ? { regionCode: options.regionCode } : {}),
+          ...(pageSize === undefined ? {} : { pageSize }),
         }),
         headers: {
           "Content-Type": "application/json",
@@ -215,7 +289,7 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
     );
     const places = record(value)?.places;
     if (!Array.isArray(places)) return [];
-    return places.map((place) => this.candidate(place));
+    return places.map((place) => this.candidate(place, true));
   }
 
   async lookup(rawQuery: string, options: PlaceSearchOptions = {}): Promise<RatedPlaceCandidate[]> {
@@ -272,18 +346,53 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
     };
   }
 
-  async getPlace(rawProviderPlaceId: string) {
-    const providerPlaceId = rawProviderPlaceId.trim();
-    if (!/^[A-Za-z0-9_-]{8,300}$/.test(providerPlaceId)) {
-      throw new TypeError("Invalid Google place ID");
-    }
+  async getPlace(
+    rawProviderPlaceId: string,
+    options: Pick<PlaceSearchOptions, "languageCode" | "regionCode"> = {},
+  ) {
+    const providerPlaceId = this.placeId(rawProviderPlaceId);
+    const query = new URLSearchParams();
+    if (options.languageCode) query.set("languageCode", options.languageCode);
+    if (options.regionCode) query.set("regionCode", options.regionCode);
+    const parameters = query.toString();
+    const suffix = parameters ? `?${parameters}` : "";
     const value = await this.request(
-      `https://places.googleapis.com/v1/places/${encodeURIComponent(providerPlaceId)}`,
+      `https://places.googleapis.com/v1/places/${encodeURIComponent(providerPlaceId)}${suffix}`,
       {
         headers: { "X-Goog-FieldMask": DETAILS_FIELD_MASK },
       },
     );
     return this.candidate(value);
+  }
+
+  async getFirstPhoto(rawProviderPlaceId: string): Promise<GoogleProviderPhoto | null> {
+    const providerPlaceId = this.placeId(rawProviderPlaceId);
+    const value = record(await this.request(
+      `https://places.googleapis.com/v1/places/${encodeURIComponent(providerPlaceId)}`,
+      { headers: { "X-Goog-FieldMask": "photos" } },
+    ));
+    return this.firstPhoto(value?.photos);
+  }
+
+  async fetchPhotoMedia(rawPhotoName: string, maxWidthPx: 192 | 1024): Promise<PlacePhotoMedia> {
+    const photoName = rawPhotoName.trim();
+    if (!/^places\/[A-Za-z0-9_-]{8,300}\/photos\/[A-Za-z0-9_-]{1,1000}$/.test(photoName)
+      || (maxWidthPx !== 192 && maxWidthPx !== 1024)) {
+      throw new TypeError("Invalid Google photo request");
+    }
+    const metadata = record(await this.request(
+      `https://places.googleapis.com/v1/${photoName}/media?maxWidthPx=${maxWidthPx}&skipHttpRedirect=true`,
+      { headers: {} },
+    ));
+    if (typeof metadata?.photoUri !== "string") throw new ProviderUnavailableError();
+    let photoUri: URL;
+    try {
+      photoUri = new URL(metadata.photoUri);
+    } catch {
+      throw new ProviderUnavailableError();
+    }
+    if (photoUri.protocol !== "https:") throw new ProviderUnavailableError();
+    return this.fetchImage(photoUri);
   }
 
   private async request(url: string, init: RequestInit) {
@@ -310,9 +419,98 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
     }
   }
 
-  private candidate(raw: unknown): ProviderPlaceCandidateDto {
+  private placeId(rawProviderPlaceId: string) {
+    const providerPlaceId = rawProviderPlaceId.trim();
+    if (!/^[A-Za-z0-9_-]{8,300}$/.test(providerPlaceId)) {
+      throw new TypeError("Invalid Google place ID");
+    }
+    return providerPlaceId;
+  }
+
+  private firstPhoto(rawPhotos: unknown): GoogleProviderPhoto | null {
+    if (!Array.isArray(rawPhotos) || rawPhotos.length === 0) return null;
+    const photo = record(rawPhotos[0]);
+    if (!photo
+      || typeof photo.name !== "string"
+      || !/^places\/[A-Za-z0-9_-]{8,300}\/photos\/[A-Za-z0-9_-]{1,1000}$/.test(photo.name)
+      || typeof photo.widthPx !== "number"
+      || !Number.isSafeInteger(photo.widthPx)
+      || photo.widthPx < 1
+      || photo.widthPx > 50_000
+      || typeof photo.heightPx !== "number"
+      || !Number.isSafeInteger(photo.heightPx)
+      || photo.heightPx < 1
+      || photo.heightPx > 50_000) return null;
+    const rawAuthors = photo.authorAttributions;
+    if (rawAuthors !== undefined && (!Array.isArray(rawAuthors) || rawAuthors.length > 50)) return null;
+    const authors: GoogleProviderPhoto["authors"] = [];
+    for (const rawAuthor of rawAuthors ?? []) {
+      const author = record(rawAuthor);
+      if (!author || typeof author.displayName !== "string"
+        || !author.displayName.trim() || author.displayName.length > 500) return null;
+      authors.push({ displayName: author.displayName, uri: providerHttpsUrl(author.uri) });
+    }
+    return {
+      name: photo.name,
+      width: photo.widthPx,
+      height: photo.heightPx,
+      authors,
+      googleMapsUri: providerHttpsUrl(photo.googleMapsUri),
+    };
+  }
+
+  private async fetchImage(url: URL): Promise<PlacePhotoMedia> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8_000);
+    try {
+      const response = await this.fetch(url, {
+        signal: controller.signal,
+        headers: { Accept: "image/*" },
+      });
+      const contentType = response.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+      const rawContentLength = response.headers.get("Content-Length");
+      const contentLength = rawContentLength === null ? null : Number(rawContentLength);
+      const maximumBytes = 5 * 1024 * 1024;
+      if (!response.ok || !/^image\/[a-z0-9.+-]+$/.test(contentType)
+        || (contentLength !== null && (!Number.isSafeInteger(contentLength) || contentLength < 0 || contentLength > maximumBytes))
+        || !response.body) throw new ProviderUnavailableError();
+      const reader = response.body.getReader();
+      const knownBytes = contentLength === null ? null : new Uint8Array(contentLength);
+      const chunks: Uint8Array[] | null = knownBytes ? null : [];
+      let byteLength = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const nextByteLength = byteLength + value.byteLength;
+        if (nextByteLength > maximumBytes || (knownBytes && nextByteLength > knownBytes.byteLength)) {
+          await reader.cancel();
+          throw new ProviderUnavailableError();
+        }
+        if (knownBytes) knownBytes.set(value, byteLength);
+        else chunks!.push(value);
+        byteLength = nextByteLength;
+      }
+      if (byteLength === 0 || (knownBytes && byteLength !== knownBytes.byteLength)) throw new ProviderUnavailableError();
+      if (knownBytes) return { bytes: knownBytes, contentType };
+      const bytes = new Uint8Array(byteLength);
+      let offset = 0;
+      for (const chunk of chunks!) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return { bytes, contentType };
+    } catch (error) {
+      if (error instanceof ProviderUnavailableError) throw error;
+      throw new ProviderUnavailableError();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private candidate(raw: unknown, includePhoto = false): ProviderPlaceCandidate {
     const value = record(raw);
     const displayName = record(value?.displayName);
+    const primaryTypeDisplayName = record(value?.primaryTypeDisplayName);
     const location = record(value?.location);
     if (
       !value ||
@@ -336,6 +534,9 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
       type: mappedPlaceType(
         typeof value.primaryType === "string" ? value.primaryType : "",
       ),
+      typeLabel: typeof primaryTypeDisplayName?.text === "string" && primaryTypeDisplayName.text.trim()
+        ? primaryTypeDisplayName.text
+        : null,
       address:
         typeof value.formattedAddress === "string"
           ? value.formattedAddress
@@ -348,6 +549,8 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
       attribution: this.attribution,
       observedAt: observedAt.toISOString(),
       expiresAt: expiresAt.toISOString(),
+      photo: null,
+      ...(includePhoto ? { providerPhoto: this.firstPhoto(value.photos) } : {}),
     };
   }
 }

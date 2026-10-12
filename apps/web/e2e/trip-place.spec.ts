@@ -235,7 +235,7 @@ async function cleanup() {
 test.beforeEach(() => executeDatabase("truncate table rate_limit_windows"));
 test.afterAll(cleanup);
 
-test("members vote on shared wishlist places and can remove another member's scheduled place", async ({ browser, request }) => {
+test("editors keep collaboration controls while only the owner can change scheduled places", async ({ browser, request }) => {
   test.setTimeout(240_000);
   await request.delete(`${MAILPIT_API_URL}/api/v1/messages`);
   const suffix = Date.now();
@@ -528,23 +528,32 @@ test("members vote on shared wishlist places and can remove another member's sch
   })).toHaveCount(0);
   await expect(secondDay.getByText("1 項安排", { exact: true })).toBeVisible();
 
-  const removingContext = await browser.newContext({ viewport: { width: 1024, height: 900 } });
-  const removingPage = await removingContext.newPage();
-  await signIn(removingPage, request, memberEmails[0]!);
-  await expect(removingPage.getByRole("button", { name: new RegExp(`${tripName}，切換旅程`) })).toBeVisible();
-  await openTab(removingPage, "想去清單");
-  const scheduledCard = await expandWishlistPlace(removingPage, "Cross-surface Cafe");
-  await scheduledCard.getByRole("button", { name: "從口袋名單移除", exact: true }).click();
-  await expect(scheduledCard).toContainText("確定要把「Cross-surface Cafe」移出口袋名單嗎？票和天數安排會一起清除。");
-  await scheduledCard.getByRole("button", { name: "保留地點", exact: true }).click();
-  await expect(scheduledCard).not.toContainText("票和天數安排會一起清除");
-  await scheduledCard.getByRole("button", { name: "從口袋名單移除", exact: true }).click();
-  await scheduledCard.getByRole("button", { name: "從口袋名單移除", exact: true }).click();
-  await expect(scheduledCard).toHaveCount(0);
-  await openItineraryManagement(removingPage);
-  await expect(removingPage.getByText("Cross-surface timed visit", { exact: true })).toBeVisible();
-  await expect(removingPage.getByRole("button", { name: "編輯「Cross-surface Cafe」" })).toHaveCount(1);
-  await removingContext.close();
+  const editorContext = await browser.newContext({ viewport: { width: 1024, height: 900 } });
+  const editorPage = await editorContext.newPage();
+  await signIn(editorPage, request, memberEmails[0]!);
+  await expect(editorPage.getByRole("button", { name: new RegExp(`${tripName}，切換旅程`) })).toBeVisible();
+  await openTab(editorPage, "想去清單");
+  await expect(editorPage.getByText("只有旅程擁有者可以排入、改期或移出行程。你仍可加入地點、投票與編輯備註。", { exact: true })).toHaveCount(1);
+  await expect(editorPage.getByRole("button", { name: "排入行程", exact: true })).toHaveCount(0);
+  await expect(editorPage.getByRole("button", { name: "加入地點", exact: true })).toBeVisible();
+  const scheduledCard = await expandWishlistPlace(editorPage, "Cross-surface Cafe");
+  await expect(scheduledCard.getByRole("button", { name: "修改原因", exact: true })).toBeVisible();
+  await expect(scheduledCard.getByRole("button", { name: /^想去，|^已表態想去，/ })).toBeVisible();
+  await expect(scheduledCard.getByRole("button", { name: "更改日期", exact: true })).toHaveCount(0);
+  await expect(scheduledCard.getByRole("button", { name: "從口袋名單移除", exact: true })).toHaveCount(0);
+  await scheduledCard.getByRole("button", { name: "關閉", exact: true }).click();
+  await editorContext.close();
+
+  await ownerPage.reload();
+  await openTab(ownerPage, "想去清單");
+  const ownerScheduledCard = await expandWishlistPlace(ownerPage, "Cross-surface Cafe");
+  await expect(ownerScheduledCard.getByRole("button", { name: "從口袋名單移除", exact: true })).toBeVisible();
+  await ownerScheduledCard.getByRole("button", { name: "從口袋名單移除", exact: true }).click();
+  await expect(ownerScheduledCard).toContainText("確定要把「Cross-surface Cafe」移出口袋名單嗎？票和天數安排會一起清除。");
+  await ownerScheduledCard.getByRole("button", { name: "從口袋名單移除", exact: true }).click();
+  await expect(ownerScheduledCard).toHaveCount(0);
+  await openItineraryManagement(ownerPage);
+  await expect(ownerPage.getByText("Cross-surface timed visit", { exact: true })).toBeVisible();
 
   await openTab(ownerPage, "想去清單");
   await ownerPage.getByRole("button", { name: "加入地點" }).click();
@@ -1131,6 +1140,7 @@ test("photo composition and compact credits survive desktop and enlarged-text bo
   const imageUrl = `/api/trips/${tripId}/place-photo-assets/${filename}?kind=trip-place&id=${place.id}`;
   const author = `版面驗收作者（非真實景點攝影師）；${"同一測試署名；".repeat(80)}`;
   const photo = {
+    source: "curated" as const,
     id: "geometry-test-pixel", title: "原始測試像素", description: "單一測試像素，不是實際景點照片。",
     sourceName: "本機版面驗收資料", sourceUrl: "https://example.test/original-test-pixel",
     fileSourceUrl: "https://example.test/original-test-pixel.png", author, authorUrl: "https://example.test/test-author",
@@ -1145,7 +1155,7 @@ test("photo composition and compact credits survive desktop and enlarged-text bo
     if (url.searchParams.get("kind") !== "trip-place" || url.searchParams.get("id") !== place.id) return route.fallback();
     await route.fulfill({ json: { detail: {
       reference: { kind: "trip-place", id: place.id }, canonicalPlaceId: place.placeId, name: placeName,
-      asOfDate: url.searchParams.get("date"), sections: [], sources: [], photos: [photo],
+      asOfDate: url.searchParams.get("date"), sections: [], sources: [], photos: [photo], googlePhoto: null,
     } } });
   });
   await page.route(`**/api/trips/${tripId}/place-photo-assets/${filename}?**`, (route) => route.fulfill({ contentType: "image/png", body: pixel }));

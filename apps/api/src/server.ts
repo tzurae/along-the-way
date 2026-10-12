@@ -66,7 +66,11 @@ const app = createApp({
   dayPlans,
   discovery,
   identityAccess,
-  placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
+  placeDetails: new PostgresPlaceDetailModule({
+    database,
+    assetRoot: packagedPhotoRoot,
+    ...(placeProvider.available ? { provider: placeProvider } : {}),
+  }),
   rateLimiter,
   readiness,
   siteAddress,

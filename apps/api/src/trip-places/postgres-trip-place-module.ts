@@ -5,6 +5,7 @@ import {
   type MergeTripPlacesInput,
   type ProviderCandidatesResponse,
   type ProviderPlaceCandidateDto,
+  type ProviderPlaceSearchResultDto,
   type RemoveTripPlaceInput,
   type TripPlaceDto,
   type UpdateMemberVoteInput,
@@ -28,11 +29,14 @@ import {
   replayed,
   requireIdempotencyKey,
   requireDayVersion,
+  requireOwner,
   type DatabaseExecutor,
 } from "../private-trips/postgres-private-trip-store";
 import {
+  googlePlacePhotoDto,
   ProviderUnavailableError,
   type PlaceProvider,
+  type ProviderPlaceCandidate,
 } from "./google-places-provider";
 import {
   GoogleMapsUrlError,
@@ -199,6 +203,17 @@ function normalizedSimilarity(value: string | null) {
   return value?.normalize("NFKC").toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, "") ?? "";
 }
 
+function exactNameFirst(query: string, candidates: ProviderPlaceCandidate[]) {
+  const normalizedQuery = normalizedSimilarity(query);
+  const exact: ProviderPlaceCandidate[] = [];
+  const other: ProviderPlaceCandidate[] = [];
+  for (const candidate of candidates) {
+    (normalizedSimilarity(candidate.name) === normalizedQuery ? exact : other).push(candidate);
+  }
+  exact.push(...other);
+  return exact;
+}
+
 function metresBetween(
   first: { latitude: number | null; longitude: number | null },
   second: { latitude: number | null; longitude: number | null },
@@ -297,8 +312,10 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     query: string,
   ): Promise<ProviderCandidatesResponse> {
     await this.requireMember(this.database, userId, tripId);
+    const options = await this.googleRequestOptions(tripId);
     try {
-      const candidates = await this.provider.search(query);
+      const providerCandidates = await this.provider.search(query, { ...options, pageSize: 3 });
+      const candidates = await this.searchResults(tripId, exactNameFirst(query, providerCandidates).slice(0, 3));
       await this.clearProviderUnavailable(tripId);
       return { candidates, attribution: this.provider.attribution };
     } catch (error) {
@@ -322,20 +339,22 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     url: string,
   ): Promise<ProviderCandidatesResponse> {
     await this.requireMember(this.database, userId, tripId);
+    const options = await this.googleRequestOptions(tripId);
     try {
       const resolution = await resolveGoogleMapsUrl(url, this.urlResolver);
       const providerPlaceId = googleMapsPlaceId(resolution.resolvedUrl);
       const searchText = googleMapsSearchText(resolution.resolvedUrl);
-      const candidates = providerPlaceId
-        ? [await this.provider.getPlace(providerPlaceId)]
+      const providerCandidates = providerPlaceId
+        ? [await this.provider.getPlace(providerPlaceId, options)]
         : searchText
-          ? await this.provider.search(searchText)
+          ? await this.provider.search(searchText, { ...options, pageSize: 3 })
           : [];
+      const orderedCandidates = searchText ? exactNameFirst(searchText, providerCandidates) : providerCandidates;
       if (providerPlaceId || searchText) {
         await this.clearProviderUnavailable(tripId);
       }
       return {
-        candidates,
+        candidates: await this.searchResults(tripId, orderedCandidates.slice(0, 3)),
         resolvedUrl: resolution.resolvedUrl,
         attribution: this.provider.attribution,
       };
@@ -381,8 +400,10 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       };
     } else {
       try {
+        const options = await this.googleRequestOptions(tripId);
         candidate = await this.provider.getPlace(
           requiredText(input.providerPlaceId, "providerPlaceId", 300),
+          options,
         );
       } catch (error) {
         if (error instanceof TypeError) {
@@ -413,6 +434,45 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       originalNote,
       true,
     );
+  }
+
+  private async googleRequestOptions(tripId: string) {
+    const rows = await this.database.selectFrom("trip_country_stops")
+      .select("country_code")
+      .distinct()
+      .where("trip_id", "=", tripId)
+      .execute();
+    return {
+      languageCode: "zh-TW",
+      ...(rows.length === 1 ? { regionCode: rows[0]!.country_code.trim().toUpperCase() } : {}),
+    };
+  }
+
+  private async searchResults(
+    tripId: string,
+    candidates: ProviderPlaceCandidate[],
+  ): Promise<ProviderPlaceSearchResultDto[]> {
+    const providerPlaceIds = [...new Set(candidates.map((candidate) => candidate.providerPlaceId))];
+    const existing = providerPlaceIds.length === 0
+      ? []
+      : await this.database.selectFrom("trip_places as tripPlace")
+          .innerJoin("place_identities as identity", "identity.id", "tripPlace.place_id")
+          .select("identity.provider_place_id")
+          .where("tripPlace.trip_id", "=", tripId)
+          .where("tripPlace.archived_at", "is", null)
+          .where("identity.provider", "=", "google")
+          .where("identity.provider_place_id", "in", providerPlaceIds)
+          .execute();
+    const alreadyInWishlist = new Set(existing.flatMap((row) =>
+      row.provider_place_id === null ? [] : [row.provider_place_id]));
+    return candidates.map((candidate) => {
+      const { providerPhoto, ...dto } = candidate;
+      return {
+        ...dto,
+        photo: providerPhoto ? googlePlacePhotoDto(tripId, candidate.providerPlaceId, providerPhoto) : null,
+        alreadyInWishlist: alreadyInWishlist.has(candidate.providerPlaceId),
+      };
+    });
   }
 
   /** Caller owns the transaction, trip content lock, reconciliation and command replay. */
@@ -667,7 +727,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     const key = requireIdempotencyKey(rawKey);
     const operation = `tp:day-assignments:${tripId}`;
     return this.database.transaction().execute(async (transaction) => {
-      await this.requireMember(transaction, userId, tripId);
+      await requireOwner(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedTripPlaces(replay);
@@ -791,7 +851,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     const key = requireIdempotencyKey(rawKey);
     const operation = `tp:trip-plan:${tripId}`;
     return this.database.transaction().execute(async (transaction) => {
-      await this.requireMember(transaction, userId, tripId);
+      await requireOwner(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedTripPlaces(replay);
@@ -1203,10 +1263,38 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     const operation = `tp:remove:${tripPlaceId}`;
     await this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
+      await this.lockTripContent(transaction, tripId);
+      const authorization = await transaction.selectFrom("trip_places as trip_place")
+        .select([
+          "trip_place.selected_for_itinerary",
+          sql<boolean>`exists (
+            select 1 from trip_place_day_assignments as assignment
+            where assignment.trip_id = ${tripId}
+              and assignment.trip_place_id = ${tripPlaceId}
+          )`.as("has_day_assignment"),
+          sql<boolean>`exists (
+            select 1 from itinerary_endpoints as endpoint
+            where endpoint.trip_id = ${tripId}
+              and endpoint.place_id = trip_place.legacy_place_id
+          )`.as("has_timed_endpoint"),
+        ])
+        .where("trip_place.id", "=", tripPlaceId)
+        .where("trip_place.trip_id", "=", tripId)
+        .executeTakeFirst();
+      if (!authorization) throw new AppError("trip_place_not_found", "Trip place not found", 404);
+      if (
+        authorization.selected_for_itinerary
+        || authorization.has_day_assignment
+        || authorization.has_timed_endpoint
+      ) {
+        await requireOwner(transaction, userId, tripId);
+      } else {
+        // Re-check membership under the trip lock before replaying a prior success.
+        await this.requireMember(transaction, userId, tripId);
+      }
       await lockMutation(transaction, userId, operation, key);
       if (await replayed(transaction, userId, operation, key)) return;
       await this.reconcileLegacyPlaces(transaction, tripId);
-      await this.requireMember(transaction, userId, tripId);
       const current = await this.lockTripPlace(transaction, tripId, tripPlaceId);
       this.expectedVersion(current.version, input.expectedVersion);
       const previousAssignment = await transaction.selectFrom("trip_place_day_assignments as assignment")

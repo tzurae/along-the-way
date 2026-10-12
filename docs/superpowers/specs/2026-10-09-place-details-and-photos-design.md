@@ -58,6 +58,14 @@
 
 舊 MVP 規格提到 Google Place Photos；本次照片功能以本文件的可重用授權策展照片為界線，不把舊文的 Google 照片構想視為本次授權。`PRODUCT.md` 的既有無障礙基準不變；先前 POC 排除無障礙檢查，不等於取消正式產品的基準。
 
+### 2026-10-12 Issue #104 修訂
+
+Issue #104 的已接受決定僅取代本文件對 Google Places Photos 整合的排除，不改變策展內容、權利查核、地點身分隔離或無障礙要求。經人工查核的 catalog 照片永遠優先；catalog 零張時，具有 Google provider place id 的地點可顯示 Google Places (New) 當下回傳的第一張照片。手動或未知身分仍維持無照片，不以名稱猜測。
+
+Google API key 不得送到瀏覽器。圖片只經 authenticated、trip-member-only 的同源 API 代理提供，並在所有顯示位置附上 Google 回傳的作者 attribution 與 Google Maps 連結。代理每次即時取得 photo name 與短效 media URL，限制 8 秒、5 MiB 及 `image/*`；photo name、短效 URL 和圖片 bytes 不寫入資料庫或磁碟，僅允許瀏覽器使用 `Cache-Control: private, max-age=86400`。單一 fallback 查詢失敗不阻塞詳情文字或其他地點。
+
+此修訂不批准抓取 Google Maps 網頁圖片、永久複製供應商內容、建立照片 cache／alias table 或新增 migration。供應商讀取依當期政策與計價處理；2026-10-12 的依據為 Google Maps Platform **Place Details Photos Enterprise** SKU，每月 1,000 次免費，之後每 1,000 次 US$7，官方來源為 <https://developers.google.com/maps/billing-and-pricing/pricing>。
+
 ## 4. 用語與內容責任
 
 | 用語 | 責任與界線 |
