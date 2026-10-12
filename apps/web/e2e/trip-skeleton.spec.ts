@@ -167,14 +167,14 @@ async function signIn(
   const previousResponse = await request.get(`${MAILPIT_API_URL}/api/v1/messages`);
   const previousMessageIds = new Set(messages(await previousResponse.json()).map((message) => message.id));
   await page.getByLabel("電子郵件").fill(email);
-  await page.getByRole("button", { name: "寄登入連結給我" }).click();
+  await page.getByRole("button", { name: "寄送登入連結" }).click();
   let messageId = "";
   await expect.poll(async () => {
     const response = await request.get(`${MAILPIT_API_URL}/api/v1/messages`);
     messageId = messages(await response.json()).find(
       (message) =>
         !previousMessageIds.has(message.id) &&
-        message.subject.includes("Sign in to Along the Way") &&
+        message.subject.includes("登入 Along the Way") &&
         message.recipients.includes(email),
     )?.id ?? "";
     return messageId;
@@ -222,7 +222,7 @@ async function inviteEditor(
   await ownerPage.getByLabel("透過電子郵件邀請編輯者").fill(email);
   await ownerPage.getByRole("button", { name: "寄出邀請" }).click();
   await expect(ownerPage.getByRole("tabpanel", { name: "成員", exact: true }).getByRole("status").filter({ hasText: email })).toBeVisible();
-  return emailLink(request, email, `Join ${tripName}`);
+  return emailLink(request, email, `邀請你加入「${tripName}」`);
 }
 
 async function acceptEditor(
@@ -269,6 +269,7 @@ async function createTrip(
   }
   await page.locator(`[data-day="${localDateLabel(input.startDate)}"]`).click();
   await page.locator(`[data-day="${localDateLabel(input.endDate)}"]`).click();
+  await dialog.getByRole("button", { name: "下一步" }).click();
   for (const [index, country] of input.countries.entries()) {
     const search = dialog.getByLabel("新增國家");
     await search.fill(country.query);
@@ -277,6 +278,7 @@ async function createTrip(
     await option.dispatchEvent("click");
     await expect(dialog.locator('section[aria-labelledby="country-route-heading"] li')).toHaveCount(index + 1);
   }
+  await dialog.getByRole("button", { name: "下一步" }).click();
   await fillTripFlights(dialog, input.startDate, input.endDate);
   await input.flights?.(dialog);
   await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();

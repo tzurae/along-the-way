@@ -105,13 +105,13 @@ async function openEmailLink(page: Page, link: string) {
 
 async function signIn(page: Page, request: APIRequestContext, email: string) {
   await page.getByLabel("電子郵件").fill(email);
-  await page.getByRole("button", { name: "寄登入連結給我" }).click();
+  await page.getByRole("button", { name: "寄送登入連結" }).click();
   await expect(page.getByRole("status")).toContainText(
-    "如果這個電子郵件可以登入",
+    `如果 ${email} 可以登入`,
   );
   await openEmailLink(
     page,
-    await emailLink(request, email, "Sign in to Along the Way"),
+    await emailLink(request, email, "登入 Along the Way"),
   );
   await expect(page.getByRole("button", { name: /切換旅程$/ })).toBeVisible();
 }
@@ -154,6 +154,7 @@ async function createTrip(
   const dialog = page.getByRole("dialog", { name: "建立旅程" });
   await dialog.getByLabel("旅程名稱").fill(input.name);
   await selectDateRange(page, dialog, input.startDate, input.endDate);
+  await dialog.getByRole("button", { name: "下一步" }).click();
   for (const [index, stop] of input.countryStops.entries()) {
     const search = dialog.getByLabel("新增國家");
     await search.fill(stop.query);
@@ -165,6 +166,14 @@ async function createTrip(
     ).toHaveCount(index + 1);
   }
   await beforeSubmit?.(dialog);
+  const preservedRouteCount = await dialog.locator('section[aria-labelledby="country-route-heading"] li').count();
+  await dialog.getByRole("button", { name: "上一步" }).click();
+  await expect(dialog.getByLabel("旅程名稱")).toHaveValue(input.name);
+  await expect(dialog.getByRole("button", { name: new RegExp(input.startDate.replaceAll("-", "/")) })).toBeVisible();
+  await dialog.getByRole("button", { name: "下一步" }).click();
+  await expect(dialog.locator('section[aria-labelledby="country-route-heading"] li')).toHaveCount(preservedRouteCount);
+  await dialog.getByRole("button", { name: "下一步" }).click();
+  await expect(dialog.getByRole("heading", { name: "步驟 3 / 3・去回程航班" })).toBeFocused();
   await fillTripFlights(dialog, input.startDate, input.endDate);
   await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
   await expect(page.getByRole("button", { name: new RegExp(`${input.name}，切換旅程`) })).toBeVisible();
@@ -180,7 +189,7 @@ async function inviteEditor(
   await page.getByLabel("透過電子郵件邀請編輯者").fill(email);
   await page.getByRole("button", { name: "寄出邀請" }).click();
   await expect(page.getByRole("status").filter({ hasText: email })).toBeVisible();
-  return emailLink(request, email, "Join 大阪京都家庭旅行");
+  return emailLink(request, email, "邀請你加入「大阪京都家庭旅行」");
 }
 
 async function acceptEditor(
@@ -253,14 +262,24 @@ test("private trips work across four identities, viewports, and rejection paths"
 
   await page.goto("/");
   await signIn(page, request, "owner@example.test");
-  await page.getByRole("button", { name: /切換旅程$/ }).click();
+  await expect(page.getByRole("heading", { name: "先建立一趟旅程" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /今天|行程|地點|成員/ })).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("heading", { name: "先建立一趟旅程" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /今天|行程|地點|成員/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "建立旅程", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "建立旅程" })).toContainText("步驟 1 / 3・旅程");
+  await page.keyboard.press("Escape");
+  await page.setViewportSize({ width: 1280, height: 720 });
+  const switchTripControl = page.getByRole("button", { name: /切換旅程$/ });
+  await switchTripControl.click();
   const switcher = page.getByRole("dialog", { name: "切換旅程" });
   const createTripTrigger = switcher.getByRole("button", { name: "建立旅程" });
   await createTripTrigger.click();
   await expect(page.getByRole("dialog", { name: "建立旅程" })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog", { name: "建立旅程" })).toHaveCount(0);
-  await expect(createTripTrigger).toBeFocused();
+  await expect(switchTripControl).toBeFocused();
   await page.keyboard.press("Escape");
 
   await createTrip(page, {
@@ -307,6 +326,13 @@ test("private trips work across four identities, viewports, and rejection paths"
     await expect(dialog.getByRole("alert")).toContainText("移動後會讓相同國家相鄰。");
     expect(await dialog.getByRole("listitem").allTextContents()).toEqual(routeBeforeInvalidMove);
   });
+  const checklist = page.getByRole("region", { name: "接著完成這些安排" });
+  await expect(checklist).toContainText("旅程已建立，去回程航班也已加入行程。");
+  await expect(checklist.getByRole("button", { name: "新增住宿（可稍後）" })).toBeVisible();
+  await expect(checklist.getByRole("button", { name: "加入第一個地點" })).toBeVisible();
+  await expect(checklist.getByRole("button", { name: "邀請同行成員（可稍後）" })).toBeVisible();
+  await checklist.getByRole("button", { name: "略過" }).click();
+  await expect(checklist).toHaveCount(0);
   await page.getByRole("tab", { name: "行程", exact: true }).click();
   await page.getByRole("button", { name: "FIXTURE-OUT 航班 05:00", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "到航班修改航班", exact: true }).click();
@@ -478,8 +504,8 @@ test("private trips work across four identities, viewports, and rejection paths"
   const invalidContext = await browser.newContext();
   const invalidPage = await invalidContext.newPage();
   await invalidPage.goto("/#magicToken=not-a-real-token");
-  await expect(invalidPage.getByRole("status")).toContainText(
-    "請在下方輸入電子郵件，索取新的登入連結。",
+  await expect(invalidPage.getByRole("alert")).toContainText(
+    "請寄一封新的登入信。",
   );
 
   await Promise.all([

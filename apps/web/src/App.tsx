@@ -1,4 +1,5 @@
 import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 
 import {
   parseApiError,
@@ -15,8 +16,11 @@ import {
 import { CalendarDays, ChevronDown, ChevronsUpDown, MapPin, Route, Users, Wifi, WifiOff } from "lucide-react";
 
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { countryStopLabel } from "./country-stop-label";
 import { CreateTripDialog } from "./CreateTripDialog";
+import { FirstTripOnboarding } from "./FirstTripOnboarding";
+import { LoginExperience, AuthProgress, type AuthProgressPhase } from "./LoginExperience";
 import { DiscoveryWorkspace } from "./DiscoveryWorkspace";
 import { TripSkeletonWorkspace } from "./TripSkeletonWorkspace";
 import { TripPlaceWorkspace } from "./TripPlaceWorkspace";
@@ -25,6 +29,7 @@ import { useI18n, type Messages } from "./i18n";
 import { parseTripSkeletonResponse, type TripSkeletonResponse } from "@along-the-way/contracts/trip-skeleton";
 import { parseTripPlaceListResponse, type TripPlaceListResponse } from "@along-the-way/contracts/trip-places";
 import { TodayWorkspace } from "./TodayWorkspace";
+import { TripOnboardingChecklist } from "./TripOnboardingChecklist";
 import { createTodayModel, tripClock } from "./today-model";
 import { TodaySnapshotStore, TODAY_SCHEMA_VERSION, type TodaySnapshot } from "./today-snapshot";
 import {
@@ -42,6 +47,12 @@ import {
 import { ApiRequestError } from "./api-error";
 import { useTripLiveUpdates } from "./useTripLiveUpdates";
 import { TripHistory } from "./TripHistory";
+interface OnboardingFacts {
+  tripId: string;
+  hasLodging: boolean;
+  placeCount: number;
+  hasAssignedPlace: boolean;
+}
 
 
 interface RequestOptions extends RequestInit {
@@ -131,81 +142,6 @@ function removeTokenFragment(remove: "magicToken" | "inviteToken") {
   window.history.replaceState({}, "", url);
 }
 
-function LoginPanel({
-  initialMessage,
-  pendingInviteToken,
-}: {
-  initialMessage: string;
-  pendingInviteToken: string | null;
-}) {
-  const { t } = useI18n();
-  const [email, setEmail] = useState("");
-  const [message, setMessage] = useState(initialMessage);
-  const [submitting, setSubmitting] = useState(false);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setSubmitting(true);
-    try {
-      await requestJson<{ message: string }>(
-        t.errors,
-        "/api/auth/magic-links",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            email,
-            ...(pendingInviteToken ? { inviteToken: pendingInviteToken } : {}),
-          }),
-        },
-      );
-      setMessage(t.app.magicLinkSent);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : t.app.unableRequestLink);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <main className="mx-auto grid min-h-screen w-[min(100%-1.5rem,58rem)] place-items-center py-8">
-      <section className="w-full max-w-[32rem] rounded-card border border-ink/10 bg-surface p-7 shadow-card sm:p-10">
-        <p className="mb-3 text-xs font-bold tracking-[0.18em] text-accent-strong">
-          ALONG THE WAY
-        </p>
-        <h1 className="font-display text-4xl leading-tight text-ink-strong">
-          {t.app.planTogether}
-        </h1>
-        <p className="mt-4 text-muted-foreground">
-          {t.app.signInDescription}
-        </p>
-        <form className="mt-8 grid gap-4" onSubmit={submit}>
-          <label className="grid gap-2 font-semibold">
-            {t.app.email}
-            <input
-              className="min-h-12 rounded-xl border border-ink/20 bg-white px-4 outline-none focus:border-focus focus:ring-2 focus:ring-focus/30"
-              type="email"
-              required
-              autoComplete="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-            />
-          </label>
-          <button
-            className="min-h-12 rounded-xl bg-ink-strong px-5 font-bold text-on-dark outline-none hover:bg-ink focus:ring-4 focus:ring-focus/40 disabled:opacity-60"
-            disabled={submitting}
-          >
-            {submitting ? t.app.sending : t.app.emailSignInLink}
-          </button>
-        </form>
-        {message ? (
-          <p className="mt-5 rounded-xl bg-surface-subtle p-4" role="status">
-            {message}
-          </p>
-        ) : null}
-      </section>
-    </main>
-  );
-}
 
 
 interface TripMembersWorkspaceProps {
@@ -357,20 +293,25 @@ function TripMembersWorkspace({ trip, currentUser, onChanged, request }: TripMem
   );
 }
 
-function TripSwitcher({ layout, trips, selectedTrip, signedInEmail, createTrip, selectTrip, signOut }: {
+function TripSwitcher({ layout, trips, selectedTrip, signedInEmail, openCreateTrip, selectTrip, signOut }: {
   layout: "mobile" | "desktop";
   trips: TripSummaryDto[];
   selectedTrip: TripDto | null;
   signedInEmail: string;
-  createTrip(input: CreateTripInput): Promise<void>;
+  openCreateTrip(returnFocus?: HTMLElement | null): void;
   selectTrip(tripId: string): void;
   signOut(): void;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
+  const switcherTrigger = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    setOpen(false);
+  }, [selectedTrip?.id]);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger
+        ref={switcherTrigger}
         className="flex min-h-11 w-full min-w-0 max-w-full items-center gap-2 overflow-hidden rounded-lg border border-ink/15 bg-surface px-3 py-2 text-left font-bold outline-none hover:border-ink/30 focus:ring-4 focus:ring-focus/30"
         aria-label={t.app.switchTrip(selectedTrip?.name ?? t.app.chooseTrip)}
       >
@@ -407,10 +348,13 @@ function TripSwitcher({ layout, trips, selectedTrip, signedInEmail, createTrip, 
             ))}
             {trips.length === 0 ? <p className="rounded-xl bg-surface-subtle p-4 text-muted-foreground">{t.app.createFirstTrip}</p> : null}
           </div>
-          <CreateTripDialog createTrip={async (input) => {
-            await createTrip(input);
+          <Button type="button" className="min-h-10" onClick={() => {
+            const returnFocus = switcherTrigger.current;
             setOpen(false);
-          }} />
+            window.requestAnimationFrame(() => openCreateTrip(returnFocus));
+          }}>
+            {t.app.createTrip}
+          </Button>
         </div>
         {layout === "mobile" ? (
           <div className="grid gap-2 border-t border-ink/10 pt-4">
@@ -570,6 +514,14 @@ export function App() {
   const inviteKey = useRef<string | null>(null);
   const createTripKey = useRef<string | null>(null);
   const [signInError, setSignInError] = useState("");
+  const [authProgressPhase, setAuthProgressPhase] = useState<AuthProgressPhase>(
+    () => tokenParameter("magicToken") ? "consuming-link" : "restoring",
+  );
+  const [shellEntering, setShellEntering] = useState(false);
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const createDialogReturnFocus = useRef<HTMLElement | null>(null);
+  const [onboardingFacts, setOnboardingFacts] = useState<OnboardingFacts | null>(null);
+  const [createdTripId, setCreatedTripId] = useState<string | null>(null);
   const [placesRevision, setPlacesRevision] = useState(0);
   const [arrangeDate, setArrangeDate] = useState<string | null>(null);
   const [syncRevision, setSyncRevision] = useState(0);
@@ -586,6 +538,42 @@ export function App() {
     const segment = readTripLocation().segment;
     return segment === "flight" || segment === "lodging";
   });
+  const enterSignedIn = useCallback((authenticatedUser: UserDto) => {
+    const reducedMotion = typeof window.matchMedia === "function"
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const transitionDocument = document as Document & {
+      startViewTransition?: (update: () => void) => unknown;
+    };
+    if (!reducedMotion && transitionDocument.startViewTransition) {
+      transitionDocument.startViewTransition(() => {
+        flushSync(() => setUser(authenticatedUser));
+      });
+      return;
+    }
+    setShellEntering(true);
+    setUser(authenticatedUser);
+  }, []);
+  useEffect(() => {
+    if (!shellEntering) return;
+    const timer = window.setTimeout(() => setShellEntering(false), 320);
+    return () => window.clearTimeout(timer);
+  }, [shellEntering]);
+
+  const openCreateTrip = useCallback((returnFocus?: HTMLElement | null) => {
+    createDialogReturnFocus.current = returnFocus instanceof HTMLElement
+      ? returnFocus
+      : document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    setCreateDialogOpen(true);
+  }, []);
+
+  const changeCreateDialogOpen = useCallback((open: boolean) => {
+    setCreateDialogOpen(open);
+    if (!open) {
+      window.requestAnimationFrame(() => createDialogReturnFocus.current?.focus());
+    }
+  }, []);
 
 
 
@@ -602,6 +590,7 @@ export function App() {
       }
       setTodaySnapshot((snapshot) => snapshot && !authorized.has(snapshot.model.tripId) ? null : snapshot);
       setSelectedTrip((trip) => trip && !authorized.has(trip.id) ? null : trip);
+      setOnboardingFacts((facts) => facts && !authorized.has(facts.tripId) ? null : facts);
       setTrips(response.trips);
     }
     return response.trips;
@@ -634,6 +623,12 @@ export function App() {
     setActiveSegment(segment);
     setSelectedDate(date);
     writeTripLocation(tripId, tab, segment, date, true);
+    setOnboardingFacts({
+      tripId,
+      hasLodging: skeleton.skeleton.items.some((item) => item.type === "lodging"),
+      placeCount: places.tripPlaces.length,
+      hasAssignedPlace: places.tripPlaces.some((place) => place.assignedDayId !== null),
+    });
     setSelectedTrip(response.trip);
     readOnly.current = false;
     setOffline(false);
@@ -648,11 +643,12 @@ export function App() {
     const snapshot = location.trip ? store?.read(owner, location.trip) : store?.forAccount(owner)[0];
     readOnly.current = true;
     setOffline(true);
-    if (!snapshot) { setTodaySnapshot(null); setSelectedTrip(null); setTrips([]); return false; }
+    if (!snapshot) { setTodaySnapshot(null); setSelectedTrip(null); setOnboardingFacts(null); setTrips([]); return false; }
     accountId.current = owner;
     ++loadSequence.current;
     setTodaySnapshot(snapshot);
     setSelectedTrip(null);
+    setOnboardingFacts(null);
     setTrips([]);
     setActiveTripTab("today");
     setActiveSegment(null);
@@ -672,7 +668,7 @@ export function App() {
       const previousAccount = accountId.current ?? store?.lastAccount();
       if (previousAccount && previousAccount !== session.user.id) {
         store?.clearAccount(previousAccount);
-        setTodaySnapshot(null); setSelectedTrip(null); setTrips([]);
+        setTodaySnapshot(null); setSelectedTrip(null); setOnboardingFacts(null); setTrips([]);
       }
       accountId.current = session.user.id;
       setUser(session.user);
@@ -786,6 +782,7 @@ export function App() {
       if (accountId.current && selectedTrip) store?.clearTrip(accountId.current, selectedTrip.id);
       setTodaySnapshot(null);
       setSelectedTrip(null);
+      setOnboardingFacts(null);
       void refreshTrips().catch(() => setTrips([]));
     },
   });
@@ -794,31 +791,42 @@ export function App() {
   useEffect(() => {
     let active = true;
     const epoch = sessionEpoch.current;
+    let authenticatedUser: UserDto | null = null;
     void (async () => {
       try {
         const magicToken = tokenParameter("magicToken");
         if (!magicToken && store?.isLocallySignedOut()) { setUser(null); return; }
         if (magicToken) {
+          setAuthProgressPhase("consuming-link");
           await request("/api/auth/magic-links/consume", {
             method: "POST",
             body: JSON.stringify({ token: magicToken }),
             parse: (value) => parseSessionResponse(value),
           });
           removeTokenFragment("magicToken");
+          store?.setLocallySignedOut(false);
+        } else {
+          setAuthProgressPhase("restoring");
         }
-        if (magicToken) store?.setLocallySignedOut(false);
         const session = await request<{ user: UserDto }>("/api/session", {
           parse: (value) => parseSessionResponse(value),
         });
+        authenticatedUser = session.user;
         if (!active || epoch !== sessionEpoch.current) return;
+        setAuthProgressPhase("loading-trips");
         const previousAccount = accountId.current ?? store?.lastAccount();
         if (previousAccount && previousAccount !== session.user.id) store?.clearAccount(previousAccount);
         accountId.current = session.user.id;
-        setUser(session.user);
         const available = await refreshTrips();
         if (!active || epoch !== sessionEpoch.current) return;
         const tripId = readTripLocation().trip ?? available[0]?.id;
         if (tripId) await loadTrip(tripId);
+        else {
+          setTodaySnapshot(null);
+          setSelectedTrip(null);
+          setOnboardingFacts(null);
+        }
+        if (active && epoch === sessionEpoch.current) enterSignedIn(session.user);
       } catch (reason) {
         if (active) {
           if (!(reason instanceof ApiRequestError) || (reason.status ?? 0) >= 500) {
@@ -826,6 +834,7 @@ export function App() {
           }
           if (accountId.current && reason instanceof ApiRequestError && [403, 404].includes(reason.status ?? 0)) {
             setError(reason.message);
+            if (authenticatedUser) enterSignedIn(authenticatedUser);
             return;
           }
           setUser(null);
@@ -833,9 +842,7 @@ export function App() {
             reason instanceof ApiRequestError &&
             RECOVERABLE_MAGIC_CODES[reason.code]
           ) {
-            setSignInError(
-              `${reason.message} ${t.app.requestNewMagicLink}`,
-            );
+            setSignInError(`${reason.message} ${t.app.requestNewMagicLink}`);
             removeTokenFragment("magicToken");
           }
         }
@@ -844,7 +851,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [loadTrip, refreshTrips, request, restoreSnapshot, store, t.app.requestNewMagicLink]);
+  }, [enterSignedIn, loadTrip, refreshTrips, request, restoreSnapshot, store, t.app.requestNewMagicLink]);
 
   async function acceptInvitation() {
     const token = tokenParameter("inviteToken");
@@ -883,6 +890,7 @@ export function App() {
     setSelectedTrip(response.trip);
     await refreshTrips();
     await loadTrip(response.trip.id);
+    setCreatedTripId(response.trip.id);
   }
 
   async function logout() {
@@ -894,9 +902,11 @@ export function App() {
     accountId.current = null;
     ++loadSequence.current;
     setTodaySnapshot(null);
+    setOnboardingFacts(null);
     setUser(null);
     setTrips([]);
     setSelectedTrip(null);
+    setCreatedTripId(null);
     setOffline(false);
     const wasOffline = readOnly.current || !navigator.onLine;
     readOnly.current = false;
@@ -918,14 +928,26 @@ export function App() {
   }
 
   if (user === undefined) {
-    return <main className="grid min-h-screen place-items-center" role="status">{t.app.openingTrips}</main>;
+    return <div className="atw-auth-transition-surface"><AuthProgress phase={authProgressPhase} /></div>;
   }
   if (user === null) {
     return (
-      <LoginPanel
-        initialMessage={signInError}
-        pendingInviteToken={tokenParameter("inviteToken")}
-      />
+      <div className="atw-auth-transition-surface">
+        <LoginExperience
+          initialError={signInError || null}
+          inviteToken={tokenParameter("inviteToken")}
+          requestLink={async (email, inviteToken) => {
+            await requestJson<{ message: string }>(t.errors, "/api/auth/magic-links", {
+              method: "POST",
+              body: JSON.stringify({
+                email,
+                ...(inviteToken ? { inviteToken } : {}),
+              }),
+            });
+          }}
+          describeError={(reason) => reason instanceof Error ? reason.message : t.app.unableRequestLink}
+        />
+      </div>
     );
   }
 
@@ -945,6 +967,7 @@ export function App() {
     { value: "discovery", label: t.app.placesSegments.discovery },
   ] as const;
   const selectTrip = (tripId: string) => {
+    if (createdTripId && createdTripId !== tripId) setCreatedTripId(null);
     const url = new URL(window.location.href);
     url.searchParams.set("trip", tripId);
     url.searchParams.delete("tab");
@@ -955,28 +978,34 @@ export function App() {
   };
 
   return (
-    <main className="atw-shell min-w-0" data-active-tab={activeTripTab}>
+    <main
+      className={`atw-shell min-w-0${shellEntering ? " is-entering" : ""}`}
+      data-active-tab={activeTripTab}
+      data-has-trip={selectedTrip ? "true" : "false"}
+    >
       <header className="atw-topbar">
         <div className="atw-topbar-content">
           <div className="min-w-0 flex-1">
-            <TripSwitcher layout="mobile" trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} createTrip={createTrip} selectTrip={selectTrip} signOut={() => void logout()} />
+            <TripSwitcher layout="mobile" trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} openCreateTrip={openCreateTrip} selectTrip={selectTrip} signOut={() => void logout()} />
           </div>
-          <span
-            className={`grid size-11 shrink-0 place-items-center ${liveConnected ? "text-accent-strong" : "text-muted-foreground"}`}
-            title={liveConnected ? t.collaboration.live : t.collaboration.reconnecting}
-          >
-            {liveConnected ? <Wifi aria-hidden="true" className="size-5" /> : <WifiOff aria-hidden="true" className="size-5" />}
-            <span className="sr-only">{liveConnected ? t.collaboration.live : t.collaboration.reconnecting}</span>
-          </span>
+          {selectedTrip ? (
+            <span
+              className={`grid size-11 shrink-0 place-items-center ${liveConnected ? "text-accent-strong" : "text-muted-foreground"}`}
+              title={liveConnected ? t.collaboration.live : t.collaboration.reconnecting}
+            >
+              {liveConnected ? <Wifi aria-hidden="true" className="size-5" /> : <WifiOff aria-hidden="true" className="size-5" />}
+              <span className="sr-only">{liveConnected ? t.collaboration.live : t.collaboration.reconnecting}</span>
+            </span>
+          ) : null}
         </div>
       </header>
 
       <div className="atw-frame">
         <aside className="atw-rail">
-          <TripSwitcher layout="desktop" trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} createTrip={createTrip} selectTrip={selectTrip} signOut={() => void logout()} />
-          <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} />
+          <TripSwitcher layout="desktop" trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} openCreateTrip={openCreateTrip} selectTrip={selectTrip} signOut={() => void logout()} />
+          {selectedTrip ? <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} /> : null}
           <div className="mt-2 border-t border-ink/10 pt-4">
-            {liveConnected ? (
+            {selectedTrip && liveConnected ? (
               <span className="mb-2 flex items-center gap-2 text-xs text-muted-foreground" title={t.collaboration.live}>
                 <span aria-hidden="true" className="size-2 rounded-full bg-accent-strong" />
                 {t.collaboration.live}
@@ -998,6 +1027,27 @@ export function App() {
 
           {selectedTrip ? (
             <>
+              {onboardingFacts?.tripId === selectedTrip.id ? (
+                <TripOnboardingChecklist
+                  key={selectedTrip.id}
+                  tripId={selectedTrip.id}
+                  userId={user.id}
+                  isOwner={selectedTrip.role === "owner"}
+                  facts={{
+                    hasLodging: onboardingFacts.hasLodging,
+                    placeCount: onboardingFacts.placeCount,
+                    hasAssignedPlace: onboardingFacts.hasAssignedPlace,
+                    hasCompanionOrPendingInvite:
+                      selectedTrip.members.some((member) => member.userId !== user.id)
+                      || selectedTrip.invites.some((invite) => invite.status === "pending"),
+                  }}
+                  showCreatedConfirmation={createdTripId === selectedTrip.id}
+                  navigate={(tab, segment) => {
+                    if (segment) selectSegment(tab, segment);
+                    else selectTab(tab);
+                  }}
+                />
+              ) : null}
               <section className={activeTripTab === "today" || activeTripTab === "itinerary" ? "sr-only" : "atw-trip-context"} aria-labelledby="trip-title-heading">
                 <h1 id="trip-title-heading" className="sr-only">{selectedTrip.name}</h1>
                 <p>
@@ -1091,11 +1141,16 @@ export function App() {
               </div>
             </>
           ) : (
-            <section className="grid min-h-72 place-items-center rounded-card border border-dashed border-ink/20 bg-surface/50 p-8 text-center text-muted-foreground">{t.app.chooseOrCreateTrip}</section>
+            <FirstTripOnboarding onCreateTrip={openCreateTrip} />
           )}
         </div>
       </div>
       {selectedTrip ? <TripNavigation layout="mobile" activeTab={activeTripTab} selectTab={selectTab} /> : null}
+      <CreateTripDialog
+        open={createDialogOpen}
+        onOpenChange={changeCreateDialogOpen}
+        createTrip={createTrip}
+      />
     </main>
   );
 }

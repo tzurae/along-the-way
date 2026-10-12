@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { waitFor } from "@testing-library/react";
+import { fireEvent, waitFor } from "@testing-library/react";
 import type { TripHistoryResponse } from "@along-the-way/contracts/private-trips";
 import { App } from "../src/App";
 import { createTodayModel } from "../src/today-model";
@@ -97,6 +97,36 @@ async function travelHistory(direction: "back" | "forward") {
     history[direction](); await changed;
   });
 }
+
+it("shows one actionable first-trip surface and restores focus after its dialog closes", async () => {
+  trips = [];
+  history.replaceState({}, "", "/");
+  await mount();
+
+  expect(document.querySelector("h1")).toHaveTextContent("先建立一趟旅程");
+  expect(document.querySelectorAll("[data-trip-tab]")).toHaveLength(0);
+  expect(document.body).not.toHaveTextContent("即時更新重新連線中");
+  const trigger = button("建立旅程", host);
+  trigger.focus();
+  await click(trigger);
+  const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+  expect(dialog).toHaveTextContent("步驟 1 / 3・旅程");
+  await click(button("關閉", dialog));
+  await waitFor(() => expect(trigger).toHaveFocus());
+});
+
+it("derives open onboarding actions from trip data and persists dismissal", async () => {
+  await mount();
+
+  const checklist = document.querySelector<HTMLElement>(".trip-onboarding-checklist");
+  expect(checklist).toHaveTextContent("新增住宿（可稍後）");
+  expect(checklist).toHaveTextContent("邀請同行成員（可稍後）");
+  expect(checklist).not.toHaveTextContent("加入第一個地點");
+  expect(checklist).not.toHaveTextContent("把地點排進某一天");
+  await click(button("略過", checklist!));
+  expect(document.querySelector(".trip-onboarding-checklist")).toBeNull();
+  expect(localStorage.getItem("along-the-way:trip-onboarding:account:A")).toBe("dismissed");
+});
 
 it("keeps the core Today snapshot readable when optional place previews fail", async () => {
   previewFails = true;

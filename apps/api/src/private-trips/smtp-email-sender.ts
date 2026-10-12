@@ -33,8 +33,8 @@ export class SmtpEmailSender implements EmailSender {
     await this.transport.sendMail({
       from: this.from,
       to: message.to,
-      subject: "Sign in to Along the Way",
-      text: `Use this one-time link within 15 minutes:\n\n${message.url}`,
+      subject: "登入 Along the Way",
+      text: `請在 15 分鐘內使用以下一次性登入連結：\n\n${message.url}\n\n如果你沒有索取這個連結，可以忽略這封信。`,
     });
   }
 
@@ -46,8 +46,8 @@ export class SmtpEmailSender implements EmailSender {
     await this.transport.sendMail({
       from: this.from,
       to: message.to,
-      subject: `Join ${message.tripName} on Along the Way`,
-      text: `You were invited as an editor. Sign in with this email, then accept the invitation:\n\n${message.url}`,
+      subject: `邀請你加入「${message.tripName}」｜Along the Way`,
+      text: `你被邀請以編輯者身分加入「${message.tripName}」。請打開以下連結，用這個電子郵件地址登入並接受邀請：\n\n${message.url}\n\n如果你沒有預期收到這封邀請，可以忽略這封信。`,
     });
   }
 }
