@@ -63,7 +63,11 @@ ssh -i /path/to/key.pem ubuntu@STATIC_IP \
 After this workflow is present on `main`, run
 `sh scripts/configure-github-staging-environment.sh`. It creates the GitHub
 environment and restricts its deployment policy to `main`. The workflow also
-refuses to deploy a commit until its **Verify** workflow has succeeded.
+refuses to deploy a commit until a successful **Verify** run covers its exact
+content: some verified commit (usually the release pull request head) must have
+the same Git tree. Verify no longer runs on pushes to `main`; when `main`'s tree
+matches no verified pull request head, run Verify on `main` manually
+(`gh workflow run verify.yml --ref main`) before deploying.
 
 Add these environment values:
 

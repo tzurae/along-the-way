@@ -109,9 +109,11 @@ export class AppError extends Error {
       | "expired_invite"
       | "used_invite"
       | "revoked_invite"
-      | "invite_email_mismatch",
+      | "invite_email_mismatch"
+      | "place_photo_not_found"
+      | "place_photo_unavailable",
     message: string,
-    readonly status: 400 | 401 | 403 | 404 | 409 | 429 | 503 = 400,
+    readonly status: 400 | 401 | 403 | 404 | 409 | 429 | 502 | 503 = 400,
     readonly retryAfterSeconds?: number,
     readonly currentVersion?: number,
     readonly conflictTargetId?: string,

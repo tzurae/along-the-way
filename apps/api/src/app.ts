@@ -622,6 +622,27 @@ export function createApp({
     } });
   });
 
+  app.get("/api/trips/:tripId/google-place-photos/:providerPlaceId", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("place_photo", clientIp(context), user.id);
+    const requestedWidth = context.req.query("maxWidth");
+    const maxWidth = requestedWidth === "192" ? 192 : requestedWidth === "1024" ? 1024 : null;
+    if (maxWidth === null) throw new AppError("validation_error", "maxWidth must be 192 or 1024");
+    const photo = await placeDetails.getGooglePhoto(
+      user.id,
+      uuidParam(context, "tripId"),
+      context.req.param("providerPlaceId"),
+      context.req.query("photo") ?? "",
+      maxWidth,
+    );
+    return new Response(photo.bytes, { headers: {
+      "Content-Type": photo.mediaType,
+      "Content-Length": String(photo.bytes.byteLength),
+      "Cache-Control": "private, max-age=86400",
+      "X-Content-Type-Options": "nosniff",
+    } });
+  });
+
   app.get("/api/trips/:tripId/discovery", async (context) => {
     const { user } = await authenticated(context);
     return context.json({

@@ -49,12 +49,14 @@ function minuteOf(value: string) {
 export function DayPlanDialog({
   tripId,
   day,
+  isOwner,
   request,
   onClose,
   onOrderSaved,
 }: {
   tripId: string;
   day: PlannedDay | null;
+  isOwner: boolean;
   request: JsonRequest;
   onClose(): void;
   onOrderSaved(): Promise<void>;
@@ -201,6 +203,10 @@ export function DayPlanDialog({
   }
 
   async function saveOrder() {
+    if (!isOwner) {
+      setError(t.schedule.ownerOnlyAction);
+      return;
+    }
     if (!day || !timetable) return;
     const epoch = dialogEpoch.current;
     const orderedTripPlaceIds = timetable.orderedTripPlaceIds;
@@ -225,7 +231,9 @@ export function DayPlanDialog({
       await onOrderSaved();
     } catch (reason) {
       if (epoch !== dialogEpoch.current) return;
-      if (reason instanceof ApiRequestError && reason.code === "conflict") {
+      if (reason instanceof ApiRequestError && (reason.code === "forbidden" || reason.status === 403)) {
+        setError(t.schedule.ownerOnlyAction);
+      } else if (reason instanceof ApiRequestError && reason.code === "conflict") {
         setOrderStale(true);
         setError(t.collaboration.replanDay);
       } else setError(reason instanceof Error ? reason.message : t.dayPlan.couldNotSaveOrder);
@@ -315,6 +323,7 @@ export function DayPlanDialog({
               : t.dayPlan.draftNotice}
           </DialogDescription>
         </DialogHeader>
+        {!isOwner ? <p className="route-status">{t.schedule.ownerOnly}</p> : null}
 
         {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={busy !== null}
           formatValue={(_path, value) => typeof value === "number" ? clock(value) : undefined}
@@ -451,13 +460,15 @@ export function DayPlanDialog({
               >
                 <ListOrdered /> {t.dayPlan.backToCurrentOrder}
               </Button>
-              <Button
-                size="lg"
-                disabled={busy !== null || orderStale || !timetable || timetable.orderedTripPlaceIds.length === 0}
-                onClick={() => void saveOrder()}
-              >
-                <Check /> {busy === "saving" ? t.dayPlan.saving : t.dayPlan.useThisOrder}
-              </Button>
+              {isOwner ? (
+                <Button
+                  size="lg"
+                  disabled={busy !== null || orderStale || !timetable || timetable.orderedTripPlaceIds.length === 0}
+                  onClick={() => void saveOrder()}
+                >
+                  <Check /> {busy === "saving" ? t.dayPlan.saving : t.dayPlan.useThisOrder}
+                </Button>
+              ) : null}
             </>
           ) : (
             <Button
