@@ -205,15 +205,23 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
   const [reloadRevision, setReloadRevision] = useState(0);
   const [viewerOpen, setViewerOpen] = useState(false);
 
-  useEffect(() => {
-    setSelection((current) => current.identity === identity && photos.some((photo) => photo.id === current.photoId)
-      ? current
+  // Reset per-photo state only when the photo set really changes, during render. A mount-time
+  // effect would run after commit and erase an image error that fired before effects flushed.
+  const resetKey = `${identity}\u0002${fingerprint}`;
+  const [appliedResetKey, setAppliedResetKey] = useState(resetKey);
+  if (appliedResetKey !== resetKey) {
+    setAppliedResetKey(resetKey);
+    setSelection(selection.identity === identity && photos.some((photo) => photo.id === selection.photoId)
+      ? selection
       : { identity, photoId: photos[0]?.id ?? null });
     setFailed(new Set());
     setReloadRevision(0);
     setViewerOpen(false);
+  }
+
+  useEffect(() => {
     if (trackRef.current) trackRef.current.scrollLeft = 0;
-  }, [fingerprint, identity]);
+  }, [resetKey]);
 
   if (photos.length === 0) {
     return <div className="place-gallery__empty" data-place-gallery="empty">{t.placeDetail.noPhoto}</div>;
