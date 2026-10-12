@@ -70,21 +70,14 @@ export class PostgresEmailWorker {
         if (job.kind === "magic_link" && job.magic_link_token_id) {
           const link = await transaction
             .selectFrom("magic_link_tokens")
-            .select(["linked_invite_id", "expires_at", "used_at", "revoked_at"])
+            .select(["expires_at", "used_at", "revoked_at"])
             .where("id", "=", job.magic_link_token_id)
             .executeTakeFirst();
           if (link && !link.used_at && !link.revoked_at && new Date(link.expires_at) > this.now()) {
             const url = new URL("/", this.siteAddress);
-            const parameters = new URLSearchParams({
+            url.hash = new URLSearchParams({
               magicToken: this.tokenIssuer.issue(job.magic_link_token_id),
-            });
-            if (link.linked_invite_id) {
-              parameters.set(
-                "inviteToken",
-                this.tokenIssuer.issue(link.linked_invite_id),
-              );
-            }
-            url.hash = parameters.toString();
+            }).toString();
             await this.emailSender.sendMagicLink({
               to: job.recipient,
               url: url.toString(),

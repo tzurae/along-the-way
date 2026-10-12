@@ -99,7 +99,6 @@ async function emailLink(
 }
 
 async function openEmailLink(page: Page, link: string) {
-  await page.goto("about:blank");
   await page.goto(link);
 }
 
@@ -127,17 +126,23 @@ async function selectDateRange(
   startDate: string,
   endDate: string,
 ) {
-  await dialog.getByRole("button", { name: "選擇日期範圍" }).click();
+  // A preserved draft labels the trigger with its range and opens the calendar on that month.
+  const trigger = dialog.getByRole("button", { name: /選擇日期範圍|\d{4}\/\d{2}\/\d{2} – \d{4}\/\d{2}\/\d{2}/ });
+  const draftStart = (await trigger.innerText()).match(/(\d{4})\/(\d{2})\/\d{2} –/);
+  await trigger.click();
   const [year, month] = startDate.split("-").map(Number);
   const current = new Date();
-  const monthOffset = year! * 12 + month! - 1 -
-    (current.getFullYear() * 12 + current.getMonth());
+  const shownMonth = draftStart
+    ? Number(draftStart[1]) * 12 + Number(draftStart[2]) - 1
+    : current.getFullYear() * 12 + current.getMonth();
+  const monthOffset = year! * 12 + month! - 1 - shownMonth;
   const direction = monthOffset >= 0 ? ".rdp-button_next" : ".rdp-button_previous";
   for (let step = 0; step < Math.abs(monthOffset); step += 1) {
     await page.locator(direction).click();
   }
   await page.locator(`[data-day="${localDateLabel(startDate)}"]`).click();
   await page.locator(`[data-day="${localDateLabel(endDate)}"]`).click();
+  await page.getByRole("button", { name: "確定", exact: true }).click();
 }
 
 async function openMembers(page: Page) {
@@ -199,11 +204,29 @@ async function acceptEditor(
   inviteLink: string,
 ) {
   const page = await context.newPage();
-  await openEmailLink(page, inviteLink);
-  await signIn(page, request, email);
-  await page.getByRole("button", { name: "接受邀請" }).click();
+  await page.goto(inviteLink);
+  await expect(page.getByLabel("電子郵件")).toHaveCount(0);
+  await page.getByRole("button", { name: "寄送登入連結到受邀信箱" }).click();
+  await expect(page.getByRole("status")).toContainText(
+    "如果這個邀請仍然有效，登入連結已寄到受邀的信箱。",
+  );
+  const magicLink = await emailLink(request, email, "登入 Along the Way");
+  expect(new URLSearchParams(new URL(magicLink).hash.slice(1)).has("inviteToken"))
+    .toBe(false);
+  let consumeCount = 0;
+  page.on("request", (sentRequest) => {
+    if (sentRequest.url().endsWith("/api/auth/magic-links/consume")) {
+      consumeCount += 1;
+    }
+  });
+  await page.evaluate((link) => {
+    window.location.href = link;
+  }, magicLink);
+  await expect(page.getByRole("button", { name: /大阪京都家庭旅行，切換旅程/ }))
+    .toBeVisible();
+  await expect.poll(() => consumeCount).toBe(1);
+  await expect(page.getByRole("button", { name: "接受邀請" })).toHaveCount(0);
   await openMembers(page);
-  await expect(page.getByRole("button", { name: /大阪京都家庭旅行，切換旅程/ })).toBeVisible();
   return page;
 }
 
@@ -268,7 +291,33 @@ test("private trips work across four identities, viewports, and rejection paths"
   await expect(page.getByRole("heading", { name: "先建立一趟旅程" })).toBeVisible();
   await expect(page.getByRole("tab", { name: /今天|行程|地點|成員/ })).toHaveCount(0);
   await page.getByRole("button", { name: "建立旅程", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: "建立旅程" })).toContainText("步驟 1 / 3・旅程");
+  let createDialog = page.getByRole("dialog", { name: "建立旅程" });
+  await expect(createDialog).toContainText("步驟 1 / 3・旅程");
+  await createDialog.getByLabel("旅程名稱").fill("保留中的草稿");
+  // The dialog opens from scale(0.98); measure after the transition settles.
+  const closeButton = createDialog.getByRole("button", { name: "關閉" });
+  await expect.poll(async () => {
+    const box = await closeButton.boundingBox();
+    return Math.min(box?.width ?? 0, box?.height ?? 0);
+  }).toBeGreaterThanOrEqual(44);
+  await selectDateRange(page, createDialog, "2026-10-21", "2026-10-27");
+  const dateTrigger = createDialog.getByRole("button", { name: /2026\/10\/21 – 2026\/10\/27/ });
+  await dateTrigger.click();
+  const rangeMiddle = page.locator('[data-range-middle="true"]').first();
+  await expect(rangeMiddle).toHaveCSS("background-color", "rgb(181, 87, 55)");
+  await expect(rangeMiddle).toHaveCSS("color", "rgb(255, 250, 242)");
+  await expect(page.getByRole("button", { name: "確定", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "確定", exact: true }).click();
+  await page.mouse.click(5, 5);
+  await expect(createDialog).toBeVisible();
+  await expect(createDialog.getByLabel("旅程名稱")).toHaveValue("保留中的草稿");
+  await page.keyboard.press("Escape");
+  await expect(createDialog).toHaveCount(0);
+  await page.getByRole("button", { name: "建立旅程", exact: true }).click();
+  createDialog = page.getByRole("dialog", { name: "建立旅程" });
+  await expect(createDialog.getByLabel("旅程名稱")).toHaveValue("保留中的草稿");
+  await expect(createDialog.getByRole("button", { name: /2026\/10\/21 – 2026\/10\/27/ })).toBeVisible();
+  await expect(createDialog.getByRole("heading", { name: "步驟 1 / 3・旅程" })).toBeVisible();
   await page.keyboard.press("Escape");
   await page.setViewportSize({ width: 1280, height: 720 });
   const switchTripControl = page.getByRole("button", { name: /切換旅程$/ });
@@ -377,6 +426,8 @@ test("private trips work across four identities, viewports, and rejection paths"
   await expect(membersPanel.getByText("mother@example.test", { exact: true })).toBeVisible();
   await expect(membersPanel.getByText("friend@example.test", { exact: true })).toBeVisible();
   await expect(membersPanel.getByRole("list").first().getByRole("listitem")).toHaveCount(4);
+  await expect(membersPanel.getByText("沒有待處理的邀請。", { exact: true }))
+    .toBeVisible();
 
   const wifePage = editorPages[0]!;
   const motherPage = editorPages[1]!;

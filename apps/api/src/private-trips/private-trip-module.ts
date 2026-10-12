@@ -1,6 +1,7 @@
 import type {
   CreateTripInput,
   InviteDto,
+  LinkedInviteOutcome,
   TripDto,
   TripSummaryDto,
   UserDto,
@@ -16,6 +17,8 @@ export type { CreateTripInput };
 export interface SessionResult {
   sessionToken: string;
   user: AuthenticatedUser;
+  acceptedTripId?: string;
+  inviteOutcome?: LinkedInviteOutcome;
 }
 
 export interface AcceptedInvite {
@@ -23,7 +26,8 @@ export interface AcceptedInvite {
 }
 
 export interface IdentityAccessModule {
-  requestMagicLink(email: string, inviteToken?: string): Promise<void>;
+  requestMagicLink(email: string): Promise<void>;
+  requestInviteMagicLink(inviteToken: string): Promise<void>;
   consumeMagicLink(token: string): Promise<SessionResult>;
   authenticate(sessionToken: string): Promise<AuthenticatedUser | null>;
   logout(sessionToken: string): Promise<void>;

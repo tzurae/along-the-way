@@ -4,7 +4,7 @@ import {
   parseInviteResponse,
   type InviteDto,
 } from "@along-the-way/contracts/private-trips";
-import type { Kysely } from "kysely";
+import type { Kysely, Transaction } from "kysely";
 
 import type { AlongTheWayDatabase } from "../database/database";
 import {
@@ -79,9 +79,43 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
     this.randomIdentifier = options.randomIdentifier ?? randomUUID;
   }
 
-  async requestMagicLink(rawEmail: string, inviteToken?: string) {
+  private async queueMagicLink(
+    transaction: Transaction<AlongTheWayDatabase>,
+    user: { id: string; email: string },
+    linkedInviteId: string | null,
+    now: Date,
+  ) {
+    const id = this.randomIdentifier();
+    const token = this.tokenIssuer.issue(id);
+    await transaction
+      .insertInto("magic_link_tokens")
+      .values({
+        id,
+        user_id: user.id,
+        token_hash: hashToken(token),
+        linked_invite_id: linkedInviteId,
+        expires_at: new Date(now.valueOf() + MAGIC_LINK_LIFETIME_MS),
+        used_at: null,
+        revoked_at: null,
+      })
+      .execute();
+    await transaction
+      .insertInto("email_jobs")
+      .values({
+        kind: "magic_link",
+        recipient: user.email,
+        magic_link_token_id: id,
+        invite_id: null,
+        available_at: now,
+        delivered_at: null,
+      })
+      .execute();
+  }
+
+  async requestMagicLink(rawEmail: string) {
     const email = normalizeEmail(rawEmail);
     if (!validEmail(email)) return;
+    const now = this.now();
 
     await this.database.transaction().execute(async (transaction) => {
       const user = await transaction
@@ -91,46 +125,35 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         .where("status", "=", "active")
         .executeTakeFirst();
       if (!user) return;
+      await this.queueMagicLink(transaction, user, null, now);
+    });
+  }
 
-      let inviteId: string | null = null;
-      if (inviteToken) {
-        const pendingInvite = await transaction
-          .selectFrom("invites")
-          .select("id")
-          .where("token_hash", "=", hashToken(inviteToken))
-          .where("email", "=", user.email)
-          .where("accepted_at", "is", null)
-          .where("revoked_at", "is", null)
-          .where("expires_at", ">", this.now())
-          .executeTakeFirst();
-        inviteId = pendingInvite?.id ?? null;
-      }
-
-      const id = this.randomIdentifier();
-      const token = this.tokenIssuer.issue(id);
-      await transaction
-        .insertInto("magic_link_tokens")
-        .values({
-          id,
-          user_id: user.id,
-          token_hash: hashToken(token),
-          linked_invite_id: inviteId,
-          expires_at: new Date(this.now().valueOf() + MAGIC_LINK_LIFETIME_MS),
-          used_at: null,
-          revoked_at: null,
-        })
-        .execute();
-      await transaction
-        .insertInto("email_jobs")
-        .values({
-          kind: "magic_link",
-          recipient: user.email,
-          magic_link_token_id: id,
-          invite_id: null,
-          available_at: this.now(),
-          delivered_at: null,
-        })
-        .execute();
+  async requestInviteMagicLink(inviteToken: string) {
+    const now = this.now();
+    await this.database.transaction().execute(async (transaction) => {
+      const invitation = await transaction
+        .selectFrom("invites")
+        .innerJoin("users", "users.email", "invites.email")
+        .select([
+          "invites.id as inviteId",
+          "users.id as userId",
+          "users.email",
+        ])
+        .where("invites.token_hash", "=", hashToken(inviteToken))
+        .where("invites.accepted_at", "is", null)
+        .where("invites.revoked_at", "is", null)
+        .where("invites.expires_at", ">", now)
+        .where("users.status", "=", "active")
+        .forUpdate()
+        .executeTakeFirst();
+      if (!invitation) return;
+      await this.queueMagicLink(
+        transaction,
+        { id: invitation.userId, email: invitation.email },
+        invitation.inviteId,
+        now,
+      );
     });
   }
 
@@ -146,6 +169,7 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
           "magic_link_tokens.expires_at",
           "magic_link_tokens.used_at",
           "magic_link_tokens.revoked_at",
+          "magic_link_tokens.linked_invite_id as linkedInviteId",
           "users.id as userId",
           "users.email",
           "users.display_name as displayName",
@@ -179,6 +203,101 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         );
       }
 
+      let acceptedTripId: string | undefined;
+      let inviteOutcome: SessionResult["inviteOutcome"];
+      if (link.linkedInviteId) {
+        const invite = await transaction
+          .selectFrom("invites")
+          .select([
+            "id",
+            "trip_id as tripId",
+            "email",
+            "expires_at",
+            "accepted_at",
+            "accepted_by",
+            "revoked_at",
+          ])
+          .where("id", "=", link.linkedInviteId)
+          .forUpdate()
+          .executeTakeFirst();
+
+        if (
+          invite?.accepted_at &&
+          invite.accepted_by === link.userId
+        ) {
+          const membership = await transaction
+            .selectFrom("trip_members")
+            .select("user_id")
+            .where("trip_id", "=", invite.tripId)
+            .where("user_id", "=", link.userId)
+            .where("removed_at", "is", null)
+            .executeTakeFirst();
+          if (membership) {
+            acceptedTripId = invite.tripId;
+            inviteOutcome = "already-member";
+          }
+        } else if (
+          invite &&
+          (invite.revoked_at || new Date(invite.expires_at) <= now)
+        ) {
+          inviteOutcome = "expired-or-revoked";
+        } else if (
+          invite &&
+          invite.email === link.email &&
+          invite.accepted_at === null
+        ) {
+          const trip = await transaction
+            .selectFrom("trips")
+            .select("id")
+            .where("id", "=", invite.tripId)
+            .forUpdate()
+            .executeTakeFirst();
+          if (trip) {
+            const membership = await transaction
+              .selectFrom("trip_members")
+              .select("user_id")
+              .where("trip_id", "=", invite.tripId)
+              .where("user_id", "=", link.userId)
+              .where("removed_at", "is", null)
+              .executeTakeFirst();
+            if (!membership) {
+              await transaction
+                .insertInto("trip_members")
+                .values({
+                  trip_id: invite.tripId,
+                  user_id: link.userId,
+                  role: "editor",
+                  removed_at: null,
+                })
+                .onConflict((conflict) =>
+                  conflict.columns(["trip_id", "user_id"]).doUpdateSet({
+                    role: "editor",
+                    removed_at: null,
+                    joined_at: now,
+                  }),
+                )
+                .execute();
+            }
+            await transaction
+              .updateTable("invites")
+              .set({ accepted_at: now, accepted_by: link.userId })
+              .where("id", "=", invite.id)
+              .where("accepted_at", "is", null)
+              .execute();
+            await recordEvent(transaction, {
+              tripId: invite.tripId,
+              actorId: link.userId,
+              eventType: "invite.accepted",
+              targetType: "invite",
+              targetId: invite.id,
+              summary: "Accepted an editor invitation",
+            });
+            acceptedTripId = invite.tripId;
+            inviteOutcome = membership ? "already-member" : "accepted";
+          }
+        }
+      }
+
       await transaction
         .updateTable("magic_link_tokens")
         .set({ used_at: now })
@@ -201,6 +320,8 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
           email: link.email,
           displayName: link.displayName,
         },
+        ...(acceptedTripId ? { acceptedTripId } : {}),
+        ...(inviteOutcome ? { inviteOutcome } : {}),
       };
     });
   }

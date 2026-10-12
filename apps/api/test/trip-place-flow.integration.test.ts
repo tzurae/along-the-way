@@ -2283,19 +2283,43 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       expect(response.status).toBe(201);
       return parseItineraryItemResponse(await response.json()).item;
     };
-    const tpe = await skeletonPlace("days-tpe", "Taoyuan Airport", "airport", 25.0797, 121.2342, "Asia/Taipei");
-    const kix = await skeletonPlace("days-kix", "Kansai Airport", "airport", 34.4347, 135.244, "Asia/Tokyo");
     const kyotoHotel = await skeletonPlace("days-kyoto", "Kyoto Station Hotel", "lodging", 34.9858, 135.7588, "Asia/Tokyo");
     const osakaHotel = await skeletonPlace("days-osaka", "Namba Hotel", "lodging", 34.6665, 135.5013, "Asia/Tokyo");
-    const flight = (key: string, title: string, from: [string, string, string], to: [string, string, string]) => item(key, {
-      type: "flight",
-      title,
-      endpoints: [at(from[0], "start", from[1], from[2]), at(to[0], "end", to[1], to[2])],
-      details: { carrier: null, serviceNumber: title, confirmationNotes: null },
-    });
+    const tpeInput = {
+      name: "Taoyuan Airport", latitude: 25.0797, longitude: 121.2342, timeZone: "Asia/Taipei",
+    };
+    const kixInput = {
+      name: "Kansai Airport", latitude: 34.4347, longitude: 135.244, timeZone: "Asia/Tokyo",
+    };
+    const flight = async (
+      key: string,
+      serviceNumber: string,
+      departureAirport: typeof tpeInput,
+      departureLocalDateTime: string,
+      arrivalAirport: typeof tpeInput,
+      arrivalLocalDateTime: string,
+    ) => {
+      const response = await send("POST", `/api/trips/${trip.id}/flights`, key, {
+        serviceNumber,
+        carrier: null,
+        departureAirport,
+        arrivalAirport,
+        departureLocalDateTime,
+        arrivalLocalDateTime,
+        expectedTripVersion: await tripVersion(),
+      });
+      expect(response.status).toBe(201);
+      return parseItineraryItemResponse(await response.json()).item;
+    };
     // In on the 21st (lands 12:30), Kyoto for two nights, Osaka for two, out on the 25th at 18:00.
-    const inbound = await flight("days-in", "CI 152", [tpe.id, "2026-10-21T09:00", "Asia/Taipei"], [kix.id, "2026-10-21T12:30", "Asia/Tokyo"]);
-    const outbound = await flight("days-out", "CI 153", [kix.id, "2026-10-25T18:00", "Asia/Tokyo"], [tpe.id, "2026-10-25T20:00", "Asia/Taipei"]);
+    const inbound = await flight("days-in", "CI 152", tpeInput, "2026-10-21T09:00", kixInput, "2026-10-21T12:30");
+    const outbound = await flight("days-out", "CI 153", kixInput, "2026-10-25T18:00", tpeInput, "2026-10-25T20:00");
+    const locatedAirportsResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    const locatedAirports = parseTripSkeletonResponse(await locatedAirportsResponse.json()).skeleton.places;
+    const tpe = locatedAirports.find((place) => place.name === tpeInput.name)!;
+    const kix = locatedAirports.find((place) => place.name === kixInput.name)!;
+    expect(tpe).toMatchObject({ latitude: 25.0797, longitude: 121.2342 });
+    expect(kix).toMatchObject({ latitude: 34.4347, longitude: 135.244 });
     for (const [key, hotel, from, to] of [
       ["days-stay-kyoto", kyotoHotel, "2026-10-21T15:00", "2026-10-23T10:00"],
       ["days-stay-osaka", osakaHotel, "2026-10-23T15:00", "2026-10-25T11:00"],
@@ -2351,6 +2375,9 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect(arrival.rows[0]).toMatchObject({ itemId: inbound.id, endMinute: 750, afterBufferMinutes: 60, bufferMinutes: 0 });
     expect(arrival.rows[1]).toMatchObject({ arriveMinute: 885, leaveMinute: 900, travel: { fromName: "Kansai Airport", durationMinutes: 75 } });
     expect(arrival.rows[2]).toMatchObject({ startMinute: 910, endMinute: 1000 });
+    expect(routes.queries.some((query) =>
+      ControlledRouteProvider.pair(query.origin.placeId, query.destination.placeId)
+        === ControlledRouteProvider.pair(kix.id, kyotoHotel.id))).toBe(true);
 
     // Moving day: from Kyoto, luggage to Osaka first, back to Osaka at the end.
     const moving = await draft("2026-10-23");
@@ -2372,6 +2399,9 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       afterBufferMinutes: 0,
       travel: { fromName: "Namba Hotel", durationMinutes: 60 },
     });
+    expect(routes.queries.some((query) =>
+      ControlledRouteProvider.pair(query.origin.placeId, query.destination.placeId)
+        === ControlledRouteProvider.pair(osakaHotel.id, kix.id))).toBe(true);
 
     // A confirmed buffer replaces the default.
     expect((await send("POST", `/api/trips/${trip.id}/items/${outbound.id}/constraints`, "days-buffer", {

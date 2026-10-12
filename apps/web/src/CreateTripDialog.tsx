@@ -33,6 +33,7 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useI18n } from "./i18n";
 import { emptyFlight, FlightFields, flightComplete } from "./FlightFields";
+import { sameAirport } from "./airport-data";
 
 interface CreateTripDialogProps {
   open: boolean;
@@ -67,20 +68,18 @@ export function CreateTripDialog({ open, onOpenChange, createTrip }: CreateTripD
   const [name, setName] = useState("");
   const [dateRange, setDateRange] = useState<DateRange>();
   const [datePickerOpen, setDatePickerOpen] = useState(false);
-  // Counts picks since the popover opened: the first pick starts the range, the second ends it.
-  const datePicks = useRef(0);
+  const returnAirportTouched = useRef({ departure: false, arrival: false });
   const [countryStops, setCountryStops] = useState<DraftCountryStop[]>([]);
   const [countryQuery, setCountryQuery] = useState("");
   const [selectedCountry, setSelectedCountry] = useState<CountryOption | null>(null);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [outbound, setOutbound] = useState(() => emptyFlight(Intl.DateTimeFormat().resolvedOptions().timeZone));
-  const [returnFlight, setReturnFlight] = useState(() => emptyFlight("", Intl.DateTimeFormat().resolvedOptions().timeZone));
-  const firstZone = countriesByCode.get(countryStops[0]?.countryCode ?? "")?.timeZones;
-  const lastZone = countriesByCode.get(countryStops.at(-1)?.countryCode ?? "")?.timeZones;
-  const arrivalDefault = firstZone?.length === 1 ? firstZone[0]! : "";
-  const departureDefault = lastZone?.length === 1 ? lastZone[0]! : "";
-  const previousDefaults = useRef({ arrival: "", departure: "" });
+  const [outbound, setOutbound] = useState(() => emptyFlight());
+  const [returnFlight, setReturnFlight] = useState(() => emptyFlight());
+  useEffect(() => {
+    if (!open) setDatePickerOpen(false);
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     let focusFrame = 0;
@@ -92,14 +91,33 @@ export function CreateTripDialog({ open, onOpenChange, createTrip }: CreateTripD
       window.cancelAnimationFrame(focusFrame);
     };
   }, [open, step]);
-  useEffect(() => {
-    const previous = previousDefaults.current;
-    setOutbound((flight) => flight.arrivalAirport.timeZone === previous.arrival
-      ? { ...flight, arrivalAirport: { ...flight.arrivalAirport, timeZone: arrivalDefault } } : flight);
-    setReturnFlight((flight) => flight.departureAirport.timeZone === previous.departure
-      ? { ...flight, departureAirport: { ...flight.departureAirport, timeZone: departureDefault } } : flight);
-    previousDefaults.current = { arrival: arrivalDefault, departure: departureDefault };
-  }, [arrivalDefault, departureDefault]);
+
+  function updateOutbound(next: typeof outbound) {
+    const previous = outbound;
+    setOutbound(next);
+    setReturnFlight((current) => {
+      let mirrored = current;
+      if (!returnAirportTouched.current.departure
+        && !sameAirport(previous.arrivalAirport, next.arrivalAirport)) {
+        mirrored = { ...mirrored, departureAirport: { ...next.arrivalAirport } };
+      }
+      if (!returnAirportTouched.current.arrival
+        && !sameAirport(previous.departureAirport, next.departureAirport)) {
+        mirrored = { ...mirrored, arrivalAirport: { ...next.departureAirport } };
+      }
+      return mirrored;
+    });
+  }
+
+  function updateReturnFlight(next: typeof returnFlight) {
+    if (!sameAirport(returnFlight.departureAirport, next.departureAirport)) {
+      returnAirportTouched.current.departure = true;
+    }
+    if (!sameAirport(returnFlight.arrivalAirport, next.arrivalAirport)) {
+      returnAirportTouched.current.arrival = true;
+    }
+    setReturnFlight(next);
+  }
 
   const filteredCountries = useMemo(
     () => filterCountryOptions(availableCountries, countryQuery),
@@ -163,8 +181,9 @@ export function CreateTripDialog({ open, onOpenChange, createTrip }: CreateTripD
     setCountryStops([]);
     setCountryQuery("");
     setSelectedCountry(null);
-    setOutbound(emptyFlight(Intl.DateTimeFormat().resolvedOptions().timeZone));
-    setReturnFlight(emptyFlight("", Intl.DateTimeFormat().resolvedOptions().timeZone));
+    setOutbound(emptyFlight());
+    setReturnFlight(emptyFlight());
+    returnAirportTouched.current = { departure: false, arrival: false };
     setError("");
   }
 
@@ -210,13 +229,20 @@ export function CreateTripDialog({ open, onOpenChange, createTrip }: CreateTripD
   return (
     <Dialog
       open={open}
+      disablePointerDismissal
       onOpenChange={(nextOpen) => {
-        if (!nextOpen) setStep(1);
+        if (!nextOpen) {
+          setStep(1);
+          setDatePickerOpen(false);
+        }
         onOpenChange(nextOpen);
       }}
     >
-      <DialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] overflow-y-auto sm:max-w-3xl">
-        <DialogHeader>
+      <DialogContent
+        className="max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] overflow-y-auto sm:max-w-3xl"
+        closeButtonClassName="size-11"
+      >
+        <DialogHeader className="pr-12">
           <DialogTitle>{t.createTrip.title}</DialogTitle>
           <DialogDescription>{t.createTrip.description}</DialogDescription>
         </DialogHeader>
@@ -249,10 +275,7 @@ export function CreateTripDialog({ open, onOpenChange, createTrip }: CreateTripD
                   <FieldLabel>{t.createTrip.tripDates}</FieldLabel>
                   <Popover
                     open={datePickerOpen}
-                    onOpenChange={(nextOpen) => {
-                      if (nextOpen) datePicks.current = 0;
-                      setDatePickerOpen(nextOpen);
-                    }}
+                    onOpenChange={setDatePickerOpen}
                   >
                     <PopoverTrigger
                       render={
@@ -274,14 +297,21 @@ export function CreateTripDialog({ open, onOpenChange, createTrip }: CreateTripD
                       <Calendar
                         mode="range"
                         selected={dateRange}
-                        onSelect={(range) => {
-                          setDateRange(range);
-                          datePicks.current += 1;
-                          if (range?.from && range.to && datePicks.current >= 2) setDatePickerOpen(false);
-                        }}
+                        onSelect={setDateRange}
+                        resetOnSelect
                         defaultMonth={dateRange?.from}
                         numberOfMonths={1}
                       />
+                      <div className="border-t p-3">
+                        <Button
+                          type="button"
+                          className="h-11 w-full"
+                          disabled={!dateRange?.from || !dateRange.to}
+                          onClick={() => setDatePickerOpen(false)}
+                        >
+                          {t.createTrip.confirmDates}
+                        </Button>
+                      </div>
                     </PopoverContent>
                   </Popover>
                   <FieldDescription>{t.createTrip.dateDescription}</FieldDescription>
@@ -394,10 +424,10 @@ export function CreateTripDialog({ open, onOpenChange, createTrip }: CreateTripD
                     </div>
                   </dl>
                 </section>
-                <FlightFields legend={t.travel.outbound} value={outbound} onChange={setOutbound}
+                <FlightFields legend={t.travel.outbound} value={outbound} onChange={updateOutbound}
                   startDate={dateRange?.from ? format(dateRange.from, "yyyy-MM-dd") : undefined}
                   endDate={dateRange?.to ? format(dateRange.to, "yyyy-MM-dd") : undefined} />
-                <FlightFields legend={t.travel.return} value={returnFlight} onChange={setReturnFlight}
+                <FlightFields legend={t.travel.return} value={returnFlight} onChange={updateReturnFlight}
                   startDate={dateRange?.from ? format(dateRange.from, "yyyy-MM-dd") : undefined}
                   endDate={dateRange?.to ? format(dateRange.to, "yyyy-MM-dd") : undefined} />
               </div>

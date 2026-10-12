@@ -7,6 +7,7 @@ import { MAX_TRIP_COUNTRY_STOPS } from "@along-the-way/contracts/countries";
 import type { Hono } from "hono";
 import {
   parseInviteResponse,
+  parseMagicLinkConsumeResponse,
   parseTripListResponse,
   parseTripResponse,
 } from "@along-the-way/contracts/private-trips";
@@ -184,6 +185,28 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     });
     await emailWorker.runOnce();
     return response;
+  }
+
+  async function requestInviteMagicLink(inviteToken: string) {
+    return app.request("/api/auth/invite-magic-links", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://app.example.test",
+      },
+      body: body({ inviteToken }),
+    });
+  }
+
+  async function consumeMagicLink(token: string) {
+    return app.request("/api/auth/magic-links/consume", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://app.example.test",
+      },
+      body: body({ token }),
+    });
   }
 
   async function login(address: string) {
@@ -392,6 +415,154 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     expect(await limited.json()).toMatchObject({
       error: { code: "rate_limited" },
     });
+  });
+
+  it("delivers invite login generically and accepts the linked invitation only on consume", async () => {
+    const owner = await login("owner@example.test");
+    const trip = (await createTrip(owner.cookie, "linked-invite-trip")).trip;
+    const wifeInvite = await invite(
+      owner.cookie,
+      trip.id,
+      "wife@example.test",
+      "linked-invite-wife",
+    );
+
+    const valid = await requestInviteMagicLink(wifeInvite.token);
+    const invalid = await requestInviteMagicLink("not-a-real-invite");
+    expect(valid.status).toBe(202);
+    expect(invalid.status).toBe(202);
+    expect(await valid.clone().json()).toEqual(await invalid.json());
+    await emailWorker.runOnce();
+    expect(email.magicLinks).toHaveLength(2);
+    const firstLink = email.magicLinks.at(-1)!;
+    expect(firstLink.to).toBe("wife@example.test");
+    expect(linkToken(firstLink.url, "inviteToken")).toBeNull();
+
+    const beforeConsume = await database
+      .selectFrom("trip_members")
+      .innerJoin("users", "users.id", "trip_members.user_id")
+      .select("trip_members.user_id")
+      .where("trip_members.trip_id", "=", trip.id)
+      .where("users.email", "=", "wife@example.test")
+      .where("trip_members.removed_at", "is", null)
+      .executeTakeFirst();
+    expect(beforeConsume).toBeUndefined();
+
+    expect((await requestInviteMagicLink(wifeInvite.token)).status).toBe(202);
+    await emailWorker.runOnce();
+    const secondLink = email.magicLinks.at(-1)!;
+    const firstToken = linkToken(firstLink.url, "magicToken")!;
+    const secondToken = linkToken(secondLink.url, "magicToken")!;
+
+    const firstConsume = await consumeMagicLink(firstToken);
+    expect(firstConsume.status).toBe(200);
+    expect(parseMagicLinkConsumeResponse(await firstConsume.json())).toMatchObject({
+      acceptedTripId: trip.id,
+      inviteOutcome: "accepted",
+      user: { email: "wife@example.test" },
+    });
+
+    const secondConsume = await consumeMagicLink(secondToken);
+    expect(secondConsume.status).toBe(200);
+    expect(parseMagicLinkConsumeResponse(await secondConsume.json())).toMatchObject({
+      acceptedTripId: trip.id,
+      inviteOutcome: "already-member",
+      user: { email: "wife@example.test" },
+    });
+
+    const acceptedTrip = parseTripResponse(
+      await (await app.request(`/api/trips/${trip.id}`, {
+        headers: { cookie: cookieFrom(secondConsume) },
+      })).json(),
+    ).trip;
+    expect(acceptedTrip.members.filter((member) => member.email === "wife@example.test"))
+      .toHaveLength(1);
+    expect(acceptedTrip.invites).not.toContainEqual(
+      expect.objectContaining({ id: wifeInvite.inviteId, status: "pending" }),
+    );
+
+    const deliveredCount = email.magicLinks.length;
+    expect((await requestInviteMagicLink(wifeInvite.token)).status).toBe(202);
+    expect((await requestInviteMagicLink(wifeInvite.token)).status).toBe(202);
+    expect((await requestInviteMagicLink(wifeInvite.token)).status).toBe(202);
+    const inviteRateLimited = await requestInviteMagicLink(wifeInvite.token);
+    expect(inviteRateLimited.status).toBe(429);
+    expect(await inviteRateLimited.json()).toMatchObject({
+      error: { code: "rate_limited" },
+    });
+    await emailWorker.runOnce();
+    expect(email.magicLinks).toHaveLength(deliveredCount);
+
+    const expiredInvite = await invite(
+      owner.cookie,
+      trip.id,
+      "expired-race@example.test",
+      "linked-invite-expired-race",
+    );
+    expect((await requestInviteMagicLink(expiredInvite.token)).status).toBe(202);
+    await emailWorker.runOnce();
+    const expiredMagicToken = linkToken(email.magicLinks.at(-1)!.url, "magicToken")!;
+    await database
+      .updateTable("invites")
+      .set({ expires_at: new Date(now.valueOf() - 1_000) })
+      .where("id", "=", expiredInvite.inviteId)
+      .execute();
+    const expiredConsume = await consumeMagicLink(expiredMagicToken);
+    expect(expiredConsume.status).toBe(200);
+    expect(parseMagicLinkConsumeResponse(await expiredConsume.json())).toMatchObject({
+      inviteOutcome: "expired-or-revoked",
+      user: { email: "expired-race@example.test" },
+    });
+    expect(await database
+      .selectFrom("trip_members")
+      .innerJoin("users", "users.id", "trip_members.user_id")
+      .select("trip_members.user_id")
+      .where("trip_members.trip_id", "=", trip.id)
+      .where("users.email", "=", "expired-race@example.test")
+      .where("trip_members.removed_at", "is", null)
+      .executeTakeFirst()).toBeUndefined();
+
+    const revokedInvite = await invite(
+      owner.cookie,
+      trip.id,
+      "revoked-race@example.test",
+      "linked-invite-revoked-race",
+    );
+    expect((await requestInviteMagicLink(revokedInvite.token)).status).toBe(202);
+    await emailWorker.runOnce();
+    const revokedMagicToken = linkToken(email.magicLinks.at(-1)!.url, "magicToken")!;
+    const revoke = await app.request(
+      `/api/trips/${trip.id}/invites/${revokedInvite.inviteId}`,
+      {
+        method: "DELETE",
+        headers: {
+          cookie: owner.cookie,
+          "idempotency-key": "linked-invite-revoke-race",
+          origin: "https://app.example.test",
+        },
+      },
+    );
+    expect(revoke.status).toBe(204);
+    const revokedConsume = await consumeMagicLink(revokedMagicToken);
+    expect(revokedConsume.status).toBe(200);
+    expect(parseMagicLinkConsumeResponse(await revokedConsume.json())).toMatchObject({
+      inviteOutcome: "expired-or-revoked",
+      user: { email: "revoked-race@example.test" },
+    });
+    expect(await database
+      .selectFrom("trip_members")
+      .innerJoin("users", "users.id", "trip_members.user_id")
+      .select("trip_members.user_id")
+      .where("trip_members.trip_id", "=", trip.id)
+      .where("users.email", "=", "revoked-race@example.test")
+      .where("trip_members.removed_at", "is", null)
+      .executeTakeFirst()).toBeUndefined();
+
+    const deliveredAfterRaces = email.magicLinks.length;
+    expect((await requestInviteMagicLink(expiredInvite.token)).status).toBe(202);
+    expect((await requestInviteMagicLink(revokedInvite.token)).status).toBe(202);
+    await emailWorker.runOnce();
+    expect(email.magicLinks).toHaveLength(deliveredAfterRaces);
   });
 
   it("keeps membership identity stable through removal and rejoin without sharing it across trips", async () => {

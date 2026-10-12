@@ -21,6 +21,8 @@ let requests: string[] = [];
 let liveVersion = 0;
 let liveSources: Array<EventTarget & { url: string }> = [];
 let previewFails = false;
+let magicConsumeFailure: "network" | 403 | 500 | null = null;
+let magicInviteOutcome = false;
 const reply = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 
 beforeEach(() => {
@@ -31,6 +33,8 @@ beforeEach(() => {
   dayVersion = 1;
   savedOrder = false; gate = null; requests = [];
   liveVersion = 0; liveSources = []; previewFails = false;
+  magicConsumeFailure = null;
+  magicInviteOutcome = false;
   history.replaceState({}, "", "/?trip=A&tab=today&day=2026-10-21");
   Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -42,6 +46,21 @@ beforeEach(() => {
     requests.push(input);
     if (gate && input.startsWith("/api/trips/A")) await gate;
     if (input === "/api/session") return reply({ user: todayUser });
+    if (input === "/api/auth/magic-links/consume") {
+      if (magicConsumeFailure === "network") throw new TypeError("Failed to fetch");
+      if (magicConsumeFailure) {
+        return reply({
+          error: {
+            code: magicConsumeFailure === 403 ? "forbidden" : "internal",
+            message: "Consume failed",
+          },
+        }, magicConsumeFailure);
+      }
+      return reply({
+        user: todayUser,
+        ...(magicInviteOutcome ? { inviteOutcome: "expired-or-revoked" } : {}),
+      });
+    }
     if (input === "/api/trips") return reply({ trips });
     if (input === "/api/invites/accept") return reply({ error: { code: "used_invite", message: "This invitation was already used" } }, 409);
     const trip = trips.find((entry) => input.startsWith(`/api/trips/${entry.id}`));
@@ -98,6 +117,84 @@ async function travelHistory(direction: "back" | "forward") {
   });
 }
 
+
+it("consumes each magic token once when the hash changes in the same document", async () => {
+  await mount();
+
+  history.replaceState({}, "", "/?trip=A&tab=today#magicToken=same-tab-token");
+  await act(async () => {
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  });
+
+  await waitFor(() => {
+    expect(requests.filter((request) => request === "/api/auth/magic-links/consume"))
+      .toHaveLength(1);
+  });
+  await waitFor(() => expect(document.querySelector('[data-trip-tab="today"]')).toBeInTheDocument());
+  expect(new URLSearchParams(location.hash.slice(1)).has("magicToken")).toBe(false);
+
+  history.replaceState({}, "", "/?trip=A&tab=today#magicToken=same-tab-token");
+  await act(async () => {
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  });
+  expect(requests.filter((request) => request === "/api/auth/magic-links/consume"))
+    .toHaveLength(1);
+});
+
+it.each(["network", 403, 500] as const)(
+  "keeps the magic token and shows a retry after a %s consume failure",
+  async (failure) => {
+    await mount();
+    magicConsumeFailure = failure;
+
+    history.replaceState({}, "", "/?trip=A&tab=today#magicToken=retryable-token");
+    await act(async () => {
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector('[role="alert"]')).toHaveTextContent(
+        "目前無法驗證登入連結。請檢查網路連線後重試；登入連結仍會保留。",
+      );
+    });
+    expect(button("重試登入")).toBeEnabled();
+    expect(new URLSearchParams(location.hash.slice(1)).get("magicToken"))
+      .toBe("retryable-token");
+    magicConsumeFailure = null;
+    await click(button("重試登入"));
+    await waitFor(() => {
+      expect(requests.filter((request) => request === "/api/auth/magic-links/consume"))
+        .toHaveLength(2);
+    });
+    await waitFor(() =>
+      expect(document.querySelector('[data-trip-tab="today"]')).toBeInTheDocument(),
+    );
+  },
+);
+
+it("signs in but explains when a linked invitation expired or was revoked", async () => {
+  await mount();
+  magicInviteOutcome = true;
+
+  history.replaceState(
+    {},
+    "",
+    "/?trip=A&tab=today#magicToken=outcome-token&inviteToken=legacy-invite-token",
+  );
+  await act(async () => {
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  });
+
+  await waitFor(() => {
+    expect(document.querySelector('[role="alert"]')).toHaveTextContent(
+      "邀請已過期或已被撤銷，請向旅程建立者索取新的邀請。",
+    );
+  });
+  expect([...document.querySelectorAll("button")].some((element) =>
+    element.textContent?.trim() === "接受邀請",
+  )).toBe(false);
+  expect(new URLSearchParams(location.hash.slice(1)).has("inviteToken")).toBe(false);
+});
 it("shows one actionable first-trip surface and restores focus after its dialog closes", async () => {
   trips = [];
   history.replaceState({}, "", "/");
