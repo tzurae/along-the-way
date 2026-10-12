@@ -48,6 +48,8 @@ export interface TripPlaceDto {
   id: string;
   tripId: string;
   placeId: string;
+  /** The skeleton/itinerary `PlaceDto.id` backing this wishlist place; differs from the canonical `placeId`. */
+  legacyPlaceId: string | null;
   provider: "google" | "manual";
   aiProposalId: string | null;
   providerPlaceId: string | null;
@@ -277,6 +279,7 @@ function tripPlace(value: unknown): TripPlaceDto {
     id: text(row.id),
     tripId: text(row.tripId),
     placeId: text(row.placeId),
+    legacyPlaceId: nullableText(row.legacyPlaceId ?? null),
     provider: row.provider,
     aiProposalId: nullableText(row.aiProposalId),
     providerPlaceId: nullableText(row.providerPlaceId),

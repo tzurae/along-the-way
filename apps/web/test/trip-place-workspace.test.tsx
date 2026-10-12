@@ -38,6 +38,7 @@ function place(id: string, name: string, scheduled: boolean): TripPlaceDto {
     id,
     tripId,
     placeId: id === unscheduledId ? "66666666-6666-4666-8666-666666666666" : "77777777-7777-4777-8777-777777777777",
+    legacyPlaceId: null,
     provider: "manual",
     aiProposalId: null,
     providerPlaceId: null,

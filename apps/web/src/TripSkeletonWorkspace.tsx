@@ -513,11 +513,12 @@ export function TripSkeletonWorkspace({
     ),
     [skeleton?.items],
   );
-  const scheduledPlaceIds = useMemo(
+  // Skeleton PlaceDto.id is the legacy place id; wishlist placeId is the canonical identity.
+  const scheduledLegacyPlaceIds = useMemo(
     () => new Set(
       tripPlaces
         .filter((place) => place.assignedDayId !== null || place.selectedForItinerary || place.scheduled)
-        .map((place) => place.placeId),
+        .flatMap((place) => place.legacyPlaceId ? [place.legacyPlaceId] : []),
     ),
     [tripPlaces],
   );
@@ -1139,7 +1140,7 @@ export function TripSkeletonWorkspace({
                             save={(input, conflictBase) => savePlace(input, place, conflictBase)}
                           />
                         )}
-                        {isOwner || !scheduledPlaceIds.has(place.id) ? (
+                        {isOwner || !scheduledLegacyPlaceIds.has(place.id) ? (
                           <Button
                             size="sm"
                             variant="outline"

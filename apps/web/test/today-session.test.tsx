@@ -76,7 +76,7 @@ beforeEach(() => {
     if (input.includes("/place-previews?")) return previewFails
       ? reply({ error: { code: "provider_unavailable", message: "Preview unavailable" } }, 503)
       : reply({ previews: [] });
-    if (input.endsWith("/places/canonical-UNSCHEDULED") && init?.method === "DELETE") {
+    if (input.endsWith("/places/legacy-UNSCHEDULED") && init?.method === "DELETE") {
       return reply({ error: { code: "forbidden", message: "server copy" } }, 403);
     }
     if (input.endsWith("/place-order")) {
@@ -327,22 +327,24 @@ it("removes editor scheduling entry points while keeping itinerary previews read
       member.userId === todayUser.id ? { ...member, role: "editor" as const } : member
     ),
   };
-  const canonicalPlace = skeleton.places[0]!;
+  // Production shape: skeleton PlaceDto.id (legacy) differs from the wishlist canonical placeId.
+  const legacyPlace = skeleton.places[0]!;
   skeleton = {
     ...skeleton,
     places: [
-      { ...canonicalPlace, id: "canonical-FIRST", name: "Scheduled canonical" },
-      { ...canonicalPlace, id: "canonical-UNSCHEDULED", name: "Unscheduled canonical" },
+      { ...legacyPlace, id: "legacy-FIRST", name: "Scheduled canonical" },
+      { ...legacyPlace, id: "legacy-UNSCHEDULED", name: "Unscheduled canonical" },
     ],
   };
   const [scheduled, pending] = todayWishlist();
   tripPlacesOverride = [
-    scheduled!,
+    { ...scheduled!, placeId: "canonical-FIRST", legacyPlaceId: "legacy-FIRST" },
     { ...pending!, assignedDayId: null, dayPosition: null },
     {
       ...pending!,
       id: "UNSCHEDULED",
       placeId: "canonical-UNSCHEDULED",
+      legacyPlaceId: "legacy-UNSCHEDULED",
       name: "Unscheduled canonical",
       selectedForItinerary: false,
       assignedDayId: null,

@@ -1761,6 +1761,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         id: row.id,
         tripId: row.trip_id,
         placeId: row.place_id,
+        legacyPlaceId: row.legacy_place_id,
         aiProposalId: aiProposalByTripPlaceId.get(row.id) ?? null,
         provider: row.provider,
         providerPlaceId: row.provider_place_id,
