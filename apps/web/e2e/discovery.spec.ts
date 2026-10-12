@@ -56,13 +56,13 @@ async function signIn(page: Page, request: APIRequestContext, email: string) {
   const previous = await request.get(`${MAILPIT_API_URL}/api/v1/messages`);
   const previousIds = new Set(messages(await previous.json()).map((message) => message.id));
   await page.getByLabel("電子郵件").fill(email);
-  await page.getByRole("button", { name: "寄登入連結給我" }).click();
+  await page.getByRole("button", { name: "寄送登入連結" }).click();
   let id = "";
   await expect.poll(async () => {
     const response = await request.get(`${MAILPIT_API_URL}/api/v1/messages`);
     id = messages(await response.json()).find((message) =>
       !previousIds.has(message.id) &&
-      message.subject.includes("Sign in to Along the Way") &&
+      message.subject.includes("登入 Along the Way") &&
       message.recipients.includes(email)
     )?.id ?? "";
     return id;
@@ -94,8 +94,10 @@ async function createTrip(page: Page, name: string) {
   const label = (day: number) => new Date(year, month - 1, day).toLocaleDateString("zh-TW");
   await page.locator(`[data-day="${label(3)}"]`).click();
   await page.locator(`[data-day="${label(9)}"]`).click();
+  await dialog.getByRole("button", { name: "下一步" }).click();
   await dialog.getByLabel("新增國家").fill("Japan");
   await page.getByRole("option", { name: /\(JP\)/ }).dispatchEvent("click");
+  await dialog.getByRole("button", { name: "下一步" }).click();
   await fillTripFlights(dialog, "2026-11-03", "2026-11-09");
   await dialog.getByRole("button", { name: "建立旅程", exact: true }).click();
   await expect(page.getByRole("button", { name: new RegExp(`${name}，切換旅程`) })).toBeVisible();

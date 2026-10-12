@@ -276,6 +276,7 @@
 }
 
 .atw-shell { min-height: 100vh; min-width: 0; overflow-x: clip; padding-bottom: calc(86px + env(safe-area-inset-bottom)); }
+.atw-shell[data-has-trip="false"] { padding-bottom: 0; }
 .atw-topbar { position: sticky; top: 0; z-index: 30; padding: 8px 12px; border-bottom: 1px solid var(--border); background: #f8f4ede0; backdrop-filter: blur(12px); }
 .atw-topbar-content { display: flex; align-items: center; gap: 12px; }
 .atw-frame { max-width: none; margin: 0; }
@@ -454,3 +455,172 @@ span.today-sync-status { flex: none; font-weight: 600; white-space: nowrap; }
 .native-select > select { width: 100%; min-height: 44px; appearance: none; -webkit-appearance: none; padding-inline: 12px 38px; text-overflow: ellipsis; }
 .native-select__icon { position: absolute; top: 50%; right: 12px; width: 16px; height: 16px; translate: 0 -50%; pointer-events: none; color: var(--muted-foreground); }
 .native-select > select:disabled + .native-select__icon { opacity: .5; }
+
+/* First-run and trip-creation surfaces reuse the shell's paper, ink, and route accent. */
+.first-trip-onboarding {
+  display: grid;
+  min-height: min(34rem, calc(100dvh - 8rem));
+  place-items: center;
+  border: 1px dashed color-mix(in srgb, var(--color-ink) 22%, transparent);
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--color-surface) 78%, transparent);
+  padding: clamp(2rem, 7vw, 5rem);
+  text-align: center;
+}
+.first-trip-onboarding__copy { max-width: 38rem; }
+.first-trip-onboarding__mark {
+  display: grid;
+  width: 3.5rem;
+  height: 3.5rem;
+  margin: 0 auto 1.5rem;
+  place-items: center;
+  border-radius: var(--radius-panel);
+  background: color-mix(in srgb, var(--color-accent) 18%, var(--color-surface));
+  color: var(--color-accent-strong);
+}
+.first-trip-onboarding__mark svg { width: 1.65rem; height: 1.65rem; }
+.first-trip-onboarding h1 {
+  color: var(--color-ink-strong);
+  font-family: var(--font-display);
+  font-size: clamp(2rem, 6vw, 3.4rem);
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+}
+.first-trip-onboarding__copy > p {
+  max-width: 36rem;
+  margin: 1rem auto 0;
+  color: var(--muted-foreground);
+  font-size: 1rem;
+  line-height: 1.7;
+}
+.first-trip-onboarding .first-trip-onboarding__action {
+  min-height: 3rem;
+  margin-top: 1.75rem;
+  padding-inline: 1.25rem;
+  font-weight: 750;
+}
+.first-trip-onboarding__invitation { font-size: 0.875rem !important; }
+
+.trip-onboarding-checklist {
+  margin-bottom: 1rem;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 32%, var(--border));
+  border-radius: var(--radius-panel);
+  background: color-mix(in srgb, var(--color-surface) 92%, var(--color-accent) 8%);
+  padding: clamp(1rem, 3vw, 1.4rem);
+  box-shadow: var(--shadow-feedback);
+}
+.trip-onboarding-checklist__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.trip-onboarding-checklist__confirmation {
+  margin-bottom: 0.35rem;
+  color: var(--color-accent-strong);
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+.trip-onboarding-checklist h2 {
+  color: var(--color-ink-strong);
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  line-height: 1.2;
+}
+.trip-onboarding-checklist__dismiss {
+  display: inline-flex;
+  min-height: 2.75rem;
+  min-width: 2.75rem;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: var(--radius);
+  color: var(--muted-foreground);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+.trip-onboarding-checklist__dismiss:hover { background: var(--color-surface); color: var(--color-ink); }
+.trip-onboarding-checklist__dismiss svg { width: 1rem; height: 1rem; }
+.trip-onboarding-checklist__items {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
+.trip-onboarding-checklist__items button {
+  display: flex;
+  min-height: 3rem;
+  align-items: center;
+  gap: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  padding: 0.7rem 0.85rem;
+  color: var(--color-ink);
+  font-weight: 700;
+  text-align: left;
+  transition: border-color 140ms ease-out, color 140ms ease-out;
+}
+.trip-onboarding-checklist__items button:hover {
+  border-color: color-mix(in srgb, var(--color-accent-strong) 55%, transparent);
+  color: var(--color-accent-strong);
+}
+.trip-onboarding-checklist__items svg { width: 1.1rem; height: 1.1rem; flex: none; color: var(--color-accent-strong); }
+
+.create-trip-step { display: grid; gap: 1.25rem; animation: create-trip-step-in 180ms cubic-bezier(0.16, 1, 0.3, 1); }
+.create-trip-step > h2 {
+  width: fit-content;
+  color: var(--color-accent-strong);
+  font-size: 0.88rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+.create-trip-step > h2:focus-visible { outline: 2px solid var(--ring); outline-offset: 4px; }
+.create-trip-summary {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--color-surface-subtle);
+  padding: 1rem;
+}
+.create-trip-summary h3 { margin-bottom: 0.75rem; font-family: var(--font-display); font-size: 1.15rem; }
+.create-trip-summary dl { display: grid; gap: 0.6rem; }
+.create-trip-summary dl > div { display: grid; grid-template-columns: minmax(5rem, 0.35fr) minmax(0, 1fr); gap: 0.75rem; }
+.create-trip-summary dt { color: var(--muted-foreground); font-size: 0.8rem; font-weight: 700; }
+.create-trip-summary dd { min-width: 0; overflow-wrap: anywhere; font-weight: 650; }
+.create-trip-footer > button { min-height: 2.75rem; }
+@keyframes create-trip-step-in {
+  from { opacity: 0; transform: translateX(0.45rem); }
+}
+
+.atw-auth-transition-surface,
+.atw-shell { view-transition-name: atw-auth-shell; }
+.atw-shell.is-entering { animation: atw-shell-enter 300ms cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes atw-shell-enter {
+  from { opacity: 0; }
+}
+::view-transition-old(root),
+::view-transition-new(root) { animation: none; }
+::view-transition-old(atw-auth-shell) { animation: atw-auth-shell-out 160ms ease-out both; }
+::view-transition-new(atw-auth-shell) { animation: atw-shell-enter 300ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+@keyframes atw-auth-shell-out {
+  to { opacity: 0; }
+}
+
+@media (max-width: 560px) {
+  .first-trip-onboarding { min-height: calc(100dvh - 7rem); padding: 2rem 1.25rem; }
+  .trip-onboarding-checklist__heading { align-items: center; }
+  .trip-onboarding-checklist__dismiss span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+  .create-trip-summary dl > div { grid-template-columns: 1fr; gap: 0.15rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .create-trip-step,
+  .atw-shell.is-entering,
+  ::view-transition-old(atw-auth-shell),
+  ::view-transition-new(atw-auth-shell) {
+    animation-duration: 100ms !important;
+    transform: none !important;
+  }
+  .trip-onboarding-checklist__items button { transition-duration: 80ms; }
+}

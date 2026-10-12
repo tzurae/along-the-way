@@ -39,7 +39,7 @@ async function deliveredLink(request: APIRequestContext, email: string, subject:
   return new URL(link);
 }
 async function signIn(context: BrowserContext, origin: string, email: string, inviteToken?: string) {
-  const link = await deliveredLink(context.request, email, "Sign in to Along the Way", () => mutate(context.request, origin, "/api/auth/magic-links", { email, ...(inviteToken ? { inviteToken } : {}) }));
+  const link = await deliveredLink(context.request, email, "登入 Along the Way", () => mutate(context.request, origin, "/api/auth/magic-links", { email, ...(inviteToken ? { inviteToken } : {}) }));
   const token = new URLSearchParams(link.hash.slice(1)).get("magicToken");
   const session = parseSessionResponse(await mutate(context.request, origin, "/api/auth/magic-links/consume", { token }));
   if (inviteToken) await mutate(context.request, origin, "/api/invites/accept", { token: inviteToken });
@@ -75,7 +75,7 @@ test("phone Today keeps parallel participants, URL days, private offline snapsho
     let trip = await createTrip(context.request, origin, `Today issue28 ${Date.now()}`);
     for (let index = 0; index < 3; index++) {
       const email = `today28-${index}-${Date.now()}@example.test`;
-      const invite = await deliveredLink(context.request, email, `Join ${trip.name}`, () => mutate(context.request, origin, `/api/trips/${trip.id}/invites`, { email }));
+      const invite = await deliveredLink(context.request, email, `邀請你加入「${trip.name}」`, () => mutate(context.request, origin, `/api/trips/${trip.id}/invites`, { email }));
       const peer = await browser.newContext({ baseURL });
       peers.push(peer);
       await signIn(peer, origin, email, new URLSearchParams(invite.hash.slice(1)).get("inviteToken")!);
