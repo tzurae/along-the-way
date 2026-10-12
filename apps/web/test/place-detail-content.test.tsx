@@ -68,7 +68,7 @@ it("keeps a healthy selected work, credit, license, and full viewer aligned afte
   await screen.findByText("這是有來源的完整介紹。");
 
   fireEvent.error(screen.getByAltText(/第一張作品.*第 1 張/));
-  expect(screen.getByText("照片載入失敗")).toBeInTheDocument();
+  expect(await screen.findByText("照片載入失敗")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "下一張照片" }));
   const selectedCredit = document.querySelector<HTMLElement>("[data-photo-credit='work-two']");
   expect(selectedCredit).toHaveTextContent("作者乙");
@@ -113,7 +113,7 @@ it("uses the Google fallback with required attribution and recovers from an imag
   expect(screen.getByRole("link", { name: /^在 Google Maps 查看$/ })).toHaveAttribute("href", "https://maps.google.com/?cid=123");
 
   fireEvent.error(image);
-  expect(screen.getByText("照片載入失敗", { exact: true })).toBeInTheDocument();
+  expect(await screen.findByText("照片載入失敗", { exact: true })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /^重新載入照片$/ }));
   expect(screen.getByAltText("測試景點的照片")).toHaveAttribute("src", googleResponse.detail.googlePhoto!.imageUrl);
 });
