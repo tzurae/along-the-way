@@ -83,6 +83,25 @@ it("keeps a healthy selected work, credit, license, and full viewer aligned afte
   expect(document.querySelector("[data-photo-metadata='work-two']")).toHaveTextContent("預覽以 CSS 裁切；原始檔未修改。");
 });
 
+it("keeps an image failure that fires before React flushes the gallery's effects", async () => {
+  // Dispatch the native error in the MutationObserver microtask right after the gallery commits,
+  // before React's passive effects run (a fast-failing image in a real browser behaves the same).
+  const observer = new MutationObserver(() => {
+    const image = document.querySelector<HTMLImageElement>('img[alt*="第一張作品"]');
+    if (image && image.dataset.raced !== "1") {
+      image.dataset.raced = "1";
+      image.dispatchEvent(new Event("error"));
+    }
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+  try {
+    render(<PlaceDetailContent tripId={tripId} reference={{ kind: "trip-place", id: referenceId }} date="2026-10-21" request={request} />);
+    expect(await screen.findByText("照片載入失敗")).toBeInTheDocument();
+  } finally {
+    observer.disconnect();
+  }
+});
+
 it("uses the Google fallback with required attribution and recovers from an image failure", async () => {
   const providerPlaceId = "ChIJGooglePhoto123";
   const photoFingerprint = "a1b2c3d4e5f60708";
