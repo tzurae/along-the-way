@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
@@ -410,13 +410,9 @@ export function createApp({
 
   app.post("/api/auth/magic-links", async (context) => {
     const body = await jsonBody(context);
-    const inviteToken = body.inviteToken;
-    if (inviteToken !== undefined && typeof inviteToken !== "string") {
-      throw new AppError("validation_error", "inviteToken must be a string");
-    }
     const email = stringField(body, "email");
     await rateLimiter.consume("magic_link", clientIp(context), email);
-    await identityAccess.requestMagicLink(email, inviteToken);
+    await identityAccess.requestMagicLink(email);
     return context.json(
       {
         message:
@@ -426,11 +422,30 @@ export function createApp({
     );
   });
 
+  app.post("/api/auth/invite-magic-links", async (context) => {
+    const body = await jsonBody(context);
+    const inviteToken = stringField(body, "inviteToken");
+    const rateLimitKey = createHash("sha256").update(inviteToken).digest("hex");
+    await rateLimiter.consume("magic_link", clientIp(context), rateLimitKey);
+    await identityAccess.requestInviteMagicLink(inviteToken);
+    return context.json(
+      {
+        message:
+          "If that invitation is still valid, a one-time link has been sent.",
+      },
+      202,
+    );
+  });
+
   app.post("/api/auth/magic-links/consume", async (context) => {
     const body = await jsonBody(context);
     const result = await identityAccess.consumeMagicLink(stringField(body, "token"));
     refreshCookie(context, result.sessionToken);
-    return context.json({ user: result.user });
+    return context.json({
+      user: result.user,
+      ...(result.acceptedTripId ? { acceptedTripId: result.acceptedTripId } : {}),
+      ...(result.inviteOutcome ? { inviteOutcome: result.inviteOutcome } : {}),
+    });
   });
 
   app.get("/api/session", async (context) => {

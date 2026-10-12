@@ -66,7 +66,7 @@ function retainedTravelOffset(current: ItineraryItemDto | undefined, role: "star
     ? endpoint.utcOffset : undefined;
 }
 
-const AIRPORT_FIELDS = ["name", "timeZone"];
+const AIRPORT_FIELDS = ["name", "timeZone", "latitude", "longitude"];
 const HOTEL_FIELDS = ["name", "timeZone", "address", "latitude", "longitude", "sourceUrl"];
 
 function requireDeclaredFields(input: Record<string, unknown>, fields: readonly string[]) {
@@ -270,7 +270,7 @@ function itemDetails(
     case "flight":
       return {
         carrier: detailText(details.carrier, "carrier", 200, false),
-        serviceNumber: detailText(details.serviceNumber, "serviceNumber", 100, true),
+        serviceNumber: detailText(details.serviceNumber, "serviceNumber", 100, false) ?? "",
         confirmationNotes: detailText(
           details.confirmationNotes,
           "confirmationNotes",
@@ -573,6 +573,19 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     return { id: existing.id };
   }
 
+  private flightRouteTitle(departureName: string, arrivalName: string) {
+    const label = (name: string) => {
+      const normalized = name.trim();
+      return /^([A-Z]{3})(?:\s*[·—-]\s*|\s+)/.exec(normalized)?.[1] ?? normalized;
+    };
+    const departure = label(departureName);
+    const arrival = label(arrivalName);
+    const title = `${departure} → ${arrival}`;
+    return title.length <= 200
+      ? title
+      : `${departure.slice(0, 97).trimEnd()} → ${arrival.slice(0, 97).trimEnd()}`;
+  }
+
   async flightInputInTransaction(
     transaction: Transaction<AlongTheWayDatabase>,
     userId: string,
@@ -587,16 +600,20 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     requireDeclaredFields(rawInput.departureAirport, AIRPORT_FIELDS);
     requireDeclaredFields(rawInput.arrivalAirport, AIRPORT_FIELDS);
     const input = rawInput;
-    for (const value of [input.serviceNumber, input.departureLocalDateTime, input.arrivalLocalDateTime,
+    for (const value of [input.departureLocalDateTime, input.arrivalLocalDateTime,
       input.departureAirport.name, input.departureAirport.timeZone, input.arrivalAirport.name, input.arrivalAirport.timeZone]) {
-      if (typeof value !== "string" || !value.trim()) throw new AppError("validation_error", "All flight fields except carrier are required");
+      if (typeof value !== "string" || !value.trim()) throw new AppError("validation_error", "Airport, time zone, and local time are required for each flight");
     }
+    if (typeof input.serviceNumber !== "string") throw new AppError("validation_error", "serviceNumber must be a string");
     if (input.carrier != null && typeof input.carrier !== "string") throw new AppError("validation_error", "carrier must be a string or null");
+    const serviceNumber = optionalText(input.serviceNumber, "serviceNumber", 100) ?? "";
     const departure = await this.travelPlace(transaction, userId, tripId,
-      { name: input.departureAirport.name, timeZone: input.departureAirport.timeZone, type: "airport" },
+      { name: input.departureAirport.name, timeZone: input.departureAirport.timeZone,
+        latitude: input.departureAirport.latitude, longitude: input.departureAirport.longitude, type: "airport" },
       current?.endpoints.find((endpoint) => endpoint.role === "start"));
     const arrival = await this.travelPlace(transaction, userId, tripId,
-      { name: input.arrivalAirport.name, timeZone: input.arrivalAirport.timeZone, type: "airport" },
+      { name: input.arrivalAirport.name, timeZone: input.arrivalAirport.timeZone,
+        latitude: input.arrivalAirport.latitude, longitude: input.arrivalAirport.longitude, type: "airport" },
       current?.endpoints.find((endpoint) => endpoint.role === "end"));
     const endpoints = [
       resolveEndpoint({ role: "start", placeId: departure.id, countryStopId: stops.departure,
@@ -610,10 +627,10 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     const members = current ? null : await transaction.selectFrom("trip_members").select("id")
       .where("trip_id", "=", tripId).where("removed_at", "is", null).execute();
     return {
-      type: "flight", title: input.serviceNumber,
+      type: "flight", title: serviceNumber || this.flightRouteTitle(input.departureAirport.name, input.arrivalAirport.name),
       notes: current?.notes, sourceUrl: current?.sourceUrl, money: current?.money,
       participantMemberIds: current ? current.participants?.map((member) => member.memberId) ?? null : members!.map((member) => member.id),
-      details: { serviceNumber: input.serviceNumber, carrier: input.carrier ?? null, confirmationNotes: current?.details.confirmationNotes ?? null },
+      details: { serviceNumber, carrier: input.carrier ?? null, confirmationNotes: current?.details.confirmationNotes ?? null },
       endpoints,
     };
   }

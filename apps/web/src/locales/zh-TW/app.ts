@@ -1,5 +1,7 @@
 export const app = {
   unableRequestLink: "無法索取登入連結。",
+  unableConsumeMagicLink: "目前無法驗證登入連結。請檢查網路連線後重試；登入連結仍會保留。",
+  linkedInvitationUnavailable: "邀請已過期或已被撤銷，請向旅程建立者索取新的邀請。",
   invitationSent: (email: string) => `已寄出邀請給 ${email}。`,
   unableInviteMember: "無法邀請成員。",
   role: (role: string) => role === "owner" ? "擁有者" : role === "editor" ? "編輯者" : role,

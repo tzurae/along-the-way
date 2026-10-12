@@ -7,15 +7,18 @@ import { LoginExperience } from "../src/LoginExperience";
 
 function renderLogin(overrides: Partial<React.ComponentProps<typeof LoginExperience>> = {}) {
   const requestLink = overrides.requestLink ?? vi.fn(async () => {});
+  const requestInviteLink = overrides.requestInviteLink ?? vi.fn(async () => {});
   render(
     <LoginExperience
       initialError={overrides.initialError}
-      inviteToken={overrides.inviteToken ?? "invite-token"}
+      inviteToken={overrides.inviteToken ?? null}
       requestLink={requestLink}
+      requestInviteLink={requestInviteLink}
+      retryConsume={overrides.retryConsume}
       describeError={overrides.describeError ?? (() => "無法索取登入連結。")}
     />,
   );
-  return { requestLink };
+  return { requestLink, requestInviteLink };
 }
 
 function submitEmail(email = "traveler@example.test") {
@@ -29,13 +32,19 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-it("submits the email and pending invite token through the native form", async () => {
-  const requestLink = vi.fn(async () => {});
-  renderLogin({ requestLink, inviteToken: "family-invite" });
+it("offers an invite-only CTA without asking for an email address", async () => {
+  const requestInviteLink = vi.fn(async () => {});
+  renderLogin({ requestInviteLink, inviteToken: "family-invite" });
 
-  submitEmail();
+  expect(screen.queryByRole("textbox", { name: "電子郵件" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "寄送登入連結到受邀信箱" }));
 
-  await waitFor(() => expect(requestLink).toHaveBeenCalledWith("traveler@example.test", "family-invite"));
+  await waitFor(() => expect(requestInviteLink).toHaveBeenCalledWith("family-invite"));
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "如果這個邀請仍然有效，登入連結已寄到受邀的信箱。",
+  );
+  expect(screen.queryByText(/family-invite|@/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "60 秒後可重新寄送" })).toBeDisabled();
 });
 
 it("keeps the submitted address stable and disables editing while the request is in flight", async () => {
@@ -108,7 +117,7 @@ it("blocks the same edited address during cooldown but sends a different address
   expect(submit).toBeEnabled();
   fireEvent.submit(submit.closest("form")!);
   await act(async () => {});
-  expect(requestLink).toHaveBeenNthCalledWith(2, "companion@example.test", "invite-token");
+  expect(requestLink).toHaveBeenNthCalledWith(2, "companion@example.test");
 });
 
 it("announces a rejected request and re-enables submission", async () => {

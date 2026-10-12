@@ -27,17 +27,42 @@ function travelValues(item: ItineraryItemDto, skeleton: TripSkeletonDto): TripFl
   const startPlace = skeleton.places.find((place) => place.id === start.placeId)!;
   const endPlace = skeleton.places.find((place) => place.id === end.placeId)!;
   if (item.type === "flight") return {
-    serviceNumber: item.details.serviceNumber, carrier: item.details.carrier,
-    departureAirport: { name: startPlace.name, timeZone: start.timeZone },
-    arrivalAirport: { name: endPlace.name, timeZone: end.timeZone },
-    departureLocalDateTime: start.localDateTime, arrivalLocalDateTime: end.localDateTime,
-    departureUtcOffset: start.utcOffset, arrivalUtcOffset: end.utcOffset,
+    serviceNumber: item.details.serviceNumber,
+    carrier: item.details.carrier,
+    departureAirport: {
+      name: startPlace.name,
+      timeZone: start.timeZone,
+      ...(startPlace.latitude !== null && startPlace.longitude !== null
+        ? { latitude: startPlace.latitude, longitude: startPlace.longitude } : {}),
+    },
+    arrivalAirport: {
+      name: endPlace.name,
+      timeZone: end.timeZone,
+      ...(endPlace.latitude !== null && endPlace.longitude !== null
+        ? { latitude: endPlace.latitude, longitude: endPlace.longitude } : {}),
+    },
+    departureLocalDateTime: start.localDateTime,
+    arrivalLocalDateTime: end.localDateTime,
+    departureUtcOffset: start.utcOffset,
+    arrivalUtcOffset: end.utcOffset,
   };
   return {
     hotel: { name: startPlace.name, timeZone: start.timeZone, address: startPlace.address, latitude: startPlace.latitude, longitude: startPlace.longitude, sourceUrl: startPlace.sourceUrl },
     countryStopId: start.countryStopId!,
     checkInLocalDateTime: start.localDateTime, checkOutLocalDateTime: end.localDateTime,
     checkInUtcOffset: start.utcOffset, checkOutUtcOffset: end.utcOffset,
+  };
+}
+
+function newFlightValues(skeleton: TripSkeletonDto) {
+  const existingFlights = skeleton.items.filter((entry) => entry.type === "flight");
+  if (existingFlights.length !== 1) return emptyFlight();
+  const existing = travelValues(existingFlights[0]!, skeleton);
+  if (!("serviceNumber" in existing)) return emptyFlight();
+  return {
+    ...emptyFlight(),
+    departureAirport: { ...existing.arrivalAirport },
+    arrivalAirport: { ...existing.departureAirport },
   };
 }
 
@@ -54,14 +79,25 @@ function TravelEditor({ trip, type, item, skeleton, request, saved, close }: Tra
   const startPlace = skeleton.places.find((place) => place.id === start?.placeId);
   const endPlace = skeleton.places.find((place) => place.id === end?.placeId);
   const [flight, setFlight] = useState<TripFlightInput>(() => item?.type === "flight" && start && end ? {
-    serviceNumber: item.details.serviceNumber, carrier: item.details.carrier,
-    departureAirport: { name: startPlace?.name ?? "", timeZone: start.timeZone },
-    arrivalAirport: { name: endPlace?.name ?? "", timeZone: end.timeZone },
-    departureLocalDateTime: start.localDateTime, arrivalLocalDateTime: end.localDateTime,
-    departureUtcOffset: start.utcOffset, arrivalUtcOffset: end.utcOffset,
-  } : skeleton.items.some((entry) => entry.type === "flight")
-    ? emptyFlight(trip.countryStops.at(-1)?.timeZone ?? "", Intl.DateTimeFormat().resolvedOptions().timeZone)
-    : emptyFlight(Intl.DateTimeFormat().resolvedOptions().timeZone, trip.countryStops[0]?.timeZone ?? ""));
+    serviceNumber: item.details.serviceNumber,
+    carrier: item.details.carrier,
+    departureAirport: {
+      name: startPlace?.name ?? "",
+      timeZone: start.timeZone,
+      ...(startPlace?.latitude != null && startPlace.longitude != null
+        ? { latitude: startPlace.latitude, longitude: startPlace.longitude } : {}),
+    },
+    arrivalAirport: {
+      name: endPlace?.name ?? "",
+      timeZone: end.timeZone,
+      ...(endPlace?.latitude != null && endPlace.longitude != null
+        ? { latitude: endPlace.latitude, longitude: endPlace.longitude } : {}),
+    },
+    departureLocalDateTime: start.localDateTime,
+    arrivalLocalDateTime: end.localDateTime,
+    departureUtcOffset: start.utcOffset,
+    arrivalUtcOffset: end.utcOffset,
+  } : type === "flight" ? newFlightValues(skeleton) : emptyFlight());
   const [lodging, setLodging] = useState<TripLodgingInput>(() => ({
     hotel: { name: startPlace?.name ?? "", address: startPlace?.address ?? null, latitude: startPlace?.latitude ?? null,
       longitude: startPlace?.longitude ?? null, sourceUrl: startPlace?.sourceUrl ?? null,

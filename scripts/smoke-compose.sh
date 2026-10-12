@@ -200,7 +200,7 @@ fi
 assert_private_api
 
 if [ "${RUN_BROWSER_TESTS:-0}" = "1" ]; then
-  E2E_COMPOSE_PROJECT="$smoke_project" bun run test:e2e
+  E2E_COMPOSE_PROJECT="$smoke_project" bun run test:e2e ${E2E_SHARD:+--shard="$E2E_SHARD"}
 fi
 
 compose restart db api worker
