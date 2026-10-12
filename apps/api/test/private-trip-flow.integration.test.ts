@@ -491,6 +491,22 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     })).status).toBe(401);
   });
 
+  it("gives a session stored by the previous release a full 30 days after its next use", async () => {
+    const initial = new Date(now);
+    const owner = await login("owner@example.test");
+    // Previous-release row shape: expiry exactly 30 days after last_seen_at, no slack.
+    await database.updateTable("sessions")
+      .set({ last_seen_at: initial, expires_at: new Date(initial.valueOf() + 30 * 24 * 60 * 60 * 1_000) })
+      .execute();
+
+    now = new Date(initial.valueOf() + 23 * 60 * 60 * 1_000);
+    expect((await app.request("/api/session", { headers: { cookie: owner.cookie } })).status).toBe(200);
+
+    // 29 days 13 hours after that last use: still inside the promised 30-day idle window.
+    now = new Date(initial.valueOf() + 30 * 24 * 60 * 60 * 1_000 + 12 * 60 * 60 * 1_000);
+    expect((await app.request("/api/session", { headers: { cookie: owner.cookie } })).status).toBe(200);
+  });
+
   it("uses indistinguishable requests, hashed one-time links, sliding sessions, and logout", async () => {
     const unknown = await requestMagicLink("unknown@example.test");
     const known = await requestMagicLink("owner@example.test");

@@ -352,8 +352,11 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
       return null;
     }
 
-    const refreshBefore = new Date(now.valueOf() - SESSION_REFRESH_INTERVAL_MS);
-    if (new Date(session.last_seen_at) <= refreshBefore) {
+    // Persist only when the stored expiry would no longer cover a full 30 days from now. Renewals
+    // store 31 days, so this writes at most about once a day, and sessions created by an earlier
+    // release (stored with exactly 30 days) gain the slack on their first use after upgrade.
+    const mustCover = new Date(now.valueOf() + SESSION_LIFETIME_MS);
+    if (new Date(session.expires_at) < mustCover) {
       await this.database
         .updateTable("sessions")
         .set({
@@ -363,7 +366,7 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         .where("id", "=", session.id)
         .where("revoked_at", "is", null)
         .where("expires_at", ">", now)
-        .where("last_seen_at", "<=", refreshBefore)
+        .where("expires_at", "<", mustCover)
         .execute();
     }
 
