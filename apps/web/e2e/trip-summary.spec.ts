@@ -126,11 +126,16 @@ async function selectDateRange(
   startDate: string,
   endDate: string,
 ) {
-  await dialog.getByRole("button", { name: "選擇日期範圍" }).click();
+  // A preserved draft labels the trigger with its range and opens the calendar on that month.
+  const trigger = dialog.getByRole("button", { name: /選擇日期範圍|\d{4}\/\d{2}\/\d{2} – \d{4}\/\d{2}\/\d{2}/ });
+  const draftStart = (await trigger.innerText()).match(/(\d{4})\/(\d{2})\/\d{2} –/);
+  await trigger.click();
   const [year, month] = startDate.split("-").map(Number);
   const current = new Date();
-  const monthOffset = year! * 12 + month! - 1 -
-    (current.getFullYear() * 12 + current.getMonth());
+  const shownMonth = draftStart
+    ? Number(draftStart[1]) * 12 + Number(draftStart[2]) - 1
+    : current.getFullYear() * 12 + current.getMonth();
+  const monthOffset = year! * 12 + month! - 1 - shownMonth;
   const direction = monthOffset >= 0 ? ".rdp-button_next" : ".rdp-button_previous";
   for (let step = 0; step < Math.abs(monthOffset); step += 1) {
     await page.locator(direction).click();
@@ -289,9 +294,12 @@ test("private trips work across four identities, viewports, and rejection paths"
   let createDialog = page.getByRole("dialog", { name: "建立旅程" });
   await expect(createDialog).toContainText("步驟 1 / 3・旅程");
   await createDialog.getByLabel("旅程名稱").fill("保留中的草稿");
-  const closeBox = await createDialog.getByRole("button", { name: "關閉" }).boundingBox();
-  expect(closeBox?.width).toBeGreaterThanOrEqual(44);
-  expect(closeBox?.height).toBeGreaterThanOrEqual(44);
+  // The dialog opens from scale(0.98); measure after the transition settles.
+  const closeButton = createDialog.getByRole("button", { name: "關閉" });
+  await expect.poll(async () => {
+    const box = await closeButton.boundingBox();
+    return Math.min(box?.width ?? 0, box?.height ?? 0);
+  }).toBeGreaterThanOrEqual(44);
   await selectDateRange(page, createDialog, "2026-10-21", "2026-10-27");
   const dateTrigger = createDialog.getByRole("button", { name: /2026\/10\/21 – 2026\/10\/27/ });
   await dateTrigger.click();
