@@ -24,6 +24,7 @@ export const tripPlaces = {
   },
   errors: {
     requestFailed: "無法完成要求",
+    alreadyInWishlist: "這個地點已在口袋名單。",
     noUniquePlace: "無法確認唯一的地點。請改用其他關鍵字搜尋，或手動新增。",
     discoveryPreserved: (message: string) => `${message} 你的連結、搜尋內容和備註仍保留在這裡。`,
     selectionPreserved: (message: string) => `${message} 你選的地點和備註仍保留在這裡。`,
@@ -61,9 +62,12 @@ export const tripPlaces = {
     confirmTitle: "確認地點",
     resolvedTo: (url: string) => `已安全解析為 ${url}`,
     resultsProvidedBy: (attribution: string) => `結果由 ${attribution} 提供。請選擇一個地點；系統絕不會自動猜測名稱相似的地點。`,
+    resultCount: (count: number) => `找到 ${count} 個地點`,
     addressUnavailable: "無地址資訊",
-    observedAt: (date: string) => `資料擷取於 ${date}`,
+    alreadyInWishlist: "已在口袋名單",
     addThisPlace: "新增這個地點",
+    addCandidate: (name: string, typeLabel: string | null) => `新增這個地點：${name}${typeLabel ? `・${typeLabel}` : ""}`,
+    alreadyInWishlistCandidate: (name: string, typeLabel: string | null) => `已在口袋名單：${name}${typeLabel ? `・${typeLabel}` : ""}`,
   },
   planning: {
     saved: "規劃資訊已儲存。",

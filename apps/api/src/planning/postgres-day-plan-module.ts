@@ -29,6 +29,7 @@ import {
   replayed,
   requireIdempotencyKey,
   requireDayVersion,
+  requireOwner,
 } from "../private-trips/postgres-private-trip-store";
 import type { TripPlaceModule } from "../trip-places/trip-place-module";
 import type { TripSkeletonModule } from "../trip-skeleton/trip-skeleton-module";
@@ -535,10 +536,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
     // mutation_requests.operation is varchar(80); two UUIDs leave room for a 6-character prefix.
     const operation = `dpo:${tripId.toLowerCase()}:${day}`;
     return this.database.transaction().execute(async (transaction) => {
-      const membership = await transaction.selectFrom("trip_members").select("role")
-        .where("trip_id", "=", tripId).where("user_id", "=", userId)
-        .where("removed_at", "is", null).executeTakeFirst();
-      if (!membership) throw new AppError("trip_not_found", "Trip not found", 404);
+      await requireOwner(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replay as DayPlaceOrderResponse;

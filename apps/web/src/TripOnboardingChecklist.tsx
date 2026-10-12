@@ -62,7 +62,7 @@ export function TripOnboardingChecklist({
       tab: "places",
       segment: "wishlist",
     });
-  } else if (!facts.hasAssignedPlace) {
+  } else if (isOwner && !facts.hasAssignedPlace) {
     items.push({
       id: "place",
       label: t.app.onboardingChecklist.assignPlace,

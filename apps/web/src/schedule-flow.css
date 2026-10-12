@@ -67,25 +67,38 @@
 }
 
 .schedule-selection-check {
+  position: relative;
   display: grid;
-  width: 24px;
-  height: 24px;
+  width: 44px;
+  height: 44px;
   flex: none;
   place-items: center;
+  border: 0;
+  border-radius: 11px;
+  padding: 0;
+  background: transparent;
+  color: #fffaf2;
+}
+
+.schedule-selection-check::before {
+  position: absolute;
+  width: 24px;
+  height: 24px;
   border: 1.5px solid color-mix(in srgb, #24372f 35%, transparent);
   border-radius: 7px;
-  padding: 0;
   background: var(--card);
-  color: #fffaf2;
+  content: "";
   transition: background-color .2s var(--ease-out, cubic-bezier(.16, 1, .3, 1)), border-color .2s var(--ease-out, cubic-bezier(.16, 1, .3, 1)), transform .2s var(--ease-out, cubic-bezier(.16, 1, .3, 1));
 }
 
-.schedule-selection-check[aria-checked="true"] {
+.schedule-selection-check[aria-checked="true"]::before {
   border-color: var(--primary);
   background: var(--primary);
 }
 
 .schedule-selection-check svg {
+  position: relative;
+  z-index: 1;
   opacity: 0;
   transform: scale(.5);
   transition: opacity .2s var(--ease-out, cubic-bezier(.16, 1, .3, 1)), transform .3s var(--ease-out, cubic-bezier(.16, 1, .3, 1));
@@ -100,7 +113,7 @@
   opacity: .32;
 }
 
-.schedule-selection-check:active:not(:disabled) {
+.schedule-selection-check:active:not(:disabled)::before {
   transform: scale(.9);
 }
 
@@ -159,6 +172,25 @@
 
 .schedule-selection-bar .schedule-primary-button {
   flex: none;
+}
+
+.schedule-sheet__places {
+  margin: 0 0 16px;
+  border-block: 1px solid var(--border);
+  padding: 4px 0;
+  list-style: none;
+}
+
+.schedule-sheet__places li {
+  padding: 8px 2px;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.schedule-sheet__places li + li {
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 
 .schedule-sheet__section {
@@ -404,6 +436,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .schedule-selection-check,
+  .schedule-selection-check::before,
   .schedule-selection-check svg,
   .schedule-selection-bar,
   .schedule-toast {

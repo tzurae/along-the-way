@@ -10,9 +10,9 @@ import {
 
 function place(name: string, providerPlaceId: string): RatedPlaceCandidate {
   const candidate: ProviderPlaceCandidateDto = {
-    provider: "google", providerPlaceId, name, type: "activity", address: null, latitude: 35, longitude: 135,
+    provider: "google", providerPlaceId, name, type: "activity", typeLabel: null, address: null, latitude: 35, longitude: 135,
     timeZone: null, sourceUrl: null, attribution: "Google Maps",
-    observedAt: "2026-10-04T00:00:00.000Z", expiresAt: "2026-11-03T00:00:00.000Z",
+    observedAt: "2026-10-04T00:00:00.000Z", expiresAt: "2026-11-03T00:00:00.000Z", photo: null,
   };
   return { candidate, rating: 4.5, userRatingCount: 5_000, websiteUri: null, businessStatus: "operational", countryCode: "JP" };
 }

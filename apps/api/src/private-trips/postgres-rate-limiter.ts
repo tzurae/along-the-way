@@ -9,8 +9,8 @@ export type RateLimitedAction =
   | "magic_link"
   | "trip_invite"
   | "trip_create"
-  | "trip_content";
-
+  | "trip_content"
+  | "place_photo";
 export interface RateLimiter {
   consume(action: RateLimitedAction, clientIp: string, account: string): Promise<void>;
 }
@@ -26,6 +26,7 @@ const RULES: Record<RateLimitedAction, Rule> = {
   trip_invite: { windowSeconds: 60 * 60, ipLimit: 100, accountLimit: 20 },
   trip_create: { windowSeconds: 60 * 60, ipLimit: 100, accountLimit: 20 },
   trip_content: { windowSeconds: 60 * 60, ipLimit: 600, accountLimit: 300 },
+  place_photo: { windowSeconds: 60 * 60, ipLimit: 1_200, accountLimit: 600 },
 };
 
 export class PostgresRateLimiter implements RateLimiter {

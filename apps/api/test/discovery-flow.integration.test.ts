@@ -64,6 +64,7 @@ const market: ProviderPlaceCandidateDto = {
   providerPlaceId: "ChIJ-Nishiki-Market-001",
   name: "Nishiki Market",
   type: "activity",
+  typeLabel: null,
   address: "Nakagyo Ward, Kyoto",
   latitude: 35.005,
   longitude: 135.765,
@@ -72,6 +73,7 @@ const market: ProviderPlaceCandidateDto = {
   attribution: "Google Maps",
   observedAt: "2026-09-28T12:00:00.000Z",
   expiresAt: "2026-10-28T12:00:00.000Z",
+  photo: null,
 };
 
 function place(name: string, providerPlaceId: string): ProviderPlaceCandidateDto {

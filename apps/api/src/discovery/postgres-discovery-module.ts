@@ -976,6 +976,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         providerPlaceId: proposal.provider_place_id,
         name: proposal.name,
         type: proposal.place_type,
+        typeLabel: null,
         address: proposal.address,
         latitude: proposal.latitude,
         longitude: proposal.longitude,
@@ -984,6 +985,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         attribution: typeof facts.attribution === "string" ? facts.attribution : this.placeLookup.attribution,
         observedAt: typeof facts.observedAt === "string" ? facts.observedAt : isoTimestamp(proposal.created_at),
         expiresAt: typeof facts.expiresAt === "string" ? facts.expiresAt : isoTimestamp(this.now()),
+        photo: null,
       };
       tripPlaceId = await this.tripPlaces.addObservedCandidateInTransaction(transaction, userId, tripId, candidate);
     }

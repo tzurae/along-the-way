@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { PlaceDetailResponse, PlacePhotoDto } from "@along-the-way/contracts/place-details";
 import { PlaceDetailContent } from "../src/PlaceDetailContent";
-import type { PlaceDetailRequest } from "../src/PlaceThumbnail";
+import type { PlaceDetailRequest, PlaceDetailRequestOptions } from "../src/PlaceThumbnail";
 
 const tripId = "11111111-1111-4111-8111-111111111111";
 const referenceId = "22222222-2222-4222-8222-222222222222";
@@ -13,6 +13,7 @@ function photo(id: string, title: string, author: string, licenseName: string): 
   const imageHash = (id === "work-one" ? "a" : "c").repeat(64);
   const thumbnailHash = (id === "work-one" ? "b" : "d").repeat(64);
   return {
+    source: "curated",
     id,
     title,
     description: `${title}的完整構圖`,
@@ -48,6 +49,7 @@ const response: PlaceDetailResponse = {
     sections: [{ kind: "intro", title: "景點介紹", blocks: [{ text: "這是有來源的完整介紹。", style: "paragraph", sourceIds: ["official"], certainty: "sourced", needsRecheck: false }] }],
     sources: [{ id: "official", title: "官方網站", url: "https://example.test/place", checkedAt: "2026-10-09T12:00:00Z", publishedAt: null, validFrom: null, validUntil: null, expiresAt: null }],
     photos: [photo("work-one", "第一張作品", "作者甲", "CC BY-SA 4.0"), photo("work-two", "第二張作品", "作者乙", "CC0 1.0")],
+    googlePhoto: null,
   },
 };
 
@@ -66,7 +68,7 @@ it("keeps a healthy selected work, credit, license, and full viewer aligned afte
   await screen.findByText("這是有來源的完整介紹。");
 
   fireEvent.error(screen.getByAltText(/第一張作品.*第 1 張/));
-  expect(screen.getByText("照片暫時無法載入")).toBeInTheDocument();
+  expect(screen.getByText("照片載入失敗")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "下一張照片" }));
   const selectedCredit = document.querySelector<HTMLElement>("[data-photo-credit='work-two']");
   expect(selectedCredit).toHaveTextContent("作者乙");
@@ -79,4 +81,68 @@ it("keeps a healthy selected work, credit, license, and full viewer aligned afte
   expect(document.querySelector("[data-photo-metadata='work-two']")).toHaveTextContent("作者乙");
   expect(document.querySelector("[data-photo-metadata='work-two']")).toHaveTextContent("CC0 1.0");
   expect(document.querySelector("[data-photo-metadata='work-two']")).toHaveTextContent("預覽以 CSS 裁切；原始檔未修改。");
+});
+
+it("uses the Google fallback with required attribution and recovers from an image failure", async () => {
+  const providerPlaceId = "ChIJGooglePhoto123";
+  const photoFingerprint = "a1b2c3d4e5f60708";
+  const googleResponse: PlaceDetailResponse = {
+    detail: {
+      ...response.detail,
+      photos: [],
+      googlePhoto: {
+        source: "google",
+        id: `google:${providerPlaceId}:${photoFingerprint}`,
+        thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?photo=${photoFingerprint}&maxWidth=192`,
+        imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?photo=${photoFingerprint}&maxWidth=1024`,
+        width: 1200,
+        height: 800,
+        authors: [{ displayName: "攝影者甲", uri: "https://maps.google.com/contrib/example" }],
+        googleMapsUri: "https://maps.google.com/?cid=123",
+      },
+    },
+  };
+  const googleRequest: PlaceDetailRequest = async <T,>(_path: string, init?: PlaceDetailRequestOptions) =>
+    (init?.parse ? init.parse(googleResponse) : googleResponse) as T;
+
+  render(<PlaceDetailContent tripId={tripId} reference={{ kind: "trip-place", id: referenceId }} request={googleRequest} />);
+  const image = await screen.findByAltText("測試景點的照片");
+  expect(image).toHaveAttribute("src", googleResponse.detail.googlePhoto!.imageUrl);
+  expect(screen.getByText("Google Maps", { exact: true })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: /^攝影者甲$/ })).toHaveAttribute("href", "https://maps.google.com/contrib/example");
+  expect(screen.getByRole("link", { name: /^在 Google Maps 查看$/ })).toHaveAttribute("href", "https://maps.google.com/?cid=123");
+
+  fireEvent.error(image);
+  expect(screen.getByText("照片載入失敗", { exact: true })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /^重新載入照片$/ }));
+  expect(screen.getByAltText("測試景點的照片")).toHaveAttribute("src", googleResponse.detail.googlePhoto!.imageUrl);
+});
+
+it("shows a calm explicit empty state when neither curated nor Google photos exist", async () => {
+  const emptyResponse: PlaceDetailResponse = {
+    detail: { ...response.detail, photos: [], googlePhoto: null },
+  };
+  const emptyRequest: PlaceDetailRequest = async <T,>(_path: string, init?: PlaceDetailRequestOptions) =>
+    (init?.parse ? init.parse(emptyResponse) : emptyResponse) as T;
+
+  render(<PlaceDetailContent tripId={tripId} reference={{ kind: "trip-place", id: referenceId }} request={emptyRequest} />);
+  await screen.findByText("此地點目前沒有照片", { exact: true });
+  expect(document.querySelector(".place-gallery__empty svg")).not.toBeInTheDocument();
+});
+
+it("offers a 44px-class retry action that repeats a failed detail request", async () => {
+  let attempts = 0;
+  const retryingRequest: PlaceDetailRequest = async <T,>(_path: string, init?: PlaceDetailRequestOptions) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("upstream unavailable");
+    return (init?.parse ? init.parse(response) : response) as T;
+  };
+
+  render(<PlaceDetailContent tripId={tripId} reference={{ kind: "trip-place", id: referenceId }} request={retryingRequest} />);
+  await screen.findByText("目前無法取得景點詳情。行程、投票與既有備註不受影響，可以稍後再試。");
+  const retry = screen.getByRole("button", { name: /^重試$/ });
+  expect(retry).toHaveClass("place-detail__retry");
+  fireEvent.click(retry);
+  await screen.findByText("這是有來源的完整介紹。");
+  expect(attempts).toBe(2);
 });

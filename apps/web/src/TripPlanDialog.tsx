@@ -17,6 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useI18n } from "./i18n";
+import { ApiRequestError } from "./api-error";
 import { loadLabel, reasonLabel, span, TimetableRow } from "./TimetableView";
 
 type JsonRequest = <T>(url: string, options?: RequestInit & { parse?: (value: unknown) => unknown }) => Promise<T>;
@@ -29,6 +30,7 @@ export function TripPlanDialog({
   tripId,
   open,
   dayLabels,
+  isOwner,
   request,
   onClose,
   onApplied,
@@ -37,6 +39,7 @@ export function TripPlanDialog({
   open: boolean;
   /** "Day N" by day ID. */
   dayLabels: Map<string, string>;
+  isOwner: boolean;
   request: JsonRequest;
   onClose(): void;
   onApplied(): void;
@@ -76,6 +79,10 @@ export function TripPlanDialog({
   }, [open, draft]);
 
   async function applyPlan() {
+    if (!isOwner) {
+      setError(t.schedule.ownerOnlyAction);
+      return;
+    }
     if (!plan) return;
     const key = applyKey.current?.basis === plan.basis ? applyKey.current.key : crypto.randomUUID();
     applyKey.current = { basis: plan.basis, key };
@@ -98,7 +105,10 @@ export function TripPlanDialog({
       applyKey.current = null;
       onApplied();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : t.tripPlan.couldNotUsePlan);
+      setError(reason instanceof ApiRequestError
+        && (reason.code === "forbidden" || reason.status === 403)
+        ? t.schedule.ownerOnlyAction
+        : reason instanceof Error ? reason.message : t.tripPlan.couldNotUsePlan);
     } finally {
       setBusy(null);
     }
@@ -114,6 +124,7 @@ export function TripPlanDialog({
           <DialogTitle>{t.tripPlan.title}</DialogTitle>
           <DialogDescription>{t.tripPlan.description}</DialogDescription>
         </DialogHeader>
+        {!isOwner ? <p className="route-status">{t.schedule.ownerOnly}</p> : null}
 
         {error ? <p role="alert" className="route-error">{error}</p> : null}
         {busy === "planning" ? <p role="status" className="route-status">{t.tripPlan.planning}</p> : null}
@@ -224,17 +235,21 @@ export function TripPlanDialog({
           </div>
         ) : null}
 
-        <DialogFooter className="route-actionbar">
-          {error ? (
-            <Button variant="outline" size="lg" disabled={busy !== null} onClick={() => void draft()}>
-              {t.tripPlan.planAgain}
-            </Button>
-          ) : null}
-          <Button size="lg" disabled={busy !== null || !plan || plan.days.length === 0} onClick={() => void applyPlan()}>
-            <Check />
-            {busy === "saving" ? t.tripPlan.saving : t.tripPlan.useThisPlan}
-          </Button>
-        </DialogFooter>
+        {error || isOwner ? (
+          <DialogFooter className="route-actionbar">
+            {error ? (
+              <Button variant="outline" size="lg" disabled={busy !== null} onClick={() => void draft()}>
+                {t.tripPlan.planAgain}
+              </Button>
+            ) : null}
+            {isOwner ? (
+              <Button size="lg" disabled={busy !== null || !plan || plan.days.length === 0} onClick={() => void applyPlan()}>
+                <Check />
+                {busy === "saving" ? t.tripPlan.saving : t.tripPlan.useThisPlan}
+              </Button>
+            ) : null}
+          </DialogFooter>
+        ) : null}
       </DialogContent>
     </Dialog>
   );

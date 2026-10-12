@@ -6,7 +6,7 @@
 
 目前正在隔離環境完成行為驗收與修復；這不是部署完成宣告。未直接觀察的驗收項目仍是 `UNVERIFIED`。此次不修改真實旅程，不 commit／push／建立 PR／部署。驗收帳號、登入 cookie、資料庫密碼只保存在隔離環境，不能加入 repository。
 
-不包含：照片上傳、旅程相簿、任意景點自動研究、Google Places Photo API、抓取 Google 圖片、公開圖片網址，或改動投票／排程／導航／成員權限演算法。既有 Google Maps 外連不成為本相簿的照片來源。
+不包含：照片上傳、旅程相簿、任意景點自動研究、抓取 Google Maps 網頁圖片、公開圖片網址，或改動投票／排程／導航／成員權限演算法。既有 Google Maps 網頁外連不作為圖片抓取來源；下述 Google Places (New) Photos fallback 是經驗證、私有代理的獨立路徑。
 
 ## 身分與讀取介面
 
@@ -23,15 +23,16 @@
 GET /api/trips/:tripId/place-details?kind=trip-place&id=<UUID>&date=YYYY-MM-DD
 GET /api/trips/:tripId/place-previews?kind=trip-place&ids=<UUID>,<UUID>
 GET /api/trips/:tripId/place-photo-assets/<sha256>.jpg?kind=trip-place&id=<UUID>
+GET /api/trips/:tripId/google-place-photos/<providerPlaceId>?photo=<photoFingerprint>&maxWidth=192|1024
 ```
 
 `kind` 亦接受 `proposal`、`itinerary-place`。詳情回傳 `{ detail }`，縮圖預覽回傳 `{ previews }`；契約與嚴格 parser 位於 `packages/contracts/src/place-details.ts`。日期必須是實際存在的完整日曆日期；省略日期不表示來源已證實當日有效。
 
-每條 route 先驗證登入與有效旅程成員資格，再解析同一旅程的 reference。照片路徑中的雜湊不是公開存取憑證：仍需登入、旅程成員資格，以及該 reference 對應照片的關聯。照片回應使用 private／no-store，未知檔案、缺失或毀損不冒充正常圖片。
+每條 route 先驗證登入與有效旅程成員資格，再解析同一旅程的 reference。策展照片路徑中的雜湊不是公開存取憑證：仍需登入、旅程成員資格，以及該 reference 對應照片的關聯；其回應使用 private／no-store。Google 照片代理同樣要求旅程成員資格，另按帳號每小時 600 次、IP 每小時 1,200 次限流，回應使用 `Cache-Control: private, max-age=86400` 及 `X-Content-Type-Options: nosniff`。未知檔案、缺失或毀損不冒充正常圖片。
 
-已接受提案優先使用 `accepted_trip_place_id` 的 canonical identity；未接受提案才使用已有 provider identity。legacy 行程地點只能經同旅程既有 `trip_places.legacy_place_id` 關聯解析。地點名稱不作為匹配鍵；不建立或合併身分來湊內容。未知店、同名分店及未關聯的 travel-only 地點保留空白 curated 內容；原有可確認的行程資料仍保留。
+已接受提案優先使用 `accepted_trip_place_id` 的 canonical identity；未接受提案的 Google provider id 直接來自該提案，無須為顯示照片建立 `place_identities`。legacy 行程地點只能經同旅程既有 `trip_places.legacy_place_id` 關聯解析。地點名稱不作為身分匹配鍵；不建立或合併身分來湊內容。手動地點、未知店、同名分店及未關聯的 travel-only 地點不借用其他地點的內容或照片；原有可確認的行程資料仍保留。
 
-完整內容與已排序照片由同一 SQL statement 讀取 publication snapshot，避免一個詳情混用兩次匯入的資料。預覽批次只讀首張照片，不逐卡呼叫完整詳情或供應商。
+完整策展內容與已排序照片由同一 SQL statement 讀取 publication snapshot，避免一個詳情混用兩次匯入的資料。預覽批次只讀首張策展照片；僅對沒有策展照片且具有 Google provider identity 的項目，以最大並行數 4 查詢首張 Google 照片。單一供應商失敗只使該項 fallback 為空，不使整批失敗。
 
 ## 經人工查核的 catalog
 
@@ -42,6 +43,14 @@ GET /api/trips/:tripId/place-photo-assets/<sha256>.jpg?kind=trip-place&id=<UUID>
 catalog 不會在啟動時依名稱自動套用。營運者必須逐一確認現有 canonical identity 與實際地點，再明確匯入；新加的任意景點沒有照片是正常狀態，不可借用其他地點的照片。
 
 每個作品保留獨立的作者、credit、作品頁、原始檔來源、授權名称／版本／連結、拍攝日期（未知為 null）、查核時間、永久版本查核網址、地点判別證據、原始尺寸、修改說明及限制。Commons 查核網址必須指向 numeric `oldid` 或 `Special:PermanentLink`，不能只有會變動的目前頁面。不同作品的 CC BY-SA 4.0、CC BY 2.5、CC0 不合併為固定相簿署名。衍生檔縮放與詳情預覽 CSS 裁切的說明保留；完整檢視器以 contain 呈現完整構圖。歷史照片不表示當日景況或夜間開放。
+
+## Google Places 照片 fallback
+
+經人工查核的 catalog 對已加入旅程的預覽與詳情永遠優先；只有 catalog 為零張時，才顯示 Google Places (New) 回傳的第一張照片。加入前的搜尋結果尚未解析為旅程 canonical identity，因此直接顯示該次搜尋結果的第一張 Google 照片，不能把它解讀為已確認該地點沒有策展照片。API 搜尋結果只攜帶第一張照片的尺寸與作者署名，客戶端 URL 一律是同源 `/api/trips/.../google-place-photos/...`，不包含 Google API key。
+
+Google 對同一張照片在不同 metadata response 可能回傳不同 photo name，因此 client URL 不直接使用該不穩定名稱。DTO 以尺寸與完整作者 attribution（依序包含 display name 與 URI）計算 SHA-256，取前 16 個小寫十六進位字元作穩定 fingerprint；provider place id、fingerprint、署名 metadata、縮圖 URL 與大圖 URL 因而綁定。代理以免費的 Place Details `photos` Essentials IDs Only mask 重新取得當下第一張照片並重算 fingerprint：相同才以當次 photo name 和 `skipHttpRedirect=true` 取得短效 `photoUri`，不同則回 404，因此舊 URL 不會送出另一位作者或不同尺寸的圖片。fingerprint 保護的是「作者署名＋尺寸」組合，而不是唯一的單張作品：同一作者以相同尺寸上傳的另一張照片若成為第一張，會沿用同一 URL 與署名（作者仍正確，但圖片內容與 Google Maps 照片連結可能是另一張）；`googleMapsUri` 不在 fingerprint 內。這使相同照片保有相同 URL，可實際使用 24 小時 private browser cache，避免每次 page view 因不穩定 photo name 產生新的 media 讀取。短效 URL 必須是 HTTPS `googleusercontent.com` 或其子網域；伺服器最多手動跟隨兩次且逐次重新驗證 host，只接受 JPEG、PNG 或 WebP，metadata 上限 256 KiB，圖片上限 5 MiB，圖片抓取逾時 8 秒。照片名稱、短效 URL與圖片 bytes 不寫入 PostgreSQL、檔案或其他 server cache；只有瀏覽器依 private cache header 暫存。依 [Google Places 政策](https://developers.google.com/maps/documentation/places/web-service/policies)，Google 回傳的作者署名與 Google Maps 連結必須隨圖片顯示；無圖片、fingerprint 已變更或 media resource 已失效回 404 `place_photo_not_found`，其他上游失敗回 502 `place_photo_unavailable`，沒有 API key 時功能關閉並回 404。
+
+此讀取使用 Google Maps Platform 的 **Place Details Photos Enterprise** SKU。依 [Google Maps Platform pricing](https://developers.google.com/maps/billing-and-pricing/pricing)（2026-10-12 查閱），每月 1,000 次免費，之後為每 1,000 次 US$7；價格可能由供應商調整，營運預算應以當期官方價格為準。
 
 ## 營運者匯入
 
@@ -77,7 +86,7 @@ Bindings 格式：
 
 `manifest key ↔ canonical identity` 一經發布不得改指另一身分。錯誤的重指、重複 key／身分／legacy id、缺少綁定及不匹配的既有關聯都會拒絕。驗收副本也須使用自己的 manifest keys，不能把已發布的 key 改綁到測試副本。
 
-每份 CLI JSON 輸入上限 8 MiB。圖片須放在 packaged asset root，以 64 位小寫 SHA-256 加 `.jpg`／`.png`／`.webp` 命名；manifest 提供相同 SHA-256、實際尺寸及 media type。逐檔拒絕 symlink、非法路徑、非一般檔案、超過 20 MiB、雜湊／容器／尺寸不符。所有檔案先驗證，再以 advisory-locked transaction 取代本次各 identity 的內容與照片。任一較晚 entry 失敗也不部分發布；重複同份合法輸入不增加副本。清空照片陣列會發布零張，不以舊照片補齊。照片 GET 亦檢查 packaged 檔案完整性，沒有遠端抓圖 fallback。
+每份 CLI JSON 輸入上限 8 MiB。圖片須放在 packaged asset root，以 64 位小寫 SHA-256 加 `.jpg`／`.png`／`.webp` 命名；manifest 提供相同 SHA-256、實際尺寸及 media type。逐檔拒絕 symlink、非法路徑、非一般檔案、超過 20 MiB、雜湊／容器／尺寸不符。所有檔案先驗證，再以 advisory-locked transaction 取代本次各 identity 的內容與照片。任一較晚 entry 失敗也不部分發布；重複同份合法輸入不增加副本。清空策展照片陣列會發布零張策展照片；若地點有 Google provider identity，讀取時才依上述政策嘗試 fallback，且不把結果寫回 catalog。策展照片 GET 仍檢查 packaged 檔案完整性。
 
 新增目的地沿用相同 manifest／bindings／資產流程，不新增名稱特例。未查核的作品不能靠合法格式的 JSON 就被稱為授權查核完成；營運者仍須保留實際逐張來源證據。
 

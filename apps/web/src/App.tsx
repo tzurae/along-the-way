@@ -1194,7 +1194,24 @@ export function App() {
               {!liveConnected ? <p aria-live="polite" role="status" className="rounded-xl border border-ink/10 bg-surface-subtle p-3 text-sm text-muted-foreground">{t.collaboration.reconnecting}</p> : null}
 
               <div id="trip-panel-today" role="tabpanel" aria-label={t.app.tabs.today} hidden={activeTripTab !== "today"}>
-                {todaySnapshot ? <TodayWorkspace key={todaySnapshot.model.tripId} model={todaySnapshot.model} fetchedAt={todaySnapshot.fetchedAt} selectedDate={selectedDate} onDayChanged={selectDay} onArrangeDay={(date) => { setArrangeDate(date); selectSegment("itinerary", "daily"); }} retry={() => void reconnect()} retrying={retrying} persisted={persisted} request={request} /> : <p role="status">{t.today.unavailable}</p>}
+                {todaySnapshot ? (
+                  <TodayWorkspace
+                    key={todaySnapshot.model.tripId}
+                    model={todaySnapshot.model}
+                    fetchedAt={todaySnapshot.fetchedAt}
+                    selectedDate={selectedDate}
+                    onDayChanged={selectDay}
+                    isOwner={selectedTrip.role === "owner"}
+                    onArrangeDay={selectedTrip.role === "owner" ? (date) => {
+                      setArrangeDate(date);
+                      selectSegment("itinerary", "daily");
+                    } : undefined}
+                    retry={() => void reconnect()}
+                    retrying={retrying}
+                    persisted={persisted}
+                    request={request}
+                  />
+                ) : <p role="status">{t.today.unavailable}</p>}
               </div>
 
               <div id="trip-panel-itinerary" role="tabpanel" aria-label={t.app.tabs.itinerary} hidden={activeTripTab !== "itinerary"}>
