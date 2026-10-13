@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { ImageOff } from "lucide-react";
 
 import {
   parsePlacePreviewResponse,
@@ -8,8 +9,9 @@ import {
   type PlacePreviewDto,
   type PlacePreviewResponse,
 } from "@along-the-way/contracts/place-details";
+import { useI18n } from "./i18n";
 import { safeExternalUrl } from "./external-url";
-import "./place-detail.css";
+import "./place-media.css";
 
 export interface PlaceDetailRequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -102,6 +104,7 @@ export function PlaceThumbnail({ photo, photoCount = photo ? 1 : 0, loading = fa
     setFailure({ photoKey, failed: false });
   }
   const failed = failure.photoKey === photoKey && failure.failed;
+  const { t } = useI18n();
 
   return (
     <span
@@ -126,26 +129,48 @@ export function PlaceThumbnail({ photo, photoCount = photo ? 1 : 0, loading = fa
           <span aria-hidden="true">+{photoCount - 1}</span>
         </span>
       ) : null}
-      {!loading && (!photo || failed) ? <span className="place-thumbnail__empty" /> : null}
+      {!loading && (!photo || failed) ? (
+        // `null` means the place has no photo; `undefined` or a broken image means it failed to load.
+        <span className="place-thumbnail__empty" role="img" aria-label={photo === null ? t.placeDetail.noPhoto : t.placeDetail.photoUnavailable}>
+          <ImageOff aria-hidden="true" className="place-thumbnail__empty-icon" />
+          <span aria-hidden="true">{photo === null ? t.placeDetail.noPhotoShort : t.placeDetail.photoUnavailableShort}</span>
+        </span>
+      ) : null}
     </span>
   );
+}
+
+function compactLicenseLabel(licenseUrl: string, fallback: string) {
+  try {
+    const url = new URL(licenseUrl);
+    if ((url.protocol !== "http:" && url.protocol !== "https:")
+      || (url.hostname !== "creativecommons.org" && !url.hostname.endsWith(".creativecommons.org"))) {
+      return fallback;
+    }
+    const segments = url.pathname.split("/").filter(Boolean);
+    if (segments[0] === "publicdomain" && segments[1] === "zero" && segments[2]) {
+      return `CC0 ${segments[2]}`;
+    }
+    if (segments[0] === "licenses" && segments[2]) {
+      if (segments[1] === "by") return `CC BY ${segments[2]}`;
+      if (segments[1] === "by-sa") return `CC BY-SA ${segments[2]}`;
+    }
+  } catch {
+    // Preserve the supplied name when the source URL is not parseable.
+  }
+  return fallback;
 }
 
 export function PlacePhotoCredit({ photo }: { photo: PlaceDisplayPhoto | null | undefined }) {
   if (!photo) return null;
   if (photo.source === "google") {
-    const maps = safeExternalUrl(photo.googleMapsUri);
-    return (
-      <small className="place-photo-credit place-photo-credit--google">
-        <span className="place-photo-credit__text"><strong>Google Maps</strong>{photo.authors.length ? <span>・照片：{photo.authors.map((author, index) => {
-          const uri = safeExternalUrl(author.uri);
-          return <span key={`${author.displayName}:${index}`}>{index > 0 ? "、" : ""}{uri ? <a href={uri} target="_blank" rel="noreferrer">{author.displayName}</a> : author.displayName}</span>;
-        })}</span> : null}</span>
-        {maps ? <span className="place-photo-credit__links"><a href={maps} target="_blank" rel="noreferrer">在 Google Maps 查看</a></span> : null}
-      </small>
-    );
+    return <small className="place-photo-credit"><span className="place-photo-credit__text"><strong>Google Maps</strong>{photo.authors.length ? <>・{photo.authors.map((author, index) => {
+      const href = safeExternalUrl(author.uri);
+      return <span key={`${author.displayName}:${index}`}>{index > 0 ? "、" : ""}{href ? <a className="place-photo-credit__link" href={href} target="_blank" rel="noreferrer">{author.displayName}</a> : author.displayName}</span>;
+    })}</> : ""}</span></small>;
   }
-  const source = safeExternalUrl(photo.sourceUrl);
-  const license = safeExternalUrl(photo.licenseUrl);
-  return <small className="place-photo-credit"><span className="place-photo-credit__text">{photo.creditText}</span><span className="place-photo-credit__links">{source ? <a href={source} target="_blank" rel="noreferrer">來源</a> : null}{license ? <a href={license} target="_blank" rel="noreferrer">授權</a> : null}<span>縮圖預覽（裁切）</span></span></small>;
+  const authorHref = safeExternalUrl(photo.authorUrl);
+  const licenseHref = safeExternalUrl(photo.licenseUrl);
+  const license = compactLicenseLabel(photo.licenseUrl, photo.licenseName);
+  return <small className="place-photo-credit"><span className="place-photo-credit__text">{authorHref ? <a className="place-photo-credit__link" href={authorHref} target="_blank" rel="noreferrer">{photo.author}</a> : photo.author}・{licenseHref ? <a className="place-photo-credit__link" href={licenseHref} target="_blank" rel="noreferrer">{license}</a> : license}</span></small>;
 }

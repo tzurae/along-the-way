@@ -93,6 +93,10 @@
   --border: color-mix(in srgb, #24372f 18%, transparent);
   --input: color-mix(in srgb, #24372f 18%, transparent);
   --ring: #e09271;
+  --place-row-thumb: 64px;
+  --place-row-pad-x: 12px;
+  --place-row-pad-y: 12px;
+  --place-row-gap: 4px;
 }
 
 @layer base {

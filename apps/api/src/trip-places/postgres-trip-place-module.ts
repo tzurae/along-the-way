@@ -1,13 +1,16 @@
 import {
   parseTripPlaceListResponse,
   parseTripPlaceResponse,
+  parseTripPlaceMustItemResponse,
   type CreateTripPlaceInput,
   type MergeTripPlacesInput,
+  type MustItemKind,
   type ProviderCandidatesResponse,
   type ProviderPlaceCandidateDto,
   type ProviderPlaceSearchResultDto,
   type RemoveTripPlaceInput,
   type TripPlaceDto,
+  type TripPlaceMustItemDto,
   type UpdateMemberVoteInput,
   type UpdateTripPlaceDayAssignmentsInput,
   type UpdateTripPlacePlanningInput,
@@ -49,6 +52,7 @@ import {
   type GoogleMapsUrlResolverDependencies,
 } from "./safe-google-maps-url";
 import type { TripPlaceModule } from "./trip-place-module";
+import type { PreparedCommonsPhoto, RepresentativePhotoSource } from "../place-details/commons-place-photos";
 
 interface ModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
@@ -56,6 +60,8 @@ interface ModuleOptions {
   urlResolver?: GoogleMapsUrlResolverDependencies;
   now?: () => Date;
   photoCapabilitySecret?: string;
+  /** Looks up a freely licensed representative photo once, when a Google place is added. */
+  commonsPhotos?: RepresentativePhotoSource;
 }
 
 interface ManualPlaceFacts {
@@ -287,12 +293,45 @@ export async function suggestPossibleTripPlaceDuplicates(
   }
 }
 
+function mustItemInput(input: { kind: unknown; label: unknown }) {
+  if (input.kind !== "buy" && input.kind !== "eat" && input.kind !== "drink") {
+    throw new AppError("validation_error", "kind must be buy, eat, or drink");
+  }
+  const label = requiredText(input.label, "label", 80);
+  return {
+    kind: input.kind as MustItemKind,
+    label,
+    normalizedLabel: label.normalize("NFKC").toLocaleLowerCase("und").replace(/\s+/gu, " "),
+  };
+}
+
+function mustItemDto(row: {
+  id: string;
+  trip_place_id: string;
+  kind: MustItemKind;
+  label: string;
+  version: number;
+  created_at: Date | string;
+  updated_at: Date | string;
+}): TripPlaceMustItemDto {
+  return {
+    id: row.id,
+    tripPlaceId: row.trip_place_id,
+    kind: row.kind,
+    label: row.label,
+    version: row.version,
+    createdAt: isoTimestamp(row.created_at),
+    updatedAt: isoTimestamp(row.updated_at),
+  };
+}
+
 export class PostgresTripPlaceModule implements TripPlaceModule {
   private readonly database: Kysely<AlongTheWayDatabase>;
   private readonly provider: PlaceProvider;
   private readonly urlResolver: GoogleMapsUrlResolverDependencies;
   private readonly now: () => Date;
   private readonly photoCapability: GooglePhotoCapability | undefined;
+  private readonly commonsPhotos: RepresentativePhotoSource | undefined;
 
   constructor(options: ModuleOptions) {
     this.database = options.database;
@@ -303,6 +342,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     this.photoCapability = options.photoCapabilitySecret
       ? new GooglePhotoCapability(options.photoCapabilitySecret, this.now)
       : undefined;
+    this.commonsPhotos = options.commonsPhotos;
   }
 
   async list(userId: string, tripId: string) {
@@ -310,6 +350,192 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       await this.requireMember(transaction, userId, tripId);
       await this.reconcileLegacyPlaces(transaction, tripId);
       return this.readList(transaction, userId, tripId);
+    });
+  }
+
+  async listMustItems(userId: string, tripId: string, tripPlaceId: string) {
+    tripPlaceId = uuid(tripPlaceId, "tripPlaceId").toLowerCase();
+    return this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      const place = await transaction.selectFrom("trip_places")
+        .select("id")
+        .where("id", "=", tripPlaceId)
+        .where("trip_id", "=", tripId)
+        .where("archived_at", "is", null)
+        .executeTakeFirst();
+      if (!place) throw new AppError("trip_place_not_found", "Trip place not found", 404);
+      const rows = await transaction.selectFrom("trip_place_must_items")
+        .selectAll()
+        .where("trip_id", "=", tripId)
+        .where("trip_place_id", "=", tripPlaceId)
+        .orderBy(sql<number>`case kind when 'buy' then 1 when 'eat' then 2 else 3 end`)
+        .orderBy("created_at")
+        .orderBy("id")
+        .execute();
+      return rows.map(mustItemDto);
+    });
+  }
+
+  async createMustItem(
+    userId: string,
+    tripId: string,
+    tripPlaceId: string,
+    rawKey: string,
+    input: { kind: MustItemKind; label: string },
+  ) {
+    tripPlaceId = uuid(tripPlaceId, "tripPlaceId").toLowerCase();
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `tp:must:create:${tripPlaceId}`;
+    const parsed = mustItemInput(input);
+    return this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) {
+        return parseTripPlaceMustItemResponse({ item: replay }).item;
+      }
+      await this.lockTripPlace(transaction, tripId, tripPlaceId);
+      const duplicate = await transaction.selectFrom("trip_place_must_items")
+        .select("id")
+        .where("trip_place_id", "=", tripPlaceId)
+        .where("kind", "=", parsed.kind)
+        .where("normalized_label", "=", parsed.normalizedLabel)
+        .executeTakeFirst();
+      if (duplicate) {
+        throw new AppError("must_item_duplicate", "This must-item is already in the list", 409);
+      }
+      const count = await transaction.selectFrom("trip_place_must_items")
+        .select((builder) => builder.fn.countAll().as("count"))
+        .where("trip_place_id", "=", tripPlaceId)
+        .executeTakeFirstOrThrow();
+      if (Number(count.count) >= 24) {
+        throw new AppError("must_item_limit", "Each place can have at most 24 must-items", 409);
+      }
+      const createdAt = this.now();
+      const row = await transaction.insertInto("trip_place_must_items").values({
+        trip_id: tripId,
+        trip_place_id: tripPlaceId,
+        kind: parsed.kind,
+        label: parsed.label,
+        normalized_label: parsed.normalizedLabel,
+        created_by: userId,
+        created_at: createdAt,
+        updated_at: createdAt,
+      }).returningAll().executeTakeFirstOrThrow();
+      const response = mustItemDto(row);
+      await recordEvent(transaction, {
+        tripId,
+        actorId: userId,
+        eventType: "trip_place.must_item_created",
+        targetType: "trip_place_must_item",
+        targetId: row.id,
+        summary: "Added a must-item to a wishlist place",
+        relatedTargetIds: [tripPlaceId],
+      });
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
+  async updateMustItem(
+    userId: string,
+    tripId: string,
+    tripPlaceId: string,
+    itemId: string,
+    rawKey: string,
+    input: { kind: MustItemKind; label: string; expectedVersion: number },
+  ) {
+    tripPlaceId = uuid(tripPlaceId, "tripPlaceId").toLowerCase();
+    itemId = uuid(itemId, "itemId").toLowerCase();
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `tp:must:update:${itemId}`;
+    const parsed = mustItemInput(input);
+    return this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) {
+        return parseTripPlaceMustItemResponse({ item: replay }).item;
+      }
+      await this.lockTripPlace(transaction, tripId, tripPlaceId);
+      const current = await transaction.selectFrom("trip_place_must_items")
+        .selectAll()
+        .where("id", "=", itemId)
+        .where("trip_id", "=", tripId)
+        .where("trip_place_id", "=", tripPlaceId)
+        .executeTakeFirst();
+      if (!current) throw new AppError("item_not_found", "Must-item not found", 404);
+      this.expectedVersion(current.version, input.expectedVersion, itemId);
+      const duplicate = await transaction.selectFrom("trip_place_must_items")
+        .select("id")
+        .where("trip_place_id", "=", tripPlaceId)
+        .where("kind", "=", parsed.kind)
+        .where("normalized_label", "=", parsed.normalizedLabel)
+        .where("id", "!=", itemId)
+        .executeTakeFirst();
+      if (duplicate) {
+        throw new AppError("must_item_duplicate", "This must-item is already in the list", 409);
+      }
+      const row = await transaction.updateTable("trip_place_must_items").set({
+        kind: parsed.kind,
+        label: parsed.label,
+        normalized_label: parsed.normalizedLabel,
+        version: sql`version + 1`,
+        updated_at: this.now(),
+      }).where("id", "=", itemId).returningAll().executeTakeFirstOrThrow();
+      const response = mustItemDto(row);
+      await recordEvent(transaction, {
+        tripId,
+        actorId: userId,
+        eventType: "trip_place.must_item_updated",
+        targetType: "trip_place_must_item",
+        targetId: itemId,
+        summary: "Updated a wishlist place must-item",
+        relatedTargetIds: [tripPlaceId],
+      });
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
+  async removeMustItem(
+    userId: string,
+    tripId: string,
+    tripPlaceId: string,
+    itemId: string,
+    rawKey: string,
+    expectedVersion: number,
+  ) {
+    tripPlaceId = uuid(tripPlaceId, "tripPlaceId").toLowerCase();
+    itemId = uuid(itemId, "itemId").toLowerCase();
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `tp:must:remove:${itemId}`;
+    await this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      if (await replayed(transaction, userId, operation, key)) return;
+      await this.lockTripPlace(transaction, tripId, tripPlaceId);
+      const current = await transaction.selectFrom("trip_place_must_items")
+        .select(["id", "version"])
+        .where("id", "=", itemId)
+        .where("trip_id", "=", tripId)
+        .where("trip_place_id", "=", tripPlaceId)
+        .executeTakeFirst();
+      if (!current) throw new AppError("item_not_found", "Must-item not found", 404);
+      this.expectedVersion(current.version, expectedVersion, itemId);
+      await transaction.deleteFrom("trip_place_must_items")
+        .where("id", "=", itemId)
+        .execute();
+      await recordEvent(transaction, {
+        tripId,
+        actorId: userId,
+        eventType: "trip_place.must_item_removed",
+        targetType: "trip_place_must_item",
+        targetId: itemId,
+        summary: "Removed a must-item from a wishlist place",
+        relatedTargetIds: [tripPlaceId],
+      });
+      await remember(transaction, userId, operation, key, { removed: true });
     });
   }
 
@@ -394,6 +620,8 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
 
     let loadCandidate: (() => Promise<ProviderPlaceCandidateDto>) | null = null;
     let manual: ManualPlaceFacts | null = null;
+    // A holder, not a `let`: values are assigned inside a callback, which flow analysis does not follow.
+    const intake: { candidate: ProviderPlaceCandidateDto | null; photo: PreparedCommonsPhoto | null } = { candidate: null, photo: null };
     if (input.method === "manual") {
       const point = coordinates(input.latitude, input.longitude);
       manual = {
@@ -418,11 +646,17 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       const options = await this.googleRequestOptions(tripId);
       loadCandidate = async () => {
         try {
-          return await this.provider.getPlace(providerPlaceId, options);
+          intake.candidate = await this.provider.getPlace(providerPlaceId, options);
         } catch (error) {
           if (error instanceof TypeError || error instanceof ProviderUnavailableError) throw error;
           throw new ProviderUnavailableError();
         }
+        // Only a fresh Google intake reaches here; replays and manual places skip the lookup.
+        // Wikimedia failures resolve to null and leave the place on the Google photo fallback.
+        if (this.commonsPhotos && !(await this.hasCommonsPhoto(intake.candidate.providerPlaceId))) {
+          intake.photo = await this.commonsPhotos.prepare(intake.candidate.sourceUrl);
+        }
+        return intake.candidate;
       };
     }
     const requestedSourceUrl = optionalUrl(input.sourceUrl);
@@ -440,6 +674,10 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         requestedSourceUrl,
         originalNote,
         true,
+        // Same transaction as the place: no reader sees it before its photo exists.
+        async (transaction, placeIdentityId) => {
+          if (intake.photo && this.commonsPhotos) await this.commonsPhotos.store(transaction, placeIdentityId, intake.photo);
+        },
       );
     } catch (error) {
       if (input.method !== "manual" && error instanceof TypeError) {
@@ -451,6 +689,15 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       }
       throw error;
     }
+  }
+
+  private async hasCommonsPhoto(providerPlaceId: string) {
+    return Boolean(await this.database.selectFrom("place_identities as identity")
+      .innerJoin("commons_place_photos as photo", "photo.place_id", "identity.id")
+      .select("identity.id")
+      .where("identity.provider", "=", "google")
+      .where("identity.provider_place_id", "=", providerPlaceId)
+      .executeTakeFirst());
   }
 
   private async googleRequestOptions(tripId: string) {
@@ -530,6 +777,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     requestedSourceUrl: string | null,
     originalNote: string | null,
     refuseActiveProviderDuplicate: boolean,
+    beforeCommit?: (transaction: Transaction<AlongTheWayDatabase>, placeIdentityId: string) => Promise<void>,
   ) {
     return this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
@@ -545,6 +793,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         sourceUrl, originalNote, refuseActiveProviderDuplicate,
       );
       const response = await this.readOne(transaction, userId, tripId, tripPlaceId);
+      await beforeCommit?.(transaction, response.placeId);
       await remember(transaction, userId, operation, key, response);
       return response;
     });
@@ -1270,6 +1519,21 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         version: sql`version + 1`,
         updated_at: updatedAt,
       }).where("id", "=", target.id).execute();
+      await sql`
+        delete from trip_place_must_items as source_item
+        where source_item.trip_place_id = ${source.id}
+          and exists (
+            select 1
+            from trip_place_must_items as target_item
+            where target_item.trip_place_id = ${target.id}
+              and target_item.kind = source_item.kind
+              and target_item.normalized_label = source_item.normalized_label
+          )
+      `.execute(transaction);
+      await transaction.updateTable("trip_place_must_items")
+        .set({ trip_place_id: target.id })
+        .where("trip_place_id", "=", source.id)
+        .execute();
       await transaction.deleteFrom("trip_places").where("id", "=", source.id).execute();
       await transaction.deleteFrom("places")
         .where("trip_id", "=", tripId)
@@ -1379,6 +1643,9 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       for (const table of ["trip_place_desired_days", "trip_place_excluded_days", "trip_place_day_assignments", "trip_place_votes"] as const) {
         await transaction.deleteFrom(table).where("trip_place_id", "=", tripPlaceId).execute();
       }
+      await transaction.deleteFrom("trip_place_must_items")
+        .where("trip_place_id", "=", tripPlaceId)
+        .execute();
       const removedAt = this.now();
       await transaction.updateTable("trip_places").set({
         ...(previousAssignment ? {
@@ -1882,7 +2149,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     return membership;
   }
 
-  private expectedVersion(current: number, expected: number) {
+  private expectedVersion(current: number, expected: number, conflictTargetId?: string) {
     if (!Number.isSafeInteger(expected) || expected !== current) {
       throw new AppError(
         "conflict",
@@ -1890,6 +2157,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         409,
         undefined,
         current,
+        conflictTargetId,
       );
     }
   }

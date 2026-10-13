@@ -141,7 +141,7 @@ it("reports result count, disables listed places, and clears stale search result
   fireEvent.change(within(dialog).getByLabelText("搜尋 Google Maps"), { target: { value: "清水寺" } });
   fireEvent.click(within(dialog).getByRole("button", { name: /^搜尋地點$/ }));
 
-  expect(await within(dialog).findByRole("status")).toHaveTextContent("找到 2 個地點");
+  expect(await within(dialog).findByText("找到 2 個地點")).toHaveAttribute("role", "status");
   expect(within(dialog).getByText("京都府京都市東山區", { exact: true })).toBeInTheDocument();
   expect(within(dialog).queryByText(/資料擷取於/)).not.toBeInTheDocument();
   expect(within(dialog).getByText("· 佛寺", { exact: true })).toBeInTheDocument();
@@ -151,9 +151,9 @@ it("reports result count, disables listed places, and clears stale search result
   fireEvent.change(within(dialog).getByLabelText("搜尋 Google Maps"), { target: { value: "伏見稻荷" } });
   fireEvent.click(within(dialog).getByRole("button", { name: /^搜尋地點$/ }));
   await waitFor(() => expect(within(dialog).queryByText("清水寺", { exact: true })).not.toBeInTheDocument());
-  expect(within(dialog).queryByRole("status")).not.toBeInTheDocument();
+  expect(within(dialog).queryByText(/^找到 \d+ 個地點$/)).not.toBeInTheDocument();
   await act(async () => settleSecond({ attribution: "Google Maps", candidates: [] }));
-  expect(await within(dialog).findByRole("status")).toHaveTextContent("找到 0 個地點");
+  expect(await within(dialog).findByText("找到 0 個地點")).toHaveAttribute("role", "status");
 });
 
 it("shows a zh-TW provider error instead of leaking the server's English message", async () => {
@@ -214,6 +214,57 @@ it("preserves search and note drafts when confirmation returns already_in_wishli
   expect(note).toHaveValue("家人想看夜間點燈");
 });
 
+it("shows progress only on the pending candidate and restores its label after failure", async () => {
+  const candidates: ProviderCandidatesResponse["candidates"] = [
+    {
+      provider: "google", providerPlaceId, name: "清水寺", type: "activity", typeLabel: "佛寺", address: "京都府京都市東山區", latitude: 34.9948, longitude: 135.785, timeZone: "Asia/Tokyo",
+      sourceUrl: "https://maps.google.com/?cid=1", attribution: "Google Maps", observedAt: "2026-10-12T00:00:00Z", expiresAt: "2026-11-11T00:00:00Z",
+      photo: null, alreadyInWishlist: false,
+    },
+    {
+      provider: "google", providerPlaceId: "ChIJSecondPlace123", name: "清水坂", type: "activity", typeLabel: "商店街", address: "京都府京都市東山區清水", latitude: 34.996, longitude: 135.78, timeZone: "Asia/Tokyo",
+      sourceUrl: "https://maps.google.com/?cid=2", attribution: "Google Maps", observedAt: "2026-10-12T00:00:00Z", expiresAt: "2026-11-11T00:00:00Z",
+      photo: null, alreadyInWishlist: false,
+    },
+  ];
+  let rejectAdd!: (reason?: unknown) => void;
+  const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
+    if (path.endsWith("/trip-places") && !init?.method) return { tripPlaces: [] } as T;
+    if (path.includes("/place-previews?")) return applyParser({ previews: [] }, init);
+    if (path.endsWith("/trip-places/search")) return { attribution: "Google Maps", candidates } as T;
+    if (path.endsWith("/trip-places") && init?.method === "POST") {
+      return new Promise<T>((_resolve, reject) => { rejectAdd = reject; });
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  };
+
+  render(<TripPlaceWorkspace trip={trip("owner")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  await screen.findByRole("heading", { name: /^口袋名單$/ });
+  fireEvent.click(screen.getByRole("button", { name: /^加入地點$/ }));
+  const dialog = await screen.findByRole("dialog", { name: /^加入地點$/ });
+  fireEvent.change(within(dialog).getByLabelText("搜尋 Google Maps"), { target: { value: "清水" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: /^搜尋地點$/ }));
+
+  const pendingButton = await within(dialog).findByRole("button", { name: /^新增這個地點：清水寺・佛寺$/ });
+  const otherButton = within(dialog).getByRole("button", { name: /^新增這個地點：清水坂・商店街$/ });
+  fireEvent.click(pendingButton);
+
+  expect(pendingButton).toHaveTextContent("新增中…");
+  expect(pendingButton).toHaveAttribute("aria-busy", "true");
+  expect(pendingButton).toBeDisabled();
+  expect(within(dialog).getByText("正在新增「清水寺」…")).toHaveAttribute("role", "status");
+  expect(otherButton).toHaveTextContent("新增這個地點");
+  expect(otherButton).not.toHaveAttribute("aria-busy");
+  expect(otherButton).toBeDisabled();
+
+  await act(async () => rejectAdd(new Error("photo lookup failed")));
+  await waitFor(() => expect(pendingButton).toHaveTextContent("新增這個地點"));
+  expect(pendingButton).not.toHaveAttribute("aria-busy");
+  expect(pendingButton).toBeEnabled();
+  expect(otherButton).toBeEnabled();
+  expect(within(dialog).queryByText("正在新增「清水寺」…")).not.toBeInTheDocument();
+});
+
 it("hides owner-only scheduling and scheduled removal while retaining editor collaboration", async () => {
   const places = [place(unscheduledId, "未排程咖啡店", false), place(scheduledId, "固定行程餐廳", true)];
   places[0]!.duplicateSuggestions = [{
@@ -249,28 +300,19 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
   expect(screen.getByRole("button", { name: /^加入地點$/ })).toBeInTheDocument();
   expect(screen.getAllByRole("button", { name: /^想去，/ }).length).toBeGreaterThan(0);
   expect(screen.getByRole("button", { name: /^查看 未排程咖啡店 的詳情$/ })).toBeVisible();
-  const cards = [...document.querySelectorAll<HTMLElement>("[data-place-card]")];
-  expect(cards).toHaveLength(2);
-  for (const card of cards) {
-    const body = card.querySelector<HTMLElement>(".list-place-card__body")!;
-    expect([...body.children].map((child) => child.className)).toEqual([
-      "list-place-card__heading",
-      "list-place-card__identity",
-      "list-place-card__description",
-      "list-place-card__status",
-      ...(card.querySelector(".list-place-card__credit") ? ["list-place-card__credit"] : []),
-      "list-place-card__actions",
-    ]);
-    expect(card.querySelector(".list-place-card__location")).not.toHaveTextContent(/^$/);
-    expect(card.querySelectorAll(".pd-vote-control")).toHaveLength(1);
-  }
-  const photographed = cards[0]!;
+  const rows = [...document.querySelectorAll<HTMLElement>("[data-place-list-row]")];
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toHaveTextContent("想去：未排程咖啡店 的家庭備註");
+  expect(rows[0]).not.toHaveTextContent("京都市中京區");
+  for (const row of rows) expect(row.querySelectorAll(".pd-vote-control")).toHaveLength(1);
+  const photographed = rows[0]!;
   await waitFor(() => expect(photographed.querySelectorAll("img")).toHaveLength(1));
   expect(within(photographed).getByRole("img", { name: "共 3 張照片" })).toHaveTextContent("+2");
 
   fireEvent.click(screen.getByRole("button", { name: /^查看 未排程咖啡店 的詳情$/ }));
   let detail = await screen.findByRole("dialog", { name: /^未排程咖啡店$/ });
   expect(within(detail).getByRole("button", { name: /^修改原因$/ })).toBeInTheDocument();
+  expect(within(detail).getByRole("button", { name: "新增" })).toBeEnabled();
   expect(within(detail).getByRole("button", { name: /^從口袋名單移除$/ })).toBeInTheDocument();
   expect(within(detail).queryByRole("button", { name: /^排入行程$/ })).not.toBeInTheDocument();
   expect(within(detail).queryByRole("button", { name: /^合併$/ })).not.toBeInTheDocument();
@@ -283,4 +325,51 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
   expect(within(detail).getByRole("button", { name: /^修改原因$/ })).toBeInTheDocument();
   expect(within(detail).queryByRole("button", { name: /^更改日期$/ })).not.toBeInTheDocument();
   expect(within(detail).queryByRole("button", { name: /^從口袋名單移除$/ })).not.toBeInTheDocument();
+});
+
+it("round-trips duration and budget values when saving only the wishlist reason", async () => {
+  const current = {
+    ...place(unscheduledId, "哲學之道", false),
+    durationMinutes: 75,
+    budgetAmountMinor: 3200,
+    budgetCurrency: "JPY",
+    notes: "想看櫻花",
+  };
+  let savedPayload: Record<string, unknown> | null = null;
+  const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
+    if (path.endsWith("/trip-places") && !init?.method) return { tripPlaces: [current] } as T;
+    if (path.includes("/place-previews?")) return applyParser({ previews: [] }, init);
+    if (path.includes("/place-details?")) return applyParser({ detail: {
+      reference: { kind: "trip-place", id: current.id },
+      canonicalPlaceId: current.placeId,
+      name: current.name,
+      asOfDate: null,
+      sections: [],
+      sources: [],
+      photos: [],
+      googlePhotos: [],
+    } }, init);
+    if (path.endsWith("/must-items") && !init?.method) return applyParser({ items: [] }, init);
+    if (path.endsWith("/planning") && init?.method === "PATCH") {
+      savedPayload = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return applyParser({ tripPlace: { ...current, notes: savedPayload.notes, version: 2 } }, init);
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  };
+
+  render(<TripPlaceWorkspace trip={trip("editor")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "查看 哲學之道 的詳情" }));
+  const detail = await screen.findByRole("dialog", { name: "哲學之道" });
+  expect(within(detail).queryByText("停留時間和預算")).not.toBeInTheDocument();
+  fireEvent.click(within(detail).getByRole("button", { name: "修改原因" }));
+  fireEvent.change(within(detail).getByRole("textbox"), { target: { value: "想在清晨散步" } });
+  fireEvent.click(within(detail).getByRole("button", { name: "儲存" }));
+
+  await waitFor(() => expect(savedPayload).toEqual({
+    durationMinutes: 75,
+    budgetAmountMinor: 3200,
+    budgetCurrency: "JPY",
+    notes: "想在清晨散步",
+    expectedVersion: 1,
+  }));
 });

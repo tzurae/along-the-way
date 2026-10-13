@@ -22,7 +22,7 @@ import {
   type UpdatePlaceInput,
   type ZonedEndpointDto,
 } from "@along-the-way/contracts/trip-skeleton";
-import { CalendarClock, CalendarDays, CalendarMinus, CalendarPlus, ChevronDown, Clock3, Lock, MapPin, MapPinOff, Plane, Plus, Route, StickyNote, Trash2, Unlock, Wallet } from "lucide-react";
+import { CalendarClock, CalendarDays, CalendarMinus, CalendarPlus, ChevronDown, Clock3, Lock, MapPin, MapPinOff, Plane, Plus, Route, StickyNote, Trash2, Unlock } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -1464,21 +1464,6 @@ export function TripSkeletonWorkspace({
                     {viewingAssignedPlace.durationMinutes
                       ? t.tripSkeleton.plannedDuration(viewingAssignedPlace.durationMinutes)
                       : t.tripSkeleton.durationUnknown}
-                  </dd>
-                </div>
-              </div>
-              <div className="plan-assigned-detail-row">
-                <Wallet aria-hidden="true" />
-                <div>
-                  <dt>{t.tripSkeleton.assignmentCostLabel}</dt>
-                  <dd>
-                    {viewingAssignedPlace.budgetAmountMinor !== null && viewingAssignedPlace.budgetCurrency
-                      ? formatMinorAmount(
-                          viewingAssignedPlace.budgetAmountMinor,
-                          viewingAssignedPlace.budgetCurrency,
-                          locale,
-                        )
-                      : t.tripSkeleton.costUnknown}
                   </dd>
                 </div>
               </div>
