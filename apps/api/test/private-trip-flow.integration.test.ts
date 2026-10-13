@@ -122,6 +122,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         itinerary_endpoints,
         itinerary_items,
         trip_place_duplicate_suggestions,
+        trip_place_must_items,
         trip_place_excluded_days,
         trip_place_desired_days,
         trip_place_votes,

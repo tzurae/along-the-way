@@ -22,6 +22,7 @@ import type { TripFlightInput } from "@along-the-way/contracts/private-trips";
 import type {
   CreateTripPlaceInput,
   MergeTripPlacesInput,
+  MustItemKind,
   UpdateMemberVoteInput,
   UpdateTripPlaceDayAssignmentsInput,
   UpdateTripPlacePlanningInput,
@@ -295,6 +296,20 @@ function voteInput(body: Record<string, unknown>): UpdateMemberVoteInput {
     throw new AppError("validation_error", "voted must be a boolean");
   }
   return { voted: body.voted };
+}
+
+function mustItemInput(body: Record<string, unknown>) {
+  return {
+    kind: stringField(body, "kind") as MustItemKind,
+    label: stringField(body, "label"),
+  };
+}
+
+function updateMustItemInput(body: Record<string, unknown>) {
+  return {
+    ...mustItemInput(body),
+    expectedVersion: numberField(body, "expectedVersion"),
+  };
 }
 
 function mergeInput(body: Record<string, unknown>): MergeTripPlacesInput {
@@ -940,6 +955,72 @@ export function createApp({
     );
     return context.json({ tripPlace }, 201);
   });
+
+  app.get(
+    "/api/trips/:tripId/trip-places/:tripPlaceId/must-items",
+    async (context) => {
+      const { user } = await authenticated(context);
+      const items = await tripPlaces.listMustItems(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "tripPlaceId"),
+      );
+      return context.json({ items });
+    },
+  );
+
+  app.post(
+    "/api/trips/:tripId/trip-places/:tripPlaceId/must-items",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const body = await jsonBody(context);
+      const item = await tripPlaces.createMustItem(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "tripPlaceId"),
+        idempotencyKey(context),
+        mustItemInput(body),
+      );
+      return context.json({ item }, 201);
+    },
+  );
+
+  app.patch(
+    "/api/trips/:tripId/trip-places/:tripPlaceId/must-items/:itemId",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const body = await jsonBody(context);
+      const item = await tripPlaces.updateMustItem(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "tripPlaceId"),
+        uuidParam(context, "itemId"),
+        idempotencyKey(context),
+        updateMustItemInput(body),
+      );
+      return context.json({ item });
+    },
+  );
+
+  app.delete(
+    "/api/trips/:tripId/trip-places/:tripPlaceId/must-items/:itemId",
+    async (context) => {
+      const { user } = await authenticated(context);
+      await rateLimiter.consume("trip_content", clientIp(context), user.id);
+      const body = await jsonBody(context);
+      await tripPlaces.removeMustItem(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "tripPlaceId"),
+        uuidParam(context, "itemId"),
+        idempotencyKey(context),
+        numberField(body, "expectedVersion"),
+      );
+      return context.json({ removed: true });
+    },
+  );
 
   app.patch(
     "/api/trips/:tripId/trip-places/:tripPlaceId/planning",

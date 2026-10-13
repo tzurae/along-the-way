@@ -4,7 +4,9 @@ import type {
   MergeTripPlacesInput,
   ProviderCandidatesResponse,
   RemoveTripPlaceInput,
+  MustItemKind,
   TripPlaceDto,
+  TripPlaceMustItemDto,
   UpdateMemberVoteInput,
   UpdateTripPlaceDayAssignmentsInput,
   UpdateTripPlacePlanningInput,
@@ -28,6 +30,34 @@ export interface TripPlaceModule {
     idempotencyKey: string,
     input: CreateTripPlaceInput,
   ): Promise<TripPlaceDto>;
+  listMustItems(
+    userId: string,
+    tripId: string,
+    tripPlaceId: string,
+  ): Promise<TripPlaceMustItemDto[]>;
+  createMustItem(
+    userId: string,
+    tripId: string,
+    tripPlaceId: string,
+    idempotencyKey: string,
+    input: { kind: MustItemKind; label: string },
+  ): Promise<TripPlaceMustItemDto>;
+  updateMustItem(
+    userId: string,
+    tripId: string,
+    tripPlaceId: string,
+    itemId: string,
+    idempotencyKey: string,
+    input: { kind: MustItemKind; label: string; expectedVersion: number },
+  ): Promise<TripPlaceMustItemDto>;
+  removeMustItem(
+    userId: string,
+    tripId: string,
+    tripPlaceId: string,
+    itemId: string,
+    idempotencyKey: string,
+    expectedVersion: number,
+  ): Promise<void>;
   updatePlanning(
     userId: string,
     tripId: string,

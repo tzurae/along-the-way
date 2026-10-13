@@ -137,6 +137,9 @@
 .pd-pagehead-copy {
   min-width: 0;
 }
+.pd-pagehead-title--compact {
+  display: none;
+}
 .pd-chip,
 .pd-state {
   display: inline-flex;
@@ -152,7 +155,7 @@
 .pd-chip {
   padding: 4px 8px 4px 6px;
   background: color-mix(in srgb, var(--color-accent) 14%, transparent);
-  color: var(--color-accent-strong);
+  color: #9b452b;
   font-weight: 600;
 }
 
@@ -460,7 +463,7 @@
 .pd-danger-link {
   border: 0;
   background: none;
-  color: var(--destructive);
+  color: #9b452b;
   text-decoration: underline;
   text-underline-offset: 0.2rem;
 }
@@ -757,6 +760,17 @@
 .pd-empty { padding: 32px 16px; border: 1px dashed var(--border); border-radius: 18px; color: var(--muted-foreground); text-align: center; }
 .pd-discovery > div > section > h3 { font-size: 20px; }
 .pd-discovery details > summary { cursor: pointer; font-size: 14px; font-weight: 700; }
+@media (max-width: 767.98px) {
+  .pd-pagehead-copy[data-compact-mobile] .pd-pagehead-title--full,
+  .pd-pagehead-copy[data-compact-mobile] > p {
+    display: none;
+  }
+
+  .pd-pagehead-copy[data-compact-mobile] .pd-pagehead-title--compact {
+    display: inline;
+  }
+}
+
 @media (max-width: 599.98px) {
   .pd-pagehead {
     flex-wrap: wrap;
@@ -771,7 +785,6 @@
   .pd-pagehead--selecting {
     flex-wrap: nowrap;
   }
-
 }
 
 

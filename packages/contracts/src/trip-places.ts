@@ -94,6 +94,26 @@ export interface TripPlaceResponse {
   tripPlace: TripPlaceDto;
 }
 
+export type MustItemKind = "buy" | "eat" | "drink";
+
+export interface TripPlaceMustItemDto {
+  id: string;
+  tripPlaceId: string;
+  kind: MustItemKind;
+  label: string;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TripPlaceMustItemListResponse {
+  items: TripPlaceMustItemDto[];
+}
+
+export interface TripPlaceMustItemResponse {
+  item: TripPlaceMustItemDto;
+}
+
 export interface ProviderCandidatesResponse {
   candidates: ProviderPlaceSearchResultDto[];
   resolvedUrl?: string;
@@ -123,6 +143,10 @@ export type CreateTripPlaceInput =
   | CreateManualTripPlaceInput
   | CreateProviderTripPlaceInput;
 
+/**
+ * The planning PATCH treats omitted optional fields as null. A caller changing one field
+ * must round-trip every other value it intends to preserve.
+ */
 export interface UpdateTripPlacePlanningInput {
   expectedVersion: number;
   durationMinutes?: number | null;
@@ -330,6 +354,35 @@ export function parseTripPlaceListResponse(value: unknown): TripPlaceListRespons
 
 export function parseTripPlaceResponse(value: unknown): TripPlaceResponse {
   return { tripPlace: tripPlace(record(value).tripPlace) };
+}
+
+function mustItem(value: unknown): TripPlaceMustItemDto {
+  const row = record(value);
+  if (row.kind !== "buy" && row.kind !== "eat" && row.kind !== "drink") return invalid();
+  return {
+    id: text(row.id),
+    tripPlaceId: text(row.tripPlaceId),
+    kind: row.kind,
+    label: text(row.label),
+    version: integer(row.version),
+    createdAt: text(row.createdAt),
+    updatedAt: text(row.updatedAt),
+  };
+}
+
+export function parseTripPlaceMustItemListResponse(
+  value: unknown,
+): TripPlaceMustItemListResponse {
+  const row = record(value);
+  return {
+    items: Array.isArray(row.items) ? row.items.map(mustItem) : invalid(),
+  };
+}
+
+export function parseTripPlaceMustItemResponse(
+  value: unknown,
+): TripPlaceMustItemResponse {
+  return { item: mustItem(record(value).item) };
 }
 
 export function parseProviderCandidatesResponse(value: unknown): ProviderCandidatesResponse {

@@ -79,6 +79,31 @@ Places are never matched by name or coordinates, so same-name branches do not
 borrow another identity's content. A thumbnail without a photo says so in text
 (「沒有照片」), and a failed image says 「載入失敗」.
 
+### Lists and must-items (#123)
+
+Both 口袋名單 and AI 建議 use one compact row (`PlaceListRow`). Each row shows a
+64px thumbnail, the name with a type chip, one list-specific line, a status, and
+an attribution line that is never truncated. Addresses live only in the detail
+panel.
+
+Wishlist details list members' 必買／必吃／必喝 items:
+
+- Table `trip_place_must_items`, added by expand-only migration 025.
+- Routes `GET|POST /api/trips/:tripId/trip-places/:tripPlaceId/must-items` and
+  `PATCH|DELETE …/must-items/:itemId`.
+- Owners and editors can write; every write is idempotent and version-checked.
+- At most 24 items per place, labels up to 80 characters, and normalized
+  duplicates are rejected.
+- Each write locks the parent place row and emits a collaboration event.
+- Removing a place deletes its items; merging moves them into the target place
+  and removes duplicates.
+- AI proposal details show these items read-only once the proposal has been
+  added to the wishlist.
+
+The detail panel no longer shows 停留時間 or 預算. The columns, API, and DTO
+fields remain because day drafting still reads `durationMinutes`, and saving a
+reason sends the existing values back unchanged.
+
 Catalog publication is explicit and operator-only: run the curated manifest CLI
 with reviewed bindings to existing canonical identities. Startup does not match
 place names or seed real trips. Authenticated media routes enforce both trip

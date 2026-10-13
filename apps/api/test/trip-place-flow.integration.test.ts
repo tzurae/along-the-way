@@ -257,6 +257,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     await sql`
       truncate table
         trip_place_duplicate_suggestions,
+        trip_place_must_items,
         trip_place_day_assignments,
         trip_place_excluded_days,
         trip_place_desired_days,

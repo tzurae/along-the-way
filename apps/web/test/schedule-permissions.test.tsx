@@ -230,11 +230,8 @@ describe("owner-only schedule surfaces", () => {
     const item = container.querySelector<HTMLButtonElement>("[data-today-item-trigger]");
     expect(item).toBeInTheDocument();
     fireEvent.click(item!);
-    expect(await screen.findByText("端點攝影者")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "端點攝影者" })).toHaveAttribute(
-      "href",
-      "https://maps.google.com/contrib/today-author",
-    );
+    await waitFor(() => expect(document.querySelector(".place-photo-credit")).toHaveTextContent("Google Maps・端點攝影者"));
+    expect(screen.getByRole("link", { name: "端點攝影者" })).toHaveAttribute("href", "https://maps.google.com/contrib/today-author");
     expect(screen.getByRole("img", { name: "共 3 張照片" })).toBeInTheDocument();
   });
 

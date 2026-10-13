@@ -151,6 +151,19 @@ export interface TripPlaceTable {
   updated_at: Timestamp;
 }
 
+export interface TripPlaceMustItemTable {
+  id: Generated<string>;
+  trip_id: string;
+  trip_place_id: string;
+  kind: "buy" | "eat" | "drink";
+  label: string;
+  normalized_label: string;
+  version: Generated<number>;
+  created_by: string;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
 export interface TripPlaceContributionTable {
   id: Generated<string>;
   trip_id: string;
@@ -478,6 +491,7 @@ export interface AlongTheWayDatabase {
   place_photo_blobs: PlacePhotoBlobTable;
   commons_place_photos: CommonsPlacePhotoTable;
   trip_places: TripPlaceTable;
+  trip_place_must_items: TripPlaceMustItemTable;
   trip_place_contributions: TripPlaceContributionTable;
   trip_place_votes: TripPlaceVoteTable;
   trip_place_desired_days: TripPlaceDayTable;
