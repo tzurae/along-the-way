@@ -408,10 +408,6 @@ Integration tests require a disposable `TEST_DATABASE_URL`. The migration
 regression creates and uses the sibling `along_the_way_participants_migration`
 database on that same isolated PostgreSQL server, so the test role needs
 `CREATEDB`. Never run their reset operations against retained or production data.
-Run browser verification against a freshly seeded, disposable app database:
-`owner@example.test` must exist and Mailpit must be reachable by the test process.
-Integration fixtures must not be left in the browser database; a prior earlier
-Trip otherwise changes which Trip the existing summary scenario opens on reload.
 
 **Rollback cache interoperability: PASS after repair.** The original candidate
 returned HTTP 409, `Stored mutation result is invalid`, after an old binary
@@ -729,16 +725,8 @@ isolation. Mounted-App HTTP-boundary regressions cover unselected revocation,
 inaccessible bookmarks, delayed cross-trip Back/Forward, mounted-panel sync and
 accepted day ordering. An isolated Vite-build/worker-runtime scenario verifies an
 HTML-only deployment reaches offline reopening and API requests bypass the worker.
-`apps/web/e2e/today.spec.ts` exercises the real API with disposable four-member trips,
-`page.clock`, phone/desktop overlaps, cross-zone flights, a midnight-crossing activity,
-day URL reload/Back/Forward, a California trip, `context.setOffline`, formal-version
-and mounted-panel refresh, unselected membership removal, inaccessible bookmarks
-and offline logout. Run that spec against the **production** web build so complete
-offline reopening also exercises the service worker.
-The Chromium spec verifies single-column phone/desktop overlaps and offline
-reopening/recovery through the production shell. Real-device accessibility,
-actual external navigation destinations and the 2.5s 4G performance target
-remain UNVERIFIED.
+Real-device accessibility, actual external navigation destinations and the 2.5s 4G
+performance target remain UNVERIFIED.
 
 ## Concurrent editing and live collaboration (Issue #27)
 
