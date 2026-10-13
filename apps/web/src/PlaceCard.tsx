@@ -19,7 +19,12 @@ export interface PlaceCardProps {
   selectionControl?: ReactNode;
   ariaLabel?: string;
   current?: boolean;
-  state?: "default" | "selecting" | "selectable" | "selected" | "scheduled" | "changed";
+  /** Selection-mode state only; scheduling facts are independent flags below. */
+  state?: "default" | "selecting" | "selectable" | "selected";
+  /** The place is on a day of the itinerary (keeps its tint in every mode). */
+  scheduled?: boolean;
+  /** Just changed by a scheduling action (plays the settle animation once). */
+  changed?: boolean;
   onOpen(): void;
   onActivate?(): void;
   openLabel: string;
@@ -50,6 +55,8 @@ export function PlaceCard({
   ariaLabel,
   current = false,
   state = "default",
+  scheduled = false,
+  changed = false,
   onOpen,
   onActivate,
   openLabel,
@@ -64,10 +71,12 @@ export function PlaceCard({
     : openDataAttribute
       ? { "data-proposal-detail-trigger": openDataAttribute.value }
       : {};
-  const selecting = state === "selecting" || state === "selectable" || state === "selected";
-  const stateClassName = state === "changed"
-    ? "list-place-card--scheduled list-place-card--changed"
-    : `list-place-card--${state}`;
+  const selecting = state !== "default";
+  const stateClassName = [
+    `list-place-card--${state}`,
+    scheduled ? "list-place-card--scheduled" : "",
+    changed ? "list-place-card--changed" : "",
+  ].filter(Boolean).join(" ");
 
   return (
     <article

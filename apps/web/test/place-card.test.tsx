@@ -128,3 +128,19 @@ it("routes title clicks through card selection instead of opening details in sel
   fireEvent.click(screen.getByRole("checkbox", { name: "選擇" }));
   expect(onActivate).toHaveBeenCalledOnce();
 });
+
+it("keeps scheduled feedback independent of selection mode and never invents it for an unscheduled change", () => {
+  const base = {
+    name: "東福寺", typeLabel: "活動或景點", location: "京都市東山區", description: "看紅葉",
+    photo: null, photoCount: 0, onOpen: vi.fn(), openLabel: "查看 東福寺 的詳情",
+    dataAttribute: { name: "wishlist-place", value: "東福寺" },
+  } as const;
+  const { container, rerender } = render(<PlaceCard {...base} state="selecting" scheduled />);
+  const card = () => container.querySelector<HTMLElement>("[data-place-card]")!;
+  // An already-scheduled card keeps its scheduled tint while the owner is selecting other places.
+  expect(card()).toHaveClass("list-place-card--selecting", "list-place-card--scheduled");
+  // Removing a date highlights the card as changed, but it is no longer scheduled.
+  rerender(<PlaceCard {...base} changed scheduled={false} />);
+  expect(card()).toHaveClass("list-place-card--changed");
+  expect(card()).not.toHaveClass("list-place-card--scheduled");
+});

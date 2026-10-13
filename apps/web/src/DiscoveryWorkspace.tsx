@@ -1114,7 +1114,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                   const preview = previews.previews.get(proposal.id);
                   const state = selecting
                     ? selected ? "selected" : selectable ? "selectable" : "selecting"
-                    : changedProposalIds.has(proposal.id) ? "changed" : assignedDayId ? "scheduled" : "default";
+                    : "default";
                   const selectionControl = selecting && selectable ? (
                     <button
                       type="button"
@@ -1171,6 +1171,8 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                       ariaLabel={repeatedName ? t.proposal.proposalAtAddress(proposal.name, proposal.address ?? t.proposal.unknownAddress) : t.proposal.ariaLabel(proposal.name)}
                       current={!selecting && proposal.id === selectedProposalId}
                       state={state}
+                      scheduled={Boolean(assignedDayId)}
+                      changed={!selecting && changedProposalIds.has(proposal.id)}
                       onOpen={() => openProposalDetail(proposal.id)}
                       onActivate={() => {
                         if (selecting) changeSelection(proposal, !selected);

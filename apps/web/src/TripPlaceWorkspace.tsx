@@ -1241,7 +1241,7 @@ export function TripPlaceWorkspace({
             );
             const state = selecting
               ? selected ? "selected" : eligible ? "selectable" : "selecting"
-              : highlightedPlaceIds.has(place.id) ? "changed" : scheduled ? "scheduled" : "default";
+              : "default";
             return (
               <PlaceCard
                 key={place.id}
@@ -1259,6 +1259,8 @@ export function TripPlaceWorkspace({
                 ariaLabel={repeatedName ? t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress) : place.name}
                 current={!selecting && selectedPlaceId === place.id}
                 state={state}
+                scheduled={scheduled}
+                changed={!selecting && highlightedPlaceIds.has(place.id)}
                 onOpen={() => openDetail(place.id)}
                 onActivate={() => {
                   if (selecting) {
