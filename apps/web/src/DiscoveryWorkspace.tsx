@@ -22,7 +22,8 @@ import { useI18n, type Messages } from "./i18n";
 import { VoteControl, VoteVoters } from "./VoteControl";
 import { ConflictPanel, useVersionConflict } from "./ConflictPanel";
 import { PlaceDetailContent } from "./PlaceDetailContent";
-import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest } from "./PlaceThumbnail";
+import { PlacePhotoCredit, usePlacePreviews, type PlaceDetailRequest } from "./PlaceThumbnail";
+import { PlaceCard } from "./PlaceCard";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import { SchedulePlacesSheet } from "./SchedulePlacesSheet";
 import { SelectionBar } from "./SelectionBar";
@@ -917,36 +918,44 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   return (
     <section className="pd-workspace pd-discovery" data-selecting={selecting ? "true" : undefined} aria-labelledby="ai-discovery-heading">
       <div className={`pd-pagehead${selecting ? " pd-pagehead--selecting" : ""}`}>
-        <h2 id="ai-discovery-heading" className="schedule-page-title">{selecting ? scheduleT.selectedCount(selectedProposalIds.size) : t.header.title}</h2>
         {selecting ? (
-          <div className="schedule-head-buttons">
-            <button
-              className="schedule-secondary-button"
-              disabled={pending !== null}
-              onClick={() => {
-                setSelecting(false);
-                setSelectedProposalIds(new Set());
-                setScheduleError("");
-              }}
-            >
-              {scheduleT.cancel}
-            </button>
-          </div>
+          <>
+            <h2 id="ai-discovery-heading" className="schedule-page-title">{scheduleT.selectedCount(selectedProposalIds.size)}</h2>
+            <div className="schedule-head-buttons">
+              <button
+                className="schedule-secondary-button"
+                disabled={pending !== null}
+                onClick={() => {
+                  setSelecting(false);
+                  setSelectedProposalIds(new Set());
+                  setScheduleError("");
+                }}
+              >
+                {scheduleT.cancel}
+              </button>
+            </div>
+          </>
         ) : (
-          <div className="schedule-head-buttons">
-            {trip.role === "owner" && hasSelectableProposals ? (
-              <button className="schedule-primary-button" disabled={pending !== null || loading} onClick={beginSelection}>
-                <CalendarPlus aria-hidden="true" className="size-4" />
-                <span>{scheduleT.pageAction}</span>
-              </button>
-            ) : null}
-            {workspace?.latestRun?.status === "completed" ? (
-              <button className="schedule-secondary-button" onClick={() => setResearchSettingsOpen(true)}>
-                <Pencil aria-hidden="true" className="size-4" />
-                <span>{t.brief.editRequirements}</span>
-              </button>
-            ) : null}
-          </div>
+          <>
+            <div className="pd-pagehead-copy">
+              <h2 id="ai-discovery-heading" className="schedule-page-title">{t.header.title}</h2>
+              <p>{t.header.description}</p>
+            </div>
+            <div className="schedule-head-buttons">
+              {trip.role === "owner" && hasSelectableProposals ? (
+                <button className="schedule-primary-button" disabled={pending !== null || loading} onClick={beginSelection}>
+                  <CalendarPlus aria-hidden="true" className="size-4" />
+                  <span>{scheduleT.pageAction}</span>
+                </button>
+              ) : null}
+              {workspace?.latestRun?.status === "completed" ? (
+                <button className="schedule-secondary-button" onClick={() => setResearchSettingsOpen(true)}>
+                  <Pencil aria-hidden="true" className="size-4" />
+                  <span>{t.brief.editRequirements}</span>
+                </button>
+              ) : null}
+            </div>
+          </>
         )}
       </div>
       {trip.role !== "owner" ? <p className="pd-subhead">{t.header.ownerSchedulingOnly}</p> : null}
@@ -1102,98 +1111,77 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                       {t.scheduling.missingLocationUnavailable}
                     </span>
                   ) : null;
-                  const classes = [
-                    "pd-row",
-                    selecting ? "pd-row--selecting" : "",
-                    selectable ? "pd-row--selectable" : "",
-                    selected ? "pd-row--selected" : "",
-                    assignedDayId ? "schedule-row--scheduled" : "",
-                    changedProposalIds.has(proposal.id) ? "schedule-row--changed" : "",
-                  ].filter(Boolean).join(" ");
+                  const preview = previews.previews.get(proposal.id);
+                  const state = selecting
+                    ? selected ? "selected" : selectable ? "selectable" : "selecting"
+                    : "default";
+                  const selectionControl = selecting && selectable ? (
+                    <button
+                      type="button"
+                      role="checkbox"
+                      aria-checked={selected}
+                      aria-label={selectionLabel}
+                      className="schedule-selection-check"
+                      disabled={pending !== null}
+                      onClick={() => changeSelection(proposal, !selected)}
+                    >
+                      <Check aria-hidden="true" size={16} strokeWidth={3} />
+                    </button>
+                  ) : undefined;
+                  const voteAction = proposal.status === "pending" && proposal.votingAvailable ? (
+                    <VoteControl
+                      compact
+                      name={proposal.name}
+                      voters={proposal.voters}
+                      voteCount={proposal.voteCount}
+                      ownVote={proposal.ownVote}
+                      votingAvailable
+                      disabled={pending !== null}
+                      onChange={(voted) => void setProposalVote(proposal, voted)}
+                    />
+                  ) : undefined;
+                  const wishlistAction = proposal.status === "pending" && trip.role === "owner" ? (
+                    <button
+                      type="button"
+                      className="pd-secondary"
+                      disabled={pending !== null}
+                      onClick={() => void acceptProposal(proposal)}
+                    >
+                      <Check aria-hidden="true" className="size-4" />
+                      {t.proposal.accept}
+                    </button>
+                  ) : undefined;
                   return (
-                    <article
+                    <PlaceCard
                       key={proposal.id}
-                      data-discovery-proposal={proposal.name}
-                      className={classes}
-                      aria-current={!selecting && proposal.id === selectedProposalId ? "true" : undefined}
-                      aria-label={repeatedName ? t.proposal.proposalAtAddress(proposal.name, proposal.address ?? t.proposal.unknownAddress) : t.proposal.ariaLabel(proposal.name)}
-                      onClick={(event) => {
-                        if (event.target instanceof Element && event.target.closest("button, a, input, label, textarea, select")) return;
+                      name={proposal.name}
+                      typeLabel={proposal.category ?? t.placeType[proposal.type]}
+                      location={proposal.address ?? t.proposal.unknownAddress}
+                      description={firstSentence
+                        ? <ClaimSentence sentence={firstSentence} numberedEvidence={numberedEvidence} t={t} />
+                        : proposal.recommendation}
+                      status={<>{scheduleMeta}<p className="pd-fit-line">{t.proposal.fitLine(proposal.matchedNeeds)}</p></>}
+                      photo={preview?.photo}
+                      photoCount={preview?.photoCount ?? 0}
+                      loadingPhoto={previews.loading}
+                      photoCredit={preview?.photo ? <PlacePhotoCredit photo={preview.photo} /> : undefined}
+                      voteAction={voteAction}
+                      wishlistAction={wishlistAction}
+                      selectionControl={selectionControl}
+                      ariaLabel={repeatedName ? t.proposal.proposalAtAddress(proposal.name, proposal.address ?? t.proposal.unknownAddress) : t.proposal.ariaLabel(proposal.name)}
+                      current={!selecting && proposal.id === selectedProposalId}
+                      state={state}
+                      scheduled={Boolean(assignedDayId)}
+                      changed={!selecting && changedProposalIds.has(proposal.id)}
+                      onOpen={() => openProposalDetail(proposal.id)}
+                      onActivate={() => {
                         if (selecting) changeSelection(proposal, !selected);
                         else openProposalDetail(proposal.id);
                       }}
-                    >
-                      {selecting && selectable ? (
-                        <button
-                          type="button"
-                          role="checkbox"
-                          aria-checked={selected}
-                          aria-label={selectionLabel}
-                          className="schedule-selection-check schedule-selection-check--desktop"
-                          disabled={pending !== null}
-                          onClick={() => changeSelection(proposal, !selected)}
-                        >
-                          <Check aria-hidden="true" size={16} strokeWidth={3} />
-                        </button>
-                      ) : null}
-                      <div className="pd-row-main">
-                        <PlaceThumbnail photo={previews.photos.get(proposal.id)} loading={previews.loading} />
-                        <div className="pd-row-copy">
-                          <div className="pd-titleline">
-                            {selecting ? (
-                              <span className="pd-titlebutton">{proposal.name}</span>
-                            ) : (
-                              <button
-                                type="button"
-                                className="pd-titlebutton"
-                                data-proposal-detail-trigger={proposal.id}
-                                aria-label={t.proposal.viewDetail(proposal.name)}
-                                onClick={() => openProposalDetail(proposal.id)}
-                              >
-                                {proposal.name}
-                              </button>
-                            )}
-                            <span className="pd-chip">{proposal.category ?? t.placeType[proposal.type]}</span>
-                            {selecting && selectable ? (
-                              <button
-                                type="button"
-                                role="checkbox"
-                                aria-checked={selected}
-                                aria-label={selectionLabel}
-                                className="schedule-selection-check schedule-selection-check--mobile"
-                                disabled={pending !== null}
-                                onClick={() => changeSelection(proposal, !selected)}
-                              >
-                                <Check aria-hidden="true" size={16} strokeWidth={3} />
-                              </button>
-                            ) : null}
-                          </div>
-                          {repeatedName ? <p className="pd-row-note">{proposal.address ?? t.proposal.unknownAddress}</p> : null}
-                          {firstSentence ? <p className="pd-row-note"><ClaimSentence sentence={firstSentence} numberedEvidence={numberedEvidence} t={t} /></p> : proposal.recommendationSentences === null ? <p className="pd-row-note">{proposal.recommendation}</p> : null}
-                          <div className="pd-row-status">
-                            {scheduleMeta}
-                            <p className="pd-fit-line">{t.proposal.fitLine(proposal.matchedNeeds)}</p>
-                          </div>
-                          <PlacePhotoCredit photo={previews.photos.get(proposal.id)} />
-                          {proposal.status === "pending" && (proposal.votingAvailable || trip.role === "owner") ? (
-                            <div className="pd-row-bottom">
-                              {proposal.votingAvailable ? <VoteControl compact name={proposal.name} voters={proposal.voters} voteCount={proposal.voteCount} ownVote={proposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(proposal, voted)} /> : null}
-                              {trip.role === "owner" ? (
-                                <button
-                                  type="button"
-                                  className="pd-secondary"
-                                  disabled={pending !== null}
-                                  onClick={() => void acceptProposal(proposal)}
-                                >
-                                  <Check aria-hidden="true" className="size-4" />
-                                  {t.proposal.accept}
-                                </button>
-                              ) : null}
-                            </div>
-                          ) : null}
-                        </div>
-                      </div>
-                    </article>
+                      openLabel={t.proposal.viewDetail(proposal.name)}
+                      openDataAttribute={{ name: "proposal-detail-trigger", value: proposal.id }}
+                      dataAttribute={{ name: "discovery-proposal", value: proposal.name }}
+                    />
                   );
                 })}
               </div>

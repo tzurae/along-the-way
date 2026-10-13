@@ -91,6 +91,7 @@ export function googlePlacePhotoFingerprint(photo: GoogleProviderPhoto): string 
 export function googlePlacePhotoDto(
   tripId: string,
   providerPlaceId: string,
+  index: 0 | 1 | 2,
   photo: GoogleProviderPhoto,
   capability?: { exp: number; sig: string },
 ): GooglePlacePhotoDto {
@@ -102,9 +103,10 @@ export function googlePlacePhotoDto(
   const capabilityQuery = capability ? `&exp=${capability.exp}&sig=${capability.sig}` : "";
   return {
     source: "google",
-    id: `google:${providerPlaceId}:${fingerprint}`,
-    thumbnailUrl: `${prefix}?photo=${fingerprint}&maxWidth=192${capabilityQuery}`,
-    imageUrl: `${prefix}?photo=${fingerprint}&maxWidth=1024${capabilityQuery}`,
+    index,
+    id: `google:${providerPlaceId}:${index}:${fingerprint}`,
+    thumbnailUrl: `${prefix}?index=${index}&photo=${fingerprint}&maxWidth=192${capabilityQuery}`,
+    imageUrl: `${prefix}?index=${index}&photo=${fingerprint}&maxWidth=1024${capabilityQuery}`,
     width: photo.width,
     height: photo.height,
     authors: photo.authors,
@@ -127,7 +129,7 @@ export interface PlaceProvider {
   readonly available?: boolean;
   search(query: string, options?: PlaceSearchOptions): Promise<ProviderPlaceCandidate[]>;
   getPlace(providerPlaceId: string, options?: Pick<PlaceSearchOptions, "languageCode" | "regionCode">): Promise<ProviderPlaceCandidate>;
-  getFirstPhoto?(providerPlaceId: string): Promise<GoogleProviderPhoto | null>;
+  getPhotos?(providerPlaceId: string): Promise<GoogleProviderPhoto[]>;
   fetchPhotoMedia?(photoName: string, maxWidthPx: 192 | 1024): Promise<PlacePhotoMedia>;
 }
 
@@ -392,13 +394,13 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
     return this.candidate(value, true);
   }
 
-  async getFirstPhoto(rawProviderPlaceId: string): Promise<GoogleProviderPhoto | null> {
+  async getPhotos(rawProviderPlaceId: string): Promise<GoogleProviderPhoto[]> {
     const providerPlaceId = this.placeId(rawProviderPlaceId);
     const value = record(await this.request(
       `https://places.googleapis.com/v1/places/${encodeURIComponent(providerPlaceId)}`,
       { headers: { "X-Goog-FieldMask": "photos" } },
     ));
-    return this.firstPhoto(value?.photos, providerPlaceId);
+    return this.photos(value?.photos, providerPlaceId);
   }
 
   async fetchPhotoMedia(rawPhotoName: string, maxWidthPx: 192 | 1024): Promise<PlacePhotoMedia> {
@@ -461,9 +463,20 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
     return providerPlaceId;
   }
 
-  private firstPhoto(rawPhotos: unknown, providerPlaceId: string): GoogleProviderPhoto | null {
-    if (!Array.isArray(rawPhotos) || rawPhotos.length === 0) return null;
-    const photo = record(rawPhotos[0]);
+  private photos(rawPhotos: unknown, providerPlaceId: string, limit = 3): GoogleProviderPhoto[] {
+    if (!Array.isArray(rawPhotos) || rawPhotos.length === 0) return [];
+    const count = Math.min(rawPhotos.length, limit);
+    const photos = new Array<GoogleProviderPhoto>(count);
+    for (let index = 0; index < count; index += 1) {
+      const photo = this.photo(rawPhotos[index], providerPlaceId);
+      if (photo === null) return [];
+      photos[index] = photo;
+    }
+    return photos;
+  }
+
+  private photo(rawPhoto: unknown, providerPlaceId: string): GoogleProviderPhoto | null {
+    const photo = record(rawPhoto);
     const photoName = typeof photo?.name === "string" ? photo.name : null;
     const identity = photoName === null
       ? null
@@ -627,7 +640,7 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
       observedAt: observedAt.toISOString(),
       expiresAt: expiresAt.toISOString(),
       photo: null,
-      ...(includePhoto ? { providerPhoto: this.firstPhoto(value.photos, value.id) } : {}),
+      ...(includePhoto ? { providerPhoto: this.photos(value.photos, value.id, 1)[0] ?? null } : {}),
     };
   }
 }

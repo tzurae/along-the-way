@@ -1,12 +1,12 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, CalendarDays, Check, ChevronRight, CircleDot, Clock3, ExternalLink, Lock, MapPin, Navigation, TriangleAlert, Users, WifiOff } from "lucide-react";
-import type { PlaceDetailReference, PlacePreviewDto } from "@along-the-way/contracts/place-details";
+import type { PlaceDetailReference } from "@along-the-way/contracts/place-details";
 import { useI18n } from "./i18n";
 import { googleMapsCoordinatesUrl, googleMapsNavigationUrl } from "./google-maps";
 import { dayItems, localDate, parallelItemIds, personalState, tripClock, type TodayItem, type TodayModel } from "./today-model";
 import { readTripLocation } from "./trip-location";
 import { PlaceDetailContent } from "./PlaceDetailContent";
-import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest } from "./PlaceThumbnail";
+import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest, type PlacePreviewValue } from "./PlaceThumbnail";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import { NativeSelect } from "./components/ui/native-select";
 
@@ -44,7 +44,7 @@ function TodayItemDetails({ item, now, parallel, memberId, date, previews, previ
   parallel: boolean;
   memberId: string;
   date: string;
-  previews: Map<string, PlacePreviewDto["photo"]>;
+  previews: Map<string, PlacePreviewValue>;
   previewsLoading: boolean;
   openPlace?: (selection: TodayDetailSelection) => void;
 }) {
@@ -68,9 +68,9 @@ function TodayItemDetails({ item, now, parallel, memberId, date, previews, previ
           const maps = endpoint.place ? googleMapsCoordinatesUrl(endpoint.place) : null;
           const detailIdentity = endpoint.place?.id ?? null;
           const triggerKey = detailIdentity ? encodeURIComponent(`${item.id}:${endpoint.role}:${detailIdentity}`) : "";
-          const photo = detailIdentity ? previews.get(detailIdentity) : undefined;
+          const preview = detailIdentity ? previews.get(detailIdentity) : undefined;
           return <div key={endpoint.role} className="today-detail-endpoint">
-            {endpoint.place && detailIdentity && openPlace ? <PlaceThumbnail photo={photo} loading={previewsLoading} /> : null}
+            {endpoint.place && detailIdentity && openPlace ? <PlaceThumbnail photo={preview?.photo} photoCount={preview?.photoCount} loading={previewsLoading} /> : null}
             <div className="min-w-0">
               <dt>{endpoint.role === "start" ? startLabel : endLabel}</dt>
               <dd>
@@ -85,7 +85,7 @@ function TodayItemDetails({ item, now, parallel, memberId, date, previews, previ
               </dd>
               {endpoint.place?.address ? <dd>{endpoint.place.address}</dd> : null}
               <dd>{maps ? <a className="today-link" href={maps} target="_blank" rel="noopener noreferrer">{text.maps}<ExternalLink size={14} aria-hidden="true" /><span className="text-xs">{text.leavesApp}</span></a> : <span className="inline-flex items-center gap-1"><TriangleAlert size={15} aria-hidden="true" />{text.locationMissing}</span>}</dd>
-              {endpoint.place && detailIdentity && openPlace ? <PlacePhotoCredit photo={photo} /> : null}
+              {endpoint.place && detailIdentity && openPlace ? <PlacePhotoCredit photo={preview?.photo} /> : null}
             </div>
           </div>;
         })}
@@ -435,9 +435,10 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, isOwner, onA
         </>}
         {day.wishlist.length ? <section className="today-wishlist" aria-label={text.wishlist}><div className="today-sectionhead"><h3>{text.wishlist}</h3><span>{day.wishlist.length}</span></div><p>{text.wishlistHelp}</p><ul>{day.wishlist.map((place) => {
           const triggerKey = encodeURIComponent(`wishlist:${place.id}`);
+          const preview = wishlistPreviews.previews.get(place.id);
           return <li key={place.id}>
-            {openPlace ? <PlaceThumbnail photo={wishlistPreviews.photos.get(place.id)} loading={wishlistPreviews.loading} /> : null}
-            <div className="today-wishlist-copy">{openPlace ? <button type="button" aria-label={text.viewPlaceDetail(place.name)} data-today-place-detail-trigger={triggerKey} onClick={() => openPlace({ reference: { kind: "trip-place", id: place.id }, name: place.name, triggerKey, date: day.date })}>{place.name}<ChevronRight size={16} /></button> : <span>{place.name}</span>}<PlacePhotoCredit photo={wishlistPreviews.photos.get(place.id)} /></div>
+            {openPlace ? <PlaceThumbnail photo={preview?.photo} photoCount={preview?.photoCount} loading={wishlistPreviews.loading} /> : null}
+            <div className="today-wishlist-copy">{openPlace ? <button type="button" aria-label={text.viewPlaceDetail(place.name)} data-today-place-detail-trigger={triggerKey} onClick={() => openPlace({ reference: { kind: "trip-place", id: place.id }, name: place.name, triggerKey, date: day.date })}>{place.name}<ChevronRight size={16} /></button> : <span>{place.name}</span>}<PlacePhotoCredit photo={preview?.photo} /></div>
           </li>;
         })}</ul></section> : null}
       </section>
@@ -450,7 +451,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, isOwner, onA
       description={selectedItem ? <TodayTime item={selectedItem} zone={selectedItemDay.timeZone} /> : undefined}
       onClose={closeItem}
     >
-      {selectedItem ? <TodayItemDetails item={selectedItem} now={now} parallel={selectedItemParallel} memberId={model.memberId} date={selectedItemDay.date} previews={endpointPreviews.photos} previewsLoading={endpointPreviews.loading} openPlace={openPlace} /> : null}
+      {selectedItem ? <TodayItemDetails item={selectedItem} now={now} parallel={selectedItemParallel} memberId={model.memberId} date={selectedItemDay.date} previews={endpointPreviews.previews} previewsLoading={endpointPreviews.loading} openPlace={openPlace} /> : null}
     </PlaceDetailSheet>
     <PlaceDetailSheet open={Boolean(selectedDetail)} title={selectedDetail ? text.detailTitle(selectedDetail.name) : ""} onClose={closeDetail}>{detail}</PlaceDetailSheet>
   </section>;

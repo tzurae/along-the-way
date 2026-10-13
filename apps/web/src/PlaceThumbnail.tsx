@@ -5,6 +5,7 @@ import {
   type GooglePlacePhotoDto,
   type PlaceDetailReferenceKind,
   type PlacePhotoDto,
+  type PlacePreviewDto,
   type PlacePreviewResponse,
 } from "@along-the-way/contracts/place-details";
 import { safeExternalUrl } from "./external-url";
@@ -18,9 +19,11 @@ export type PlaceDetailRequest = <T>(path: string, init?: PlaceDetailRequestOpti
 
 export type PlaceDisplayPhoto = PlacePhotoDto | GooglePlacePhotoDto;
 
+export type PlacePreviewValue = Pick<PlacePreviewDto, "photo" | "photoCount">;
+
 interface PreviewState {
   loading: boolean;
-  photos: Map<string, PlaceDisplayPhoto | null>;
+  previews: Map<string, PlacePreviewValue>;
 }
 
 export function usePlacePreviews({
@@ -38,15 +41,15 @@ export function usePlacePreviews({
 }) {
   const stableIds = useMemo(() => [...new Set(ids)].sort(), [ids.join("\u0000")]);
   const key = stableIds.join("\u0000");
-  const [state, setState] = useState<PreviewState>(() => ({ loading: Boolean(enabled && request && stableIds.length), photos: new Map() }));
+  const [state, setState] = useState<PreviewState>(() => ({ loading: Boolean(enabled && request && stableIds.length), previews: new Map() }));
 
   useEffect(() => {
     if (!enabled || !request || stableIds.length === 0) {
-      setState({ loading: false, photos: new Map() });
+      setState({ loading: false, previews: new Map() });
       return;
     }
     const controller = new AbortController();
-    setState({ loading: true, photos: new Map() });
+    setState({ loading: true, previews: new Map() });
     const requestedIds = new Set(stableIds);
     const batches = Array.from({ length: Math.ceil(stableIds.length / 100) }, (_, index) => stableIds.slice(index * 100, index * 100 + 100));
     async function loadBatch(batch: string[]): Promise<PlacePreviewResponse | null> {
@@ -66,19 +69,19 @@ export function usePlacePreviews({
     }
     void Promise.all(batches.map(loadBatch)).then((responses) => {
       if (controller.signal.aborted) return;
-      const photos = new Map<string, PlaceDisplayPhoto | null>();
+      const previews = new Map<string, PlacePreviewValue>();
       for (const response of responses) {
         if (!response) continue;
         for (const preview of response.previews) {
           if (preview.reference.kind === kind && requestedIds.has(preview.reference.id)) {
-            photos.set(preview.reference.id, preview.photo);
+            previews.set(preview.reference.id, { photo: preview.photo, photoCount: preview.photoCount });
           }
         }
       }
-      setState({ loading: false, photos });
+      setState({ loading: false, previews });
     }).catch((error: unknown) => {
       if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return;
-      setState({ loading: false, photos: new Map() });
+      setState({ loading: false, previews: new Map() });
     });
     return () => controller.abort();
   }, [enabled, key, kind, request, stableIds, tripId]);
@@ -86,7 +89,13 @@ export function usePlacePreviews({
   return state;
 }
 
-export function PlaceThumbnail({ photo, loading = false }: { photo: PlaceDisplayPhoto | null | undefined; loading?: boolean }) {
+export interface PlaceThumbnailProps {
+  photo: PlaceDisplayPhoto | null | undefined;
+  photoCount?: PlacePreviewDto["photoCount"];
+  loading?: boolean;
+}
+
+export function PlaceThumbnail({ photo, photoCount = photo ? 1 : 0, loading = false }: PlaceThumbnailProps) {
   const photoKey = photo ? `${photo.id}\u0000${photo.thumbnailUrl}` : null;
   const [failure, setFailure] = useState({ photoKey, failed: false });
   if (failure.photoKey !== photoKey) {
@@ -97,7 +106,6 @@ export function PlaceThumbnail({ photo, loading = false }: { photo: PlaceDisplay
   return (
     <span
       className="place-thumbnail"
-      aria-hidden="true"
       data-place-thumbnail={photo?.id ?? (loading ? "loading" : photo === null ? "empty" : "unavailable")}
     >
       {loading ? <span className="place-thumbnail__loading" /> : null}
@@ -112,6 +120,11 @@ export function PlaceThumbnail({ photo, loading = false }: { photo: PlaceDisplay
           decoding="async"
           onError={() => setFailure({ photoKey, failed: true })}
         />
+      ) : null}
+      {!loading && photo && photoCount > 1 ? (
+        <span className="place-thumbnail__count" role="img" aria-label={`共 ${photoCount} 張照片`}>
+          <span aria-hidden="true">+{photoCount - 1}</span>
+        </span>
       ) : null}
       {!loading && (!photo || failed) ? <span className="place-thumbnail__empty" /> : null}
     </span>

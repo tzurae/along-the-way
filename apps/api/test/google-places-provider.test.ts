@@ -277,7 +277,7 @@ describe("Google Places provider adapter", () => {
 
     expect(await provider.openingHours("ChIJ-no-hours-1234")).toEqual({ businessStatus: null, regular: null, current: null });
   });
-  it("reads only the first Place Details photo and fetches bounded image media", async () => {
+  it("reads the first three Place Details photos in order and fetches bounded image media", async () => {
     const calls: Array<{ url: string; fields: string | null; apiKey: string | null; redirect: RequestRedirect | undefined }> = [];
     const provider = new GooglePlacesProvider({
       apiKey: "server-only-key",
@@ -291,36 +291,57 @@ describe("Google Places provider adapter", () => {
           redirect: init?.redirect,
         });
         if (url.endsWith("/places/ChIJ-photo-place-1234")) {
-          return Response.json({ photos: [{
-            name: "places/ChIJ-photo-place-1234/photos/first-token", widthPx: 2048, heightPx: 1365,
-            authorAttributions: [{ displayName: "甲", uri: "https://example.test/author" }],
-            googleMapsUri: "https://maps.google.com/?cid=photo",
-          }, {
-            name: "places/ChIJ-photo-place-1234/photos/second-token", widthPx: 800, heightPx: 600,
-          }] });
+          return Response.json({ photos: [
+            {
+              name: "places/ChIJ-photo-place-1234/photos/first-token", widthPx: 2048, heightPx: 1365,
+              authorAttributions: [{ displayName: "甲", uri: "https://example.test/author/one" }],
+              googleMapsUri: "https://maps.google.com/?cid=one",
+            },
+            {
+              name: "places/ChIJ-photo-place-1234/photos/second-token", widthPx: 800, heightPx: 600,
+              authorAttributions: [{ displayName: "乙", uri: "https://example.test/author/two" }],
+              googleMapsUri: "https://maps.google.com/?cid=two",
+            },
+            {
+              name: "places/ChIJ-photo-place-1234/photos/third-token", widthPx: 640, heightPx: 480,
+              authorAttributions: [{ displayName: "丙", uri: "https://example.test/author/three" }],
+              googleMapsUri: "https://maps.google.com/?cid=three",
+            },
+            { name: "", widthPx: "ignored", heightPx: 0 },
+          ] });
         }
         if (url.includes("/media?")) return Response.json({ photoUri: "https://lh3.googleusercontent.com/photo-token" });
         return new Response(new Uint8Array([1, 2, 3]), { headers: { "Content-Type": "image/jpeg", "Content-Length": "3" } });
       },
     });
 
-    expect(await provider.getFirstPhoto("ChIJ-photo-place-1234")).toEqual({
-      name: "places/ChIJ-photo-place-1234/photos/first-token",
-      width: 2048,
-      height: 1365,
-      authors: [{ displayName: "甲", uri: "https://example.test/author" }],
-      googleMapsUri: "https://maps.google.com/?cid=photo",
-    });
+    expect(await provider.getPhotos("ChIJ-photo-place-1234")).toEqual([
+      {
+        name: "places/ChIJ-photo-place-1234/photos/first-token", width: 2048, height: 1365,
+        authors: [{ displayName: "甲", uri: "https://example.test/author/one" }],
+        googleMapsUri: "https://maps.google.com/?cid=one",
+      },
+      {
+        name: "places/ChIJ-photo-place-1234/photos/second-token", width: 800, height: 600,
+        authors: [{ displayName: "乙", uri: "https://example.test/author/two" }],
+        googleMapsUri: "https://maps.google.com/?cid=two",
+      },
+      {
+        name: "places/ChIJ-photo-place-1234/photos/third-token", width: 640, height: 480,
+        authors: [{ displayName: "丙", uri: "https://example.test/author/three" }],
+        googleMapsUri: "https://maps.google.com/?cid=three",
+      },
+    ]);
     expect(calls[0]).toEqual({
       url: "https://places.googleapis.com/v1/places/ChIJ-photo-place-1234",
       fields: "photos",
       apiKey: "server-only-key",
       redirect: undefined,
     });
-    const media = await provider.fetchPhotoMedia("places/ChIJ-photo-place-1234/photos/first-token", 1024);
+    const media = await provider.fetchPhotoMedia("places/ChIJ-photo-place-1234/photos/second-token", 1024);
     expect(media.contentType).toBe("image/jpeg");
     expect([...media.bytes]).toEqual([1, 2, 3]);
-    expect(calls[1]?.url).toBe("https://places.googleapis.com/v1/places/ChIJ-photo-place-1234/photos/first-token/media?maxWidthPx=1024&skipHttpRedirect=true");
+    expect(calls[1]?.url).toBe("https://places.googleapis.com/v1/places/ChIJ-photo-place-1234/photos/second-token/media?maxWidthPx=1024&skipHttpRedirect=true");
     expect(calls[2]?.url).toBe("https://lh3.googleusercontent.com/photo-token");
     expect(calls[2]?.apiKey).toBeNull();
     expect(calls[2]?.redirect).toBe("manual");
@@ -448,7 +469,7 @@ describe("Google Places provider adapter", () => {
       .rejects.toBeInstanceOf(ProviderUnavailableError);
   });
 
-  it("builds stable same-origin URLs from photo attribution without provider credentials", () => {
+  it("builds stable per-index same-origin URLs from photo attribution without provider credentials", () => {
     const photo = {
       name: "places/ChIJ-photo-place-1234/photos/first-token",
       width: 1200,
@@ -456,23 +477,34 @@ describe("Google Places provider adapter", () => {
       authors: [{ displayName: "甲", uri: null }],
       googleMapsUri: null,
     };
-    const dto = googlePlacePhotoDto("11111111-1111-4111-8111-111111111111", "ChIJ-photo-place-1234", photo);
+    const dto = googlePlacePhotoDto("11111111-1111-4111-8111-111111111111", "ChIJ-photo-place-1234", 1, photo);
     expect(dto).toMatchObject({
       source: "google",
-      id: "google:ChIJ-photo-place-1234:84df05a7b9f74968",
-      thumbnailUrl: "/api/trips/11111111-1111-4111-8111-111111111111/google-place-photos/ChIJ-photo-place-1234?photo=84df05a7b9f74968&maxWidth=192",
-      imageUrl: "/api/trips/11111111-1111-4111-8111-111111111111/google-place-photos/ChIJ-photo-place-1234?photo=84df05a7b9f74968&maxWidth=1024",
+      index: 1,
+      id: "google:ChIJ-photo-place-1234:1:84df05a7b9f74968",
+      thumbnailUrl: "/api/trips/11111111-1111-4111-8111-111111111111/google-place-photos/ChIJ-photo-place-1234?index=1&photo=84df05a7b9f74968&maxWidth=192",
+      imageUrl: "/api/trips/11111111-1111-4111-8111-111111111111/google-place-photos/ChIJ-photo-place-1234?index=1&photo=84df05a7b9f74968&maxWidth=1024",
     });
     const renamed = googlePlacePhotoDto(
       "11111111-1111-4111-8111-111111111111",
       "ChIJ-photo-place-1234",
+      1,
       { ...photo, name: "places/ChIJ-photo-place-1234/photos/rotated-provider-token" },
     );
     expect({ id: renamed.id, thumbnailUrl: renamed.thumbnailUrl, imageUrl: renamed.imageUrl })
       .toEqual({ id: dto.id, thumbnailUrl: dto.thumbnailUrl, imageUrl: dto.imageUrl });
+    const sameMetadataAtAnotherIndex = googlePlacePhotoDto(
+      "11111111-1111-4111-8111-111111111111",
+      "ChIJ-photo-place-1234",
+      2,
+      photo,
+    );
+    expect(sameMetadataAtAnotherIndex.id).not.toBe(dto.id);
+    expect(sameMetadataAtAnotherIndex.id.endsWith("84df05a7b9f74968")).toBe(true);
     const differentPhoto = googlePlacePhotoDto(
       "11111111-1111-4111-8111-111111111111",
       "ChIJ-photo-place-1234",
+      1,
       { ...photo, googleMapsUri: "https://maps.google.com/?cid=a-different-photo" },
     );
     expect(differentPhoto.id).not.toBe(dto.id);

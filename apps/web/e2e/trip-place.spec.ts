@@ -197,7 +197,7 @@ async function addTimedActivity(
 }
 
 function wishlistEntry(page: Page, placeName: string) {
-  return page.locator("article[data-wishlist-place]").filter({
+  return page.locator("article[data-place-card][data-wishlist-place]").filter({
     has: page.getByText(placeName, { exact: true }),
   });
 }
@@ -1158,7 +1158,7 @@ test("photo composition and compact credits survive desktop and enlarged-text bo
     if (url.searchParams.get("kind") !== "trip-place" || url.searchParams.get("id") !== place.id) return route.fallback();
     await route.fulfill({ json: { detail: {
       reference: { kind: "trip-place", id: place.id }, canonicalPlaceId: place.placeId, name: placeName,
-      asOfDate: url.searchParams.get("date"), sections: [], sources: [], photos: [photo], googlePhoto: null,
+      asOfDate: url.searchParams.get("date"), sections: [], sources: [], photos: [photo], googlePhotos: [],
     } } });
   });
   await page.route(`**/api/trips/${tripId}/place-photo-assets/${filename}?**`, (route) => route.fulfill({ contentType: "image/png", body: pixel }));
