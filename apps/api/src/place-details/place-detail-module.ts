@@ -17,6 +17,7 @@ export interface PlaceDetailModule {
     userId: string,
     tripId: string,
     providerPlaceId: string,
+    index: 0 | 1 | 2,
     photoFingerprint: string,
     maxWidth: 192 | 1024,
     capabilityExpiry?: string | null,

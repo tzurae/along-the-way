@@ -18,9 +18,10 @@ const photoFingerprint = "a1b2c3d4e5f60708";
 function googlePhoto(overrides: Partial<GooglePlacePhotoDto> = {}): GooglePlacePhotoDto {
   return {
     source: "google",
-    id: `google:${providerPlaceId}:${photoFingerprint}`,
-    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?photo=${photoFingerprint}&maxWidth=192`,
-    imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?photo=${photoFingerprint}&maxWidth=1024`,
+    index: 0,
+    id: `google:${providerPlaceId}:0:${photoFingerprint}`,
+    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?index=0&photo=${photoFingerprint}&maxWidth=192`,
+    imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?index=0&photo=${photoFingerprint}&maxWidth=1024`,
     width: 1200,
     height: 800,
     authors: [{ displayName: "攝影者甲", uri: "https://maps.google.com/contrib/example" }],
@@ -55,13 +56,30 @@ it("renders a reserved lazy Google thumbnail and policy attribution", () => {
   expect(screen.getByRole("link", { name: /^在 Google Maps 查看$/ })).toHaveAttribute("href", "https://maps.google.com/?cid=123");
 });
 
+it("shows one image and an accessible capped count badge only for multiple photos", () => {
+  const photo = googlePhoto();
+  const { container, rerender } = render(<PlaceThumbnail photo={photo} photoCount={3} />);
+  expect(container.querySelectorAll("img")).toHaveLength(1);
+  expect(container.querySelector(".place-thumbnail__count")).toHaveTextContent("+2");
+  expect(screen.getByRole("img", { name: "共 3 張照片" })).toBeInTheDocument();
+
+  rerender(<PlaceThumbnail photo={photo} photoCount={2} />);
+  expect(container.querySelector(".place-thumbnail__count")).toHaveTextContent("+1");
+  expect(screen.getByRole("img", { name: "共 2 張照片" })).toBeInTheDocument();
+
+  rerender(<PlaceThumbnail photo={photo} photoCount={1} />);
+  expect(container.querySelector(".place-thumbnail__count")).not.toBeInTheDocument();
+  rerender(<PlaceThumbnail photo={null} photoCount={0} />);
+  expect(container.querySelector(".place-thumbnail__count")).not.toBeInTheDocument();
+});
+
 it("keeps image failure local and resets it when the photo URL changes", async () => {
   const first = googlePhoto();
   const secondProviderPlaceId = "ChIJGooglePhoto456";
   const second = googlePhoto({
-    id: `google:${secondProviderPlaceId}:${photoFingerprint}`,
-    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${secondProviderPlaceId}?photo=${photoFingerprint}&maxWidth=192`,
-    imageUrl: `/api/trips/${tripId}/google-place-photos/${secondProviderPlaceId}?photo=${photoFingerprint}&maxWidth=1024`,
+    id: `google:${secondProviderPlaceId}:0:${photoFingerprint}`,
+    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${secondProviderPlaceId}?index=0&photo=${photoFingerprint}&maxWidth=192`,
+    imageUrl: `/api/trips/${tripId}/google-place-photos/${secondProviderPlaceId}?index=0&photo=${photoFingerprint}&maxWidth=1024`,
   });
   const { container, rerender } = render(<PlaceThumbnail photo={first} />);
   fireEvent.error(container.querySelector("img")!);
@@ -82,7 +100,8 @@ it("keeps a preview image failure that fires before thumbnail effects flush", as
     });
   function Harness() {
     const previews = usePlacePreviews({ tripId, kind: "trip-place", ids: [id], request });
-    return <PlaceThumbnail photo={previews.photos.get(id)} loading={previews.loading} />;
+    const preview = previews.previews.get(id);
+    return <PlaceThumbnail photo={preview?.photo} photoCount={preview?.photoCount} loading={previews.loading} />;
   }
   const observer = new MutationObserver(() => {
     const image = document.querySelector<HTMLImageElement>(".place-thumbnail__image");
@@ -94,7 +113,7 @@ it("keeps a preview image failure that fires before thumbnail effects flush", as
   observer.observe(document.body, { childList: true, subtree: true });
   try {
     const { container } = render(<Harness />);
-    resolveRequest({ previews: [{ reference: { kind: "trip-place", id }, photo }] });
+    resolveRequest({ previews: [{ reference: { kind: "trip-place", id }, photo, photoCount: 3 }] });
     await waitFor(() => expect(
       container.querySelector(`[data-place-thumbnail="${photo.id}"] .place-thumbnail__empty`),
     ).toBeInTheDocument());
@@ -112,7 +131,7 @@ it("retries one failed preview batch without erasing another batch's photos", as
     calls.push(batch);
     if (batch.includes(ids[0]!)) throw new Error("first batch unavailable");
     const raw: PlacePreviewResponse = {
-      previews: [{ reference: { kind: "trip-place", id: ids[100]! }, photo: googlePhoto() }],
+      previews: [{ reference: { kind: "trip-place", id: ids[100]! }, photo: googlePhoto(), photoCount: 1 }],
     };
     return (init?.parse ? init.parse(raw) : raw) as T;
   };
@@ -120,8 +139,8 @@ it("retries one failed preview batch without erasing another batch's photos", as
   function Harness() {
     const previews = usePlacePreviews({ tripId, kind: "trip-place", ids, request });
     return <>
-      <PlaceThumbnail photo={previews.photos.get(ids[0]!)} loading={previews.loading} />
-      <PlaceThumbnail photo={previews.photos.get(ids[100]!)} loading={previews.loading} />
+      <PlaceThumbnail photo={previews.previews.get(ids[0]!)?.photo} photoCount={previews.previews.get(ids[0]!)?.photoCount} loading={previews.loading} />
+      <PlaceThumbnail photo={previews.previews.get(ids[100]!)?.photo} photoCount={previews.previews.get(ids[100]!)?.photoCount} loading={previews.loading} />
     </>;
   }
 

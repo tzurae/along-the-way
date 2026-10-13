@@ -697,10 +697,17 @@ export function createApp({
     const requestedWidth = context.req.query("maxWidth");
     const maxWidth = requestedWidth === "192" ? 192 : requestedWidth === "1024" ? 1024 : null;
     if (maxWidth === null) throw new AppError("validation_error", "maxWidth must be 192 or 1024");
+    const requestedIndex = context.req.query("index");
+    if (requestedIndex === undefined) {
+      throw new AppError("place_photo_not_found", "Place photo not found", 404);
+    }
+    const index = requestedIndex === "0" ? 0 : requestedIndex === "1" ? 1 : requestedIndex === "2" ? 2 : null;
+    if (index === null) throw new AppError("validation_error", "index must be 0, 1, or 2");
     const photo = await placeDetails.getGooglePhoto(
       user.id,
       uuidParam(context, "tripId"),
       context.req.param("providerPlaceId"),
+      index,
       context.req.query("photo") ?? "",
       maxWidth,
       context.req.query("exp") ?? null,

@@ -76,9 +76,10 @@ function place(id: string, name: string, scheduled: boolean): TripPlaceDto {
 function googlePhoto(): GooglePlacePhotoDto {
   return {
     source: "google",
-    id: `google:${providerPlaceId}:${photoFingerprint}`,
-    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?photo=${photoFingerprint}&maxWidth=192`,
-    imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?photo=${photoFingerprint}&maxWidth=1024`,
+    index: 0,
+    id: `google:${providerPlaceId}:0:${photoFingerprint}`,
+    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?index=0&photo=${photoFingerprint}&maxWidth=192`,
+    imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?index=0&photo=${photoFingerprint}&maxWidth=1024`,
     width: 1200,
     height: 800,
     authors: [{ displayName: "搜尋攝影者", uri: "https://maps.google.com/contrib/search-author" }],
@@ -145,7 +146,7 @@ it("reports result count, disables listed places, and clears stale search result
   expect(within(dialog).queryByText(/資料擷取於/)).not.toBeInTheDocument();
   expect(within(dialog).getByText("· 佛寺", { exact: true })).toBeInTheDocument();
   expect(within(dialog).getByRole("button", { name: /^已在口袋名單：清水寺・佛寺$/ })).toBeDisabled();
-  expect(dialog.querySelector(`[data-place-thumbnail="google:${providerPlaceId}:${photoFingerprint}"] img`)).toBeInTheDocument();
+  expect(dialog.querySelector(`[data-place-thumbnail="google:${providerPlaceId}:0:${photoFingerprint}"] img`)).toBeInTheDocument();
 
   fireEvent.change(within(dialog).getByLabelText("搜尋 Google Maps"), { target: { value: "伏見稻荷" } });
   fireEvent.click(within(dialog).getByRole("button", { name: /^搜尋地點$/ }));
@@ -224,14 +225,18 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
   const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
     if (path.endsWith("/trip-places") && !init?.method) return { tripPlaces: places } as T;
     if (path.includes("/place-previews?")) {
-      return applyParser({ previews: places.map((entry) => ({ reference: { kind: "trip-place", id: entry.id }, photo: null })) }, init);
+      return applyParser({ previews: places.map((entry, index) => ({
+        reference: { kind: "trip-place", id: entry.id },
+        photo: index === 0 ? googlePhoto() : null,
+        photoCount: index === 0 ? 3 : 0,
+      })) }, init);
     }
     if (path.includes("/place-details?")) {
       const id = new URL(path, "https://example.test").searchParams.get("id")!;
       const selected = places.find((entry) => entry.id === id)!;
       return applyParser({ detail: {
         reference: { kind: "trip-place", id }, canonicalPlaceId: selected.placeId, name: selected.name,
-        asOfDate: null, sections: [], sources: [], photos: [], googlePhoto: null,
+        asOfDate: null, sections: [], sources: [], photos: [], googlePhotos: [],
       } }, init);
     }
     throw new Error(`Unexpected request: ${path}`);
@@ -243,7 +248,25 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
   expect(screen.queryByRole("button", { name: /^排入行程$/ })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: /^加入地點$/ })).toBeInTheDocument();
   expect(screen.getAllByRole("button", { name: /^想去，/ }).length).toBeGreaterThan(0);
-  expect(screen.getByRole("button", { name: /^查看 未排程咖啡店 的詳情$/ })).toHaveClass("min-h-11");
+  expect(screen.getByRole("button", { name: /^查看 未排程咖啡店 的詳情$/ })).toBeVisible();
+  const cards = [...document.querySelectorAll<HTMLElement>("[data-place-card]")];
+  expect(cards).toHaveLength(2);
+  for (const card of cards) {
+    const body = card.querySelector<HTMLElement>(".place-card__body")!;
+    expect([...body.children].map((child) => child.className)).toEqual([
+      "place-card__heading",
+      "place-card__identity",
+      "place-card__description",
+      "place-card__status",
+      ...(card.querySelector(".place-card__credit") ? ["place-card__credit"] : []),
+      "place-card__actions",
+    ]);
+    expect(card.querySelector(".place-card__location")).not.toHaveTextContent(/^$/);
+    expect(card.querySelectorAll(".pd-vote-control")).toHaveLength(1);
+  }
+  const photographed = cards[0]!;
+  await waitFor(() => expect(photographed.querySelectorAll("img")).toHaveLength(1));
+  expect(within(photographed).getByRole("img", { name: "共 3 張照片" })).toHaveTextContent("+2");
 
   fireEvent.click(screen.getByRole("button", { name: /^查看 未排程咖啡店 的詳情$/ }));
   let detail = await screen.findByRole("dialog", { name: /^未排程咖啡店$/ });

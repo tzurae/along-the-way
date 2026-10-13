@@ -9,7 +9,7 @@ export const placeDetail = {
   photoUnavailable: "照片載入失敗",
   reloadPhoto: "重新載入照片",
   retry: "重試",
-  googlePhotoAlt: (name: string) => `${name}的照片`,
+  googlePhotoAlt: (name: string, current: number, total: number) => `${name}的照片，第 ${current} 張，共 ${total} 張`,
   photoCount: (current: number, total: number) => `${current}／${total}`,
   photoAlt: (title: string, current: number, total: number) => `${title}，第 ${current} 張，共 ${total} 張`,
   previousPhoto: "上一張照片",

@@ -108,8 +108,81 @@ async function openTab(page: Page, name: "AI 找地點" | "想去清單") {
   await page.getByRole("tab", { name: name === "AI 找地點" ? "AI 建議" : "口袋名單", exact: true }).click();
 }
 
+async function addManualWishlistPlace(page: Page, input: { name: string; address: string; note: string }) {
+  await openTab(page, "想去清單");
+  await page.getByRole("button", { name: "加入地點" }).click();
+  const dialog = page.getByRole("dialog", { name: "加入地點" });
+  await dialog.getByRole("tab", { name: "手動輸入" }).click();
+  await dialog.getByLabel("地點名稱").fill(input.name);
+  await dialog.getByLabel("地點類型").selectOption("restaurant");
+  await dialog.locator("summary", { hasText: "位置與來源（選填）" }).click();
+  await dialog.getByLabel("地址（若知道）").fill(input.address);
+  await dialog.getByLabel("為什麼想去？（選填）").fill(input.note);
+  await dialog.getByRole("button", { name: "手動新增地點" }).click();
+  await expect(dialog).toHaveCount(0);
+}
+
+async function assertSharedPlaceCards(page: Page, dataAttribute: "data-wishlist-place" | "data-discovery-proposal") {
+  const cards = page.locator(`article[${dataAttribute}]`);
+  await expect(cards.first()).toBeVisible();
+  expect(await cards.count()).toBeGreaterThan(0);
+  await expect(page.locator(`article[${dataAttribute}]:not([data-place-card])`)).toHaveCount(0);
+  await expect(page.locator(".pd-row-sidevotes, .pd-row-bottom--mobile")).toHaveCount(0);
+
+  const measurements = await cards.evaluateAll((elements) => elements.map((card) => {
+    const body = card.querySelector<HTMLElement>(".place-card__body")!;
+    const heading = body.querySelector<HTMLElement>(".place-card__heading")!;
+    const identity = body.querySelector<HTMLElement>(".place-card__identity")!;
+    const title = heading.querySelector<HTMLElement>(".place-card__title")!;
+    const type = identity.querySelector<HTMLElement>(".place-card__type")!;
+    const location = identity.querySelector<HTMLElement>(".place-card__location")!;
+    const actions = body.querySelector<HTMLElement>(".place-card__actions");
+    const expectedOrder = ["place-card__heading", "place-card__identity", "place-card__description"];
+    if (body.querySelector(".place-card__status")) expectedOrder.push("place-card__status");
+    if (body.querySelector(".place-card__credit")) expectedOrder.push("place-card__credit");
+    if (actions) expectedOrder.push("place-card__actions");
+    const actionBoxes = actions
+      ? [...actions.children].flatMap((slot) => {
+          const target = slot.querySelector<HTMLElement>("button, a");
+          if (!target) return [];
+          const rect = target.getBoundingClientRect();
+          return [{ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, height: rect.height }];
+        })
+      : [];
+    const actionSeparations = actionBoxes.slice(1).map((box, index) => {
+      const previous = actionBoxes[index]!;
+      return box.top < previous.bottom && box.bottom > previous.top
+        ? box.left - previous.right
+        : box.top - previous.bottom;
+    });
+    return {
+      bodyOrder: [...body.children].map((child) => child.className),
+      expectedOrder,
+      identityOrder: [...identity.children].map((child) => child.className),
+      titleLeft: title.getBoundingClientRect().left,
+      typeLeft: type.getBoundingClientRect().left,
+      locationLeft: location.getBoundingClientRect().left,
+      actionsGap: actions ? getComputedStyle(actions).gap : null,
+      actionHeights: actionBoxes.map((box) => box.height),
+      actionSeparations,
+      voteCount: card.querySelectorAll(".pd-vote-control").length,
+    };
+  }));
+
+  for (const measurement of measurements) {
+    expect(measurement.bodyOrder).toEqual(measurement.expectedOrder);
+    expect(measurement.identityOrder).toEqual(["place-card__type", "place-card__location"]);
+    expect(Math.abs(measurement.typeLeft - measurement.titleLeft)).toBeLessThanOrEqual(1);
+    expect(Math.abs(measurement.locationLeft - measurement.titleLeft)).toBeLessThanOrEqual(1);
+    expect(measurement.voteCount).toBe(1);
+    if (measurement.actionsGap !== null) expect(measurement.actionsGap).toBe("12px");
+    for (const height of measurement.actionHeights) expect(height).toBeGreaterThanOrEqual(44);
+    for (const separation of measurement.actionSeparations) expect(separation).toBeGreaterThanOrEqual(12);
+  }
+}
+
 function proposalEntry(page: Page, name: string) {
-  return page.locator("article[data-discovery-proposal]").filter({
+  return page.locator("article[data-place-card][data-discovery-proposal]").filter({
     has: page.getByRole("button", { name: `查看 ${name} 的詳情`, exact: true }),
   });
 }
@@ -121,6 +194,68 @@ async function cleanup() {
 
 test.beforeEach(() => executeDatabase("truncate table rate_limit_windows"));
 test.afterAll(cleanup);
+
+test("uses one measurable PlaceCard contract across wishlist and AI surfaces", async ({ browser, page, request }) => {
+  test.setTimeout(240_000);
+  await request.delete(`${MAILPIT_API_URL}/api/v1/messages`);
+  const suffix = Date.now();
+  const tripName = `Discovery browser cards ${suffix}`;
+  const ownerEmail = `discovery-cards-owner-${suffix}@example.test`;
+  const editorEmail = `discovery-cards-editor-${suffix}@example.test`;
+  const runId = crypto.randomUUID();
+  const proposalId = crypto.randomUUID();
+
+  await executeDatabase(`insert into users (email, display_name, status) values ('${ownerEmail}', 'Cards owner', 'active') on conflict (email) do nothing;`);
+  await signIn(page, request, ownerEmail);
+  await createTrip(page, tripName);
+  await addManualWishlistPlace(page, {
+    name: "很長名稱的家庭咖啡與甜點候選地點",
+    address: "京都府京都市中京區一條很長但仍必須完整換行的地址",
+    note: "想一起吃甜點並休息。",
+  });
+
+  await executeDatabase(`
+    insert into discovery_briefs (trip_id, original_text, structured_brief, unresolved_questions, updated_by)
+      select trip.id, 'Food markets at an easy pace.',
+        '{"interests":["food markets"],"pace":"easy","budget":null,"exclusions":[],"areas":["Kyoto"]}'::jsonb,
+        '[]'::jsonb, member.user_id
+      from trips trip join trip_members member on member.trip_id = trip.id and member.role = 'owner'
+      where trip.name = '${tripName}';
+    insert into discovery_runs (id, trip_id, brief_version, policy_version, model_id, status, search_plan, error_code, created_by, completed_at)
+      select '${runId}', trip.id, 1, 'discovery-v1', 'gpt-test', 'completed',
+        '{"queries":["Kyoto markets"],"areas":["Kyoto"],"categories":["market"],"exclusions":[],"dateRange":{"start":"2026-11-03","end":"2026-11-09"}}'::jsonb,
+        null, member.user_id, now()
+      from trips trip join trip_members member on member.trip_id = trip.id and member.role = 'owner'
+      where trip.name = '${tripName}';
+    insert into candidate_proposals (id, trip_id, run_id, provider_place_id, name, place_type, address, latitude, longitude, source_url, recommendation, recommendation_sentences, matched_needs, tradeoffs, unknowns, confidence)
+      select '${proposalId}', trip.id, '${runId}', 'ChIJ-Cards-Market', '共享卡片市場', 'activity',
+        '京都府京都市中京區市場通', 35.005, 135.765, null,
+        '適合全家悠閒逛市場並品嚐在地小吃。', null, '["food markets"]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'medium'
+      from trips trip where trip.name = '${tripName}';
+    insert into users (email, display_name, status) values ('${editorEmail}', 'Cards editor', 'active');
+    insert into trip_members (trip_id, user_id, role)
+      select trip.id, member.id, 'editor' from trips trip cross join users member
+      where trip.name = '${tripName}' and member.email = '${editorEmail}';
+  `);
+
+  await page.reload();
+  const editorContext = await browser.newContext({ baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost" });
+  const editorPage = await editorContext.newPage();
+  await signIn(editorPage, request, editorEmail);
+  await expect(editorPage.getByRole("button", { name: new RegExp(`${tripName}，切換旅程`) })).toBeVisible();
+
+  for (const rolePage of [page, editorPage]) {
+    for (const viewport of [{ width: 390, height: 844 }, { width: 1280, height: 800 }]) {
+      await rolePage.setViewportSize(viewport);
+      await openTab(rolePage, "想去清單");
+      await assertSharedPlaceCards(rolePage, "data-wishlist-place");
+      await openTab(rolePage, "AI 找地點");
+      await assertSharedPlaceCards(rolePage, "data-discovery-proposal");
+    }
+  }
+
+  await editorContext.close();
+});
 
 test("an owner reviews grounded AI evidence and schedules a proposal while editors cannot decide it", async ({ browser, page, request }) => {
   test.setTimeout(240_000);

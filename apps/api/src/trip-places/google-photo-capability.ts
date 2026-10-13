@@ -15,7 +15,13 @@ export class GooglePhotoCapability {
     this.issuer = new TokenIssuer(secret);
   }
 
-  issue(tripId: string, userId: string, providerPlaceId: string): GooglePhotoCapabilityValue {
+  issue(
+    tripId: string,
+    userId: string,
+    providerPlaceId: string,
+    index: 0 | 1 | 2,
+    fingerprint: string,
+  ): GooglePhotoCapabilityValue {
     const now = this.now();
     const exp = Math.floor(Date.UTC(
       now.getUTCFullYear(),
@@ -24,7 +30,7 @@ export class GooglePhotoCapability {
     ) / 1_000) - 1;
     return {
       exp,
-      sig: this.issuer.issue(this.identifier(tripId, userId, providerPlaceId, exp)),
+      sig: this.issuer.issue(this.identifier(tripId, userId, providerPlaceId, index, fingerprint, exp)),
     };
   }
 
@@ -32,6 +38,8 @@ export class GooglePhotoCapability {
     tripId: string,
     userId: string,
     providerPlaceId: string,
+    index: 0 | 1 | 2,
+    fingerprint: string,
     rawExpiry: string | null,
     signature: string | null,
   ) {
@@ -39,10 +47,20 @@ export class GooglePhotoCapability {
       || !signature || !/^[A-Za-z0-9_-]{43}$/.test(signature)) return false;
     const exp = Number(rawExpiry);
     if (!Number.isSafeInteger(exp) || exp < Math.floor(this.now().getTime() / 1_000)) return false;
-    return this.issuer.matches(this.identifier(tripId, userId, providerPlaceId, exp), signature);
+    return this.issuer.matches(
+      this.identifier(tripId, userId, providerPlaceId, index, fingerprint, exp),
+      signature,
+    );
   }
 
-  private identifier(tripId: string, userId: string, providerPlaceId: string, exp: number) {
-    return `${tripId}|${userId}|${providerPlaceId}|${exp}`;
+  private identifier(
+    tripId: string,
+    userId: string,
+    providerPlaceId: string,
+    index: 0 | 1 | 2,
+    fingerprint: string,
+    exp: number,
+  ) {
+    return `${tripId}|${userId}|${providerPlaceId}|${index}|${fingerprint}|${exp}`;
   }
 }

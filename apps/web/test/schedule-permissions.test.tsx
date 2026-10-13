@@ -201,17 +201,18 @@ describe("owner-only schedule surfaces", () => {
       return {
         previews: [{
           reference: { kind: "itinerary-place", id: "place" },
-          name: "Park",
           photo: {
             source: "google",
-            id: "google:ChIJTodayEndpoint:today-photo",
-            thumbnailUrl: "/api/trips/A/google-place-photos/ChIJTodayEndpoint?photo=today-photo&maxWidth=192",
-            imageUrl: "/api/trips/A/google-place-photos/ChIJTodayEndpoint?photo=today-photo&maxWidth=1024",
+            index: 0,
+            id: "google:ChIJTodayEndpoint:0:0123456789abcdef",
+            thumbnailUrl: "/api/trips/A/google-place-photos/ChIJTodayEndpoint?index=0&photo=0123456789abcdef&maxWidth=192",
+            imageUrl: "/api/trips/A/google-place-photos/ChIJTodayEndpoint?index=0&photo=0123456789abcdef&maxWidth=1024",
             width: 1200,
             height: 800,
             authors: [{ displayName: "端點攝影者", uri: "https://maps.google.com/contrib/today-author" }],
             googleMapsUri: "https://maps.google.com/?cid=987",
           },
+          photoCount: 3,
         }],
       } as T;
     };
@@ -234,6 +235,7 @@ describe("owner-only schedule surfaces", () => {
       "href",
       "https://maps.google.com/contrib/today-author",
     );
+    expect(screen.getByRole("img", { name: "共 3 張照片" })).toBeInTheDocument();
   });
 
   it("offers the assign-place onboarding item only to owners", () => {

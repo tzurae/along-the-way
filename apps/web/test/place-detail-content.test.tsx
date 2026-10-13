@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { PlaceDetailResponse, PlacePhotoDto } from "@along-the-way/contracts/place-details";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { GooglePlacePhotoDto, PlaceDetailResponse, PlacePhotoDto } from "@along-the-way/contracts/place-details";
 import { PlaceDetailContent } from "../src/PlaceDetailContent";
 import type { PlaceDetailRequest, PlaceDetailRequestOptions } from "../src/PlaceThumbnail";
 
@@ -40,6 +40,22 @@ function photo(id: string, title: string, author: string, licenseName: string): 
   };
 }
 
+function googlePhoto(index: 0 | 1 | 2, author: string): GooglePlacePhotoDto {
+  const providerPlaceId = "ChIJGooglePhoto123";
+  const fingerprint = String(index + 1).repeat(16);
+  return {
+    source: "google",
+    index,
+    id: `google:${providerPlaceId}:${index}:${fingerprint}`,
+    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?index=${index}&photo=${fingerprint}&maxWidth=192`,
+    imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?index=${index}&photo=${fingerprint}&maxWidth=1024`,
+    width: 1200,
+    height: 800,
+    authors: [{ displayName: author, uri: `https://maps.google.com/contrib/${index}` }],
+    googleMapsUri: `https://maps.google.com/?cid=${index}`,
+  };
+}
+
 const response: PlaceDetailResponse = {
   detail: {
     reference: { kind: "trip-place", id: referenceId },
@@ -49,7 +65,7 @@ const response: PlaceDetailResponse = {
     sections: [{ kind: "intro", title: "景點介紹", blocks: [{ text: "這是有來源的完整介紹。", style: "paragraph", sourceIds: ["official"], certainty: "sourced", needsRecheck: false }] }],
     sources: [{ id: "official", title: "官方網站", url: "https://example.test/place", checkedAt: "2026-10-09T12:00:00Z", publishedAt: null, validFrom: null, validUntil: null, expiresAt: null }],
     photos: [photo("work-one", "第一張作品", "作者甲", "CC BY-SA 4.0"), photo("work-two", "第二張作品", "作者乙", "CC0 1.0")],
-    googlePhoto: null,
+    googlePhotos: [],
   },
 };
 
@@ -61,7 +77,7 @@ beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: vi.fn() });
   Object.defineProperty(window, "matchMedia", { configurable: true, value: vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })) });
 });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 it("keeps a healthy selected work, credit, license, and full viewer aligned after another image fails", async () => {
   render(<PlaceDetailContent tripId={tripId} reference={{ kind: "trip-place", id: referenceId }} date="2026-10-21" request={request} />);
@@ -102,44 +118,73 @@ it("keeps an image failure that fires before React flushes the gallery's effects
   }
 });
 
-it("uses the Google fallback with required attribution and recovers from an image failure", async () => {
-  const providerPlaceId = "ChIJGooglePhoto123";
-  const photoFingerprint = "a1b2c3d4e5f60708";
+it("activates Google slides on demand and keeps selection, failure, and per-photo credit aligned", async () => {
+  let observerRoot: Element | Document | null | undefined;
+  let observerCallback: IntersectionObserverCallback | undefined;
+  const observedSlides: Element[] = [];
+  vi.stubGlobal("IntersectionObserver", class {
+    constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+      observerCallback = callback;
+      observerRoot = options?.root;
+    }
+    observe(target: Element) { observedSlides.push(target); }
+    disconnect() {}
+  });
+  const googlePhotos = [
+    googlePhoto(0, "攝影者甲"),
+    googlePhoto(1, "攝影者乙"),
+    googlePhoto(2, "攝影者丙"),
+  ];
   const googleResponse: PlaceDetailResponse = {
     detail: {
       ...response.detail,
       photos: [],
-      googlePhoto: {
-        source: "google",
-        id: `google:${providerPlaceId}:${photoFingerprint}`,
-        thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?photo=${photoFingerprint}&maxWidth=192`,
-        imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?photo=${photoFingerprint}&maxWidth=1024`,
-        width: 1200,
-        height: 800,
-        authors: [{ displayName: "攝影者甲", uri: "https://maps.google.com/contrib/example" }],
-        googleMapsUri: "https://maps.google.com/?cid=123",
-      },
+      googlePhotos,
     },
   };
   const googleRequest: PlaceDetailRequest = async <T,>(_path: string, init?: PlaceDetailRequestOptions) =>
     (init?.parse ? init.parse(googleResponse) : googleResponse) as T;
 
   render(<PlaceDetailContent tripId={tripId} reference={{ kind: "trip-place", id: referenceId }} request={googleRequest} />);
-  const image = await screen.findByAltText("測試景點的照片");
-  expect(image).toHaveAttribute("src", googleResponse.detail.googlePhoto!.imageUrl);
-  expect(screen.getByText("Google Maps", { exact: true })).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: /^攝影者甲$/ })).toHaveAttribute("href", "https://maps.google.com/contrib/example");
-  expect(screen.getByRole("link", { name: /^在 Google Maps 查看$/ })).toHaveAttribute("href", "https://maps.google.com/?cid=123");
+  const first = await screen.findByAltText("測試景點的照片，第 1 張，共 3 張");
+  const slides = Array.from(document.querySelectorAll<HTMLElement>("[data-photo-slide]"));
+  expect(first).toHaveAttribute("src", googlePhotos[0]!.imageUrl);
+  expect(slides).toHaveLength(3);
+  expect(slides[1]!.querySelector("img")).not.toBeInTheDocument();
+  expect(slides[2]!.querySelector("img")).not.toBeInTheDocument();
+  expect(observerRoot).toBe(document.querySelector(".place-gallery__track"));
+  expect(observedSlides).toEqual(slides.slice(1));
+  expect(screen.getByText("1／3")).toBeInTheDocument();
+  expect(document.querySelector(`[data-photo-credit="${googlePhotos[0]!.id}"]`)).toHaveTextContent("Google Maps・照片：攝影者甲");
 
-  fireEvent.error(image);
+  act(() => observerCallback?.([
+    { isIntersecting: true, target: slides[1]! } as unknown as IntersectionObserverEntry,
+  ], {} as IntersectionObserver));
+  const second = await screen.findByAltText("測試景點的照片，第 2 張，共 3 張");
+  expect(second).toHaveAttribute("src", googlePhotos[1]!.imageUrl);
+  expect(screen.getByText("1／3")).toBeInTheDocument();
+  expect(slides[2]!.querySelector("img")).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "下一張照片" }));
+  expect(screen.getByText("2／3")).toBeInTheDocument();
+  expect(document.querySelector(`[data-photo-credit="${googlePhotos[1]!.id}"]`)).toHaveTextContent("Google Maps・照片：攝影者乙");
+  expect(screen.getByRole("link", { name: /^在 Google Maps 查看$/ })).toHaveAttribute("href", googlePhotos[1]!.googleMapsUri);
+  expect(slides[2]!.querySelector("img")).not.toBeInTheDocument();
+
+  fireEvent.error(second);
   expect(await screen.findByText("照片載入失敗", { exact: true })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /^重新載入照片$/ }));
-  expect(screen.getByAltText("測試景點的照片")).toHaveAttribute("src", googleResponse.detail.googlePhoto!.imageUrl);
+  expect(screen.getByAltText("測試景點的照片，第 2 張，共 3 張")).toHaveAttribute("src", googlePhotos[1]!.imageUrl);
+
+  fireEvent.click(screen.getByRole("button", { name: "下一張照片" }));
+  expect(await screen.findByAltText("測試景點的照片，第 3 張，共 3 張")).toHaveAttribute("src", googlePhotos[2]!.imageUrl);
+  expect(screen.getByText("3／3")).toBeInTheDocument();
+  expect(document.querySelector(`[data-photo-credit="${googlePhotos[2]!.id}"]`)).toHaveTextContent("Google Maps・照片：攝影者丙");
 });
 
 it("shows a calm explicit empty state when neither curated nor Google photos exist", async () => {
   const emptyResponse: PlaceDetailResponse = {
-    detail: { ...response.detail, photos: [], googlePhoto: null },
+    detail: { ...response.detail, photos: [], googlePhotos: [] },
   };
   const emptyRequest: PlaceDetailRequest = async <T,>(_path: string, init?: PlaceDetailRequestOptions) =>
     (init?.parse ? init.parse(emptyResponse) : emptyResponse) as T;

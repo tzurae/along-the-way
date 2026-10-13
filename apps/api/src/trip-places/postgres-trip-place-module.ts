@@ -34,6 +34,7 @@ import {
 } from "../private-trips/postgres-private-trip-store";
 import {
   googlePlacePhotoDto,
+  googlePlacePhotoFingerprint,
   ProviderUnavailableError,
   type PlaceProvider,
   type ProviderPlaceCandidate,
@@ -484,16 +485,22 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       row.provider_place_id === null ? [] : [row.provider_place_id]));
     return candidates.map((candidate) => {
       const { providerPhoto, ...dto } = candidate;
+      if (!providerPhoto) return {
+        ...dto,
+        photo: null,
+        alreadyInWishlist: alreadyInWishlist.has(candidate.providerPlaceId),
+      };
+      const index = 0;
+      const fingerprint = googlePlacePhotoFingerprint(providerPhoto);
       return {
         ...dto,
-        photo: providerPhoto
-          ? googlePlacePhotoDto(
-              tripId,
-              candidate.providerPlaceId,
-              providerPhoto,
-              this.photoCapability?.issue(tripId, userId, candidate.providerPlaceId),
-            )
-          : null,
+        photo: googlePlacePhotoDto(
+          tripId,
+          candidate.providerPlaceId,
+          index,
+          providerPhoto,
+          this.photoCapability?.issue(tripId, userId, candidate.providerPlaceId, index, fingerprint),
+        ),
         alreadyInWishlist: alreadyInWishlist.has(candidate.providerPlaceId),
       };
     });
