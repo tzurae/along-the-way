@@ -8,6 +8,7 @@ import {
   CircleCheck,
   CloudOff,
   Images,
+  LoaderCircle,
   MapPin,
   MapPinOff,
   Pencil,
@@ -203,6 +204,7 @@ function AddPlacePanel({
   const [resultCount, setResultCount] = useState<number | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pendingProviderPlaceId, setPendingProviderPlaceId] = useState<string | null>(null);
   const retryKeys = useRef<RetryKeys>(new Map());
 
   async function discover(event: FormEvent) {
@@ -240,6 +242,7 @@ function AddPlacePanel({
 
   async function confirm(candidate: ProviderPlaceCandidateDto) {
     setBusy(true);
+    setPendingProviderPlaceId(candidate.providerPlaceId);
     setMessage("");
     const operation = `confirm:${candidate.providerPlaceId}`;
     const payload = {
@@ -264,6 +267,7 @@ function AddPlacePanel({
         : t.errors.selectionPreserved(errorMessage(error, t.errors.requestFailed)));
     } finally {
       setBusy(false);
+      setPendingProviderPlaceId(null);
     }
   }
 
@@ -309,6 +313,8 @@ function AddPlacePanel({
       setBusy(false);
     }
   }
+
+  const pendingCandidateName = candidates.find((candidate) => candidate.providerPlaceId === pendingProviderPlaceId)?.name ?? null;
 
   return (
     <PlaceDetailSheet open appearance="workspace" title={t.add.title} description={t.add.description} onClose={close}>
@@ -386,31 +392,44 @@ function AddPlacePanel({
           {resolvedUrl ? <p className="pd-add-intro break-all">{t.add.resolvedTo(resolvedUrl)}</p> : null}
           <p className="pd-add-intro">{t.add.resultsProvidedBy(attribution)}</p>
           <ul className="pd-result-list">
-            {candidates.map((candidate) => (
-              <li key={candidate.providerPlaceId}>
-                <PlaceThumbnail photo={candidate.photo} />
-                <span className="pd-result-copy">
-                  <span className="pd-result-title"><strong>{candidate.name}</strong>{candidate.typeLabel ? <span className="pd-result-type">· {candidate.typeLabel}</span> : null}</span>
-                  <small>{candidate.address ?? t.add.addressUnavailable}</small>
-                  <PlacePhotoCredit photo={candidate.photo} />
-                </span>
-                <button
-                  type="button"
-                  className="pd-primary pd-accent"
-                  disabled={busy || candidate.alreadyInWishlist}
-                  aria-label={candidate.alreadyInWishlist
-                    ? t.add.alreadyInWishlistCandidate(candidate.name, candidate.typeLabel)
-                    : t.add.addCandidate(candidate.name, candidate.typeLabel)}
-                  onClick={() => void confirm(candidate)}
-                >
-                  {candidate.alreadyInWishlist ? t.add.alreadyInWishlist : t.add.addThisPlace}
-                </button>
-              </li>
-            ))}
+            {candidates.map((candidate) => {
+              const isPending = pendingProviderPlaceId === candidate.providerPlaceId;
+              return (
+                <li key={candidate.providerPlaceId}>
+                  <PlaceThumbnail photo={candidate.photo} />
+                  <span className="pd-result-copy">
+                    <span className="pd-result-title"><strong>{candidate.name}</strong>{candidate.typeLabel ? <span className="pd-result-type">· {candidate.typeLabel}</span> : null}</span>
+                    <small>{candidate.address ?? t.add.addressUnavailable}</small>
+                    <PlacePhotoCredit photo={candidate.photo} />
+                  </span>
+                  <button
+                    type="button"
+                    className="pd-primary pd-accent"
+                    disabled={busy || candidate.alreadyInWishlist}
+                    aria-busy={isPending || undefined}
+                    aria-label={candidate.alreadyInWishlist
+                      ? t.add.alreadyInWishlistCandidate(candidate.name, candidate.typeLabel)
+                      : t.add.addCandidate(candidate.name, candidate.typeLabel)}
+                    onClick={() => void confirm(candidate)}
+                  >
+                    {candidate.alreadyInWishlist ? t.add.alreadyInWishlist : isPending ? (
+                      <>
+                        <LoaderCircle aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
+                        {t.add.adding}
+                      </>
+                    ) : t.add.addThisPlace}
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         </section>
       ) : null}
       {message ? <p className="pd-notice mt-4" role="alert">{message}</p> : null}
+      {/* The pressed button keeps its place name as accessible name, so progress is announced here. */}
+      <p className="sr-only" role="status" aria-atomic="true">
+        {pendingCandidateName ? t.add.addingCandidate(pendingCandidateName) : ""}
+      </p>
     </PlaceDetailSheet>
   );
 }

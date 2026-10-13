@@ -269,8 +269,8 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
   const selected = photos[selectedIndex]!;
   const selectedKey = `${selected.id}\u0000${selected.imageUrl}`;
   const selectedFailed = failed.has(selectedKey);
-  const sourceHref = selected.source === "curated" ? safeExternalUrl(selected.sourceUrl) : null;
-  const licenseHref = selected.source === "curated" ? safeExternalUrl(selected.licenseUrl) : null;
+  const sourceHref = selected.source !== "google" ? safeExternalUrl(selected.sourceUrl) : null;
+  const licenseHref = selected.source !== "google" ? safeExternalUrl(selected.licenseUrl) : null;
 
   function activate(photoId: string) {
     setActivation((current) => {
@@ -337,7 +337,7 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
               src={photo.imageUrl}
               width={photo.width}
               height={photo.height}
-              alt={photo.source === "curated"
+              alt={photo.source !== "google"
                 ? t.placeDetail.photoAlt(photo.title, index + 1, photos.length)
                 : t.placeDetail.googlePhotoAlt(placeName, index + 1, photos.length)}
               loading={index > 0 ? "lazy" : undefined}
@@ -352,7 +352,7 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
                   <p>{t.placeDetail.photoUnavailable}</p>
                   <button type="button" className="place-photo-retry" onClick={() => retryPhoto(photoKey)}>{t.placeDetail.reloadPhoto}</button>
                 </div>
-              ) : photo.source === "curated" ? (
+              ) : photo.source !== "google" ? (
                 <button type="button" className="place-gallery__image-button" tabIndex={index === selectedIndex ? 0 : -1} aria-label={t.placeDetail.openPhoto(photo.title)} onClick={() => { choose(index, false); setViewerOpen(true); }}>
                   {image}
                   {activated ? <span className="place-gallery__enlarge"><Maximize2 aria-hidden="true" className="size-4" />{t.placeDetail.photoInformation}</span> : null}
@@ -384,7 +384,7 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
           <button type="button" className="place-gallery__open" aria-label={t.placeDetail.photoInformationFor(selected.title)} onClick={() => setViewerOpen(true)}>{t.placeDetail.photoInformation}</button>
         </figcaption>
       )}
-      {selected.source === "curated" ? <PhotoViewer photo={selected} failed={selectedFailed} open={viewerOpen} onOpenChange={setViewerOpen} /> : null}
+      {selected.source !== "google" ? <PhotoViewer photo={selected} failed={selectedFailed} open={viewerOpen} onOpenChange={setViewerOpen} /> : null}
     </figure>
   );
 }

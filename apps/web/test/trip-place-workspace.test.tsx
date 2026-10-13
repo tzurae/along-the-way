@@ -141,7 +141,7 @@ it("reports result count, disables listed places, and clears stale search result
   fireEvent.change(within(dialog).getByLabelText("搜尋 Google Maps"), { target: { value: "清水寺" } });
   fireEvent.click(within(dialog).getByRole("button", { name: /^搜尋地點$/ }));
 
-  expect(await within(dialog).findByRole("status")).toHaveTextContent("找到 2 個地點");
+  expect(await within(dialog).findByText("找到 2 個地點")).toHaveAttribute("role", "status");
   expect(within(dialog).getByText("京都府京都市東山區", { exact: true })).toBeInTheDocument();
   expect(within(dialog).queryByText(/資料擷取於/)).not.toBeInTheDocument();
   expect(within(dialog).getByText("· 佛寺", { exact: true })).toBeInTheDocument();
@@ -151,9 +151,9 @@ it("reports result count, disables listed places, and clears stale search result
   fireEvent.change(within(dialog).getByLabelText("搜尋 Google Maps"), { target: { value: "伏見稻荷" } });
   fireEvent.click(within(dialog).getByRole("button", { name: /^搜尋地點$/ }));
   await waitFor(() => expect(within(dialog).queryByText("清水寺", { exact: true })).not.toBeInTheDocument());
-  expect(within(dialog).queryByRole("status")).not.toBeInTheDocument();
+  expect(within(dialog).queryByText(/^找到 \d+ 個地點$/)).not.toBeInTheDocument();
   await act(async () => settleSecond({ attribution: "Google Maps", candidates: [] }));
-  expect(await within(dialog).findByRole("status")).toHaveTextContent("找到 0 個地點");
+  expect(await within(dialog).findByText("找到 0 個地點")).toHaveAttribute("role", "status");
 });
 
 it("shows a zh-TW provider error instead of leaking the server's English message", async () => {
@@ -212,6 +212,57 @@ it("preserves search and note drafts when confirmation returns already_in_wishli
   expect(await within(dialog).findByRole("alert")).toHaveTextContent("這個地點已在口袋名單。");
   expect(query).toHaveValue("清水寺");
   expect(note).toHaveValue("家人想看夜間點燈");
+});
+
+it("shows progress only on the pending candidate and restores its label after failure", async () => {
+  const candidates: ProviderCandidatesResponse["candidates"] = [
+    {
+      provider: "google", providerPlaceId, name: "清水寺", type: "activity", typeLabel: "佛寺", address: "京都府京都市東山區", latitude: 34.9948, longitude: 135.785, timeZone: "Asia/Tokyo",
+      sourceUrl: "https://maps.google.com/?cid=1", attribution: "Google Maps", observedAt: "2026-10-12T00:00:00Z", expiresAt: "2026-11-11T00:00:00Z",
+      photo: null, alreadyInWishlist: false,
+    },
+    {
+      provider: "google", providerPlaceId: "ChIJSecondPlace123", name: "清水坂", type: "activity", typeLabel: "商店街", address: "京都府京都市東山區清水", latitude: 34.996, longitude: 135.78, timeZone: "Asia/Tokyo",
+      sourceUrl: "https://maps.google.com/?cid=2", attribution: "Google Maps", observedAt: "2026-10-12T00:00:00Z", expiresAt: "2026-11-11T00:00:00Z",
+      photo: null, alreadyInWishlist: false,
+    },
+  ];
+  let rejectAdd!: (reason?: unknown) => void;
+  const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
+    if (path.endsWith("/trip-places") && !init?.method) return { tripPlaces: [] } as T;
+    if (path.includes("/place-previews?")) return applyParser({ previews: [] }, init);
+    if (path.endsWith("/trip-places/search")) return { attribution: "Google Maps", candidates } as T;
+    if (path.endsWith("/trip-places") && init?.method === "POST") {
+      return new Promise<T>((_resolve, reject) => { rejectAdd = reject; });
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  };
+
+  render(<TripPlaceWorkspace trip={trip("owner")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  await screen.findByRole("heading", { name: /^口袋名單$/ });
+  fireEvent.click(screen.getByRole("button", { name: /^加入地點$/ }));
+  const dialog = await screen.findByRole("dialog", { name: /^加入地點$/ });
+  fireEvent.change(within(dialog).getByLabelText("搜尋 Google Maps"), { target: { value: "清水" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: /^搜尋地點$/ }));
+
+  const pendingButton = await within(dialog).findByRole("button", { name: /^新增這個地點：清水寺・佛寺$/ });
+  const otherButton = within(dialog).getByRole("button", { name: /^新增這個地點：清水坂・商店街$/ });
+  fireEvent.click(pendingButton);
+
+  expect(pendingButton).toHaveTextContent("新增中…");
+  expect(pendingButton).toHaveAttribute("aria-busy", "true");
+  expect(pendingButton).toBeDisabled();
+  expect(within(dialog).getByText("正在新增「清水寺」…")).toHaveAttribute("role", "status");
+  expect(otherButton).toHaveTextContent("新增這個地點");
+  expect(otherButton).not.toHaveAttribute("aria-busy");
+  expect(otherButton).toBeDisabled();
+
+  await act(async () => rejectAdd(new Error("photo lookup failed")));
+  await waitFor(() => expect(pendingButton).toHaveTextContent("新增這個地點"));
+  expect(pendingButton).not.toHaveAttribute("aria-busy");
+  expect(pendingButton).toBeEnabled();
+  expect(otherButton).toBeEnabled();
+  expect(within(dialog).queryByText("正在新增「清水寺」…")).not.toBeInTheDocument();
 });
 
 it("hides owner-only scheduling and scheduled removal while retaining editor collaboration", async () => {

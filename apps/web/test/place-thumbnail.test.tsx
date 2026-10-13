@@ -32,12 +32,17 @@ function googlePhoto(overrides: Partial<GooglePlacePhotoDto> = {}): GooglePlaceP
 
 afterEach(cleanup);
 
-it("renders a calm, wordless placeholder when no photo exists", () => {
+it("tells the reader a place has no photo instead of showing a blank box", () => {
   const { container } = render(<PlaceThumbnail photo={null} />);
-  expect(container.querySelector('[data-place-thumbnail="empty"]')).toBeInTheDocument();
   expect(container.querySelector("img")).not.toBeInTheDocument();
-  expect(container.querySelector("svg")).not.toBeInTheDocument();
-  expect(container.querySelector(".place-thumbnail__empty")?.textContent).toBe("");
+  expect(screen.getByRole("img", { name: "此地點目前沒有照片" })).toHaveTextContent("沒有照片");
+});
+
+it("says a photo failed to load rather than claiming the place has none", () => {
+  const { container } = render(<PlaceThumbnail photo={googlePhoto()} />);
+  fireEvent.error(container.querySelector("img")!);
+  expect(screen.getByRole("img", { name: "照片載入失敗" })).toHaveTextContent("載入失敗");
+  expect(screen.queryByRole("img", { name: "此地點目前沒有照片" })).not.toBeInTheDocument();
 });
 
 it("renders a reserved lazy Google thumbnail and policy attribution", () => {

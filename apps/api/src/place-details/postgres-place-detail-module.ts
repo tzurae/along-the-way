@@ -102,6 +102,10 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
           .where("place_id", "=", place!.canonicalPlaceId).executeTakeFirst()
       : undefined;
     if (!content) {
+      const commons = place!.canonicalPlaceId ? (await this.commonsPhotos([place!.canonicalPlaceId])).get(place!.canonicalPlaceId) : undefined;
+      if (commons) {
+        return { detail: { ...empty, photos: [this.photoDto(tripId, reference, commons, "commons")] }, googleFallbackFailed: false };
+      }
       const fallback = includeGooglePhoto
         ? await this.googlePhotos(tripId, place!.providerPlaceId)
         : { photos: [], failed: false };
@@ -121,7 +125,9 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
       || (date !== null && source.validFrom !== null && date < source.validFrom)
       || (date !== null && source.validUntil !== null && date > source.validUntil),
     ).map((source) => source.id));
-    const photos = curated.photos.map((photo) => this.photoDto(tripId, reference, photo));
+    const curatedPhotos = curated.photos.map((photo) => this.photoDto(tripId, reference, photo, "curated"));
+    const commons = curatedPhotos.length === 0 ? (await this.commonsPhotos([place!.canonicalPlaceId!])).get(place!.canonicalPlaceId!) : undefined;
+    const photos = commons ? [this.photoDto(tripId, reference, commons, "commons")] : curatedPhotos;
     const fallback = photos.length === 0 && includeGooglePhoto
       ? await this.googlePhotos(tripId, place!.providerPlaceId)
       : null;
@@ -163,15 +169,18 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
       photo: parseCuratedPhoto(row.metadata),
       photoCount: row.photo_count,
     }]));
+    const commonsByPlace = await this.commonsPhotos(canonicalIds.filter((id) => !byPlace.has(id)));
     let googleFallbackFailed = false;
     const previews = await mapWithConcurrency(places, 4, async (place) => {
       const reference = { kind, id: place.id };
       const curated = place.canonicalPlaceId ? byPlace.get(place.canonicalPlaceId) : undefined;
       if (curated) return {
         reference,
-        photo: this.photoDto(tripId, reference, curated.photo),
+        photo: this.photoDto(tripId, reference, curated.photo, "curated"),
         photoCount: curated.photoCount,
       };
+      const commons = place.canonicalPlaceId ? commonsByPlace.get(place.canonicalPlaceId) : undefined;
+      if (commons) return { reference, photo: this.photoDto(tripId, reference, commons, "commons"), photoCount: 1 };
       const fallback = includeGooglePhoto
         ? await this.googlePhotos(tripId, place.providerPlaceId)
         : { photos: [], failed: false };
@@ -195,7 +204,7 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
       .where("place_id", "=", place!.canonicalPlaceId)
       .where((eb) => eb.or([eb("image_filename", "=", filename), eb("thumbnail_filename", "=", filename)]))
       .executeTakeFirst();
-    if (!row) throw new AppError("place_not_found", "Photo not found", 404);
+    if (!row) return this.commonsPhotoAsset(place!.canonicalPlaceId, filename);
     const photo = parseCuratedPhoto(row.metadata);
     const asset = photo.image.filename === filename ? photo.image : photo.thumbnail;
     try {
@@ -205,6 +214,19 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") throw new AppError("place_not_found", "Photo not found", 404);
       throw error;
     }
+  }
+
+  /** Stored bytes of a Commons representative photo; the filename must belong to this place's own photo. */
+  private async commonsPhotoAsset(placeId: string, filename: string) {
+    const owned = await this.database.selectFrom("commons_place_photos").select("place_id")
+      .where("place_id", "=", placeId)
+      .where((eb) => eb.or([eb("image_filename", "=", filename), eb("thumbnail_filename", "=", filename)]))
+      .executeTakeFirst();
+    const blob = owned
+      ? await this.database.selectFrom("place_photo_blobs").select(["bytes", "media_type"]).where("filename", "=", filename).executeTakeFirst()
+      : undefined;
+    if (!blob) throw new AppError("place_not_found", "Photo not found", 404);
+    return { bytes: new Uint8Array(blob.bytes), mediaType: blob.media_type };
   }
 
   async getGooglePhoto(
@@ -343,11 +365,19 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
     }
   }
 
-  private photoDto(tripId: string, reference: PlaceDetailReference, photo: CuratedPhotoInput): PlacePhotoDto {
+  /** Commons representative photos per canonical place; parsed so malformed stored data fails loudly. */
+  private async commonsPhotos(placeIds: string[]): Promise<Map<string, CuratedPhotoInput>> {
+    if (placeIds.length === 0) return new Map();
+    const rows = await this.database.selectFrom("commons_place_photos").select(["place_id", "metadata"])
+      .where("place_id", "in", placeIds).execute();
+    return new Map(rows.map((row) => [row.place_id, parseCuratedPhoto(row.metadata)]));
+  }
+
+  private photoDto(tripId: string, reference: PlaceDetailReference, photo: CuratedPhotoInput, source: PlacePhotoDto["source"]): PlacePhotoDto {
     const { image, thumbnail, ...metadata } = photo;
     const suffix = `?kind=${reference.kind}&id=${reference.id}`;
     const prefix = `/api/trips/${tripId}/place-photo-assets/`;
-    return { source: "curated", ...metadata, imageUrl: prefix + image.filename + suffix, thumbnailUrl: prefix + thumbnail.filename + suffix,
+    return { source, ...metadata, imageUrl: prefix + image.filename + suffix, thumbnailUrl: prefix + thumbnail.filename + suffix,
       width: image.width, height: image.height };
   }
 }

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { ImageOff } from "lucide-react";
 
 import {
   parsePlacePreviewResponse,
@@ -9,6 +10,7 @@ import {
   type PlacePreviewResponse,
 } from "@along-the-way/contracts/place-details";
 import { safeExternalUrl } from "./external-url";
+import { useI18n } from "./i18n";
 import "./place-detail.css";
 
 export interface PlaceDetailRequestOptions extends RequestInit {
@@ -102,6 +104,7 @@ export function PlaceThumbnail({ photo, photoCount = photo ? 1 : 0, loading = fa
     setFailure({ photoKey, failed: false });
   }
   const failed = failure.photoKey === photoKey && failure.failed;
+  const { t } = useI18n();
 
   return (
     <span
@@ -126,7 +129,13 @@ export function PlaceThumbnail({ photo, photoCount = photo ? 1 : 0, loading = fa
           <span aria-hidden="true">+{photoCount - 1}</span>
         </span>
       ) : null}
-      {!loading && (!photo || failed) ? <span className="place-thumbnail__empty" /> : null}
+      {!loading && (!photo || failed) ? (
+        // `null` means the place has no photo; `undefined` or a broken image means it failed to load.
+        <span className="place-thumbnail__empty" role="img" aria-label={photo === null ? t.placeDetail.noPhoto : t.placeDetail.photoUnavailable}>
+          <ImageOff aria-hidden="true" className="place-thumbnail__empty-icon" />
+          <span aria-hidden="true">{photo === null ? t.placeDetail.noPhotoShort : t.placeDetail.photoUnavailableShort}</span>
+        </span>
+      ) : null}
     </span>
   );
 }

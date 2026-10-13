@@ -63,7 +63,8 @@ export interface PlacePhotoMetadata {
 }
 
 export interface PlacePhotoDto extends PlacePhotoMetadata {
-  source: "curated";
+  /** `curated`: operator-reviewed packaged work. `commons`: Wikidata's representative image, matched by Google CID at intake. */
+  source: "curated" | "commons";
   imageUrl: string;
   thumbnailUrl: string;
   width: number;
@@ -361,15 +362,19 @@ function assetUrl(value: unknown): string {
 
 function photoDto(value: unknown): PlacePhotoDto {
   const item = record(value, "photo", ["source", ...photoKeys, "imageUrl", "thumbnailUrl", "width", "height"]);
-  if (item.source !== "curated") return invalid("curated photo source");
+  if (item.source !== "curated" && item.source !== "commons") return invalid("licensed photo source");
   return {
-    source: "curated",
+    source: item.source,
     ...photoMetadata(item),
     imageUrl: assetUrl(item.imageUrl),
     thumbnailUrl: assetUrl(item.thumbnailUrl),
     width: dimension(item.width),
     height: dimension(item.height),
   };
+}
+
+function isLicensedPhotoSource(value: unknown) {
+  return value === "curated" || value === "commons";
 }
 
 function googlePhotoUrl(value: unknown, field: string, maxWidth: 192 | 1024) {
@@ -467,11 +472,11 @@ export function parsePlacePreviewResponse(value: unknown): PlacePreviewResponse 
     const item = record(value, "preview", ["reference", "photo", "photoCount"]);
     const photo = nullable(item.photo, (value) => {
       const photo = record(value, "photo", ["source", ...(
-        (value as Record<string, unknown>).source === "curated"
+        isLicensedPhotoSource((value as Record<string, unknown>).source)
           ? [...photoKeys, "imageUrl", "thumbnailUrl", "width", "height"]
           : ["id", "index", "thumbnailUrl", "imageUrl", "width", "height", "authors", "googleMapsUri"]
       )]);
-      return photo.source === "curated" ? photoDto(photo) : parseGooglePlacePhoto(photo);
+      return isLicensedPhotoSource(photo.source) ? photoDto(photo) : parseGooglePlacePhoto(photo);
     });
     const photoCount = item.photoCount;
     if (!Number.isInteger(photoCount) || typeof photoCount !== "number" || photoCount < 0 || photoCount > 3

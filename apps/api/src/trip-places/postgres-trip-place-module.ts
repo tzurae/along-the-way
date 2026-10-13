@@ -49,6 +49,7 @@ import {
   type GoogleMapsUrlResolverDependencies,
 } from "./safe-google-maps-url";
 import type { TripPlaceModule } from "./trip-place-module";
+import type { PreparedCommonsPhoto, RepresentativePhotoSource } from "../place-details/commons-place-photos";
 
 interface ModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
@@ -56,6 +57,8 @@ interface ModuleOptions {
   urlResolver?: GoogleMapsUrlResolverDependencies;
   now?: () => Date;
   photoCapabilitySecret?: string;
+  /** Looks up a freely licensed representative photo once, when a Google place is added. */
+  commonsPhotos?: RepresentativePhotoSource;
 }
 
 interface ManualPlaceFacts {
@@ -293,6 +296,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
   private readonly urlResolver: GoogleMapsUrlResolverDependencies;
   private readonly now: () => Date;
   private readonly photoCapability: GooglePhotoCapability | undefined;
+  private readonly commonsPhotos: RepresentativePhotoSource | undefined;
 
   constructor(options: ModuleOptions) {
     this.database = options.database;
@@ -303,6 +307,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     this.photoCapability = options.photoCapabilitySecret
       ? new GooglePhotoCapability(options.photoCapabilitySecret, this.now)
       : undefined;
+    this.commonsPhotos = options.commonsPhotos;
   }
 
   async list(userId: string, tripId: string) {
@@ -394,6 +399,8 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
 
     let loadCandidate: (() => Promise<ProviderPlaceCandidateDto>) | null = null;
     let manual: ManualPlaceFacts | null = null;
+    // A holder, not a `let`: values are assigned inside a callback, which flow analysis does not follow.
+    const intake: { candidate: ProviderPlaceCandidateDto | null; photo: PreparedCommonsPhoto | null } = { candidate: null, photo: null };
     if (input.method === "manual") {
       const point = coordinates(input.latitude, input.longitude);
       manual = {
@@ -418,11 +425,17 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       const options = await this.googleRequestOptions(tripId);
       loadCandidate = async () => {
         try {
-          return await this.provider.getPlace(providerPlaceId, options);
+          intake.candidate = await this.provider.getPlace(providerPlaceId, options);
         } catch (error) {
           if (error instanceof TypeError || error instanceof ProviderUnavailableError) throw error;
           throw new ProviderUnavailableError();
         }
+        // Only a fresh Google intake reaches here; replays and manual places skip the lookup.
+        // Wikimedia failures resolve to null and leave the place on the Google photo fallback.
+        if (this.commonsPhotos && !(await this.hasCommonsPhoto(intake.candidate.providerPlaceId))) {
+          intake.photo = await this.commonsPhotos.prepare(intake.candidate.sourceUrl);
+        }
+        return intake.candidate;
       };
     }
     const requestedSourceUrl = optionalUrl(input.sourceUrl);
@@ -440,6 +453,10 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         requestedSourceUrl,
         originalNote,
         true,
+        // Same transaction as the place: no reader sees it before its photo exists.
+        async (transaction, placeIdentityId) => {
+          if (intake.photo && this.commonsPhotos) await this.commonsPhotos.store(transaction, placeIdentityId, intake.photo);
+        },
       );
     } catch (error) {
       if (input.method !== "manual" && error instanceof TypeError) {
@@ -451,6 +468,15 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       }
       throw error;
     }
+  }
+
+  private async hasCommonsPhoto(providerPlaceId: string) {
+    return Boolean(await this.database.selectFrom("place_identities as identity")
+      .innerJoin("commons_place_photos as photo", "photo.place_id", "identity.id")
+      .select("identity.id")
+      .where("identity.provider", "=", "google")
+      .where("identity.provider_place_id", "=", providerPlaceId)
+      .executeTakeFirst());
   }
 
   private async googleRequestOptions(tripId: string) {
@@ -530,6 +556,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     requestedSourceUrl: string | null,
     originalNote: string | null,
     refuseActiveProviderDuplicate: boolean,
+    beforeCommit?: (transaction: Transaction<AlongTheWayDatabase>, placeIdentityId: string) => Promise<void>,
   ) {
     return this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
@@ -545,6 +572,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         sourceUrl, originalNote, refuseActiveProviderDuplicate,
       );
       const response = await this.readOne(transaction, userId, tripId, tripPlaceId);
+      await beforeCommit?.(transaction, response.placeId);
       await remember(transaction, userId, operation, key, response);
       return response;
     });

@@ -53,6 +53,7 @@ export const tripPlaces = {
     reasonHelp: "家人會在清單上看到這句，用來決定要不要投讚。",
     locationAndSource: "位置與來源（選填）",
     adding: "新增中…",
+    addingCandidate: (name: string) => `正在新增「${name}」…`,
     addManualPlace: "手動新增地點",
     googleMapsUrl: "Google Maps 完整連結或 maps.app.goo.gl 連結",
     searchGoogleMaps: "搜尋 Google Maps",
