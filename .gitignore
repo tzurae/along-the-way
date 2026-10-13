@@ -5,6 +5,4 @@ apps/web/dist/
 .env.*
 !.env.example
 coverage/
-playwright-report/
-test-results/
 *.log
