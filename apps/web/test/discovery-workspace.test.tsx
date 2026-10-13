@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import { DiscoveryWorkspace } from "../src/DiscoveryWorkspace";
@@ -66,7 +66,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("shows the AI description and renders proposals through the shared place-card anatomy", async () => {
+it("renders proposal behavior in the compact shared row without exposing the address", async () => {
   const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
     let value: unknown;
     if (path.endsWith("/discovery")) {
@@ -94,17 +94,78 @@ it("shows the AI description and renders proposals through the shared place-card
   const headingCopy = heading.closest(".pd-pagehead-copy")!;
   expect(within(headingCopy as HTMLElement).getByText("只要說明一次旅程需求，AI 就會研究可信來源、在 Google Maps 確認每個地點，並只顯示至少有兩個獨立來源推薦的地點。", { exact: true })).toBeInTheDocument();
 
-  const card = await waitFor(() => {
-    const element = container.querySelector<HTMLElement>('[data-place-card][data-discovery-proposal="錦市場"]');
+  const row = await waitFor(() => {
+    const element = container.querySelector<HTMLElement>('[data-place-list-row][data-discovery-proposal="錦市場"]');
     expect(element).not.toBeNull();
     return element!;
   });
-  expect(card.querySelector(".list-place-card__location")).toHaveTextContent("地址未知");
-  expect(card.querySelector(".list-place-card__description")).toHaveTextContent("適合安排成輕鬆的市場散步。");
-  expect(card.querySelectorAll(".pd-vote-control")).toHaveLength(1);
-  expect([...card.querySelector(".list-place-card__actions")!.children].map((child) => child.className)).toEqual([
-    "list-place-card__vote",
-    "list-place-card__wishlist-action",
-  ]);
-  expect(within(card).getByRole("button", { name: "加入口袋名單" })).toBeVisible();
+  expect(row).toHaveTextContent("適合安排成輕鬆的市場散步。");
+  expect(row).toHaveTextContent("來源未逐句對應");
+  expect(row).toHaveTextContent("待討論");
+  expect(row).not.toHaveTextContent("地址未知");
+  expect(row.querySelectorAll(".pd-vote-control")).toHaveLength(1);
+  expect(within(row).getByRole("button", { name: "不要再推薦" })).toBeVisible();
+  expect(within(row).getByRole("button", { name: "加入口袋名單" })).toBeVisible();
+});
+
+it("orders accepted proposal detail and shows its wishlist items read-only with a deep link", async () => {
+  const acceptedPlaceId = "66666666-6666-4666-8666-666666666666";
+  const accepted = { ...proposal, status: "accepted", acceptedTripPlaceId: acceptedPlaceId };
+  const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
+    let value: unknown;
+    if (path.endsWith("/discovery")) {
+      value = { discovery: {
+        brief: null,
+        latestRun: null,
+        proposals: [accepted],
+        decided: [],
+        feedback: [],
+        modelAvailable: true,
+        placeProviderAvailable: true,
+      } };
+    } else if (path.endsWith("/trip-places")) {
+      value = { tripPlaces: [] };
+    } else if (path.includes("/place-previews?")) {
+      value = { previews: [{ reference: { kind: "proposal", id: proposal.id }, photo: null, photoCount: 0 }] };
+    } else if (path.includes("/place-details?")) {
+      value = { detail: {
+        reference: { kind: "proposal", id: proposal.id },
+        canonicalPlaceId: null,
+        name: proposal.name,
+        asOfDate: null,
+        sections: [],
+        sources: [],
+        photos: [],
+        googlePhotos: [],
+      } };
+    } else if (path.endsWith(`/${acceptedPlaceId}/must-items`)) {
+      value = { items: [{
+        id: "77777777-7777-4777-8777-777777777777",
+        tripPlaceId: acceptedPlaceId,
+        kind: "eat",
+        label: "豆乳甜甜圈",
+        version: 1,
+        createdAt: "2026-10-14T00:00:00.000Z",
+        updatedAt: "2026-10-14T00:00:00.000Z",
+      }] };
+    } else {
+      throw new Error(`Unexpected request: ${path}`);
+    }
+    return (init?.parse ? init.parse(value) : value) as T;
+  };
+
+  render(<DiscoveryWorkspace trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "查看 錦市場 的詳情" }));
+  const detail = await screen.findByRole("dialog", { name: "錦市場" });
+  expect(await within(detail).findByText("豆乳甜甜圈")).toBeInTheDocument();
+  expect(within(detail).queryByRole("button", { name: "編輯『豆乳甜甜圈』" })).not.toBeInTheDocument();
+  const wishlist = within(detail).getByRole("link", { name: "到口袋名單查看或新增" });
+  expect(wishlist).toHaveAttribute("href", expect.stringContaining(`place=${acceptedPlaceId}`));
+
+  const headings = within(detail).getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent);
+  expect(headings).toEqual(expect.arrayContaining(["推薦重點", "必買／必吃／必喝", "需要注意", "地點", "佐證與景點資訊"]));
+  expect(headings.indexOf("推薦重點")).toBeLessThan(headings.indexOf("必買／必吃／必喝"));
+  expect(headings.indexOf("必買／必吃／必喝")).toBeLessThan(headings.indexOf("需要注意"));
+  expect(headings.indexOf("需要注意")).toBeLessThan(headings.indexOf("地點"));
+  expect(headings.indexOf("地點")).toBeLessThan(headings.indexOf("佐證與景點資訊"));
 });

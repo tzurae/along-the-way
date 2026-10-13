@@ -2,7 +2,7 @@
 import { afterEach, expect, it } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import type { GooglePlacePhotoDto, PlacePreviewResponse } from "@along-the-way/contracts/place-details";
+import type { GooglePlacePhotoDto, PlacePhotoDto, PlacePreviewResponse } from "@along-the-way/contracts/place-details";
 import {
   PlacePhotoCredit,
   PlaceThumbnail,
@@ -29,6 +29,32 @@ function googlePhoto(overrides: Partial<GooglePlacePhotoDto> = {}): GooglePlaceP
     ...overrides,
   };
 }
+const commonsPhoto: PlacePhotoDto = {
+  source: "commons",
+  id: "commons:example",
+  title: "測試作品",
+  description: "測試照片",
+  sourceName: "Wikimedia Commons",
+  sourceUrl: "https://commons.wikimedia.org/wiki/File:Example.jpg",
+  fileSourceUrl: "https://upload.wikimedia.org/example.jpg",
+  author: "攝影者乙",
+  authorUrl: "https://commons.wikimedia.org/wiki/User:Example",
+  creditText: "測試作品，攝影者乙",
+  licenseName: "Creative Commons Zero, Public Domain Dedication",
+  licenseUrl: "https://creativecommons.org/publicdomain/zero/1.0/",
+  capturedAt: null,
+  checkedAt: "2026-10-09T12:00:00Z",
+  verificationUrl: "https://commons.wikimedia.org/wiki/File:Example.jpg",
+  locationEvidence: "作品頁標示地點。",
+  changes: "預覽裁切。",
+  notices: [],
+  originalWidth: 1600,
+  originalHeight: 1200,
+  imageUrl: "/image.jpg",
+  thumbnailUrl: "/thumbnail.jpg",
+  width: 1200,
+  height: 900,
+};
 
 afterEach(cleanup);
 
@@ -45,7 +71,7 @@ it("says a photo failed to load rather than claiming the place has none", () => 
   expect(screen.queryByRole("img", { name: "此地點目前沒有照片" })).not.toBeInTheDocument();
 });
 
-it("renders a reserved lazy Google thumbnail and policy attribution", () => {
+it("renders a reserved lazy Google thumbnail and the complete compact credit", () => {
   const photo = googlePhoto();
   const { container } = render(<><PlaceThumbnail photo={photo} /><PlacePhotoCredit photo={photo} /></>);
   const image = container.querySelector("img");
@@ -55,11 +81,28 @@ it("renders a reserved lazy Google thumbnail and policy attribution", () => {
   expect(image).toHaveAttribute("loading", "lazy");
   expect(image).toHaveAttribute("decoding", "async");
   expect(image).toHaveAttribute("alt", "");
-  expect(screen.getByText("Google Maps", { exact: true })).toBeInTheDocument();
-  expect(container.querySelector(".place-photo-credit--google")).toHaveTextContent("Google Maps・照片：攝影者甲");
-  expect(screen.getByRole("link", { name: /^攝影者甲$/ })).toHaveAttribute("href", "https://maps.google.com/contrib/example");
-  expect(screen.getByRole("link", { name: /^在 Google Maps 查看$/ })).toHaveAttribute("href", "https://maps.google.com/?cid=123");
+  const credit = container.querySelector(".place-photo-credit");
+  expect(credit).toHaveTextContent("Google Maps・攝影者甲");
+  expect(credit).not.toHaveTextContent("照片：");
+  expect(screen.getByRole("link", { name: "攝影者甲" })).toHaveAttribute("href", photo.authors[0]!.uri);
 });
+it("derives concise Creative Commons labels from canonical licence URLs", () => {
+  const { container, rerender } = render(<PlacePhotoCredit photo={commonsPhoto} />);
+  const credit = () => container.querySelector(".place-photo-credit");
+  expect(credit()).toHaveTextContent("攝影者乙・CC0 1.0");
+  expect(screen.getByRole("link", { name: "攝影者乙" })).toHaveAttribute("href", commonsPhoto.authorUrl);
+  expect(screen.getByRole("link", { name: "CC0 1.0" })).toHaveAttribute("href", commonsPhoto.licenseUrl);
+
+  rerender(<PlacePhotoCredit photo={{ ...commonsPhoto, licenseUrl: "http://creativecommons.org/licenses/by/3.0/deed.zh_TW" }} />);
+  expect(credit()).toHaveTextContent("攝影者乙・CC BY 3.0");
+
+  rerender(<PlacePhotoCredit photo={{ ...commonsPhoto, licenseUrl: "https://creativecommons.org/licenses/by-sa/4.0/deed.en" }} />);
+  expect(credit()).toHaveTextContent("攝影者乙・CC BY-SA 4.0");
+
+  rerender(<PlacePhotoCredit photo={{ ...commonsPhoto, licenseName: "自訂授權", licenseUrl: "https://example.test/licence" }} />);
+  expect(credit()).toHaveTextContent("攝影者乙・自訂授權");
+});
+
 
 it("shows one image and an accessible capped count badge only for multiple photos", () => {
   const photo = googlePhoto();

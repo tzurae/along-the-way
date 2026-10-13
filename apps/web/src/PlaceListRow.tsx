@@ -3,19 +3,21 @@ import type { ReactNode } from "react";
 import { PlaceThumbnail, type PlaceDisplayPhoto } from "./PlaceThumbnail";
 import "./list-place-card.css";
 
-export interface PlaceCardProps {
+export interface PlaceListRowProps {
+  variant: "wishlist" | "proposal";
   name: string;
   typeLabel: string;
-  location: string;
-  description: ReactNode;
+  stateLabel?: string;
+  secondary?: ReactNode;
   status?: ReactNode;
+  evidence?: ReactNode;
+  caution?: ReactNode;
   photo: PlaceDisplayPhoto | null | undefined;
   photoCount: number;
   loadingPhoto?: boolean;
   photoCredit?: ReactNode;
   voteAction?: ReactNode;
-  ownerActions?: ReactNode;
-  wishlistAction?: ReactNode;
+  rowActions?: ReactNode;
   selectionControl?: ReactNode;
   ariaLabel?: string;
   current?: boolean;
@@ -38,19 +40,21 @@ export interface PlaceCardProps {
   };
 }
 
-export function PlaceCard({
+export function PlaceListRow({
+  variant,
   name,
   typeLabel,
-  location,
-  description,
+  stateLabel,
+  secondary,
   status,
+  evidence,
+  caution,
   photo,
   photoCount,
   loadingPhoto = false,
   photoCredit,
   voteAction,
-  ownerActions,
-  wishlistAction,
+  rowActions,
   selectionControl,
   ariaLabel,
   current = false,
@@ -62,7 +66,7 @@ export function PlaceCard({
   openLabel,
   openDataAttribute,
   dataAttribute,
-}: PlaceCardProps) {
+}: PlaceListRowProps) {
   const dataProps = dataAttribute.name === "wishlist-place"
     ? { "data-wishlist-place": dataAttribute.value }
     : { "data-discovery-proposal": dataAttribute.value };
@@ -73,15 +77,16 @@ export function PlaceCard({
       : {};
   const selecting = state !== "default";
   const stateClassName = [
-    `list-place-card--${state}`,
-    scheduled ? "list-place-card--scheduled" : "",
-    changed ? "list-place-card--changed" : "",
+    `list-place-row--${variant}`,
+    `list-place-row--${state}`,
+    scheduled ? "list-place-row--scheduled" : "",
+    changed ? "list-place-row--changed" : "",
   ].filter(Boolean).join(" ");
 
   return (
     <article
-      className={`list-place-card ${stateClassName}`}
-      data-place-card=""
+      className={`list-place-row ${stateClassName}`}
+      data-place-list-row=""
       aria-label={ariaLabel}
       aria-current={current ? "true" : undefined}
       onClick={(event) => {
@@ -90,29 +95,36 @@ export function PlaceCard({
       }}
       {...dataProps}
     >
-      {selectionControl ? <div className="list-place-card__selection">{selectionControl}</div> : null}
-      <div className="list-place-card__media">
+      {selectionControl ? <div className="list-place-row__selection">{selectionControl}</div> : null}
+      <div className="list-place-row__media">
         <PlaceThumbnail photo={photo} photoCount={photoCount} loading={loadingPhoto} />
       </div>
-      <div className="list-place-card__body">
-        <div className="list-place-card__heading">
+      <div className="list-place-row__body">
+        <div className="list-place-row__heading">
           {selecting
-            ? <span className="list-place-card__title">{name}</span>
-            : <button type="button" className="list-place-card__title" aria-label={openLabel} onClick={onOpen} {...openDataProps}>{name}</button>}
+            ? <span className="list-place-row__title">{name}</span>
+            : <button type="button" className="list-place-row__title" aria-label={openLabel} onClick={onOpen} {...openDataProps}>{name}</button>}
+          <span className="list-place-row__type">{typeLabel}</span>
+          {stateLabel ? <span className="list-place-row__state">{stateLabel}</span> : null}
         </div>
-        <div className="list-place-card__identity">
-          <span className="list-place-card__type">{typeLabel}</span>
-          <div className="list-place-card__location">{location}</div>
-        </div>
-        <div className="list-place-card__description">{description}</div>
-        {status ? <div className="list-place-card__status">{status}</div> : null}
-        {photo && photoCredit ? <div className="list-place-card__credit">{photoCredit}</div> : null}
-        <footer className="list-place-card__actions">
-          {voteAction ? <div className="list-place-card__vote">{voteAction}</div> : null}
-          {ownerActions ? <div className="list-place-card__owner-actions">{ownerActions}</div> : null}
-          {wishlistAction ? <div className="list-place-card__wishlist-action">{wishlistAction}</div> : null}
-        </footer>
+        {secondary ? <div className="list-place-row__secondary">{secondary}</div> : null}
+        {status ? <div className="list-place-row__status list-place-row__status--mobile">{status}</div> : null}
+        {evidence ? <div className="list-place-row__evidence">{evidence}</div> : null}
+        {caution ? <div className="list-place-row__caution">{caution}</div> : null}
+        {photo && photoCredit ? <div className="list-place-row__credit">{photoCredit}</div> : null}
       </div>
+        {variant === "proposal" && (voteAction || rowActions) ? (
+          <footer className="list-place-row__actions">
+            {voteAction ? <div className="list-place-row__vote">{voteAction}</div> : null}
+            {rowActions ? <div className="list-place-row__row-actions">{rowActions}</div> : null}
+          </footer>
+        ) : null}
+      {variant === "wishlist" && (status || voteAction) ? (
+        <aside className="list-place-row__aside">
+          {status ? <div className="list-place-row__status list-place-row__status--desktop">{status}</div> : null}
+          {voteAction ? <div className="list-place-row__vote">{voteAction}</div> : null}
+        </aside>
+      ) : null}
     </article>
   );
 }

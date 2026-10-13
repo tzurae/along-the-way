@@ -35,8 +35,9 @@ import { useI18n, type Messages } from "./i18n";
 import { VoteControl, VoteVoters } from "./VoteControl";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews } from "./PlaceThumbnail";
-import { PlaceCard } from "./PlaceCard";
+import { PlaceListRow } from "./PlaceListRow";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
+import { PlaceMustItems, type PlaceMustItemsHandle } from "./PlaceMustItems";
 import { NativeSelect } from "./components/ui/native-select";
 import { SchedulePlacesSheet } from "./SchedulePlacesSheet";
 import { SelectionBar } from "./SelectionBar";
@@ -456,64 +457,35 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
   const { t: { tripPlaces: t } } = useI18n();
   const [base, setBase] = useState<EditSnapshot<PlanningInput>>({ input: planningValues(place), version: place.version });
   const [draft, setDraft] = useState(base.input);
-  const [reasonEditing, setReasonEditing] = useState(false);
-  const [planningDirty, setPlanningDirty] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [reasonMessage, setReasonMessage] = useState("");
-  const [planningMessage, setPlanningMessage] = useState("");
-  const [conflictOwner, setConflictOwner] = useState<"reason" | "planning" | null>(null);
+  const [message, setMessage] = useState("");
   const resolution = useVersionConflict<PlanningInput>();
   const retryKeys = useRef<RetryKeys>(new Map());
-  const conflict = useMemo(() => available ? resolution.conflict : {
-    base, current: null, attempted: draft, latestChange: null,
-  }, [available, resolution.conflict, base, draft]);
 
   useEffect(() => {
-    if (!reasonEditing && !planningDirty && !resolution.conflict && place.version > base.version) {
+    if (!editing && !resolution.conflict && place.version > base.version) {
       const snapshot = { input: planningValues(place), version: place.version };
       setBase(snapshot);
       setDraft(snapshot.input);
     }
-  }, [place, reasonEditing, planningDirty, resolution.conflict, base.version]);
+  }, [place, editing, resolution.conflict, base.version]);
 
-  function finishOwnerEdit(owner: "reason" | "planning", next = base) {
-    if (next !== base) setBase(next);
-    setDraft((current) => {
-      if (owner === "reason") {
-        return planningDirty
-          ? { ...current, notes: next.input.notes }
-          : next.input;
-      }
-      return reasonEditing
-        ? { ...next.input, notes: current.notes }
-        : next.input;
-    });
-    if (owner === "reason") setReasonEditing(false);
-    else setPlanningDirty(false);
-    setConflictOwner(null);
-    editingChanged(owner === "reason" ? planningDirty : reasonEditing);
+  function finish(next: EditSnapshot<PlanningInput>) {
+    setBase(next);
+    setDraft(next.input);
+    setEditing(false);
+    setMessage("");
+    resolution.clear();
+    editingChanged(false);
   }
 
-  function inputForOwner(owner: "reason" | "planning") {
-    if (owner === "reason") {
-      return { ...base.input, notes: draft.notes?.trim() || null };
-    }
-    return {
-      ...base.input,
-      durationMinutes: draft.durationMinutes,
-      budgetAmountMinor: draft.budgetAmountMinor,
-      budgetCurrency: draft.budgetCurrency,
-    };
-  }
-
-  async function save(owner: "reason" | "planning", attempted?: PlanningInput, version = base.version, conflictBase = resolution.conflictBaseVersion) {
-    const normalized = attempted ?? inputForOwner(owner);
-    const setOwnerMessage = owner === "reason" ? setReasonMessage : setPlanningMessage;
-    setOwnerMessage("");
-    setBusy(true);
-    setConflictOwner(owner);
+  async function save(attempted?: PlanningInput, version = base.version, conflictBase = resolution.conflictBaseVersion) {
+    const normalized = attempted ?? { ...base.input, notes: draft.notes?.trim() || null };
     const operation = `planning:${place.id}`;
     const payload = { ...normalized, expectedVersion: version };
+    setMessage("");
+    setBusy(true);
     try {
       const response = await request<{ tripPlace: TripPlaceDto }>(`/api/trips/${tripId}/trip-places/${place.id}/planning`, {
         method: "PATCH",
@@ -522,9 +494,7 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
         parse: parseTripPlaceResponse,
       });
       clearRetryKey(retryKeys.current, operation);
-      resolution.clear();
-      finishOwnerEdit(owner, { input: planningValues(response.tripPlace), version: response.tripPlace.version });
-      if (owner === "planning") setPlanningMessage(t.planning.saved);
+      finish({ input: planningValues(response.tripPlace), version: response.tripPlace.version });
       await changed();
     } catch (error) {
       try {
@@ -540,120 +510,75 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
           editingChanged(true);
           return;
         }
-        setOwnerMessage(t.errors.editsPreserved(errorMessage(error, t.errors.requestFailed)));
+        setMessage(t.errors.editsPreserved(errorMessage(error, t.errors.requestFailed)));
       } catch (reason) {
-        setOwnerMessage(t.errors.editsPreserved(errorMessage(reason, t.errors.requestFailed)));
+        setMessage(t.errors.editsPreserved(errorMessage(reason, t.errors.requestFailed)));
       }
     } finally {
       setBusy(false);
     }
   }
 
-  function conflictPanel(owner: "reason" | "planning") {
-    if (!conflict || (conflictOwner ?? "planning") !== owner) return null;
-    const setOwnerMessage = owner === "reason" ? setReasonMessage : setPlanningMessage;
-    return <ConflictPanel conflict={conflict} busy={busy}
-      onAccept={() => {
-        if (!conflict.current) {
-          // The place no longer exists: nothing can be saved, so drop every open editor
-          // (reason and planning) and release the retained row.
-          setReasonEditing(false);
-          setPlanningDirty(false);
-          setConflictOwner(null);
-          resolution.clear();
-          setOwnerMessage("");
-          editingChanged(false);
-          void changed();
-          return;
-        }
-        finishOwnerEdit(owner, conflict.current);
-        resolution.clear();
-        setOwnerMessage("");
-        void changed();
-      }}
-      onReapply={() => void save(owner, conflict.attempted, conflict.current!.version, conflict.base.version)}
-      onEdit={() => {
-        const current = conflict.current!;
-        setBase(current);
-        setDraft((existing) => owner === "reason"
-          ? {
-              ...(planningDirty ? existing : current.input),
-              notes: conflict.attempted.notes,
-            }
-          : {
-              ...current.input,
-              ...(reasonEditing ? { notes: existing.notes } : {}),
-              durationMinutes: conflict.attempted.durationMinutes,
-              budgetAmountMinor: conflict.attempted.budgetAmountMinor,
-              budgetCurrency: conflict.attempted.budgetCurrency,
-            });
-        resolution.resume();
-        setConflictOwner(null);
-        if (owner === "reason") setReasonEditing(true);
-        else setPlanningDirty(true);
-        setOwnerMessage("");
-      }}
-    />;
-  }
-
-  const savedNotes = base.input.notes;
-  return <>
+  const conflict = available ? resolution.conflict : {
+    base,
+    current: null,
+    attempted: draft,
+    latestChange: null,
+  };
+  return (
     <section className="pd-detail-section">
       <div className="pd-reason-head">
         <h3>{t.workspace.reasonTitle}</h3>
-        {available && !reasonEditing && !conflict ? <button type="button" className="pd-reason-action" onClick={() => {
-          if (!planningDirty) {
-            const snapshot = { input: planningValues(place), version: place.version };
-            setBase(snapshot);
-            setDraft(snapshot.input);
-          }
-          setReasonEditing(true);
+        {available && !editing && !conflict ? <button type="button" className="pd-reason-action" onClick={() => {
+          const snapshot = { input: planningValues(place), version: place.version };
+          setBase(snapshot);
+          setDraft(snapshot.input);
+          setEditing(true);
           editingChanged(true);
-        }}><Pencil aria-hidden="true" className="size-4" />{savedNotes ? t.workspace.editReason : t.workspace.addReason}</button> : null}
+        }}><Pencil aria-hidden="true" className="size-4" />{base.input.notes ? t.workspace.editReason : t.workspace.addReason}</button> : null}
       </div>
-      {conflictPanel("reason")}
-      {reasonEditing && !conflict ? (
-        <form className="pd-reason-form" onSubmit={(event) => { event.preventDefault(); void save("reason"); }}>
+      {conflict ? <ConflictPanel
+        conflict={conflict}
+        busy={busy}
+        onAccept={() => {
+          if (!conflict.current) {
+            setEditing(false);
+            resolution.clear();
+            setMessage("");
+            editingChanged(false);
+            void changed();
+            return;
+          }
+          finish(conflict.current);
+          void changed();
+        }}
+        onReapply={() => void save(conflict.attempted, conflict.current!.version, conflict.base.version)}
+        onEdit={() => {
+          const current = conflict.current!;
+          setBase(current);
+          setDraft({ ...current.input, notes: conflict.attempted.notes });
+          resolution.resume();
+          setEditing(true);
+          setMessage("");
+        }}
+      /> : editing ? (
+        <form className="pd-reason-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
           <textarea value={draft.notes ?? ""} maxLength={200} rows={3} placeholder={t.add.reasonPlaceholder} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} />
           <p className="pd-field-help">{t.add.reasonHelp}</p>
           <div className="pd-reason-actions">
             <button type="button" className="pd-secondary" disabled={busy} onClick={() => {
-              setDraft({ ...draft, notes: base.input.notes });
-              setReasonEditing(false);
-              editingChanged(planningDirty);
-              setReasonMessage("");
+              setDraft(base.input);
+              setEditing(false);
+              editingChanged(false);
+              setMessage("");
             }}>{t.workspace.cancelReason}</button>
             <button type="submit" className="pd-primary" disabled={busy}><CircleCheck aria-hidden="true" className="size-4" />{busy ? t.workspace.savingReason : t.workspace.saveReason}</button>
           </div>
         </form>
-      ) : !conflict ? <p className={savedNotes ? "pd-reason-copy" : "pd-reason-copy pd-muted"}>{savedNotes ?? t.workspace.noReasonDetail}</p> : null}
-      {reasonMessage ? <p className="pd-notice mt-3" role="alert">{reasonMessage}</p> : null}
+      ) : <p className={base.input.notes ? "pd-reason-copy" : "pd-reason-copy pd-muted"}>{base.input.notes ?? t.workspace.noReasonDetail}</p>}
+      {message ? <p className="pd-notice mt-3" role="alert">{message}</p> : null}
     </section>
-
-    <details open={available ? undefined : true} className="rounded-xl border border-ink/10 p-3" onToggle={(event) => {
-      if (available && event.currentTarget.open && !planningDirty && !reasonEditing && !conflict) {
-        const snapshot = { input: planningValues(place), version: place.version };
-        setBase(snapshot);
-        setDraft(snapshot.input);
-      }
-      if (!event.currentTarget.open && !planningDirty && !conflict) editingChanged(reasonEditing);
-    }}>
-      <summary className="cursor-pointer font-bold">{t.planning.summary}</summary>
-      {conflictPanel("planning")}
-      <form hidden={Boolean(conflict)} className="mt-4 grid gap-4" onChange={() => {
-        setPlanningDirty(true);
-        editingChanged(true);
-      }} onSubmit={(event) => { event.preventDefault(); void save("planning"); }}>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="grid gap-1 font-semibold">{t.planning.durationMinutes}<input className="min-h-11 rounded-lg border px-3" name="durationMinutes" type="number" min="1" value={draft.durationMinutes ?? ""} onChange={(event) => setDraft({ ...draft, durationMinutes: event.target.value === "" ? null : Number(event.target.value) })} placeholder={t.planning.unknown} /></label>
-          <label className="grid gap-1 font-semibold">{t.planning.budgetMinorUnits}<input className="min-h-11 rounded-lg border px-3" name="budgetAmountMinor" type="number" min="0" value={draft.budgetAmountMinor ?? ""} onChange={(event) => setDraft({ ...draft, budgetAmountMinor: event.target.value === "" ? null : Number(event.target.value) })} placeholder={t.planning.unknown} /></label>
-          <label className="grid gap-1 font-semibold">{t.planning.isoCurrency}<input className="min-h-11 rounded-lg border px-3 uppercase" name="budgetCurrency" maxLength={3} value={draft.budgetCurrency ?? ""} onChange={(event) => setDraft({ ...draft, budgetCurrency: event.target.value || null })} placeholder={t.planning.unknown} /></label>
-        </div>
-        <button disabled={busy} className="min-h-11 rounded-lg bg-ink-strong px-4 font-bold text-on-dark">{t.planning.save}</button>
-      </form>
-      {planningMessage ? <p role="status">{planningMessage}</p> : null}
-    </details>
-  </>;
+  );
 }
 
 
@@ -687,6 +612,7 @@ export function TripPlaceWorkspace({
   const [highlightedPlaceIds, setHighlightedPlaceIds] = useState<Set<string>>(() => new Set());
   const detailTitleRef = useRef<HTMLHeadingElement>(null);
   const detailReturnPosition = useRef<{ x: number; y: number } | null>(null);
+  const mustItemsRef = useRef<PlaceMustItemsHandle>(null);
   const [mergeConfirmation, setMergeConfirmation] = useState<{ source: TripPlaceDto; target: TripPlaceDto } | null>(null);
   const [merging, setMerging] = useState(false);
   const [removalConfirmation, setRemovalConfirmation] = useState<TripPlaceDto | null>(null);
@@ -794,6 +720,12 @@ export function TripPlaceWorkspace({
   }, [readModel.retained]);
 
   useEffect(() => {
+    const deepLinkedPlaceId = new URLSearchParams(window.location.search).get("place");
+    if (!deepLinkedPlaceId || selectedPlaceId || !readModel.current.some((place) => place.id === deepLinkedPlaceId)) return;
+    setSelectedPlaceId(deepLinkedPlaceId);
+  }, [readModel.current, selectedPlaceId]);
+
+  useEffect(() => {
     if (highlightedPlaceIds.size === 0) return;
     const timer = window.setTimeout(() => setHighlightedPlaceIds(new Set()), 1_400);
     return () => window.clearTimeout(timer);
@@ -805,12 +737,22 @@ export function TripPlaceWorkspace({
     detailReturnPosition.current = null;
     setSelectedPlaceId(null);
     setRemovalConfirmation(null);
+    const url = new URL(window.location.href);
+    if (placeId && url.searchParams.get("place") === placeId) {
+      url.searchParams.delete("place");
+      window.history.replaceState({}, "", url);
+    }
     if (placeId) {
       window.requestAnimationFrame(() => {
         document.querySelector<HTMLElement>(`[data-place-detail-trigger="${placeId}"]`)?.focus({ preventScroll: true });
         if (position) window.scrollTo({ left: position.x, top: position.y, behavior: "instant" });
       });
     }
+  }
+
+  function requestCloseDetail() {
+    if (mustItemsRef.current && !mustItemsRef.current.requestClose(closeDetail)) return;
+    closeDetail();
   }
 
   async function changedPlaces() {
@@ -1066,10 +1008,10 @@ export function TripPlaceWorkspace({
   }
 
   function voteActions(place: TripPlaceDto) {
-    if (!placesById.has(place.id) || !place.votingAvailable) return null;
+    if (!placesById.has(place.id)) return null;
     const voteDraft = voteDrafts[place.id];
     return <>
-      <VoteControl compact name={place.name} voters={place.voters} voteCount={place.voteCount} ownVote={place.ownVote} votingAvailable disabled={Boolean(pendingVotes[place.id])} onChange={(voted) => void setVote(place, voted)} />
+      <VoteControl compact name={place.name} voters={place.voters} voteCount={place.voteCount} ownVote={place.ownVote} votingAvailable={place.votingAvailable} disabled={Boolean(pendingVotes[place.id])} onChange={(voted) => void setVote(place, voted)} />
       {failedVotes[place.id] && voteDraft !== undefined ? (
         <button className="pd-secondary" disabled={pendingVotes[place.id]} onClick={() => void setVote(place, voteDraft)}>{t.vote.retry}</button>
       ) : null}
@@ -1077,11 +1019,7 @@ export function TripPlaceWorkspace({
   }
   function placeDetail(place: TripPlaceDto) {
     const available = placesById.has(place.id);
-    const factsLabel = place.factsSource === "provider"
-      ? place.providerAttribution ?? t.workspace.providerFacts
-      : place.provider === "google"
-        ? t.workspace.memberFactsWithGoogle
-        : t.workspace.manualEntry;
+    const manageLocationHref = `?${new URLSearchParams({ trip: trip.id, tab: "itinerary", segment: "daily", manage: "places" })}`;
     const duplicateSuggestions = duplicateSuggestionsByPlace.get(place.id) ?? [];
     return (
       <PlaceDetailContent
@@ -1089,6 +1027,7 @@ export function TripPlaceWorkspace({
         reference={{ kind: "trip-place", id: place.id }}
         request={request}
         collapsible
+        disclosureLabel="旅遊資訊與資料來源"
         interlude={<div className="pd-detail">
           <PlanningEditors key={place.id} tripId={trip.id} place={place} available={available} request={request} changed={changedPlaces}
             editingChanged={(editing) => {
@@ -1098,11 +1037,19 @@ export function TripPlaceWorkspace({
                 setReadModel((current) => ({ ...current, retained: current.retained.filter((entry) => entry.id !== place.id) }));
               }
             }} />
+          <PlaceMustItems
+            ref={mustItemsRef}
+            tripId={trip.id}
+            tripPlaceId={place.id}
+            request={request}
+            editable={available}
+            revision={placesRevision}
+            onChanged={onPlacesChanged}
+          />
           <section className="pd-detail-section">
-            <h3>{t.workspace.placeAndSources}</h3>
+            <h3>地點</h3>
             <p className="pd-detail-meta"><MapPin aria-hidden="true" className="size-4" /><span>{place.address ?? t.workspace.unknownAddress}</span></p>
-            <p className="mt-1 text-sm text-muted-foreground">{t.workspace.factsSource(factsLabel)}{place.aiProposalId ? `・${t.workspace.aiProposal}` : ""}</p>
-            {place.providerObservedAt ? <p className="mt-1 text-sm text-muted-foreground">{t.workspace.providerObserved(new Date(place.providerObservedAt).toLocaleString(locale))}{place.providerFactsExpired ? `・${t.workspace.expiredFacts}` : ""}</p> : null}
+            {place.latitude === null || place.longitude === null ? <a className="pd-secondary mt-3" href={manageLocationHref}><MapPinOff aria-hidden="true" className="size-4" />{schedule.addLocation}</a> : null}
             <div className="pd-source-links mt-3">
               {place.provider === "google" && place.providerPlaceId ? <a className="pd-secondary" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
               {place.sourceUrl ? <a className="inline-flex min-h-11 items-center break-all text-sm font-bold text-accent-strong underline underline-offset-2" href={place.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
@@ -1204,8 +1151,11 @@ export function TripPlaceWorkspace({
           </>
         ) : (
           <>
-            <div className="pd-pagehead-copy">
-              <h2 id="shared-wishlist-heading" className="schedule-page-title">{appText.placesSegments.wishlist}</h2>
+            <div className="pd-pagehead-copy" data-compact-mobile={listedPlaces.length > 0 || undefined}>
+              <h2 id="shared-wishlist-heading" className="schedule-page-title" aria-label={appText.placesSegments.wishlist}>
+                <span className="pd-pagehead-title--full" aria-hidden="true">{appText.placesSegments.wishlist}</span>
+                <span className="pd-pagehead-title--compact" aria-hidden="true">{t.workspace.compactTitle(listedPlaces.length)}</span>
+              </h2>
               <p>{t.workspace.helper}</p>
             </div>
             <div className="schedule-head-buttons">
@@ -1249,12 +1199,9 @@ export function TripPlaceWorkspace({
             const repeatedName = (placeNameCounts.get(place.name) ?? 0) > 1;
             const preview = previews.previews.get(place.id);
             const status = !located ? (
-              <>
-                <span className="pd-schedule-meta pd-schedule-meta--missing"><MapPinOff aria-hidden="true" />{schedule.missingLocation}</span>
-                {available ? <a className="schedule-secondary-button" href={`?trip=${encodeURIComponent(trip.id)}&tab=itinerary&segment=daily&manage=places`}><MapPin aria-hidden="true" />{schedule.addLocation}</a> : null}
-              </>
+              <span className="pd-schedule-meta pd-schedule-meta--missing"><MapPinOff aria-hidden="true" />{t.workspace.missingLocationForSchedule}</span>
             ) : scheduled ? (
-              <span className="pd-schedule-meta schedule-status-pill"><CalendarCheck aria-hidden="true" />{place.assignedDayId ? schedule.scheduledOn(dayLabel(place.assignedDayId)!) : t.status.scheduled}</span>
+              <span className="pd-schedule-meta schedule-status-pill"><CalendarCheck aria-hidden="true" />{place.assignedDayId ? schedule.scheduledOn(dayLabel(place.assignedDayId)!) : t.workspace.selectedPendingDate}</span>
             ) : (
               <span className="pd-schedule-meta"><CalendarClock aria-hidden="true" />{schedule.notScheduled}</span>
             );
@@ -1262,12 +1209,12 @@ export function TripPlaceWorkspace({
               ? selected ? "selected" : eligible ? "selectable" : "selecting"
               : "default";
             return (
-              <PlaceCard
+              <PlaceListRow
                 key={place.id}
+                variant="wishlist"
                 name={place.name}
                 typeLabel={t.placeType[place.type]}
-                location={place.address ?? t.workspace.unknownAddress}
-                description={<span className={place.notes ? undefined : "pd-muted"}>{place.notes ?? t.workspace.noReason}</span>}
+                secondary={place.notes ? <span>{t.workspace.reason(place.notes)}</span> : undefined}
                 status={status}
                 photo={preview?.photo}
                 photoCount={preview?.photoCount ?? 0}
@@ -1318,7 +1265,7 @@ export function TripPlaceWorkspace({
                 : null}
           </div>}
           titleRef={detailTitleRef}
-          onClose={closeDetail}
+          onClose={requestCloseDetail}
           footer={
           removalConfirmation ? <div className="pd-confirm-footer"><p>{t.workspace.confirmRemove(removalConfirmation.name)}</p>{message ? <p role="alert">{message}</p> : null}<div><button className="pd-secondary" disabled={removing} onClick={() => setRemovalConfirmation(null)}>保留地點</button><button className="pd-danger-button" disabled={removing} onClick={() => void remove(removalConfirmation)}>{removing ? "移除中…" : t.workspace.remove}</button></div></div>
           : <div>{message ? <p className="pd-notice" role="alert">{message}</p> : null}<div className="pd-fixed-actions">{detailScheduleAction(selectedPlace)}{voteActions(selectedPlace)}{placesById.has(selectedPlace.id) && (canSchedule || !isScheduledForRemovalPolicy(selectedPlace)) ? <button className="pd-danger-link" disabled={removing} onClick={() => { setMessage(""); setRemovalConfirmation(selectedPlace); }}>{t.workspace.remove}</button> : null}</div></div>
