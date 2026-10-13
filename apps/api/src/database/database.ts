@@ -151,6 +151,19 @@ export interface TripPlaceTable {
   updated_at: Timestamp;
 }
 
+export interface TripPlaceMustItemTable {
+  id: Generated<string>;
+  trip_id: string;
+  trip_place_id: string;
+  kind: "buy" | "eat" | "drink";
+  label: string;
+  normalized_label: string;
+  version: Generated<number>;
+  created_by: string;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
 export interface TripPlaceContributionTable {
   id: Generated<string>;
   trip_id: string;
@@ -446,6 +459,22 @@ export interface CuratedPlacePhotoTable {
   thumbnail_filename: string;
 }
 
+export interface PlacePhotoBlobTable {
+  filename: string;
+  media_type: "image/jpeg" | "image/png" | "image/webp";
+  bytes: Uint8Array;
+  created_at: Generated<Timestamp>;
+}
+
+export interface CommonsPlacePhotoTable {
+  place_id: string;
+  wikidata_id: string;
+  metadata: unknown;
+  image_filename: string;
+  thumbnail_filename: string;
+  checked_at: Timestamp;
+}
+
 export interface AlongTheWayDatabase {
   users: UserTable;
   magic_link_tokens: MagicLinkTokenTable;
@@ -459,7 +488,10 @@ export interface AlongTheWayDatabase {
   place_identities: PlaceIdentityTable;
   curated_place_details: CuratedPlaceDetailTable;
   curated_place_photos: CuratedPlacePhotoTable;
+  place_photo_blobs: PlacePhotoBlobTable;
+  commons_place_photos: CommonsPlacePhotoTable;
   trip_places: TripPlaceTable;
+  trip_place_must_items: TripPlaceMustItemTable;
   trip_place_contributions: TripPlaceContributionTable;
   trip_place_votes: TripPlaceVoteTable;
   trip_place_desired_days: TripPlaceDayTable;

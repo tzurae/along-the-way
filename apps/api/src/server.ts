@@ -16,6 +16,8 @@ import { GooglePlacesProvider } from "./trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "./trip-places/postgres-trip-place-module";
 import { PostgresPlaceDetailModule } from "./place-details/postgres-place-detail-module";
 import { packagedPhotoRoot } from "./place-details/photo-assets";
+import { CommonsPlacePhotos } from "./place-details/commons-place-photos";
+import packageJson from "../../../package.json";
 
 function requireSetting(name: string) {
   const value = process.env[name]?.trim();
@@ -39,6 +41,10 @@ const tripPlaces = new PostgresTripPlaceModule({
   database,
   provider: placeProvider,
   photoCapabilitySecret: tokenSecret,
+  // Wikimedia asks API clients for a descriptive User-Agent with contact information.
+  commonsPhotos: new CommonsPlacePhotos({
+    userAgent: `AlongTheWay/${packageJson.version} (https://github.com/tzurae/along-the-way)`,
+  }),
 });
 const discovery = new PostgresDiscoveryModule({
   database,

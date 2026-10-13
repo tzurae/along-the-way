@@ -356,6 +356,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
         discovery_runs,
         discovery_briefs,
         trip_place_duplicate_suggestions,
+        trip_place_must_items,
         trip_place_excluded_days,
         trip_place_desired_days,
         trip_place_votes,

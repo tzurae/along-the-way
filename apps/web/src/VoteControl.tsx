@@ -23,7 +23,17 @@ export function VoteControl({ name, voters, voteCount, ownVote, votingAvailable,
   onChange(voted: boolean): void;
 }) {
   const { t: { tripPlaces: { vote: t } } } = useI18n();
-  if (!votingAvailable) return null;
+  if (!votingAvailable) {
+    return (
+      <section className="pd-vote-control" data-compact={compact ? "true" : "false"} aria-label={t.forPlace(name)}>
+        <span className="pd-vote-tally" aria-label={`${t.unavailable}，${t.count(voteCount)}`} title={t.unavailable}>
+          <ThumbsUp aria-hidden="true" className="size-4" />
+          <span>{voteCount}</span>
+        </span>
+        {!compact ? <VoteVoters voters={voters} /> : null}
+      </section>
+    );
+  }
   return (
     <section className="pd-vote-control" data-compact={compact ? "true" : "false"} aria-label={t.forPlace(name)}>
       <button

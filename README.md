@@ -59,14 +59,50 @@ bun run build
 Staging setup, HTTPS deployment, persistent data, and rollback are documented in
 [`docs/operations/staging.md`](docs/operations/staging.md).
 
-## Place details and reviewed photos
+## Place details and photos
 
 Pocket-list, discovery and Today place references share the canonical detail API
-and an optional thumbnail/gallery surface. Photos are packaged, individually
-reviewed Wikimedia Commons works with per-work attribution, licence/version,
-verification revision and derivative notices—not scraped Google images or
-user-uploaded trip albums. Unknown places and same-name branches do not borrow
-another identity's content.
+and an optional thumbnail/gallery surface. Each place shows the first available of:
+
+1. **Curated photos**: packaged, individually reviewed Wikimedia Commons works with
+   per-work attribution, licence/version, verification revision and derivative notices.
+2. **Commons representative photo** (#121): when a Google place is added, its Google
+   Maps CID (from `googleMapsUri`) is looked up once on Wikidata (`P3749`). Only when
+   exactly one item matches, that item has a representative image (`P18`), and the
+   work is CC0, CC BY or CC BY-SA, the API downloads Commons' 1280px and 330px
+   renditions into PostgreSQL (`place_photo_blobs`, `commons_place_photos`). Reads
+   never contact Wikimedia or Google. Any other outcome, including a Wikimedia
+   failure, leaves the place on the Google fallback; the CID is not stored.
+3. **Google Places photos**, fetched per read because Google's terms forbid storing them.
+
+Places are never matched by name or coordinates, so same-name branches do not
+borrow another identity's content. A thumbnail without a photo says so in text
+(「沒有照片」), and a failed image says 「載入失敗」.
+
+### Lists and must-items (#123)
+
+Both 口袋名單 and AI 建議 use one compact row (`PlaceListRow`). Each row shows a
+64px thumbnail, the name with a type chip, one list-specific line, a status, and
+an attribution line that is never truncated. Addresses live only in the detail
+panel.
+
+Wishlist details list members' 必買／必吃／必喝 items:
+
+- Table `trip_place_must_items`, added by expand-only migration 025.
+- Routes `GET|POST /api/trips/:tripId/trip-places/:tripPlaceId/must-items` and
+  `PATCH|DELETE …/must-items/:itemId`.
+- Owners and editors can write; every write is idempotent and version-checked.
+- At most 24 items per place, labels up to 80 characters, and normalized
+  duplicates are rejected.
+- Each write locks the parent place row and emits a collaboration event.
+- Removing a place deletes its items; merging moves them into the target place
+  and removes duplicates.
+- AI proposal details show these items read-only once the proposal has been
+  added to the wishlist.
+
+The detail panel no longer shows 停留時間 or 預算. The columns, API, and DTO
+fields remain because day drafting still reads `durationMinutes`, and saving a
+reason sends the existing values back unchanged.
 
 Catalog publication is explicit and operator-only: run the curated manifest CLI
 with reviewed bindings to existing canonical identities. Startup does not match

@@ -269,8 +269,8 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
   const selected = photos[selectedIndex]!;
   const selectedKey = `${selected.id}\u0000${selected.imageUrl}`;
   const selectedFailed = failed.has(selectedKey);
-  const sourceHref = selected.source === "curated" ? safeExternalUrl(selected.sourceUrl) : null;
-  const licenseHref = selected.source === "curated" ? safeExternalUrl(selected.licenseUrl) : null;
+  const sourceHref = selected.source !== "google" ? safeExternalUrl(selected.sourceUrl) : null;
+  const licenseHref = selected.source !== "google" ? safeExternalUrl(selected.licenseUrl) : null;
 
   function activate(photoId: string) {
     setActivation((current) => {
@@ -337,7 +337,7 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
               src={photo.imageUrl}
               width={photo.width}
               height={photo.height}
-              alt={photo.source === "curated"
+              alt={photo.source !== "google"
                 ? t.placeDetail.photoAlt(photo.title, index + 1, photos.length)
                 : t.placeDetail.googlePhotoAlt(placeName, index + 1, photos.length)}
               loading={index > 0 ? "lazy" : undefined}
@@ -352,7 +352,7 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
                   <p>{t.placeDetail.photoUnavailable}</p>
                   <button type="button" className="place-photo-retry" onClick={() => retryPhoto(photoKey)}>{t.placeDetail.reloadPhoto}</button>
                 </div>
-              ) : photo.source === "curated" ? (
+              ) : photo.source !== "google" ? (
                 <button type="button" className="place-gallery__image-button" tabIndex={index === selectedIndex ? 0 : -1} aria-label={t.placeDetail.openPhoto(photo.title)} onClick={() => { choose(index, false); setViewerOpen(true); }}>
                   {image}
                   {activated ? <span className="place-gallery__enlarge"><Maximize2 aria-hidden="true" className="size-4" />{t.placeDetail.photoInformation}</span> : null}
@@ -384,16 +384,28 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
           <button type="button" className="place-gallery__open" aria-label={t.placeDetail.photoInformationFor(selected.title)} onClick={() => setViewerOpen(true)}>{t.placeDetail.photoInformation}</button>
         </figcaption>
       )}
-      {selected.source === "curated" ? <PhotoViewer photo={selected} failed={selectedFailed} open={viewerOpen} onOpenChange={setViewerOpen} /> : null}
+      {selected.source !== "google" ? <PhotoViewer photo={selected} failed={selectedFailed} open={viewerOpen} onOpenChange={setViewerOpen} /> : null}
     </figure>
   );
 }
 
-function DetailArticle({ detail, collapsible }: { detail: PlaceDetailDto; collapsible: boolean }) {
+function DetailArticle({ detail, collapsible, disclosureLabel, disclosureHeadingId, disclosureOpen, articlePrelude }: {
+  detail: PlaceDetailDto;
+  collapsible: boolean;
+  disclosureLabel?: string;
+  disclosureHeadingId?: string;
+  disclosureOpen?: boolean;
+  articlePrelude?: ReactNode;
+}) {
   const { locale, t } = useI18n();
+  const [expanded, setExpanded] = useState(Boolean(disclosureOpen));
   const sources = useMemo(() => new Map(detail.sources.map((source) => [source.id, source])), [detail.sources]);
+  useEffect(() => {
+    if (disclosureOpen) setExpanded(true);
+  }, [disclosureOpen]);
   const article = (
     <div className="place-detail__article">
+      {articlePrelude}
       {detail.asOfDate ? <p className="place-detail__date">{t.placeDetail.contentForDate(formatDateOnly(detail.asOfDate, locale))}</p> : null}
       {detail.sections.length ? detail.sections.map((section) => (
         <section key={section.kind} className="place-detail__section" data-place-detail-section={section.kind}>
@@ -425,20 +437,28 @@ function DetailArticle({ detail, collapsible }: { detail: PlaceDetailDto; collap
     </div>
   );
   return collapsible ? (
-    <details className="place-detail__disclosure">
-      <summary><ChevronRight aria-hidden="true" className="size-4" />{t.placeDetail.moreInformation}</summary>
+    <details className="place-detail__disclosure" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
+      <summary>
+        <ChevronRight aria-hidden="true" className="size-4" />
+        <h3 id={disclosureHeadingId} tabIndex={disclosureHeadingId ? -1 : undefined}>{disclosureLabel ?? t.placeDetail.moreInformation}</h3>
+      </summary>
       {article}
     </details>
   ) : article;
 }
 
-export function PlaceDetailContent({ tripId, reference, date, request, interlude, collapsible = false }: {
+export function PlaceDetailContent({ tripId, reference, date, request, interlude, collapsible = false, disclosureLabel, disclosureHeadingId, disclosureOpen, articlePrelude, focusHeadingId }: {
   tripId: string;
   reference: PlaceDetailReference;
   date?: string | null;
   request: PlaceDetailRequest;
   interlude?: ReactNode;
   collapsible?: boolean;
+  disclosureLabel?: string;
+  disclosureHeadingId?: string;
+  disclosureOpen?: boolean;
+  articlePrelude?: ReactNode;
+  focusHeadingId?: string;
 }) {
   const { t } = useI18n();
   const identity = `${reference.kind}:${reference.id}`;
@@ -468,6 +488,15 @@ export function PlaceDetailContent({ tripId, reference, date, request, interlude
 
   const loading = state.identity !== identity || state.loading;
   const detail = !loading && !state.error ? state.detail : null;
+  useEffect(() => {
+    if (!detail || !focusHeadingId) return;
+    const firstFrame = window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      const heading = document.getElementById(focusHeadingId);
+      heading?.closest("details")?.setAttribute("open", "");
+      heading?.focus();
+    }));
+    return () => window.cancelAnimationFrame(firstFrame);
+  }, [detail, focusHeadingId]);
   const errorMessage = !loading && state.error
     ? !navigator.onLine
       ? t.placeDetail.offlineUnavailable
@@ -491,7 +520,14 @@ export function PlaceDetailContent({ tripId, reference, date, request, interlude
         photos={detail.photos.length > 0 ? detail.photos : detail.googlePhotos}
       /> : null}
       {interlude}
-      {detail ? <DetailArticle detail={detail} collapsible={collapsible} /> : null}
+      {detail ? <DetailArticle
+        detail={detail}
+        collapsible={collapsible}
+        disclosureLabel={disclosureLabel}
+        disclosureHeadingId={disclosureHeadingId}
+        disclosureOpen={disclosureOpen}
+        articlePrelude={articlePrelude}
+      /> : null}
     </div>
   );
 }

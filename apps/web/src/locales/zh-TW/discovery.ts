@@ -32,10 +32,10 @@ export const discovery = {
     noLocation: "Google Maps 沒有提供座標，無法排進行程，不推薦。",
   },
   status: {
-    pending: "可供審查",
-    accepting: "正在接受建議…",
-    accepted: "已接受",
-    rejected: "已設為不要再推薦",
+    pending: "待討論",
+    accepting: "處理中",
+    accepted: "已加入口袋名單",
+    rejected: "不再推薦",
   },
   feedbackStatus: {
     // Another member's feedback awaiting its author's decision.
@@ -67,6 +67,7 @@ export const discovery = {
   },
   header: {
     title: "AI 建議",
+    compactTitle: (count: number) => `AI 建議・${count}`,
     description: "只要說明一次旅程需求，AI 就會研究可信來源、在 Google Maps 確認每個地點，並只顯示至少有兩個獨立來源推薦的地點。",
     researchAgain: "重新研究",
     loading: "正在載入 AI 研究…",
@@ -130,6 +131,13 @@ export const discovery = {
     matchesYourNeeds: "符合你的需求",
     noMatchesListed: "尚未列出符合的需求。",
     unknownPrefix: (value: string) => `還不確定：${value}`,
+    tradeoffPrefix: (value: string) => `要注意：${value}`,
+    moreItems: (count: number) => `另有 ${count} 項`,
+    rowEvidenceCount: (count: number) => `${count} 個佐證來源`,
+    rowEvidenceStale: "佐證資料需重新確認",
+    rowInference: "AI 推論・未查證",
+    rowLegacyEvidence: "來源未逐句對應",
+    statusAnnouncement: (name: string, status: string) => `${name}：${status}`,
     sourceCount: (count: number) => `${count} 個來源`,
     noEvidence: "尚無可揭露的來源",
     matches: "符合需求",
