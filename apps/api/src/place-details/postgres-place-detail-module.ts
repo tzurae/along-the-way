@@ -22,7 +22,7 @@ import {
   type PlaceProvider,
 } from "../trip-places/google-places-provider";
 import { GooglePhotoCapability } from "../trip-places/google-photo-capability";
-import type { PlaceDetailModule } from "./place-detail-module";
+import type { PlaceDetailModule, PlaceDetailReadResult, PlacePreviewReadResult } from "./place-detail-module";
 import { readPackagedPhoto } from "./photo-assets";
 
 interface ResolvedPlace {
@@ -30,6 +30,11 @@ interface ResolvedPlace {
   name: string;
   canonicalPlaceId: string | null;
   providerPlaceId: string | null;
+}
+
+interface GooglePhotoReadResult {
+  photos: GooglePlacePhotoDto[];
+  failed: boolean;
 }
 
 async function mapWithConcurrency<T, R>(
@@ -71,7 +76,7 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
       : undefined;
   }
 
-  async getDetail(userId: string, tripId: string, reference: PlaceDetailReference, date: string | null, includeGooglePhoto = true): Promise<PlaceDetailDto> {
+  async getDetail(userId: string, tripId: string, reference: PlaceDetailReference, date: string | null, includeGooglePhoto = true): Promise<PlaceDetailReadResult> {
     await this.authorize(userId, tripId);
     this.validateRequest(reference, date);
     const [place] = await this.resolve(tripId, reference.kind, [reference.id]);
@@ -80,18 +85,30 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
       canonicalPlaceId: place!.canonicalPlaceId,
       name: place!.name,
       asOfDate: date,
-      sections: [], sources: [], photos: [], googlePhoto: null,
+      sections: [], sources: [], photos: [], googlePhotos: [],
     };
     const content = place!.canonicalPlaceId
       ? await this.database.selectFrom("curated_place_details").selectAll()
           .select(sql<unknown>`coalesce((
             select jsonb_agg(photo.metadata order by photo.position)
-            from curated_place_photos photo where photo.place_id = curated_place_details.place_id
+            from (
+              select candidate.metadata, candidate.position
+              from curated_place_photos candidate
+              where candidate.place_id = curated_place_details.place_id
+              order by candidate.position
+              limit 3
+            ) photo
           ), '[]'::jsonb)`.as("photos"))
           .where("place_id", "=", place!.canonicalPlaceId).executeTakeFirst()
       : undefined;
     if (!content) {
-      return { ...empty, googlePhoto: includeGooglePhoto ? await this.googlePhoto(tripId, place!.providerPlaceId) : null };
+      const fallback = includeGooglePhoto
+        ? await this.googlePhotos(tripId, place!.providerPlaceId)
+        : { photos: [], failed: false };
+      return {
+        detail: { ...empty, googlePhotos: fallback.photos },
+        googleFallbackFailed: fallback.failed,
+      };
     }
     // Validate stored content too: malformed data is an error, never a false empty state.
     const curated = parseCuratedPlaceManifest({ version: 1, places: [{
@@ -105,18 +122,24 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
       || (date !== null && source.validUntil !== null && date > source.validUntil),
     ).map((source) => source.id));
     const photos = curated.photos.map((photo) => this.photoDto(tripId, reference, photo));
+    const fallback = photos.length === 0 && includeGooglePhoto
+      ? await this.googlePhotos(tripId, place!.providerPlaceId)
+      : null;
     return {
-      ...empty,
-      sources: curated.sources,
-      sections: curated.sections.map((section) => ({ ...section, blocks: section.blocks.map((block) => ({
-        ...block, needsRecheck: block.sourceIds.some((id) => staleIds.has(id)),
-      })) })),
-      photos,
-      googlePhoto: photos.length === 0 && includeGooglePhoto ? await this.googlePhoto(tripId, place!.providerPlaceId) : null,
+      detail: {
+        ...empty,
+        sources: curated.sources,
+        sections: curated.sections.map((section) => ({ ...section, blocks: section.blocks.map((block) => ({
+          ...block, needsRecheck: block.sourceIds.some((id) => staleIds.has(id)),
+        })) })),
+        photos,
+        googlePhotos: fallback?.photos ?? [],
+      },
+      googleFallbackFailed: fallback?.failed ?? false,
     };
   }
 
-  async getPreviews(userId: string, tripId: string, kind: PlaceDetailReferenceKind, ids: string[], includeGooglePhoto = true): Promise<PlacePreviewDto[]> {
+  async getPreviews(userId: string, tripId: string, kind: PlaceDetailReferenceKind, ids: string[], includeGooglePhoto = true): Promise<PlacePreviewReadResult> {
     await this.authorize(userId, tripId);
     try {
       parsePlacePreviewIds(ids.join(","));
@@ -126,20 +149,40 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
     }
     const places = await this.resolve(tripId, kind, ids);
     const canonicalIds = [...new Set(places.flatMap((place) => place.canonicalPlaceId ? [place.canonicalPlaceId] : []))];
-    // One batch of first-photo metadata only, not N full-detail reads or section payloads.
+    // The database returns only the first metadata row plus a capped count per
+    // place, rather than hydrating every curated photo DTO.
     const photos = canonicalIds.length === 0 ? [] : await this.database.selectFrom("curated_place_photos")
-      .select(["place_id", "metadata"]).where("place_id", "in", canonicalIds).where("position", "=", 0).execute();
-    const byPlace = new Map(photos.map((row) => [row.place_id, parseCuratedPhoto(row.metadata)]));
-    return mapWithConcurrency(places, 4, async (place) => {
+      .distinctOn("place_id")
+      .select(["place_id", "metadata"])
+      .select(sql<number>`least(count(*) over (partition by place_id), 3)::integer`.as("photo_count"))
+      .where("place_id", "in", canonicalIds)
+      .orderBy("place_id")
+      .orderBy("position")
+      .execute();
+    const byPlace = new Map(photos.map((row) => [row.place_id, {
+      photo: parseCuratedPhoto(row.metadata),
+      photoCount: row.photo_count,
+    }]));
+    let googleFallbackFailed = false;
+    const previews = await mapWithConcurrency(places, 4, async (place) => {
       const reference = { kind, id: place.id };
       const curated = place.canonicalPlaceId ? byPlace.get(place.canonicalPlaceId) : undefined;
+      if (curated) return {
+        reference,
+        photo: this.photoDto(tripId, reference, curated.photo),
+        photoCount: curated.photoCount,
+      };
+      const fallback = includeGooglePhoto
+        ? await this.googlePhotos(tripId, place.providerPlaceId)
+        : { photos: [], failed: false };
+      if (fallback.failed) googleFallbackFailed = true;
       return {
         reference,
-        photo: curated
-          ? this.photoDto(tripId, reference, curated)
-          : includeGooglePhoto ? await this.googlePhoto(tripId, place.providerPlaceId) : null,
+        photo: fallback.photos[0] ?? null,
+        photoCount: fallback.photos.length,
       };
     });
+    return { previews, googleFallbackFailed };
   }
 
   async getPhotoAsset(userId: string, tripId: string, reference: PlaceDetailReference, filename: string) {
@@ -168,6 +211,7 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
     userId: string,
     tripId: string,
     providerPlaceId: string,
+    index: 0 | 1 | 2,
     photoFingerprint: string,
     maxWidth: 192 | 1024,
     capabilityExpiry: string | null = null,
@@ -198,6 +242,8 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
         tripId,
         userId,
         providerPlaceId,
+        index,
+        photoFingerprint,
         capabilityExpiry,
         capabilitySignature,
       )) {
@@ -205,12 +251,12 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
     }
     if (!this.provider
       || this.provider.available === false
-      || !this.provider.getFirstPhoto
+      || !this.provider.getPhotos
       || !this.provider.fetchPhotoMedia) {
       throw new AppError("place_photo_not_found", "Place photo not found", 404);
     }
     try {
-      const photo = await this.provider.getFirstPhoto(providerPlaceId);
+      const photo = (await this.provider.getPhotos(providerPlaceId))[index];
       if (!photo || googlePlacePhotoFingerprint(photo) !== photoFingerprint) {
         throw new PlacePhotoNotFoundError();
       }
@@ -281,13 +327,19 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
     });
   }
 
-  private async googlePhoto(tripId: string, providerPlaceId: string | null): Promise<GooglePlacePhotoDto | null> {
-    if (!providerPlaceId || !this.provider?.getFirstPhoto || this.provider.available === false) return null;
+  private async googlePhotos(tripId: string, providerPlaceId: string | null): Promise<GooglePhotoReadResult> {
+    if (!providerPlaceId || !this.provider?.getPhotos || this.provider.available === false) {
+      return { photos: [], failed: false };
+    }
     try {
-      const photo = await this.provider.getFirstPhoto(providerPlaceId);
-      return photo ? googlePlacePhotoDto(tripId, providerPlaceId, photo) : null;
+      const photos = (await this.provider.getPhotos(providerPlaceId)).slice(0, 3);
+      return {
+        photos: photos.map((photo, index) =>
+          googlePlacePhotoDto(tripId, providerPlaceId, index as 0 | 1 | 2, photo)),
+        failed: false,
+      };
     } catch {
-      return null;
+      return { photos: [], failed: true };
     }
   }
 

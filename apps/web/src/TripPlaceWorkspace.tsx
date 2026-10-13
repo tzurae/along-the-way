@@ -34,6 +34,7 @@ import { useI18n, type Messages } from "./i18n";
 import { VoteControl, VoteVoters } from "./VoteControl";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews } from "./PlaceThumbnail";
+import { PlaceCard } from "./PlaceCard";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import { NativeSelect } from "./components/ui/native-select";
 import { SchedulePlacesSheet } from "./SchedulePlacesSheet";
@@ -1055,11 +1056,6 @@ export function TripPlaceWorkspace({
       ) : null}
     </>;
   }
-
-  function quickActions(place: TripPlaceDto) {
-    const actions = voteActions(place);
-    return actions ? <div className="pd-row-actions">{actions}</div> : null;
-  }
   function placeDetail(place: TripPlaceDto) {
     const available = placesById.has(place.id);
     const factsLabel = place.factsSource === "provider"
@@ -1134,13 +1130,13 @@ export function TripPlaceWorkspace({
     );
   }
 
-  function selectionCheckbox(place: TripPlaceDto, placement: "desktop" | "mobile") {
+  function selectionCheckbox(place: TripPlaceDto) {
     const eligible = canSelectForSchedule(place, placesById.has(place.id));
     const selected = selectedPlaceIds.has(place.id);
     return (
       <button
         type="button"
-        className={`schedule-selection-check schedule-selection-check--${placement}`}
+        className="schedule-selection-check"
         role="checkbox"
         aria-checked={selected}
         aria-label={schedule.selectPlace(place.name)}
@@ -1232,58 +1228,51 @@ export function TripPlaceWorkspace({
             const selected = selectedPlaceIds.has(place.id);
             const eligible = canSelectForSchedule(place, available);
             const repeatedName = (placeNameCounts.get(place.name) ?? 0) > 1;
-            const votes = voteActions(place);
-            const sideVotes = voteActions(place);
-            const classes = [
-              "pd-row",
-              selecting ? "pd-row--selecting" : "",
-              eligible ? "pd-row--selectable" : "",
-              selected ? "pd-row--selected" : "",
-              scheduled ? "schedule-row--scheduled" : "",
-              highlightedPlaceIds.has(place.id) ? "schedule-row--changed" : "",
-            ].filter(Boolean).join(" ");
+            const preview = previews.previews.get(place.id);
+            const status = !located ? (
+              <>
+                <span className="pd-schedule-meta pd-schedule-meta--missing"><MapPinOff aria-hidden="true" />{schedule.missingLocation}</span>
+                {available ? <a className="schedule-secondary-button" href={`?trip=${encodeURIComponent(trip.id)}&tab=itinerary&segment=daily&manage=places`}><MapPin aria-hidden="true" />{schedule.addLocation}</a> : null}
+              </>
+            ) : scheduled ? (
+              <span className="pd-schedule-meta schedule-status-pill"><CalendarCheck aria-hidden="true" />{place.assignedDayId ? schedule.scheduledOn(dayLabel(place.assignedDayId)!) : t.status.scheduled}</span>
+            ) : (
+              <span className="pd-schedule-meta"><CalendarClock aria-hidden="true" />{schedule.notScheduled}</span>
+            );
+            const state = selecting
+              ? selected ? "selected" : eligible ? "selectable" : "selecting"
+              : "default";
             return (
-              <article key={place.id} data-wishlist-place={place.name} className={classes}
-                aria-label={repeatedName ? t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress) : place.name}
-                aria-current={!selecting && selectedPlaceId === place.id ? "true" : undefined}
-                onClick={(event) => {
-                  if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select")) return;
+              <PlaceCard
+                key={place.id}
+                name={place.name}
+                typeLabel={t.placeType[place.type]}
+                location={place.address ?? t.workspace.unknownAddress}
+                description={<span className={place.notes ? undefined : "pd-muted"}>{place.notes ?? t.workspace.noReason}</span>}
+                status={status}
+                photo={preview?.photo}
+                photoCount={preview?.photoCount ?? 0}
+                loadingPhoto={previews.loading}
+                photoCredit={preview?.photo ? <PlacePhotoCredit photo={preview.photo} /> : undefined}
+                voteAction={voteActions(place)}
+                selectionControl={canSchedule && selecting ? selectionCheckbox(place) : undefined}
+                ariaLabel={repeatedName ? t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress) : place.name}
+                current={!selecting && selectedPlaceId === place.id}
+                state={state}
+                scheduled={scheduled}
+                changed={!selecting && highlightedPlaceIds.has(place.id)}
+                onOpen={() => openDetail(place.id)}
+                onActivate={() => {
                   if (selecting) {
                     if (eligible) togglePlaceSelection(place);
-                    return;
+                  } else {
+                    openDetail(place.id);
                   }
-                  openDetail(place.id);
-                }}>
-                {canSchedule && selecting ? selectionCheckbox(place, "desktop") : null}
-                <div className="pd-row-main">
-                  <PlaceThumbnail photo={previews.photos.get(place.id)} loading={previews.loading} />
-                  <div className="pd-row-copy">
-                    <div className="pd-titleline">
-                      {selecting
-                        ? <span className="pd-titlebutton">{place.name}</span>
-                        : <button type="button" data-place-detail-trigger={place.id} className="pd-titlebutton min-h-11" aria-label={t.workspace.viewDetail(place.name)} onClick={() => openDetail(place.id)}>{place.name}</button>}
-                      <span className="pd-chip">{t.placeType[place.type]}</span>
-                      {canSchedule && selecting ? selectionCheckbox(place, "mobile") : null}
-                    </div>
-                    <p className={`pd-row-note${place.notes ? "" : " pd-muted"}`}>{place.notes ?? t.workspace.noReason}</p>
-                    <div className="pd-row-status">
-                      {!located ? (
-                        <>
-                          <span className="pd-schedule-meta pd-schedule-meta--missing"><MapPinOff aria-hidden="true" />{schedule.missingLocation}</span>
-                          {available ? <a className="schedule-secondary-button pd-row-location-action" href={`?trip=${encodeURIComponent(trip.id)}&tab=itinerary&segment=daily&manage=places`} onClick={(event) => event.stopPropagation()}><MapPin aria-hidden="true" />{schedule.addLocation}</a> : null}
-                        </>
-                      ) : scheduled ? (
-                        <span className="pd-schedule-meta schedule-status-pill"><CalendarCheck aria-hidden="true" />{place.assignedDayId ? schedule.scheduledOn(dayLabel(place.assignedDayId)!) : t.status.scheduled}</span>
-                      ) : (
-                        <span className="pd-schedule-meta"><CalendarClock aria-hidden="true" />{schedule.notScheduled}</span>
-                      )}
-                    </div>
-                    <PlacePhotoCredit photo={previews.photos.get(place.id)} />
-                    {votes ? <div className="pd-row-bottom pd-row-bottom--mobile"><div className="pd-row-actions">{votes}</div></div> : null}
-                  </div>
-                </div>
-                {sideVotes ? <div className="pd-row-sidevotes"><div className="pd-row-actions">{sideVotes}</div></div> : null}
-              </article>
+                }}
+                openLabel={t.workspace.viewDetail(place.name)}
+                openDataAttribute={{ name: "place-detail-trigger", value: place.id }}
+                dataAttribute={{ name: "wishlist-place", value: place.name }}
+              />
             );
           })}
         </div>
@@ -1313,7 +1302,7 @@ export function TripPlaceWorkspace({
           onClose={closeDetail}
           footer={
           removalConfirmation ? <div className="pd-confirm-footer"><p>{t.workspace.confirmRemove(removalConfirmation.name)}</p>{message ? <p role="alert">{message}</p> : null}<div><button className="pd-secondary" disabled={removing} onClick={() => setRemovalConfirmation(null)}>保留地點</button><button className="pd-danger-button" disabled={removing} onClick={() => void remove(removalConfirmation)}>{removing ? "移除中…" : t.workspace.remove}</button></div></div>
-          : <div>{message ? <p className="pd-notice" role="alert">{message}</p> : null}<div className="pd-fixed-actions">{detailScheduleAction(selectedPlace)}{quickActions(selectedPlace)}{placesById.has(selectedPlace.id) && (canSchedule || !isScheduledForRemovalPolicy(selectedPlace)) ? <button className="pd-danger-link" disabled={removing} onClick={() => { setMessage(""); setRemovalConfirmation(selectedPlace); }}>{t.workspace.remove}</button> : null}</div></div>
+          : <div>{message ? <p className="pd-notice" role="alert">{message}</p> : null}<div className="pd-fixed-actions">{detailScheduleAction(selectedPlace)}{voteActions(selectedPlace)}{placesById.has(selectedPlace.id) && (canSchedule || !isScheduledForRemovalPolicy(selectedPlace)) ? <button className="pd-danger-link" disabled={removing} onClick={() => { setMessage(""); setRemovalConfirmation(selectedPlace); }}>{t.workspace.remove}</button> : null}</div></div>
         }>
           {placeDetail(selectedPlace)}
         </PlaceDetailSheet>

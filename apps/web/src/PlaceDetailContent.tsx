@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { ChevronLeft, ChevronRight, CircleAlert, ExternalLink, Maximize2, X } from "lucide-react";
 
 import {
@@ -186,7 +187,7 @@ function GoogleGalleryCredit({ photo }: { photo: GooglePlacePhotoDto }) {
     <div className="place-gallery__google-credit">
       <span className="place-gallery__google-byline">
         <strong>Google Maps</strong>
-        {photo.authors.length ? <span>照片：{photo.authors.map((author, index) => {
+        {photo.authors.length ? <span>・照片：{photo.authors.map((author, index) => {
           const uri = safeExternalUrl(author.uri);
           return <span key={`${author.displayName}:${index}`}>{index > 0 ? "、" : ""}{uri ? <a href={uri} target="_blank" rel="noreferrer">{author.displayName}</a> : author.displayName}</span>;
         })}</span> : null}
@@ -200,28 +201,66 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
   const { t } = useI18n();
   const trackRef = useRef<HTMLDivElement>(null);
   const fingerprint = photos.map((photo) => `${photo.id}\u0000${photo.imageUrl}`).join("\u0001");
-  const [selection, setSelection] = useState<{ identity: string; photoId: string | null }>({ identity, photoId: photos[0]?.id ?? null });
+  const resetKey = `${identity}\u0002${fingerprint}`;
+  const firstPhotoId = photos[0]?.id;
+  const [selection, setSelection] = useState<{ identity: string; photoId: string | null }>({ identity, photoId: firstPhotoId ?? null });
   const [failed, setFailed] = useState<Set<string>>(() => new Set());
-  const [reloadRevision, setReloadRevision] = useState(0);
+  const [reloadRevisions, setReloadRevisions] = useState<Map<string, number>>(() => new Map());
+  const [activation, setActivation] = useState<{ resetKey: string; ids: Set<string> }>(() => ({
+    resetKey,
+    ids: new Set(firstPhotoId ? [firstPhotoId] : []),
+  }));
   const [viewerOpen, setViewerOpen] = useState(false);
 
-  // Reset per-photo state only when the photo set really changes, during render. A mount-time
-  // effect would run after commit and erase an image error that fired before effects flushed.
-  const resetKey = `${identity}\u0002${fingerprint}`;
+  // Reset synchronously when the gallery changes so a fast image error cannot be erased by a
+  // mount-time effect. Activated slides belong only to this exact gallery identity/photo set.
   const [appliedResetKey, setAppliedResetKey] = useState(resetKey);
   if (appliedResetKey !== resetKey) {
     setAppliedResetKey(resetKey);
     setSelection(selection.identity === identity && photos.some((photo) => photo.id === selection.photoId)
       ? selection
-      : { identity, photoId: photos[0]?.id ?? null });
+      : { identity, photoId: firstPhotoId ?? null });
     setFailed(new Set());
-    setReloadRevision(0);
+    setReloadRevisions(new Map());
+    setActivation({ resetKey, ids: new Set(firstPhotoId ? [firstPhotoId] : []) });
     setViewerOpen(false);
   }
+  const activatedIds = activation.resetKey === resetKey
+    ? activation.ids
+    : new Set(firstPhotoId ? [firstPhotoId] : []);
 
   useEffect(() => {
     if (trackRef.current) trackRef.current.scrollLeft = 0;
   }, [resetKey]);
+
+  useEffect(() => {
+    const root = trackRef.current;
+    if (!root || typeof IntersectionObserver !== "function") return;
+    const observer = new IntersectionObserver((entries) => {
+      const intersectingIds = entries
+        .filter((entry) => entry.isIntersecting && entry.intersectionRatio >= 0.5)
+        .map((entry) => (entry.target as HTMLElement).dataset.photoSlide)
+        .filter((id): id is string => Boolean(id));
+      if (intersectingIds.length === 0) return;
+      setActivation((current) => {
+        const ids = current.resetKey === resetKey
+          ? new Set(current.ids)
+          : new Set(firstPhotoId ? [firstPhotoId] : []);
+        let changed = current.resetKey !== resetKey;
+        for (const id of intersectingIds) {
+          if (!ids.has(id)) {
+            ids.add(id);
+            changed = true;
+          }
+        }
+        return changed ? { resetKey, ids } : current;
+      });
+    }, { root, threshold: [0.5] });
+    root.querySelectorAll<HTMLElement>("[data-photo-slide]").forEach((slide, index) => {
+      if (index > 0) observer.observe(slide);
+    });
+    return () => observer.disconnect();
+  }, [firstPhotoId, resetKey]);
 
   if (photos.length === 0) {
     return <div className="place-gallery__empty" data-place-gallery="empty">{t.placeDetail.noPhoto}</div>;
@@ -233,12 +272,34 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
   const sourceHref = selected.source === "curated" ? safeExternalUrl(selected.sourceUrl) : null;
   const licenseHref = selected.source === "curated" ? safeExternalUrl(selected.licenseUrl) : null;
 
+  function activate(photoId: string) {
+    setActivation((current) => {
+      const ids = current.resetKey === resetKey
+        ? current.ids
+        : new Set(firstPhotoId ? [firstPhotoId] : []);
+      if (current.resetKey === resetKey && ids.has(photoId)) return current;
+      const next = new Set(ids);
+      next.add(photoId);
+      return { resetKey, ids: next };
+    });
+  }
+
   function choose(index: number, scroll: boolean) {
     const bounded = Math.max(0, Math.min(photos.length - 1, index));
-    setSelection({ identity, photoId: photos[bounded]!.id });
+    const next = photos[bounded]!;
+    const select = () => {
+      activate(next.id);
+      setSelection((current) => current.identity === identity && current.photoId === next.id
+        ? current
+        : { identity, photoId: next.id });
+    };
     if (scroll && trackRef.current) {
+      const track = trackRef.current;
       const reduced = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      trackRef.current.scrollTo({ left: bounded * trackRef.current.clientWidth, behavior: reduced ? "auto" : "smooth" });
+      flushSync(select);
+      track.scrollTo({ left: bounded * track.clientWidth, behavior: reduced ? "auto" : "smooth" });
+    } else {
+      select();
     }
   }
 
@@ -248,7 +309,11 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
       next.delete(photoKey);
       return next;
     });
-    setReloadRevision((current) => current + 1);
+    setReloadRevisions((current) => {
+      const next = new Map(current);
+      next.set(photoKey, (next.get(photoKey) ?? 0) + 1);
+      return next;
+    });
   }
 
   return (
@@ -264,20 +329,22 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
         {photos.map((photo, index) => {
           const photoKey = `${photo.id}\u0000${photo.imageUrl}`;
           const imageFailed = failed.has(photoKey);
-          const image = (
+          const activated = index === 0 || activatedIds.has(photo.id);
+          const image = activated ? (
             <img
-              key={`${photoKey}:${reloadRevision}`}
+              key={`${photoKey}:${reloadRevisions.get(photoKey) ?? 0}`}
               className="place-gallery__image"
               src={photo.imageUrl}
               width={photo.width}
               height={photo.height}
               alt={photo.source === "curated"
                 ? t.placeDetail.photoAlt(photo.title, index + 1, photos.length)
-                : t.placeDetail.googlePhotoAlt(placeName)}
+                : t.placeDetail.googlePhotoAlt(placeName, index + 1, photos.length)}
+              loading={index > 0 ? "lazy" : undefined}
               decoding="async"
               onError={() => setFailed((current) => new Set(current).add(photoKey))}
             />
-          );
+          ) : <span className="place-gallery__placeholder" aria-hidden="true" />;
           return (
             <div key={photoKey} className="place-gallery__slide" data-photo-slide={photo.id}>
               {imageFailed ? (
@@ -288,7 +355,7 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
               ) : photo.source === "curated" ? (
                 <button type="button" className="place-gallery__image-button" tabIndex={index === selectedIndex ? 0 : -1} aria-label={t.placeDetail.openPhoto(photo.title)} onClick={() => { choose(index, false); setViewerOpen(true); }}>
                   {image}
-                  <span className="place-gallery__enlarge"><Maximize2 aria-hidden="true" className="size-4" />{t.placeDetail.photoInformation}</span>
+                  {activated ? <span className="place-gallery__enlarge"><Maximize2 aria-hidden="true" className="size-4" />{t.placeDetail.photoInformation}</span> : null}
                 </button>
               ) : image}
             </div>
@@ -421,7 +488,7 @@ export function PlaceDetailContent({ tripId, reference, date, request, interlude
       {detail ? <Gallery
         identity={`${detail.reference.kind}:${detail.reference.id}`}
         placeName={detail.name}
-        photos={detail.photos.length ? detail.photos : detail.googlePhoto ? [detail.googlePhoto] : []}
+        photos={detail.photos.length > 0 ? detail.photos : detail.googlePhotos}
       /> : null}
       {interlude}
       {detail ? <DetailArticle detail={detail} collapsible={collapsible} /> : null}

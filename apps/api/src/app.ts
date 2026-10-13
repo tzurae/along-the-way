@@ -647,8 +647,16 @@ export function createApp({
       if (!(error instanceof AppError) || error.code !== "rate_limited") throw error;
       includeGooglePhoto = false;
     }
-    context.header("Cache-Control", "private, no-store");
-    return context.json({ detail: await placeDetails.getDetail(user.id, uuidParam(context, "tripId"), reference, date, includeGooglePhoto) });
+    const result = await placeDetails.getDetail(
+      user.id,
+      uuidParam(context, "tripId"),
+      reference,
+      date,
+      includeGooglePhoto,
+    );
+    context.header("Cache-Control",
+      includeGooglePhoto && !result.googleFallbackFailed ? "private, max-age=3600" : "private, no-store");
+    return context.json({ detail: result.detail });
   });
 
   app.get("/api/trips/:tripId/place-previews", async (context) => {
@@ -668,8 +676,16 @@ export function createApp({
       if (!(error instanceof AppError) || error.code !== "rate_limited") throw error;
       includeGooglePhoto = false;
     }
-    context.header("Cache-Control", "private, no-store");
-    return context.json({ previews: await placeDetails.getPreviews(user.id, uuidParam(context, "tripId"), kind, ids, includeGooglePhoto) });
+    const result = await placeDetails.getPreviews(
+      user.id,
+      uuidParam(context, "tripId"),
+      kind,
+      ids,
+      includeGooglePhoto,
+    );
+    context.header("Cache-Control",
+      includeGooglePhoto && !result.googleFallbackFailed ? "private, max-age=3600" : "private, no-store");
+    return context.json({ previews: result.previews });
   });
 
   app.get("/api/trips/:tripId/place-photo-assets/:filename", async (context) => {
@@ -697,10 +713,17 @@ export function createApp({
     const requestedWidth = context.req.query("maxWidth");
     const maxWidth = requestedWidth === "192" ? 192 : requestedWidth === "1024" ? 1024 : null;
     if (maxWidth === null) throw new AppError("validation_error", "maxWidth must be 192 or 1024");
+    const requestedIndex = context.req.query("index");
+    if (requestedIndex === undefined) {
+      throw new AppError("place_photo_not_found", "Place photo not found", 404);
+    }
+    const index = requestedIndex === "0" ? 0 : requestedIndex === "1" ? 1 : requestedIndex === "2" ? 2 : null;
+    if (index === null) throw new AppError("validation_error", "index must be 0, 1, or 2");
     const photo = await placeDetails.getGooglePhoto(
       user.id,
       uuidParam(context, "tripId"),
       context.req.param("providerPlaceId"),
+      index,
       context.req.query("photo") ?? "",
       maxWidth,
       context.req.query("exp") ?? null,

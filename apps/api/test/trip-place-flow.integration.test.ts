@@ -1778,8 +1778,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       typeLabel: "咖啡店",
       photo: {
         source: "google",
-        id: `google:${provider.branch.providerPlaceId}:ab695b0da15727f7`,
-        thumbnailUrl: `/api/trips/${trip.id}/google-place-photos/${provider.branch.providerPlaceId}?photo=ab695b0da15727f7&maxWidth=192`,
+        id: `google:${provider.branch.providerPlaceId}:0:ab695b0da15727f7`,
+        thumbnailUrl: `/api/trips/${trip.id}/google-place-photos/${provider.branch.providerPlaceId}?index=0&photo=ab695b0da15727f7&maxWidth=192`,
       },
     });
     expect(provider.searchRequests.at(-1)).toEqual({
@@ -1827,8 +1827,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         providerPlaceId: provider.kyoto.providerPlaceId,
         typeLabel: "佛寺",
         photo: {
-          id: `google:${provider.kyoto.providerPlaceId}:ab695b0da15727f7`,
-          thumbnailUrl: `/api/trips/${firstTrip.id}/google-place-photos/${provider.kyoto.providerPlaceId}?photo=ab695b0da15727f7&maxWidth=192`,
+          id: `google:${provider.kyoto.providerPlaceId}:0:ab695b0da15727f7`,
+          thumbnailUrl: `/api/trips/${firstTrip.id}/google-place-photos/${provider.kyoto.providerPlaceId}?index=0&photo=ab695b0da15727f7&maxWidth=192`,
         },
       }],
       attribution: "Google Maps",

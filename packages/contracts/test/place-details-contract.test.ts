@@ -32,19 +32,19 @@ function reviewedManifest(): CuratedPlaceManifest {
 const tripId = "11111111-1111-4111-8111-111111111111";
 const id = "22222222-2222-4222-8222-222222222222";
 
-function googlePhoto(): GooglePlacePhotoDto {
+function googlePhoto(index: 0 | 1 | 2 = 0, fingerprint = `0baa8b4907390a5${index}`): GooglePlacePhotoDto {
   const providerPlaceId = "ChIJ-place-photo-1234";
-  const photoFingerprint = "0baa8b4907390a5a";
   const prefix = `/api/trips/${tripId}/google-place-photos/${providerPlaceId}`;
   return {
     source: "google",
-    id: `google:${providerPlaceId}:${photoFingerprint}`,
-    thumbnailUrl: `${prefix}?photo=${photoFingerprint}&maxWidth=192`,
-    imageUrl: `${prefix}?photo=${photoFingerprint}&maxWidth=1024`,
+    id: `google:${providerPlaceId}:${index}:${fingerprint}`,
+    index,
+    thumbnailUrl: `${prefix}?index=${index}&photo=${fingerprint}&maxWidth=192`,
+    imageUrl: `${prefix}?index=${index}&photo=${fingerprint}&maxWidth=1024`,
     width: 1600,
     height: 1200,
-    authors: [{ displayName: "攝影者", uri: "https://example.test/author" }],
-    googleMapsUri: "https://maps.google.com/?cid=123",
+    authors: [{ displayName: `攝影者 ${index + 1}`, uri: `https://example.test/author/${index + 1}` }],
+    googleMapsUri: `https://maps.google.com/?cid=${index + 1}`,
   };
 }
 
@@ -102,26 +102,21 @@ describe("curated place detail contract boundaries", () => {
     const url = `/api/trips/${tripId}/place-photo-assets/${image.filename}?kind=trip-place&id=${id}`;
     const photo = { source: "curated" as const, ...metadata, imageUrl: url, thumbnailUrl: url, width: 800, height: 600 };
     const response = { detail: { reference: { kind: "trip-place", id }, canonicalPlaceId: id, name: place.name,
-      asOfDate: "2026-11-01", sources: place.sources, photos: [photo], googlePhoto: null,
+      asOfDate: "2026-11-01", sources: place.sources, photos: [photo], googlePhotos: [],
       sections: place.sections.map((section) => ({ ...section, blocks: section.blocks.map((block) => ({ ...block, needsRecheck: true })) })),
     } };
     expect(parsePlaceDetailResponse(response).detail.sections[0]?.blocks[0]?.needsRecheck).toBe(true);
     expect(() => parsePlaceDetailResponse({ detail: { ...response.detail, sources: [] } })).toThrow();
     expect(() => parsePlacePreviewResponse({ previews: [{ reference: response.detail.reference,
-      photo: { ...photo, imageUrl: "https://other.test/photo.jpg" } }] })).toThrow();
-    expect(parsePlacePreviewResponse({ previews: [{ reference: response.detail.reference, photo: null }] }).previews[0]?.photo).toBeNull();
+      photo: { ...photo, imageUrl: "https://other.test/photo.jpg" }, photoCount: 1 }] })).toThrow();
+    expect(parsePlacePreviewResponse({ previews: [{ reference: response.detail.reference, photo: null, photoCount: 0 }] }).previews[0]?.photo).toBeNull();
   });
 
-  it("accepts same-origin Google photos and rejects leaked or insecure provider URLs", () => {
+  it("accepts same-origin indexed Google photos and rejects mismatched identities", () => {
     const photo = googlePhoto();
     expect(parseGooglePlacePhoto(photo)).toEqual(photo);
     const fixtureFingerprint = "fixture_token-1";
-    const fixturePhoto = {
-      ...photo,
-      id: photo.id.replace("0baa8b4907390a5a", fixtureFingerprint),
-      thumbnailUrl: photo.thumbnailUrl.replace("0baa8b4907390a5a", fixtureFingerprint),
-      imageUrl: photo.imageUrl.replace("0baa8b4907390a5a", fixtureFingerprint),
-    };
+    const fixturePhoto = googlePhoto(0, fixtureFingerprint);
     expect(parseGooglePlacePhoto(fixturePhoto)).toEqual(fixturePhoto);
     const signed = {
       ...photo,
@@ -133,28 +128,62 @@ describe("curated place detail contract boundaries", () => {
       ...signed,
       imageUrl: `${photo.imageUrl}&exp=1791676799&sig=${"B".repeat(43)}`,
     })).toThrow();
-    expect(parsePlacePreviewResponse({ previews: [{ reference: { kind: "trip-place", id }, photo }] }).previews[0]?.photo)
-      .toEqual(photo);
+    expect(parsePlacePreviewResponse({ previews: [{
+      reference: { kind: "trip-place", id }, photo, photoCount: 1,
+    }] }).previews[0]?.photo).toEqual(photo);
     expect(() => parseGooglePlacePhoto({ ...photo, imageUrl: "https://places.googleapis.com/v1/photo/media?key=secret" })).toThrow();
     expect(() => parseGooglePlacePhoto({
       ...photo,
-      imageUrl: photo.imageUrl.replace("0baa8b4907390a5a", "different-fingerprint"),
+      imageUrl: photo.imageUrl.replace("0baa8b4907390a50", "different-fingerprint"),
+    })).toThrow();
+    expect(() => parseGooglePlacePhoto({ ...photo, index: 1 })).toThrow();
+    expect(() => parseGooglePlacePhoto({
+      ...photo,
+      imageUrl: photo.imageUrl.replace("?index=0", "?index=1"),
     })).toThrow();
     expect(() => parseGooglePlacePhoto({ ...photo, authors: [{ displayName: "攝影者", uri: "http://example.test/author" }] })).toThrow();
     expect(() => parseGooglePlacePhoto({ ...photo, googleMapsUri: "javascript:alert(1)" })).toThrow();
   });
 
-  it("requires curated source discrimination and keeps detail fallbacks mutually exclusive", () => {
+  it("caps detail galleries and enforces source, index, and preview-count invariants", () => {
     const place = reviewedManifest().places[0]!;
     const { image, thumbnail: _thumbnail, ...metadata } = place.photos[0]!;
     const url = `/api/trips/${tripId}/place-photo-assets/${image.filename}?kind=trip-place&id=${id}`;
     const photo = { source: "curated" as const, ...metadata, imageUrl: url, thumbnailUrl: url, width: 800, height: 600 };
     const detail = {
       reference: { kind: "trip-place", id }, canonicalPlaceId: id, name: place.name, asOfDate: null,
-      sources: place.sources, sections: [], photos: [photo], googlePhoto: null,
+      sources: place.sources, sections: [], photos: [photo], googlePhotos: [],
     };
     expect(parsePlaceDetailResponse({ detail }).detail.photos[0]?.source).toBe("curated");
     expect(() => parsePlaceDetailResponse({ detail: { ...detail, photos: [{ ...photo, source: undefined }] } })).toThrow();
-    expect(() => parsePlaceDetailResponse({ detail: { ...detail, googlePhoto: googlePhoto() } })).toThrow();
+    expect(() => parsePlaceDetailResponse({ detail: { ...detail, googlePhotos: [googlePhoto()] } })).toThrow();
+    const fourPhotos = (["1", "2", "3", "4"] as const).map((marker, index) => {
+      const filename = `${marker.repeat(64)}.jpg`;
+      const assetUrl = `/api/trips/${tripId}/place-photo-assets/${filename}?kind=trip-place&id=${id}`;
+      return {
+        ...photo,
+        id: `curated-work-${index}`,
+        sourceUrl: `https://example.test/works/curated-${index}`,
+        fileSourceUrl: `https://example.test/files/curated-${index}.jpg`,
+        imageUrl: assetUrl,
+        thumbnailUrl: assetUrl,
+      };
+    });
+    expect(() => parsePlaceDetailResponse({ detail: { ...detail, photos: fourPhotos } })).toThrow();
+    expect(() => parsePlaceDetailResponse({ detail: { ...detail, photos: [], googlePhotos: [
+      googlePhoto(0), googlePhoto(1), googlePhoto(2), { ...googlePhoto(2), id: googlePhoto(2).id.replace(":2:", ":3:"), index: 3 },
+    ] } })).toThrow();
+    expect(() => parsePlaceDetailResponse({ detail: { ...detail, photos: [], googlePhotos: [googlePhoto(1)] } })).toThrow();
+    expect(() => parsePlaceDetailResponse({ detail: { ...detail, photos: [], googlePhotos: [googlePhoto(0), googlePhoto(2)] } })).toThrow();
+
+    const reference = detail.reference;
+    expect(parsePlacePreviewResponse({ previews: [{ reference, photo, photoCount: 3 }] }).previews[0]?.photoCount).toBe(3);
+    for (const preview of [
+      { reference, photo: null, photoCount: 1 },
+      { reference, photo, photoCount: 0 },
+      { reference, photo, photoCount: 4 },
+      { reference, photo: null, photoCount: -1 },
+      { reference, photo: null, photoCount: 1.5 },
+    ]) expect(() => parsePlacePreviewResponse({ previews: [preview] })).toThrow();
   });
 });
