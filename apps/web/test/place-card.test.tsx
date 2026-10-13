@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { GooglePlacePhotoDto } from "@along-the-way/contracts/place-details";
 
 import { PlaceCard } from "../src/PlaceCard";
+import { VoteControl } from "../src/VoteControl";
 
 afterEach(cleanup);
 
@@ -22,6 +23,8 @@ const photo: GooglePlacePhotoDto = {
 
 it("renders one canonical place-card anatomy with ordered named slots", () => {
   const onOpen = vi.fn();
+  const onActivate = vi.fn();
+  const onVoteChange = vi.fn();
   const { container } = render(
     <PlaceCard
       name="清水寺"
@@ -33,11 +36,23 @@ it("renders one canonical place-card anatomy with ordered named slots", () => {
       photoCount={1}
       loadingPhoto={false}
       photoCredit={<span>照片來源</span>}
-      voteAction={<button type="button">想去</button>}
+      voteAction={(
+        <VoteControl
+          name="清水寺"
+          voters={[]}
+          voteCount={0}
+          ownVote={false}
+          votingAvailable
+          disabled={false}
+          compact
+          onChange={onVoteChange}
+        />
+      )}
       ownerActions={<button type="button">排入行程</button>}
-      wishlistAction={<button type="button">加入口袋名單</button>}
+      wishlistAction={<a href="#wishlist">加入口袋名單</a>}
       selectionControl={<button type="button" role="checkbox" aria-checked="false">選擇</button>}
       onOpen={onOpen}
+      onActivate={onActivate}
       openLabel="查看 清水寺 的詳情"
       dataAttribute={{ name: "wishlist-place", value: "清水寺" }}
     />,
@@ -46,31 +61,70 @@ it("renders one canonical place-card anatomy with ordered named slots", () => {
   const card = container.querySelector<HTMLElement>("[data-place-card]")!;
   expect(card).toHaveAttribute("data-wishlist-place", "清水寺");
   expect([...card.children].map((child) => child.className)).toEqual([
-    "place-card__selection",
-    "place-card__media",
-    "place-card__body",
+    "list-place-card__selection",
+    "list-place-card__media",
+    "list-place-card__body",
   ]);
-  const body = card.querySelector<HTMLElement>(".place-card__body")!;
+  const body = card.querySelector<HTMLElement>(".list-place-card__body")!;
   expect([...body.children].map((child) => child.className)).toEqual([
-    "place-card__heading",
-    "place-card__identity",
-    "place-card__description",
-    "place-card__status",
-    "place-card__credit",
-    "place-card__actions",
+    "list-place-card__heading",
+    "list-place-card__identity",
+    "list-place-card__description",
+    "list-place-card__status",
+    "list-place-card__credit",
+    "list-place-card__actions",
   ]);
-  const identity = body.querySelector(".place-card__identity")!;
+  const identity = body.querySelector(".list-place-card__identity")!;
   expect([...identity.children].map((child) => child.className)).toEqual([
-    "place-card__type",
-    "place-card__location",
+    "list-place-card__type",
+    "list-place-card__location",
   ]);
-  expect([...body.querySelector(".place-card__actions")!.children].map((child) => child.className)).toEqual([
-    "place-card__vote",
-    "place-card__owner-actions",
-    "place-card__wishlist-action",
+  expect([...body.querySelector(".list-place-card__actions")!.children].map((child) => child.className)).toEqual([
+    "list-place-card__vote",
+    "list-place-card__owner-actions",
+    "list-place-card__wishlist-action",
   ]);
-  expect(card.querySelectorAll(".pd-vote-control")).toHaveLength(0);
+  expect(card.querySelectorAll(".pd-vote-control")).toHaveLength(1);
 
   fireEvent.click(screen.getByRole("button", { name: "查看 清水寺 的詳情" }));
   expect(onOpen).toHaveBeenCalledOnce();
+  expect(onActivate).not.toHaveBeenCalled();
+
+  fireEvent.click(card.querySelector(".list-place-card__location")!);
+  expect(onActivate).toHaveBeenCalledOnce();
+
+  fireEvent.click(screen.getByRole("button", { name: /^想去，/ }));
+  fireEvent.click(screen.getByRole("button", { name: "排入行程" }));
+  fireEvent.click(screen.getByRole("link", { name: "加入口袋名單" }));
+  expect(onVoteChange).toHaveBeenCalledOnce();
+  expect(onActivate).toHaveBeenCalledOnce();
+});
+
+it("routes title clicks through card selection instead of opening details in selection mode", () => {
+  const onOpen = vi.fn();
+  const onActivate = vi.fn();
+  const { container } = render(
+    <PlaceCard
+      name="清水寺"
+      typeLabel="活動或景點"
+      location="京都府京都市東山區"
+      description="想看秋季夜間點燈"
+      photo={null}
+      photoCount={0}
+      state="selectable"
+      selectionControl={<button type="button" role="checkbox" aria-checked="false">選擇</button>}
+      onOpen={onOpen}
+      onActivate={onActivate}
+      openLabel="查看 清水寺 的詳情"
+      dataAttribute={{ name: "wishlist-place", value: "清水寺" }}
+    />,
+  );
+
+  expect(screen.queryByRole("button", { name: "查看 清水寺 的詳情" })).not.toBeInTheDocument();
+  fireEvent.click(container.querySelector(".list-place-card__title")!);
+  expect(onActivate).toHaveBeenCalledOnce();
+  expect(onOpen).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("checkbox", { name: "選擇" }));
+  expect(onActivate).toHaveBeenCalledOnce();
 });

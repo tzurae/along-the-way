@@ -157,7 +157,19 @@ describe("curated place detail contract boundaries", () => {
     expect(parsePlaceDetailResponse({ detail }).detail.photos[0]?.source).toBe("curated");
     expect(() => parsePlaceDetailResponse({ detail: { ...detail, photos: [{ ...photo, source: undefined }] } })).toThrow();
     expect(() => parsePlaceDetailResponse({ detail: { ...detail, googlePhotos: [googlePhoto()] } })).toThrow();
-    expect(() => parsePlaceDetailResponse({ detail: { ...detail, photos: [photo, { ...photo, id: "two" }, { ...photo, id: "three" }, { ...photo, id: "four" }] } })).toThrow();
+    const fourPhotos = (["1", "2", "3", "4"] as const).map((marker, index) => {
+      const filename = `${marker.repeat(64)}.jpg`;
+      const assetUrl = `/api/trips/${tripId}/place-photo-assets/${filename}?kind=trip-place&id=${id}`;
+      return {
+        ...photo,
+        id: `curated-work-${index}`,
+        sourceUrl: `https://example.test/works/curated-${index}`,
+        fileSourceUrl: `https://example.test/files/curated-${index}.jpg`,
+        imageUrl: assetUrl,
+        thumbnailUrl: assetUrl,
+      };
+    });
+    expect(() => parsePlaceDetailResponse({ detail: { ...detail, photos: fourPhotos } })).toThrow();
     expect(() => parsePlaceDetailResponse({ detail: { ...detail, photos: [], googlePhotos: [
       googlePhoto(0), googlePhoto(1), googlePhoto(2), { ...googlePhoto(2), id: googlePhoto(2).id.replace(":2:", ":3:"), index: 3 },
     ] } })).toThrow();

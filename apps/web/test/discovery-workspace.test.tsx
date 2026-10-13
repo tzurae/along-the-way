@@ -99,12 +99,12 @@ it("shows the AI description and renders proposals through the shared place-card
     expect(element).not.toBeNull();
     return element!;
   });
-  expect(card.querySelector(".place-card__location")).toHaveTextContent("地址未知");
-  expect(card.querySelector(".place-card__description")).toHaveTextContent("適合安排成輕鬆的市場散步。");
+  expect(card.querySelector(".list-place-card__location")).toHaveTextContent("地址未知");
+  expect(card.querySelector(".list-place-card__description")).toHaveTextContent("適合安排成輕鬆的市場散步。");
   expect(card.querySelectorAll(".pd-vote-control")).toHaveLength(1);
-  expect([...card.querySelector(".place-card__actions")!.children].map((child) => child.className)).toEqual([
-    "place-card__vote",
-    "place-card__wishlist-action",
+  expect([...card.querySelector(".list-place-card__actions")!.children].map((child) => child.className)).toEqual([
+    "list-place-card__vote",
+    "list-place-card__wishlist-action",
   ]);
   expect(within(card).getByRole("button", { name: "加入口袋名單" })).toBeVisible();
 });

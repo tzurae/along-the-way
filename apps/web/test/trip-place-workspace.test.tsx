@@ -252,16 +252,16 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
   const cards = [...document.querySelectorAll<HTMLElement>("[data-place-card]")];
   expect(cards).toHaveLength(2);
   for (const card of cards) {
-    const body = card.querySelector<HTMLElement>(".place-card__body")!;
+    const body = card.querySelector<HTMLElement>(".list-place-card__body")!;
     expect([...body.children].map((child) => child.className)).toEqual([
-      "place-card__heading",
-      "place-card__identity",
-      "place-card__description",
-      "place-card__status",
-      ...(card.querySelector(".place-card__credit") ? ["place-card__credit"] : []),
-      "place-card__actions",
+      "list-place-card__heading",
+      "list-place-card__identity",
+      "list-place-card__description",
+      "list-place-card__status",
+      ...(card.querySelector(".list-place-card__credit") ? ["list-place-card__credit"] : []),
+      "list-place-card__actions",
     ]);
-    expect(card.querySelector(".place-card__location")).not.toHaveTextContent(/^$/);
+    expect(card.querySelector(".list-place-card__location")).not.toHaveTextContent(/^$/);
     expect(card.querySelectorAll(".pd-vote-control")).toHaveLength(1);
   }
   const photographed = cards[0]!;

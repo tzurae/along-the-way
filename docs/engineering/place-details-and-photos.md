@@ -54,6 +54,8 @@ Google 對同一張照片在不同 metadata response 可能回傳不同 photo na
 
 `photos` field mask 屬於 **Essentials IDs Only** SKU；依 [Google Maps Platform pricing](https://developers.google.com/maps/billing-and-pricing/pricing)（2026-10-12 查閱）不計費，但仍受供應商配額與延遲影響，因此 metadata 與 media 端點各自限流。Google Place Photo media 每月前 1,000 次免費，其後每 1,000 次 US$7（每次 US$0.007）：未命中 private browser cache 時，打開詳情只載入首張為一次 media request；看完三張為三次、免費額度後合計 US$0.021。每月 1,000 次打開若都只看首張，剛好用完免費池；若每次看完三張，共 3,000 次，扣除前 1,000 次後為 US$14。卡片 192px 縮圖是另一個 media request；照片數 badge 本身不發 request。
 
+本 Google Cloud project 另有 `GetPlaceRequest per day = 300` 的硬上限。未命中 HTTP cache 時，每個需要 Google fallback 的預覽 batch entry 會用一次 Place Details、每次 Google detail 會用一次，且每張 media proxy 請求為驗證目前 index／fingerprint 還會再用一次。成功且沒有任何 rate-limit／上游失敗降級的 `/place-previews` 與 `/place-details` 回應使用 `Cache-Control: private, max-age=3600`，讓同一使用者一小時內重用結果；任一 Google lookup 失敗或 metadata rate limit 降級時維持 `private, no-store`，避免把暫時缺圖快取一小時並允許後續視圖重試。media proxy 仍使用既有 `private, max-age=86400`。
+
 ## 營運者匯入
 
 先執行 migration；新增的 `curated_place_details`、`curated_place_photos` 是 additive tables。匯入不是 HTTP 會員功能，而是持有資料庫發布權限的營運者 CLI。

@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 
 import { PlaceThumbnail, type PlaceDisplayPhoto } from "./PlaceThumbnail";
-import "./place-card.css";
+import "./list-place-card.css";
 
 export interface PlaceCardProps {
   name: string;
@@ -64,10 +64,14 @@ export function PlaceCard({
     : openDataAttribute
       ? { "data-proposal-detail-trigger": openDataAttribute.value }
       : {};
+  const selecting = state === "selecting" || state === "selectable" || state === "selected";
+  const stateClassName = state === "changed"
+    ? "list-place-card--scheduled list-place-card--changed"
+    : `list-place-card--${state}`;
 
   return (
     <article
-      className={`place-card place-card--${state}`}
+      className={`list-place-card ${stateClassName}`}
       data-place-card=""
       aria-label={ariaLabel}
       aria-current={current ? "true" : undefined}
@@ -77,25 +81,27 @@ export function PlaceCard({
       }}
       {...dataProps}
     >
-      {selectionControl ? <div className="place-card__selection">{selectionControl}</div> : null}
-      <div className="place-card__media">
+      {selectionControl ? <div className="list-place-card__selection">{selectionControl}</div> : null}
+      <div className="list-place-card__media">
         <PlaceThumbnail photo={photo} photoCount={photoCount} loading={loadingPhoto} />
       </div>
-      <div className="place-card__body">
-        <div className="place-card__heading">
-          <button type="button" className="place-card__title" aria-label={openLabel} onClick={onOpen} {...openDataProps}>{name}</button>
+      <div className="list-place-card__body">
+        <div className="list-place-card__heading">
+          {selecting
+            ? <span className="list-place-card__title">{name}</span>
+            : <button type="button" className="list-place-card__title" aria-label={openLabel} onClick={onOpen} {...openDataProps}>{name}</button>}
         </div>
-        <div className="place-card__identity">
-          <span className="place-card__type">{typeLabel}</span>
-          <div className="place-card__location">{location}</div>
+        <div className="list-place-card__identity">
+          <span className="list-place-card__type">{typeLabel}</span>
+          <div className="list-place-card__location">{location}</div>
         </div>
-        <div className="place-card__description">{description}</div>
-        {status ? <div className="place-card__status">{status}</div> : null}
-        {photo && photoCredit ? <div className="place-card__credit">{photoCredit}</div> : null}
-        <footer className="place-card__actions">
-          {voteAction ? <div className="place-card__vote">{voteAction}</div> : null}
-          {ownerActions ? <div className="place-card__owner-actions">{ownerActions}</div> : null}
-          {wishlistAction ? <div className="place-card__wishlist-action">{wishlistAction}</div> : null}
+        <div className="list-place-card__description">{description}</div>
+        {status ? <div className="list-place-card__status">{status}</div> : null}
+        {photo && photoCredit ? <div className="list-place-card__credit">{photoCredit}</div> : null}
+        <footer className="list-place-card__actions">
+          {voteAction ? <div className="list-place-card__vote">{voteAction}</div> : null}
+          {ownerActions ? <div className="list-place-card__owner-actions">{ownerActions}</div> : null}
+          {wishlistAction ? <div className="list-place-card__wishlist-action">{wishlistAction}</div> : null}
         </footer>
       </div>
     </article>

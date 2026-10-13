@@ -122,7 +122,11 @@ async function addManualWishlistPlace(page: Page, input: { name: string; address
   await expect(dialog).toHaveCount(0);
 }
 
-async function assertSharedPlaceCards(page: Page, dataAttribute: "data-wishlist-place" | "data-discovery-proposal") {
+async function assertSharedPlaceCards(
+  page: Page,
+  dataAttribute: "data-wishlist-place" | "data-discovery-proposal",
+  votingAvailableNames: string[],
+) {
   const cards = page.locator(`article[${dataAttribute}]`);
   await expect(cards.first()).toBeVisible();
   expect(await cards.count()).toBeGreaterThan(0);
@@ -130,23 +134,21 @@ async function assertSharedPlaceCards(page: Page, dataAttribute: "data-wishlist-
   await expect(page.locator(".pd-row-sidevotes, .pd-row-bottom--mobile")).toHaveCount(0);
 
   const measurements = await cards.evaluateAll((elements) => elements.map((card) => {
-    const body = card.querySelector<HTMLElement>(".place-card__body")!;
-    const heading = body.querySelector<HTMLElement>(".place-card__heading")!;
-    const identity = body.querySelector<HTMLElement>(".place-card__identity")!;
-    const title = heading.querySelector<HTMLElement>(".place-card__title")!;
-    const type = identity.querySelector<HTMLElement>(".place-card__type")!;
-    const location = identity.querySelector<HTMLElement>(".place-card__location")!;
-    const actions = body.querySelector<HTMLElement>(".place-card__actions");
-    const expectedOrder = ["place-card__heading", "place-card__identity", "place-card__description"];
-    if (body.querySelector(".place-card__status")) expectedOrder.push("place-card__status");
-    if (body.querySelector(".place-card__credit")) expectedOrder.push("place-card__credit");
-    if (actions) expectedOrder.push("place-card__actions");
+    const body = card.querySelector<HTMLElement>(".list-place-card__body")!;
+    const heading = body.querySelector<HTMLElement>(".list-place-card__heading")!;
+    const identity = body.querySelector<HTMLElement>(".list-place-card__identity")!;
+    const title = heading.querySelector<HTMLElement>(".list-place-card__title")!;
+    const type = identity.querySelector<HTMLElement>(".list-place-card__type")!;
+    const location = identity.querySelector<HTMLElement>(".list-place-card__location")!;
+    const actions = body.querySelector<HTMLElement>(".list-place-card__actions");
+    const expectedOrder = ["list-place-card__heading", "list-place-card__identity", "list-place-card__description"];
+    if (body.querySelector(".list-place-card__status")) expectedOrder.push("list-place-card__status");
+    if (body.querySelector(".list-place-card__credit")) expectedOrder.push("list-place-card__credit");
+    if (actions) expectedOrder.push("list-place-card__actions");
     const actionBoxes = actions
-      ? [...actions.children].flatMap((slot) => {
-          const target = slot.querySelector<HTMLElement>("button, a");
-          if (!target) return [];
+      ? [...actions.querySelectorAll<HTMLElement>("button, a")].map((target) => {
           const rect = target.getBoundingClientRect();
-          return [{ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, height: rect.height }];
+          return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, height: rect.height };
         })
       : [];
     const actionSeparations = actionBoxes.slice(1).map((box, index) => {
@@ -156,6 +158,7 @@ async function assertSharedPlaceCards(page: Page, dataAttribute: "data-wishlist-
         : box.top - previous.bottom;
     });
     return {
+      name: card.getAttribute("data-wishlist-place") ?? card.getAttribute("data-discovery-proposal")!,
       bodyOrder: [...body.children].map((child) => child.className),
       expectedOrder,
       identityOrder: [...identity.children].map((child) => child.className),
@@ -171,10 +174,11 @@ async function assertSharedPlaceCards(page: Page, dataAttribute: "data-wishlist-
 
   for (const measurement of measurements) {
     expect(measurement.bodyOrder).toEqual(measurement.expectedOrder);
-    expect(measurement.identityOrder).toEqual(["place-card__type", "place-card__location"]);
+    expect(measurement.identityOrder).toEqual(["list-place-card__type", "list-place-card__location"]);
     expect(Math.abs(measurement.typeLeft - measurement.titleLeft)).toBeLessThanOrEqual(1);
     expect(Math.abs(measurement.locationLeft - measurement.titleLeft)).toBeLessThanOrEqual(1);
-    expect(measurement.voteCount).toBe(1);
+    expect(measurement.voteCount).toBeLessThanOrEqual(1);
+    expect(measurement.voteCount).toBe(votingAvailableNames.includes(measurement.name) ? 1 : 0);
     if (measurement.actionsGap !== null) expect(measurement.actionsGap).toBe("12px");
     for (const height of measurement.actionHeights) expect(height).toBeGreaterThanOrEqual(44);
     for (const separation of measurement.actionSeparations) expect(separation).toBeGreaterThanOrEqual(12);
@@ -204,6 +208,7 @@ test("uses one measurable PlaceCard contract across wishlist and AI surfaces", a
   const editorEmail = `discovery-cards-editor-${suffix}@example.test`;
   const runId = crypto.randomUUID();
   const proposalId = crypto.randomUUID();
+  const decidedProposalId = crypto.randomUUID();
 
   await executeDatabase(`insert into users (email, display_name, status) values ('${ownerEmail}', 'Cards owner', 'active') on conflict (email) do nothing;`);
   await signIn(page, request, ownerEmail);
@@ -232,12 +237,30 @@ test("uses one measurable PlaceCard contract across wishlist and AI surfaces", a
         '京都府京都市中京區市場通', 35.005, 135.765, null,
         '適合全家悠閒逛市場並品嚐在地小吃。', null, '["food markets"]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'medium'
       from trips trip where trip.name = '${tripName}';
+    insert into candidate_proposals (id, trip_id, run_id, provider_place_id, name, place_type, address, latitude, longitude, source_url, recommendation, recommendation_sentences, matched_needs, tradeoffs, unknowns, confidence, status, decided_by, decided_at)
+      select '${decidedProposalId}', trip.id, '${runId}', 'ChIJ-Cards-Decided', '已決定的庭園', 'activity',
+        '京都府京都市左京區庭園通', 35.025, 135.785, null,
+        '這筆建議已經決定，不應再顯示投票控制。', null, '["gardens"]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'medium',
+        'rejected', member.user_id, now()
+      from trips trip join trip_members member on member.trip_id = trip.id and member.role = 'owner'
+      where trip.name = '${tripName}';
+  `);
+
+  await page.reload();
+  for (const viewport of [{ width: 390, height: 844 }, { width: 1280, height: 800 }]) {
+    await page.setViewportSize(viewport);
+    await openTab(page, "想去清單");
+    await assertSharedPlaceCards(page, "data-wishlist-place", []);
+    await openTab(page, "AI 找地點");
+    await assertSharedPlaceCards(page, "data-discovery-proposal", []);
+  }
+
+  await executeDatabase(`
     insert into users (email, display_name, status) values ('${editorEmail}', 'Cards editor', 'active');
     insert into trip_members (trip_id, user_id, role)
       select trip.id, member.id, 'editor' from trips trip cross join users member
       where trip.name = '${tripName}' and member.email = '${editorEmail}';
   `);
-
   await page.reload();
   const editorContext = await browser.newContext({ baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost" });
   const editorPage = await editorContext.newPage();
@@ -248,9 +271,24 @@ test("uses one measurable PlaceCard contract across wishlist and AI surfaces", a
     for (const viewport of [{ width: 390, height: 844 }, { width: 1280, height: 800 }]) {
       await rolePage.setViewportSize(viewport);
       await openTab(rolePage, "想去清單");
-      await assertSharedPlaceCards(rolePage, "data-wishlist-place");
+      await assertSharedPlaceCards(rolePage, "data-wishlist-place", ["很長名稱的家庭咖啡與甜點候選地點"]);
       await openTab(rolePage, "AI 找地點");
-      await assertSharedPlaceCards(rolePage, "data-discovery-proposal");
+      await assertSharedPlaceCards(rolePage, "data-discovery-proposal", ["共享卡片市場"]);
+
+      if (rolePage === page) {
+        await rolePage.getByRole("button", { name: "排入行程", exact: true }).click();
+        const pageHead = rolePage.locator(".pd-pagehead");
+        await expect(pageHead.getByRole("heading", { name: "已選 0 個地點", exact: true })).toBeVisible();
+        const selectableCard = rolePage.locator('article[data-discovery-proposal="共享卡片市場"]');
+        const selectionTitle = selectableCard.locator(".list-place-card__title");
+        await selectionTitle.click();
+        await expect(pageHead.getByRole("heading", { name: "已選 1 個地點", exact: true })).toBeVisible();
+        await expect(rolePage.getByRole("dialog")).toHaveCount(0);
+        await selectionTitle.click();
+        await expect(pageHead.getByRole("heading", { name: "已選 0 個地點", exact: true })).toBeVisible();
+        await expect(rolePage.getByRole("dialog")).toHaveCount(0);
+        await pageHead.getByRole("button", { name: "取消", exact: true }).click();
+      }
     }
   }
 

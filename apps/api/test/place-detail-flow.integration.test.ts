@@ -256,6 +256,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
   async function detail(reference: PlaceDetailReference, date = "2026-10-15") {
     const response = await app.request(`/api/trips/${tripId}/place-details?kind=${reference.kind}&id=${reference.id}&date=${date}`, { headers: { cookie: owner.cookie } });
     expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, max-age=3600");
     return parsePlaceDetailResponse(await response.json()).detail;
   }
 
@@ -292,6 +293,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     ]);
     expect(other.googlePhotos[0]?.imageUrl).not.toContain("server-only");
     const previews = await app.request(`/api/trips/${tripId}/place-previews?kind=trip-place&ids=${branch.id},${place.id}`, { headers: { cookie: owner.cookie } });
+    expect(previews.headers.get("cache-control")).toBe("private, max-age=3600");
     const parsed = parsePlacePreviewResponse(await previews.json()).previews;
     expect(parsed.map((item) => item.reference.id)).toEqual([branch.id, place.id]);
     expect(parsed[0]).toMatchObject({ photo: { source: "google", index: 0 }, photoCount: 3 });
@@ -311,6 +313,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
       { headers: { cookie: owner.cookie } },
     );
     expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
     const previews = parsePlacePreviewResponse(await response.json()).previews;
     expect(previews[0]?.photo).toBeNull();
     expect(previews[1]?.photo).toMatchObject({ source: "curated", id: "original-test-pixel" });
@@ -434,6 +437,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
       { headers: { cookie: owner.cookie } },
     );
     expect(previewResponse.status).toBe(200);
+    expect(previewResponse.headers.get("cache-control")).toBe("private, no-store");
     const previews = parsePlacePreviewResponse(await previewResponse.json()).previews;
     expect(previews[0]).toMatchObject({ photo: null, photoCount: 0 });
     expect(previews[1]).toMatchObject({ photo: { source: "curated", id: "original-test-pixel" }, photoCount: 1 });
@@ -443,6 +447,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
       { headers: { cookie: owner.cookie } },
     );
     expect(detailResponse.status).toBe(200);
+    expect(detailResponse.headers.get("cache-control")).toBe("private, no-store");
     expect(parsePlaceDetailResponse(await detailResponse.json()).detail.googlePhotos).toEqual([]);
     expect(providerReads).toBe(0);
   });

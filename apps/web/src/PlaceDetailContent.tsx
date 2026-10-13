@@ -238,7 +238,7 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
     if (!root || typeof IntersectionObserver !== "function") return;
     const observer = new IntersectionObserver((entries) => {
       const intersectingIds = entries
-        .filter((entry) => entry.isIntersecting)
+        .filter((entry) => entry.isIntersecting && entry.intersectionRatio >= 0.5)
         .map((entry) => (entry.target as HTMLElement).dataset.photoSlide)
         .filter((id): id is string => Boolean(id));
       if (intersectingIds.length === 0) return;
@@ -255,7 +255,7 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
         }
         return changed ? { resetKey, ids } : current;
       });
-    }, { root, threshold: 0.01 });
+    }, { root, threshold: [0.5] });
     root.querySelectorAll<HTMLElement>("[data-photo-slide]").forEach((slide, index) => {
       if (index > 0) observer.observe(slide);
     });

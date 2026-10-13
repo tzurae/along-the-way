@@ -158,7 +158,12 @@ it("activates Google slides on demand and keeps selection, failure, and per-phot
   expect(document.querySelector(`[data-photo-credit="${googlePhotos[0]!.id}"]`)).toHaveTextContent("Google Maps・照片：攝影者甲");
 
   act(() => observerCallback?.([
-    { isIntersecting: true, target: slides[1]! } as unknown as IntersectionObserverEntry,
+    { isIntersecting: true, intersectionRatio: 0, target: slides[1]! } as unknown as IntersectionObserverEntry,
+  ], {} as IntersectionObserver));
+  expect(slides[1]!.querySelector("img")).not.toBeInTheDocument();
+
+  act(() => observerCallback?.([
+    { isIntersecting: true, intersectionRatio: 0.6, target: slides[1]! } as unknown as IntersectionObserverEntry,
   ], {} as IntersectionObserver));
   const second = await screen.findByAltText("測試景點的照片，第 2 張，共 3 張");
   expect(second).toHaveAttribute("src", googlePhotos[1]!.imageUrl);

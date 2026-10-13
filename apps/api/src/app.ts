@@ -647,8 +647,16 @@ export function createApp({
       if (!(error instanceof AppError) || error.code !== "rate_limited") throw error;
       includeGooglePhoto = false;
     }
-    context.header("Cache-Control", "private, no-store");
-    return context.json({ detail: await placeDetails.getDetail(user.id, uuidParam(context, "tripId"), reference, date, includeGooglePhoto) });
+    const result = await placeDetails.getDetail(
+      user.id,
+      uuidParam(context, "tripId"),
+      reference,
+      date,
+      includeGooglePhoto,
+    );
+    context.header("Cache-Control",
+      includeGooglePhoto && !result.googleFallbackFailed ? "private, max-age=3600" : "private, no-store");
+    return context.json({ detail: result.detail });
   });
 
   app.get("/api/trips/:tripId/place-previews", async (context) => {
@@ -668,8 +676,16 @@ export function createApp({
       if (!(error instanceof AppError) || error.code !== "rate_limited") throw error;
       includeGooglePhoto = false;
     }
-    context.header("Cache-Control", "private, no-store");
-    return context.json({ previews: await placeDetails.getPreviews(user.id, uuidParam(context, "tripId"), kind, ids, includeGooglePhoto) });
+    const result = await placeDetails.getPreviews(
+      user.id,
+      uuidParam(context, "tripId"),
+      kind,
+      ids,
+      includeGooglePhoto,
+    );
+    context.header("Cache-Control",
+      includeGooglePhoto && !result.googleFallbackFailed ? "private, max-age=3600" : "private, no-store");
+    return context.json({ previews: result.previews });
   });
 
   app.get("/api/trips/:tripId/place-photo-assets/:filename", async (context) => {
