@@ -93,6 +93,11 @@
   --border: color-mix(in srgb, #24372f 18%, transparent);
   --input: color-mix(in srgb, #24372f 18%, transparent);
   --ring: #e09271;
+  /* Day load colors: the level is carried by a solid background; text is always --load-on. */
+  --load-relaxed: #2f6b4a;
+  --load-balanced: #8a5a0f;
+  --load-packed: #a3402a;
+  --load-on: #fffaf2;
   --place-row-thumb: 64px;
   --place-row-pad-x: 12px;
   --place-row-pad-y: 12px;
@@ -398,6 +403,11 @@ span.today-sync-status { flex: none; font-weight: 600; white-space: nowrap; }
   .atw-railnav > div { display: grid; gap: 6px; }
   .atw-railnav button { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 10px 12px; border-radius: 14px; text-align: left; font-size: 15px; font-weight: 700; }
   .atw-railnav button.is-active { background: var(--card); color: #9a4a2c; }
+  /* Child bar under 行程: indented, quieter than the parent destinations, active = accent text. */
+  .atw-railnav .atw-railnav__children { display: grid; gap: 2px; margin: -2px 0 4px 22px; padding-left: 12px; border-left: 1px solid var(--border); }
+  .atw-railnav .atw-railnav__children button { min-height: 40px; padding: 8px 12px; border-radius: 12px; font-size: 14px; font-weight: 600; color: var(--muted-foreground); }
+  .atw-railnav .atw-railnav__children button:hover { color: var(--color-ink); background: color-mix(in srgb, var(--card) 60%, transparent); }
+  .atw-railnav .atw-railnav__children button.is-active { color: #9a4a2c; background: var(--card); }
   .atw-main { min-width: 0; padding: 4px 0 80px; }
   .today-grid { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   .today-lead { padding: 26px 28px; }

@@ -1,4 +1,5 @@
 import type {
+  DayCapacityDto,
   DayLegDto,
   DayLoadDto,
   DayTimetableRowDto,
@@ -81,6 +82,7 @@ export interface TimetableResult {
   rows: DayTimetableRowDto[];
   unscheduled: UnscheduledPlaceDto[];
   load: DayLoadDto;
+  capacity: DayCapacityDto;
 }
 
 /** Travel assumed to and from a fixed item whose place has no map location, labelled an estimate. */
@@ -179,6 +181,15 @@ function loadLevel(busy: number, available: number): DayLoadDto["level"] {
   if (busy * 10 < available * 7) return "relaxed";
   if (busy * 10 <= available * 9) return "balanced";
   return "packed";
+}
+
+/**
+ * The day's load level. A day that could not hold its places for lack of time is never "relaxed",
+ * however little of the window is busy (e.g. an evening arrival leaves the morning empty but unusable).
+ */
+export function dayLoadLevel(busy: number, available: number, unscheduled: UnscheduledPlaceDto[]): DayLoadDto["level"] {
+  const outOfTime = unscheduled.some((place) => place.reason === "not_enough_time" || place.reason === "cannot_return_to_lodging");
+  return outOfTime ? "packed" : loadLevel(busy, available);
 }
 
 function pointOf(id: string): Origin {
@@ -394,10 +405,24 @@ export async function scheduleDay(input: TimetableInput): Promise<TimetableResul
     countedUntil = Math.max(countedUntil, block.endMinute + block.afterBufferMinutes);
     if (index === dropGap - 1) emitDrop();
   }
-
   // Before the arrival the traveller is elsewhere: those items are shown, nothing is placed.
   for (let index = 0; index <= arrivalIndex; index += 1) await emitBlock(index, null, emptyGap(index));
   if (dropGap === 0) emitDrop();
+  // The room places could ever use, taken before any is placed: the same gaps tried below.
+  const arrivalBlock = arrivalIndex >= 0 ? blocks[arrivalIndex]! : null;
+  const departureBlock = collectIndex >= 0 ? blocks[collectIndex]! : null;
+  const capacity: DayCapacityDto = {
+    arrival: arrivalBlock
+      ? { title: arrivalBlock.title, endMinute: arrivalBlock.endMinute, afterBufferMinutes: arrivalBlock.afterBufferMinutes }
+      : null,
+    departure: departureBlock ? { title: departureBlock.title, startMinute: departureBlock.startMinute } : null,
+    gaps: [],
+  };
+  for (let index = arrivalIndex + 1; index <= lastGap; index += 1) {
+    const gap = emptyGap(index);
+    const endMinute = Math.min(gap.deadline, window.endMinute);
+    if (endMinute > gap.startMinute) capacity.gaps.push({ startMinute: gap.startMinute, endMinute });
+  }
   let current = emptyGap(arrivalIndex + 1);
   /** Travel from the last placed stop to the current gap's target. */
   let pendingOnward: DayLegDto | null = null;
@@ -465,6 +490,7 @@ export async function scheduleDay(input: TimetableInput): Promise<TimetableResul
   return {
     rows,
     unscheduled,
-    load: { busyMinutes: busy, windowMinutes, level: loadLevel(busy, windowMinutes) },
+    load: { busyMinutes: busy, windowMinutes, level: dayLoadLevel(busy, windowMinutes, unscheduled) },
+    capacity,
   };
 }

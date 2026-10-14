@@ -35,6 +35,8 @@ export const discovery = {
     pending: "待討論",
     accepting: "處理中",
     accepted: "已加入口袋名單",
+    // Accepted and its wishlist place is already on the itinerary (same rule as the wishlist row).
+    acceptedScheduled: "已加入行程",
     rejected: "不再推薦",
   },
   feedbackStatus: {
@@ -158,7 +160,7 @@ export const discovery = {
     closeDetail: "關閉 AI 建議詳情",
     proposalAtAddress: (name: string, address: string) => `AI 推薦：${name}，地址：${address}`,
     rejectConfirmTitle: (name: string) => `不要再推薦「${name}」？`,
-    rejectConfirmDescription: "這個地點會離開候選清單，未來的研究不會再推薦。如果按錯，可以在清單最下面的「不再推薦的地點」恢復。",
+    rejectConfirmDescription: "這個地點會離開候選清單，之後的研究也不會再推薦。目前無法復原。",
     rejectConfirm: "確定不要再推薦",
     cancel: "取消",
   },

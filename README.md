@@ -82,9 +82,15 @@ borrow another identity's content. A thumbnail without a photo says so in text
 ### Lists and must-items (#123)
 
 Both 口袋名單 and AI 建議 use one compact row (`PlaceListRow`). Each row shows a
-64px thumbnail, the name with a type chip, one list-specific line, a status, and
-an attribution line that is never truncated. Addresses live only in the detail
-panel.
+64px thumbnail (a button that opens the detail), the name with a type chip, one
+list-specific line, and a status. A wishlist place without a 想去 reason shows
+the area part of its address instead. Rows carry no photo-credit or Google Maps
+attribution line (owner decision #127; this conflicts with Google's Places
+attribution policy for list thumbnails, and the detail gallery keeps its credits).
+Both lists are ordered by confirmed vote count and slide rows to their new
+position when the order changes (`FlipList`; a fade under reduced motion).
+AI 建議 hides rejected proposals and labels an accepted proposal 「已加入行程」
+once its wishlist place is on the itinerary.
 
 Wishlist details list members' 必買／必吃／必喝 items:
 
@@ -113,6 +119,20 @@ See [`docs/engineering/place-details-and-photos.md`](docs/engineering/place-deta
 for API/reference contracts, source applicability, asset validation, import and
 failure behavior, and current isolated verification status. The acceptance source
 is the [place-details/photo specification](docs/superpowers/specs/2026-10-09-place-details-and-photos-design.md).
+
+## Day planner explanations (#127)
+
+`DayTimetableDto.capacity` reports, from the scheduler itself, the fixed item
+the traveller arrives with (`arrival`), the last day's departure (`departure`)
+and the free gaps places were tried in (`gaps`). The day dialog turns these into
+plain-language reasons when a place does not fit, and hides the re-order actions
+when there is no gap at all. A day with a place left out for lack of time is
+always `packed`. Load levels render as solid badges: 寬鬆 green, 剛好 amber,
+太趕 red (`--load-relaxed|balanced|packed` in `styles.css`).
+
+Flights and lodging are reached from the 行程 navigation: on desktop the rail
+shows 總覽／航班／住宿 under 行程; on mobile the same three appear as a segment
+strip at the top of the 行程 panel.
 
 ## Shared flights and lodging (Issue #74)
 
@@ -542,14 +562,15 @@ supports migration-free rollback only).
 ## Member votes (Issue #73, replacing #67's five preference levels)
 
 Each active member has one vote per wishlist place and per pending AI proposal:
-voted or not. Voting exists only while the trip has at least two active members
-(`trip_members.removed_at is null`); with fewer, the vote endpoints return
-`409 voting_unavailable` and neither the wishlist nor plan drafts use vote
-order. Removed members' votes never count.
+voted or not. A single active member can vote (owner decision #127, replacing
+#73's two-member minimum); a trip with no active member returns
+`409 voting_unavailable`. Removed members' votes never count.
 
 - `PUT /api/trips/:tripId/trip-places/:tripPlaceId/vote` returns `{ tripPlace }`.
 - `PUT /api/trips/:tripId/discovery/proposals/:proposalId/vote` returns
-  `{ discovery }`; only `pending` proposals accept votes.
+  `{ proposal }`; only `pending` proposals accept votes. A retried vote stored
+  before 0.8.0 (whose stored result is the whole workspace) still replays the
+  proposal.
 
 Both require an `Idempotency-Key` and a body of `{ "voted": true }` or
 `{ "voted": false }` (set-state, no `expectedVersion`). They always change the
@@ -559,8 +580,9 @@ stored request replays its original result.
 Place and proposal DTOs carry `voters` (`memberUserId`, `memberEmail`,
 `memberDisplayName`), `voteCount`, `ownVote` and `votingAvailable`. The
 wishlist is ordered by vote count, ties keeping creation order; voted cards are
-tinted and the top-voted cards (at least two votes) slightly more. AI proposal
-order is unchanged. Accepting a proposal copies active members' votes to the
+tinted and the top-voted cards (at least two votes) slightly more. AI proposals
+are ordered by vote count too. Votes update optimistically, roll back on failure,
+and are then confirmed by a fresh list read. Accepting a proposal copies active members' votes to the
 wishlist place without duplicates; merging places keeps the union of votes.
 Day and whole-trip plan drafts prioritize places by vote count and no longer
 show preferences or conflicts. Formal itinerary items are never changed.

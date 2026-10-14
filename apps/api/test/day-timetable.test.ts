@@ -265,6 +265,38 @@ describe("single-day timetable", () => {
       expect(visits(result.rows)).toEqual([["a", 845, 905], ["b", 915, 975]]);
     });
 
+    it("on an evening arrival reports no free gap and never rates the unusable day relaxed", async () => {
+      // The 10/21 shape: 15:48 TPE → KIX lands 18:00, entry takes 60 minutes, the day ends at 19:00.
+      const outbound = fixed("TPE → KIX", { itemType: "flight", startMinute: 948, endMinute: 1080, afterBufferMinutes: 60 });
+      const result = await scheduleDay(input({
+        arrivalItemId: "TPE → KIX",
+        stops: [stop("kiyomizu")],
+        blocks: [outbound],
+      }));
+
+      expect(result.unscheduled).toEqual([{ tripPlaceId: "kiyomizu", name: "kiyomizu", reason: "not_enough_time" }]);
+      expect(result.capacity).toEqual({
+        arrival: { title: "TPE → KIX", endMinute: 1080, afterBufferMinutes: 60 },
+        departure: null,
+        gaps: [],
+      });
+      // Only 192 of 600 minutes are busy, but a place did not fit: the day is full, not relaxed.
+      expect(result.load).toEqual({ busyMinutes: 192, windowMinutes: 600, level: "packed" });
+    });
+
+    it("reports the free gaps places were tried in, around a fixed item", async () => {
+      const lunch = fixed("lunch", { startMinute: 12 * 60, endMinute: 13 * 60 });
+      const result = await scheduleDay(input({
+        stops: [stop("long", { durationMinutes: 7 * 60 })],
+        blocks: [lunch],
+      }));
+
+      // 09:00–12:00 and 13:00–19:00; the 7-hour stay fits neither.
+      expect(result.capacity.gaps).toEqual([{ startMinute: 540, endMinute: 720 }, { startMinute: 780, endMinute: 1140 }]);
+      expect(result.unscheduled[0]?.reason).toBe("not_enough_time");
+      expect(result.load.level).toBe("packed");
+    });
+
     it("on a moving day starts at the old lodging and leaves luggage at the new one first", async () => {
       const result = await scheduleDay(input({
         start: { id: "old", name: "Old hotel" },

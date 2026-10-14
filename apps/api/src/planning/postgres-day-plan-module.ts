@@ -36,6 +36,7 @@ import type { TripSkeletonModule } from "../trip-skeleton/trip-skeleton-module";
 import { orderByStraightLine, straightLineMeters, type GeoPoint } from "./day-route-order";
 import {
   DEFAULT_STAY_MINUTES,
+  dayLoadLevel,
   scheduleDay,
   type TimetableBlock,
   type TimetableResult,
@@ -346,8 +347,14 @@ export class PostgresDayPlanModule implements DayPlanModule {
       }
       const placedIds = addedIds.filter((id) => !dropped.has(id));
       if (placedIds.length === 0) continue;
-      // A skipped place leaves the rest of the day exactly as if it had never been tried.
-      const keptResult = { ...result, unscheduled: result.unscheduled.filter((place) => !addedIds.includes(place.tripPlaceId)) };
+      // A skipped place leaves the rest of the day exactly as if it had never been tried, so the
+      // load level is re-derived without the dropped candidates' "not enough time" verdicts.
+      const keptUnscheduled = result.unscheduled.filter((place) => !addedIds.includes(place.tripPlaceId));
+      const keptResult = {
+        ...result,
+        unscheduled: keptUnscheduled,
+        load: { ...result.load, level: dayLoadLevel(result.load.busyMinutes, result.load.windowMinutes, keptUnscheduled) },
+      };
       days.push({
         timetable: this.timetableDto(
           context, [...keptStops.map((stop) => stop.id), ...placedIds], keptResult, keptPlaces, "current",
@@ -516,6 +523,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
       rows: result.rows,
       unscheduled,
       load: result.load,
+      capacity: result.capacity,
     };
   }
 

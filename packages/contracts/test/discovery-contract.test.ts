@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseDiscoveryWorkspaceResponse } from "../src/discovery";
+import { parseDiscoveryWorkspaceResponse, parseUpdateCandidateProposalVoteResponse } from "../src/discovery";
 
 function response() {
   return {
@@ -50,5 +50,11 @@ describe("discovery contract", () => {
     const proposal = parseDiscoveryWorkspaceResponse(legacy).discovery.proposals[0]!;
 
     expect(proposal).not.toHaveProperty("confidence");
+  });
+
+  it("parses a proposal-only vote response", () => {
+    const proposal = response().discovery.proposals[0]!;
+    expect(parseUpdateCandidateProposalVoteResponse({ proposal }).proposal).toEqual(proposal);
+    expect(() => parseUpdateCandidateProposalVoteResponse({ discovery: response().discovery })).toThrow("Invalid discovery response");
   });
 });

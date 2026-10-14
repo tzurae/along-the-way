@@ -1597,7 +1597,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect(provider.detailRequests).toHaveLength(1);
   });
 
-  it("orders active votes descending, ignores removed members, and disables voting for one member", async () => {
+  it("orders active votes descending, ignores removed members, and keeps voting for a single member", async () => {
     const owner = await login("owner@example.test");
     const second = await login("second@example.test");
     const third = await login("third@example.test");
@@ -1635,17 +1635,14 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect((await setVote(owner.cookie, trip.id, one.id, false, "repeat-remove")).status).toBe(200);
     expect((await list(owner.cookie, trip.id)).find((place) => place.id === one.id)).toMatchObject({ voteCount: 0, ownVote: false });
     expect((await remove(second.user.id)).status).toBe(204);
-    for (const voted of [true, false]) {
-      const refused = await setVote(owner.cookie, trip.id, two.id, voted, `single-${voted}`);
-      expect(refused.status).toBe(409);
-      expect(await refused.json()).toMatchObject({ error: { code: "voting_unavailable" } });
-    }
-    // A retry of a vote stored before the trip dropped to one member replays its success.
-    expect((await setVote(owner.cookie, trip.id, two.id, true, `${owner.user.id}-${two.id}`)).status).toBe(200);
+    // A solo traveller can still vote (owner decision 2026-10-14).
+    expect((await setVote(owner.cookie, trip.id, two.id, true, `single-true`)).status).toBe(200);
     const solo = await list(owner.cookie, trip.id);
-    expect(solo.map((place) => place.id)).toEqual([zero.id, one.id, two.id, tie.id]);
-    expect(solo.every((place) => !place.votingAvailable)).toBe(true);
-    expect(solo.find((place) => place.id === two.id)?.voteCount).toBe(1);
+    expect(solo.every((place) => place.votingAvailable)).toBe(true);
+    expect(solo.find((place) => place.id === two.id)).toMatchObject({ voteCount: 1, ownVote: true });
+    expect(solo.map((place) => place.voteCount)).toEqual([...solo.map((place) => place.voteCount)].sort((a, b) => b - a));
+    expect((await setVote(owner.cookie, trip.id, two.id, false, `single-false`)).status).toBe(200);
+    expect((await list(owner.cookie, trip.id)).find((place) => place.id === two.id)).toMatchObject({ voteCount: 0, ownVote: false });
   });
 
   it("lets an editor merge two unscheduled places and unions votes without duplication", async () => {

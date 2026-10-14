@@ -812,7 +812,7 @@ export function createApp({
     await rateLimiter.consume("trip_content", clientIp(context), user.id);
     const body = await jsonBody(context);
     return context.json({
-      discovery: await discovery.setProposalVote(
+      proposal: await discovery.setProposalVote(
         user.id,
         uuidParam(context, "tripId"),
         uuidParam(context, "proposalId"),

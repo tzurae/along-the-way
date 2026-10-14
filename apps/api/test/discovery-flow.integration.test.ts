@@ -8,7 +8,7 @@ import { ApiRequestError } from "../../web/src/api-error";
 import type { Hono } from "hono";
 import { sql, type Kysely } from "kysely";
 
-import { parseDiscoveryWorkspaceResponse } from "@along-the-way/contracts/discovery";
+import { parseDiscoveryWorkspaceResponse, parseUpdateCandidateProposalVoteResponse } from "@along-the-way/contracts/discovery";
 import { parseApiError, parseTripResponse } from "@along-the-way/contracts/private-trips";
 import {
   parseTripPlaceListResponse,
@@ -1031,10 +1031,27 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     const proposal = parseDiscoveryWorkspaceResponse(await generatedResponse.json()).discovery.proposals[0];
     if (!proposal) throw new Error("Expected proposal");
 
-    const unavailable = await discoveryRequest(ownerCookie,
+    // A solo traveller can vote too (owner decision 2026-10-14); undo it so later counts start at zero.
+    const solo = await discoveryRequest(ownerCookie,
       `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/vote`, "solo-proposal-vote", { voted: true });
-    expect(unavailable.status).toBe(409);
-    expect(await unavailable.json()).toMatchObject({ error: { code: "voting_unavailable" } });
+    expect(solo.status).toBe(200);
+    expect(parseUpdateCandidateProposalVoteResponse(await solo.json()).proposal).toMatchObject({ voteCount: 1, ownVote: true, votingAvailable: true });
+    const soloUndo = await discoveryRequest(ownerCookie,
+      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/vote`, "solo-proposal-unvote", { voted: false });
+    expect(soloUndo.status).toBe(200);
+    // Votes recorded before 0.8.0 stored the whole workspace as their response. Retrying such a
+    // vote with its original key after the upgrade must still replay the proposal, not fail.
+    const storedWorkspace = (await (await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie: ownerCookie } })).json()).discovery;
+    await database.updateTable("mutation_requests").set({ response: storedWorkspace })
+      .where("actor_id", "=", owner.id)
+      .where("operation", "=", `discovery:vote:${proposal.id}`)
+      .where("idempotency_key", "=", "solo-proposal-unvote")
+      .execute();
+    const replayedOldVote = await discoveryRequest(ownerCookie,
+      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/vote`, "solo-proposal-unvote", { voted: false });
+    expect(replayedOldVote.status).toBe(200);
+    expect(parseUpdateCandidateProposalVoteResponse(await replayedOldVote.json()).proposal)
+      .toMatchObject({ id: proposal.id, voteCount: 0, ownVote: false });
     const second = await addMember("second-vote@example.test");
     const third = await addMember("third-vote@example.test");
     const fourth = await addMember("fourth-vote@example.test");
@@ -1042,7 +1059,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       const response = await discoveryRequest(cookie,
         `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/vote`, key, { voted, memberUserId });
       expect(response.status).toBe(200);
-      return parseDiscoveryWorkspaceResponse(await response.json()).discovery.proposals[0]!;
+      return parseUpdateCandidateProposalVoteResponse(await response.json()).proposal;
     };
     await setVote(ownerCookie, "proposal-vote-owner", true);
     await setVote(second.cookie, "proposal-vote-second", true);
@@ -1184,8 +1201,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       { voted: true },
     );
     expect(voted.status).toBe(200);
-    const votedProposal = parseDiscoveryWorkspaceResponse(await voted.json()).discovery.proposals
-      .find((proposal) => proposal.id === acceptProposal.id)!;
+    const votedProposal = parseUpdateCandidateProposalVoteResponse(await voted.json()).proposal;
     expect(votedProposal).toMatchObject({ status: "pending", ownVote: true, voteCount: 1 });
     expect(votedProposal.voters.map((voter) => voter.memberUserId)).toEqual([editor.userId]);
 

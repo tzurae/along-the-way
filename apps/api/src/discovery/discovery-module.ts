@@ -1,4 +1,5 @@
 import type {
+  CandidateProposalDto,
   CreateDiscoveryFeedbackInput,
   DecideCandidateProposalInput,
   DecideDiscoveryFeedbackInput,
@@ -36,7 +37,7 @@ export interface DiscoveryModule {
     proposalId: string,
     idempotencyKey: string,
     input: UpdateCandidateProposalVoteInput,
-  ): Promise<DiscoveryWorkspaceDto>;
+  ): Promise<CandidateProposalDto>;
   acceptProposal(
     userId: string,
     tripId: string,

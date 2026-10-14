@@ -8,7 +8,7 @@ export const tripPlan = {
   planFor: (date: string) => `${date} 的規劃`,
   dayFallback: "某一天",
   adds: "新增：",
-  loadSummary: (level: string, busy: string, window: string) => `${level}，已排 ${busy}，共 ${window}`,
+  loadSummary: (busy: string, window: string) => `已排 ${busy}，共 ${window}`,
   draftTimetableFor: (date: string) => `${date} 的每日行程草稿`,
   alreadyOnDayButNotFitting: "已在這一天但排不進去：",
   notAdded: "未加入",
