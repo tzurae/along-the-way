@@ -1,4 +1,4 @@
-import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type FormEvent, type KeyboardEvent, Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 
 import {
@@ -16,7 +16,7 @@ import {
   type UserDto,
 } from "@along-the-way/contracts/private-trips";
 
-import { CalendarDays, ChevronDown, ChevronsUpDown, MapPin, Route, Users, Wifi, WifiOff } from "lucide-react";
+import { CalendarDays, ChevronsUpDown, MapPin, Route, Users, Wifi, WifiOff } from "lucide-react";
 
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -376,10 +376,12 @@ function TripSwitcher({ layout, trips, selectedTrip, signedInEmail, openCreateTr
   );
 }
 
-function TripNavigation({ layout, activeTab, selectTab }: {
+function TripNavigation({ layout, activeTab, selectTab, itinerarySegment, selectItinerarySegment }: {
   layout: "mobile" | "desktop";
   activeTab: TripTab;
   selectTab(tab: TripTab): void;
+  itinerarySegment: ItinerarySegment;
+  selectItinerarySegment(segment: ItinerarySegment): void;
 }) {
   const { t } = useI18n();
   const destinations = [
@@ -408,22 +410,41 @@ function TripNavigation({ layout, activeTab, selectTab }: {
     >
       <div role="tablist" aria-orientation={layout === "desktop" ? "vertical" : "horizontal"}>
         {destinations.map(({ value, label, Icon }) => (
-          <button
-            key={value}
-            type="button"
-            role="tab"
-            data-trip-tab={value}
-            data-layout={layout}
-            aria-controls={`trip-panel-${value}`}
-            aria-selected={activeTab === value}
-            tabIndex={activeTab === value ? 0 : -1}
-            className={activeTab === value ? "is-active" : ""}
-            onClick={() => selectTab(value)}
-            onKeyDown={(event) => handleKeyDown(event, value)}
-          >
-            <Icon aria-hidden="true" className={layout === "mobile" ? "size-[22px]" : "size-5"} />
-            <span>{label}</span>
-          </button>
+          <Fragment key={value}>
+            <button
+              type="button"
+              role="tab"
+              data-trip-tab={value}
+              data-layout={layout}
+              aria-controls={`trip-panel-${value}`}
+              aria-selected={activeTab === value}
+              tabIndex={activeTab === value ? 0 : -1}
+              className={activeTab === value ? "is-active" : ""}
+              onClick={() => selectTab(value)}
+              onKeyDown={(event) => handleKeyDown(event, value)}
+            >
+              <Icon aria-hidden="true" className={layout === "mobile" ? "size-[22px]" : "size-5"} />
+              <span>{label}</span>
+            </button>
+            {/* Desktop child bar under 行程: the permanent way into 航班／住宿 (mobile uses the
+                segment strip at the top of the 行程 panel; the bottom bar has no room). */}
+            {layout === "desktop" && value === "itinerary" && activeTab === "itinerary" ? (
+              <div className="atw-railnav__children" role="group" aria-label={t.app.itinerarySectionPicker}>
+                {itinerarySegmentIds.map((segment) => (
+                  <button
+                    key={segment}
+                    type="button"
+                    data-itinerary-child={segment}
+                    aria-current={itinerarySegment === segment ? "page" : undefined}
+                    className={itinerarySegment === segment ? "is-active" : ""}
+                    onClick={() => selectItinerarySegment(segment)}
+                  >
+                    {t.app.itinerarySegments[segment]}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </Fragment>
         ))}
       </div>
     </nav>
@@ -548,10 +569,6 @@ export function App() {
   const [activeSegment, setActiveSegment] = useState<TripSegment | null>(() => {
     const location = readTripLocation();
     return location.segment ?? defaultSegment(location.tab ?? "itinerary");
-  });
-  const [travelManagementOpen, setTravelManagementOpen] = useState(() => {
-    const segment = readTripLocation().segment;
-    return segment === "flight" || segment === "lodging";
   });
   const clearLocalSession = useCallback(() => {
     ++sessionEpoch.current;
@@ -729,7 +746,6 @@ export function App() {
   const selectSegment = useCallback((tab: TripTab, segment: TripSegment) => {
     setActiveTripTab(tab);
     setActiveSegment(segment);
-    if (tab === "itinerary" && segment !== "daily") setTravelManagementOpen(true);
     const location = readTripLocation();
     if (location.trip) writeTripLocation(location.trip, tab, segment, location.day);
   }, []);
@@ -768,7 +784,6 @@ export function App() {
       const tab = location.tab ?? "itinerary";
       setActiveTripTab(tab);
       setActiveSegment(location.segment ?? defaultSegment(tab));
-      setTravelManagementOpen(location.segment === "flight" || location.segment === "lodging");
       setSelectedDate(location.day);
       if (readOnly.current) restoreSnapshot();
       else if (location.trip) void loadTrip(location.trip).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : t.today.unavailable));
@@ -1110,10 +1125,7 @@ export function App() {
   const placesSegment = placesSegmentIds.includes(activeSegment as PlacesSegment)
     ? activeSegment as PlacesSegment
     : "wishlist";
-  const itinerarySegments = [
-    { value: "flight", label: t.app.itinerarySegments.flight },
-    { value: "lodging", label: t.app.itinerarySegments.lodging },
-  ] as const;
+  const itinerarySegments = itinerarySegmentIds.map((value) => ({ value, label: t.app.itinerarySegments[value] }));
   const placeSegments = [
     { value: "wishlist", label: t.app.placesSegments.wishlist },
     { value: "discovery", label: t.app.placesSegments.discovery },
@@ -1155,7 +1167,7 @@ export function App() {
       <div className="atw-frame">
         <aside className="atw-rail">
           <TripSwitcher layout="desktop" trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} openCreateTrip={openCreateTrip} selectTrip={selectTrip} signOut={() => void logout()} />
-          {selectedTrip ? <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} /> : null}
+          {selectedTrip ? <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} /> : null}
           <div className="mt-2 border-t border-ink/10 pt-4">
             {selectedTrip && liveConnected ? (
               <span className="mb-2 flex items-center gap-2 text-xs text-muted-foreground" title={t.collaboration.live}>
@@ -1232,8 +1244,17 @@ export function App() {
               </div>
 
               <div id="trip-panel-itinerary" role="tabpanel" aria-label={t.app.tabs.itinerary} hidden={activeTripTab !== "itinerary"}>
+                <div className="lg:hidden">
+                  <SegmentControl
+                    label={t.app.itinerarySectionPicker}
+                    id="itinerary"
+                    items={itinerarySegments}
+                    active={itinerarySegment}
+                    onSelect={(segment) => selectSegment("itinerary", segment)}
+                  />
+                </div>
                 {itinerarySegment === "daily" ? (
-                  <div id="itinerary-segment-panel-daily">
+                  <div id="itinerary-segment-panel-daily" role="tabpanel" aria-labelledby="itinerary-segment-daily">
                     <TripSkeletonWorkspace
                       key={selectedTrip.id}
                       trip={selectedTrip}
@@ -1246,33 +1267,26 @@ export function App() {
                       onTravelEdit={(type) => {
                         const segment: ItinerarySegment = type === "flight" ? "flight" : "lodging";
                         selectSegment("itinerary", segment);
-                        window.requestAnimationFrame(() => document.getElementById(`itinerary-segment-${segment}`)?.focus());
+                        // Focus whichever 航班／住宿 control is visible: rail child (desktop) or segment strip (mobile).
+                        window.requestAnimationFrame(() => [...document.querySelectorAll<HTMLElement>(`#itinerary-segment-${segment}, [data-itinerary-child="${segment}"]`)]
+                          .find((element) => element.offsetParent !== null)?.focus());
                       }}
                     />
                   </div>
-                ) : (
-                  <details className="plan-travel-management" open={travelManagementOpen} onToggle={(event) => setTravelManagementOpen(event.currentTarget.open)}>
-                    <summary><span><strong>管理航班與住宿</strong></span><ChevronDown aria-hidden="true" /></summary>
-                    <SegmentControl
-                      label={t.app.itinerarySectionPicker}
-                      id="itinerary"
-                      items={itinerarySegments}
-                      active={itinerarySegment === "lodging" ? "lodging" : "flight"}
-                      onSelect={(segment) => selectSegment("itinerary", segment)}
+                ) : itinerarySegment === "flight" ? (
+                  <div id="itinerary-segment-panel-flight" role="tabpanel" aria-labelledby="itinerary-segment-flight">
+                    <TripFlightWorkspace
+                      trip={selectedTrip}
+                      request={request}
+                      revision={workspaceRevision}
+                      onChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }}
                     />
-                    <div id="itinerary-segment-panel-flight" role="tabpanel" aria-labelledby="itinerary-segment-flight" hidden={itinerarySegment !== "flight"}>
-                      <TripFlightWorkspace
-                        trip={selectedTrip}
-                        request={request}
-                        revision={workspaceRevision}
-                        onChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }}
-                      />
-                    </div>
-                    <div id="itinerary-segment-panel-lodging" role="tabpanel" aria-labelledby="itinerary-segment-lodging" hidden={itinerarySegment !== "lodging"}>
-                      <TravelWorkspace key={selectedTrip.id} trip={selectedTrip} type="lodging" request={request} revision={workspaceRevision}
-                        onChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }} />
-                    </div>
-                  </details>
+                  </div>
+                ) : (
+                  <div id="itinerary-segment-panel-lodging" role="tabpanel" aria-labelledby="itinerary-segment-lodging">
+                    <TravelWorkspace key={selectedTrip.id} trip={selectedTrip} type="lodging" request={request} revision={workspaceRevision}
+                      onChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }} />
+                  </div>
                 )}
               </div>
 
@@ -1314,7 +1328,7 @@ export function App() {
           )}
         </div>
       </div>
-      {selectedTrip ? <TripNavigation layout="mobile" activeTab={activeTripTab} selectTab={selectTab} /> : null}
+      {selectedTrip ? <TripNavigation layout="mobile" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} /> : null}
       <CreateTripDialog
         open={createDialogOpen}
         onOpenChange={changeCreateDialogOpen}

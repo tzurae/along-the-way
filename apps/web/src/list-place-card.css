@@ -19,6 +19,13 @@
   min-height: 208px;
 }
 
+/* The proposal min-heights reserve room for the vote/accept actions row. Decided proposals
+   (已加入口袋名單／已加入行程) have no actions, so they hug their content instead of leaving a gap.
+   Two-class specificity also beats the mobile min-height below. */
+.list-place-row--proposal:not(:has(.list-place-row__actions)) {
+  min-height: 0;
+}
+
 .list-place-row + .list-place-row {
   border-top: 1px solid var(--border);
 }
@@ -31,7 +38,8 @@
   background: color-mix(in srgb, var(--color-accent) 9%, var(--color-surface));
 }
 
-.list-place-row:has(.list-place-row__title:focus-visible) {
+.list-place-row:has(.list-place-row__title:focus-visible),
+.list-place-row:has(.list-place-row__media:focus-visible) {
   z-index: 1;
   outline: 3px solid color-mix(in srgb, var(--color-focus) 48%, transparent);
   outline-offset: -3px;
@@ -77,11 +85,30 @@
   }
 }
 
+/* In selection mode the checkbox gets its own leading column so it never covers the
+   thumbnail button, which must still open the detail. */
+.list-place-row:has(> .list-place-row__selection) {
+  grid-template-columns: 44px var(--place-row-thumb) minmax(0, 1fr) auto;
+}
+
 .list-place-row__selection {
-  position: absolute;
-  z-index: 3;
-  top: 6px;
-  left: 6px;
+  grid-column: 1;
+  grid-row: 1;
+  align-self: center;
+}
+
+.list-place-row:has(> .list-place-row__selection) .list-place-row__media {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.list-place-row:has(> .list-place-row__selection) .list-place-row__body {
+  grid-column: 3;
+  grid-row: 1;
+}
+
+.list-place-row:has(> .list-place-row__selection) .list-place-row__aside {
+  grid-column: 4;
 }
 
 .list-place-row__selection .schedule-selection-check {
@@ -89,13 +116,23 @@
   background: color-mix(in srgb, var(--color-surface) 88%, transparent);
 }
 
-.list-place-row__media,
-.list-place-row__media [data-place-thumbnail] {
+.list-place-row__media {
+  position: relative;
+  z-index: 2;
+  appearance: none;
+  display: block;
   width: var(--place-row-thumb);
   height: var(--place-row-thumb);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
 }
 
 .list-place-row__media [data-place-thumbnail] {
+  width: var(--place-row-thumb);
+  height: var(--place-row-thumb);
   border-radius: 12px;
 }
 
@@ -116,6 +153,8 @@
 .list-place-row__title {
   min-width: 0;
   max-width: 100%;
+  flex: none;
+  overflow: hidden;
   padding: 0;
   border: 0;
   background: none;
@@ -123,8 +162,9 @@
   font-size: 16px;
   font-weight: 700;
   line-height: 20px;
-  overflow-wrap: anywhere;
   text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 button.list-place-row__title {
@@ -154,6 +194,7 @@ button.list-place-row__title:hover {
   font-size: 12px;
   font-weight: 650;
   line-height: 16px;
+  white-space: nowrap;
 }
 
 .list-place-row__type {
@@ -174,7 +215,20 @@ button.list-place-row__title:hover {
   color: var(--color-ink);
   font-size: 13px;
   line-height: 18px;
+}
+
+.list-place-row--wishlist .list-place-row__secondary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list-place-row--proposal .list-place-row__secondary {
+  display: -webkit-box;
+  overflow: hidden;
   overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .list-place-row__secondary > :is(p, span),
@@ -183,9 +237,49 @@ button.list-place-row__title:hover {
   margin: 0;
 }
 
+/* Fallback when no 想去 reason exists: quieter than a member's own words. */
+.list-place-row__secondary > .list-place-row__area {
+  color: var(--muted-foreground);
+}
+
+.list-place-row__area > svg {
+  display: inline;
+  width: 13px;
+  height: 13px;
+  margin-right: 4px;
+  vertical-align: -2px;
+}
+
 .list-place-row__evidence,
 .list-place-row__caution {
   color: var(--muted-foreground);
+}
+
+.list-place-row__evidence > .list-place-row__inline-action {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list-place-row__caution {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.list-place-row__caution-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list-place-row__caution-action {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  white-space: nowrap;
 }
 
 .list-place-row__inline-action {
@@ -224,15 +318,6 @@ button.list-place-row__title:hover {
 
 .list-place-row__status--desktop {
   display: none;
-}
-
-.list-place-row__credit {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.list-place-row__credit .place-photo-credit {
-  margin: 0;
 }
 
 .list-place-row__aside,
@@ -322,15 +407,22 @@ button.list-place-row__title:hover {
     display: block;
   }
 
-  .list-place-row__aside {
+  .list-place-row--wishlist .list-place-row__aside {
     align-self: center;
+    column-gap: 16px;
   }
+
   .list-place-row--proposal .list-place-row__actions {
     grid-column: 3;
     grid-row: 1;
     align-self: end;
     flex-wrap: nowrap;
+    column-gap: 16px;
   }
+  .list-place-row--proposal:has(> .list-place-row__selection) .list-place-row__actions {
+    grid-column: 4;
+  }
+
 
   .list-place-row--proposal .list-place-row__row-actions {
     flex-wrap: nowrap;
@@ -338,18 +430,23 @@ button.list-place-row__title:hover {
 }
 
 @media (max-width: 767.98px) {
-  .list-place-row--wishlist .list-place-row__body {
-    padding-right: 52px;
-  }
-
   .list-place-row--wishlist .list-place-row__aside {
-    position: absolute;
-    top: var(--place-row-pad-y);
-    right: var(--place-row-pad-x);
+    position: relative;
+    grid-column: 3;
+    grid-row: 1;
+    margin-top: 12px;
   }
 
   .list-place-row--proposal {
     grid-template-columns: var(--place-row-thumb) minmax(0, 1fr);
+  }
+
+  .list-place-row--proposal:has(> .list-place-row__selection) {
+    grid-template-columns: 44px var(--place-row-thumb) minmax(0, 1fr);
+  }
+
+  .list-place-row--proposal:has(> .list-place-row__selection) .list-place-row__body {
+    grid-column: 3;
   }
 
   .list-place-row--proposal .list-place-row__body {
@@ -363,7 +460,7 @@ button.list-place-row__title:hover {
   .list-place-row--proposal .list-place-row__actions,
   .list-place-row--proposal .list-place-row__row-actions {
     flex-wrap: nowrap;
-    gap: 4px;
+    gap: 8px;
   }
 
   .list-place-row--proposal .list-place-row__row-actions :is(.pd-primary, .pd-danger-link) {

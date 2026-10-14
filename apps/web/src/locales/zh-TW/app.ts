@@ -55,7 +55,7 @@ export const app = {
     members: "成員",
   },
   itinerarySegments: {
-    daily: "每日",
+    daily: "總覽",
     flight: "航班",
     lodging: "住宿",
   },

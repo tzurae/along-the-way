@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { useI18n } from "./i18n";
 import { ApiRequestError } from "./api-error";
-import { loadLabel, reasonLabel, span, TimetableRow } from "./TimetableView";
+import { LoadBadge, reasonLabel, span, TimetableRow } from "./TimetableView";
 
 type JsonRequest = <T>(url: string, options?: RequestInit & { parse?: (value: unknown) => unknown }) => Promise<T>;
 
@@ -167,12 +167,9 @@ export function TripPlanDialog({
                         {t.tripPlan.adds} {day.addedTripPlaceIds.map((id) => names.get(id) ?? id).join("、")}
                       </p>
                     </div>
-                    <span>
-                      {t.tripPlan.loadSummary(
-                        loadLabel(day.timetable.load.level, t.timetable),
-                        span(day.timetable.load.busyMinutes, t.timetable),
-                        span(day.timetable.load.windowMinutes, t.timetable),
-                      )}
+                    <span className="route-load">
+                      <LoadBadge level={day.timetable.load.level} />
+                      {t.tripPlan.loadSummary(span(day.timetable.load.busyMinutes, t.timetable), span(day.timetable.load.windowMinutes, t.timetable))}
                     </span>
                   </header>
                   <ol className="route-timeline" aria-label={t.tripPlan.draftTimetableFor(day.timetable.date)}>

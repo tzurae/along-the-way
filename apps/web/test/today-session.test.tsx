@@ -112,7 +112,8 @@ beforeEach(() => {
       const order = body.order;
       return reply({ timetable: { dayId: "day21", date: "2026-10-21", window: { startMinute: 540, endMinute: 1140, version: dayVersion }, order,
         orderedTripPlaceIds: order === "suggested" ? ["SECOND", "FIRST"] : ["FIRST", "SECOND"], startsAt: null, endsAt: null, rows: [], unscheduled: [],
-        load: { busyMinutes: 120, windowMinutes: 600, level: "relaxed" } } });
+        load: { busyMinutes: 120, windowMinutes: 600, level: "relaxed" },
+        capacity: { arrival: null, departure: null, gaps: [{ startMinute: 540, endMinute: 1140 }] } } });
     }
     if (input.endsWith("/discovery")) return reply({ discovery: { brief: null, latestRun: null, proposals: [], decided: [], feedback: [], modelAvailable: false, placeProviderAvailable: false } });
     throw new Error(`Unexpected request: ${input}`);

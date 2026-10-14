@@ -14,6 +14,9 @@ export const tripPlaces = {
     unavailable: "投票未開放",
     voters: (names: string) => `投票成員：${names}`,
     retry: "重試投票",
+    saving: (name: string, voted: boolean) => `${voted ? "已選擇" : "已取消"}「${name}」想去，正在儲存`,
+    saved: (name: string, count: number) => `「${name}」想去狀態已儲存，目前 ${count} 票`,
+    updateFailed: (name: string) => `無法更新「${name}」的想去狀態；已恢復原狀，請再試一次。`,
   },
   placeType: {
     activity: "活動或景點",

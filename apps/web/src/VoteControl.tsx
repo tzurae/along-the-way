@@ -12,13 +12,14 @@ export function VoteVoters({ voters }: {
   return <p className="pd-voters">{t.voters(voters.map((member) => member.memberDisplayName || member.memberEmail).join("、"))}</p>;
 }
 
-export function VoteControl({ name, voters, voteCount, ownVote, votingAvailable, disabled, compact = false, onChange }: {
+export function VoteControl({ name, voters, voteCount, ownVote, votingAvailable, disabled, busy = false, compact = false, onChange }: {
   name: string;
   voters: MemberVoteDto[];
   voteCount: number;
   ownVote: boolean;
   votingAvailable: boolean;
   disabled: boolean;
+  busy?: boolean;
   compact?: boolean;
   onChange(voted: boolean): void;
 }) {
@@ -41,6 +42,7 @@ export function VoteControl({ name, voters, voteCount, ownVote, votingAvailable,
         className="pd-vote-button"
         aria-label={`${ownVote ? t.voted : t.vote}，${t.count(voteCount)}`}
         aria-pressed={ownVote}
+        aria-busy={busy || undefined}
         disabled={disabled}
         onClick={() => onChange(!ownVote)}
       >

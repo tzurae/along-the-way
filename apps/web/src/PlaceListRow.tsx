@@ -12,10 +12,10 @@ export interface PlaceListRowProps {
   status?: ReactNode;
   evidence?: ReactNode;
   caution?: ReactNode;
+  cautionAction?: ReactNode;
   photo: PlaceDisplayPhoto | null | undefined;
   photoCount: number;
   loadingPhoto?: boolean;
-  photoCredit?: ReactNode;
   voteAction?: ReactNode;
   rowActions?: ReactNode;
   selectionControl?: ReactNode;
@@ -49,10 +49,10 @@ export function PlaceListRow({
   status,
   evidence,
   caution,
+  cautionAction,
   photo,
   photoCount,
   loadingPhoto = false,
-  photoCredit,
   voteAction,
   rowActions,
   selectionControl,
@@ -90,35 +90,43 @@ export function PlaceListRow({
       aria-label={ariaLabel}
       aria-current={current ? "true" : undefined}
       onClick={(event) => {
-        if (!onActivate || (event.target instanceof Element && event.target.closest("button, a, input, label, textarea, select"))) return;
+        // The vote area may be a read-only tally (a span, not a button) when voting is unavailable;
+        // clicking it must never open the detail.
+        if (!onActivate || (event.target instanceof Element
+          && event.target.closest("button, a, input, label, textarea, select, .list-place-row__vote, .list-place-row__actions, .list-place-row__aside"))) return;
         onActivate();
       }}
       {...dataProps}
     >
       {selectionControl ? <div className="list-place-row__selection">{selectionControl}</div> : null}
-      <div className="list-place-row__media">
+      <button
+        type="button"
+        className="list-place-row__media"
+        aria-label={openLabel}
+        onClick={onOpen}
+        {...(selecting ? openDataProps : {})}
+      >
         <PlaceThumbnail photo={photo} photoCount={photoCount} loading={loadingPhoto} />
-      </div>
+      </button>
       <div className="list-place-row__body">
         <div className="list-place-row__heading">
           {selecting
-            ? <span className="list-place-row__title">{name}</span>
-            : <button type="button" className="list-place-row__title" aria-label={openLabel} onClick={onOpen} {...openDataProps}>{name}</button>}
+            ? <span className="list-place-row__title" title={name}>{name}</span>
+            : <button type="button" className="list-place-row__title" title={name} aria-label={openLabel} onClick={onOpen} {...openDataProps}>{name}</button>}
           <span className="list-place-row__type">{typeLabel}</span>
           {stateLabel ? <span className="list-place-row__state">{stateLabel}</span> : null}
         </div>
         {secondary ? <div className="list-place-row__secondary">{secondary}</div> : null}
         {status ? <div className="list-place-row__status list-place-row__status--mobile">{status}</div> : null}
         {evidence ? <div className="list-place-row__evidence">{evidence}</div> : null}
-        {caution ? <div className="list-place-row__caution">{caution}</div> : null}
-        {photo && photoCredit ? <div className="list-place-row__credit">{photoCredit}</div> : null}
+        {caution ? <div className="list-place-row__caution"><span className="list-place-row__caution-text">{caution}</span>{cautionAction}</div> : null}
       </div>
-        {variant === "proposal" && (voteAction || rowActions) ? (
-          <footer className="list-place-row__actions">
-            {voteAction ? <div className="list-place-row__vote">{voteAction}</div> : null}
-            {rowActions ? <div className="list-place-row__row-actions">{rowActions}</div> : null}
-          </footer>
-        ) : null}
+      {variant === "proposal" && (voteAction || rowActions) ? (
+        <footer className="list-place-row__actions">
+          {voteAction ? <div className="list-place-row__vote">{voteAction}</div> : null}
+          {rowActions ? <div className="list-place-row__row-actions">{rowActions}</div> : null}
+        </footer>
+      ) : null}
       {variant === "wishlist" && (status || voteAction) ? (
         <aside className="list-place-row__aside">
           {status ? <div className="list-place-row__status list-place-row__status--desktop">{status}</div> : null}

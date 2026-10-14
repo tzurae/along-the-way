@@ -26,7 +26,7 @@ import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./Conflict
 import {
   clock,
   describeStartAndEnd,
-  loadLabel,
+  LoadBadge,
   reasonLabel,
   span,
   TimetableRow,
@@ -266,6 +266,30 @@ export function DayPlanDialog({
     setOrderStale(false);
   }
 
+  /**
+   * Plain-language account of the day's room, from the scheduler's own capacity facts: what fixes
+   * the start (arrival), what ends it early (departure), and the free gaps places were tried in.
+   * Shown only when a place failed for lack of time; other reasons explain themselves per row.
+   */
+  function capacityNotes(version: DayTimetableDto) {
+    if (!version.unscheduled.some((place) => place.reason === "not_enough_time")) return [];
+    const { arrival, departure, gaps } = version.capacity;
+    const notes: string[] = [];
+    if (arrival) notes.push(t.dayPlan.afterArrival(arrival.title, clock(arrival.endMinute), arrival.afterBufferMinutes));
+    if (departure) {
+      const lastGap = gaps.at(-1);
+      notes.push(t.dayPlan.beforeDeparture(departure.title, clock(departure.startMinute), lastGap ? clock(lastGap.endMinute) : null));
+    }
+    const longest = gaps.reduce<(typeof gaps)[number] | null>(
+      (best, gap) => (!best || gap.endMinute - gap.startMinute > best.endMinute - best.startMinute ? gap : best),
+      null,
+    );
+    notes.push(longest
+      ? t.dayPlan.longestGap(clock(longest.startMinute), clock(longest.endMinute), span(longest.endMinute - longest.startMinute, t.timetable))
+      : t.dayPlan.noGap(clock(version.window.startMinute), clock(version.window.endMinute)));
+    return notes;
+  }
+
   function timetableVersion(kind: DayTimetableOrder) {
     const version = comparisons[kind];
     if (!version) return null;
@@ -295,7 +319,8 @@ export function DayPlanDialog({
               <TriangleAlert />
               <div>
                 <h4>{t.dayPlan.notInDraft}</h4>
-                <p>沒有刪除，仍留在這一天的口袋名單。</p>
+                {capacityNotes(version).map((note) => <p key={note}>{note}</p>)}
+                <p>{t.dayPlan.unscheduledNextStep}</p>
               </div>
             </div>
             <ul>
@@ -342,12 +367,9 @@ export function DayPlanDialog({
             <section className="route-summary" data-testid="day-load">
               <Route />
               <div>
-                <strong>
-                  {t.dayPlan.loadSummary(
-                    loadLabel(timetable.load.level, t.timetable),
-                    span(timetable.load.busyMinutes, t.timetable),
-                    span(timetable.load.windowMinutes, t.timetable),
-                  )}
+                <strong className="route-load">
+                  <LoadBadge level={timetable.load.level} />
+                  {t.dayPlan.loadSummary(span(timetable.load.busyMinutes, t.timetable), span(timetable.load.windowMinutes, t.timetable))}
                 </strong>
                 <span>
                   {timetable.unscheduled.length > 0
@@ -449,7 +471,9 @@ export function DayPlanDialog({
           </div>
         ) : null}
 
-        <DialogFooter hidden={Boolean(resolution.conflict) || !timetable} className="route-actionbar">
+        {/* No free gap at all: no order can fit anything, so offering a re-order would be a dead end.
+            Changing the day's hours (調整時間 → 重新排) stays available, since that can create room. */}
+        <DialogFooter hidden={Boolean(resolution.conflict) || !timetable || timetable.capacity.gaps.length === 0} className="route-actionbar">
           {order === "suggested" ? (
             <>
               <Button
