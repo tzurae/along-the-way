@@ -1284,8 +1284,9 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         .select((builder) => builder.fn.countAll().as("count"))
         .where("trip_id", "=", tripId).where("removed_at", "is", null)
         .executeTakeFirstOrThrow();
-      if (Number(members.count) < 2) {
-        throw new AppError("voting_unavailable", "Voting needs at least two active trip members", 409);
+      // Owner decision (2026-10-14): a solo traveller can mark places too; any active member may vote.
+      if (Number(members.count) < 1) {
+        throw new AppError("voting_unavailable", "Voting needs an active trip member", 409);
       }
       // Retained writers can place a row without synchronizing selection/history.
       await this.reconcileLegacyPlaces(transaction, tripId);
@@ -2092,12 +2093,12 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         voters,
         voteCount: voters.length,
         ownVote: voters.some((member) => member.memberUserId === userId),
-        votingAvailable: members.length >= 2,
+        votingAvailable: members.length >= 1,
         duplicateSuggestions: suggestions,
         version: row.version,
       };
     });
-    return members.length >= 2 ? places.sort((left, right) => right.voteCount - left.voteCount) : places;
+    return members.length >= 1 ? places.sort((left, right) => right.voteCount - left.voteCount) : places;
   }
 
   private async readOne(

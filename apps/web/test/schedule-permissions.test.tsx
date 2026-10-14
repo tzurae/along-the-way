@@ -261,6 +261,7 @@ function timetable(order: "current" | "suggested"): DayTimetableDto {
     startsAt: null,
     endsAt: null,
     rows: [],
+    capacity: { arrival: null, departure: null, gaps: [{ startMinute: 540, endMinute: 1140 }] },
     unscheduled: [],
     load: { busyMinutes: 60, windowMinutes: 600, level: "relaxed" },
   };

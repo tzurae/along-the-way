@@ -1,10 +1,21 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import type { TripDto } from "@along-the-way/contracts/private-trips";
+import type { GooglePlacePhotoDto, PlacePhotoDto } from "@along-the-way/contracts/place-details";
 import { DiscoveryWorkspace } from "../src/DiscoveryWorkspace";
 import type { PlaceDetailRequestOptions } from "../src/PlaceThumbnail";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((accept, refuse) => {
+    resolve = accept;
+    reject = refuse;
+  });
+  return { promise, resolve, reject };
+}
 
 const trip: TripDto = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -48,6 +59,18 @@ const proposal = {
   version: 1,
   category: "市場",
   endorsements: [],
+};
+
+const googlePhoto: GooglePlacePhotoDto = {
+  source: "google",
+  index: 0,
+  id: "google:ChIJ-Nishiki:0:abcdef1234567890",
+  thumbnailUrl: `/api/trips/${trip.id}/google-place-photos/ChIJ-Nishiki?index=0&photo=abcdef1234567890&maxWidth=192`,
+  imageUrl: `/api/trips/${trip.id}/google-place-photos/ChIJ-Nishiki?index=0&photo=abcdef1234567890&maxWidth=1024`,
+  width: 1200,
+  height: 800,
+  authors: [{ displayName: "市場攝影者", uri: "https://maps.google.com/contrib/market-author" }],
+  googleMapsUri: "https://maps.google.com/?cid=123",
 };
 
 beforeEach(() => {
@@ -155,7 +178,8 @@ it("orders accepted proposal detail and shows its wishlist items read-only with 
   };
 
   render(<DiscoveryWorkspace trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
-  fireEvent.click(await screen.findByRole("button", { name: "查看 錦市場 的詳情" }));
+  await waitFor(() => expect(document.querySelector(`[data-proposal-detail-trigger="${proposal.id}"]`)).not.toBeNull());
+  fireEvent.click(document.querySelector(`[data-proposal-detail-trigger="${proposal.id}"]`)!);
   const detail = await screen.findByRole("dialog", { name: "錦市場" });
   expect(await within(detail).findByText("豆乳甜甜圈")).toBeInTheDocument();
   expect(within(detail).queryByRole("button", { name: "編輯『豆乳甜甜圈』" })).not.toBeInTheDocument();
@@ -168,4 +192,182 @@ it("orders accepted proposal detail and shows its wishlist items read-only with 
   expect(headings.indexOf("必買／必吃／必喝")).toBeLessThan(headings.indexOf("需要注意"));
   expect(headings.indexOf("需要注意")).toBeLessThan(headings.indexOf("地點"));
   expect(headings.indexOf("地點")).toBeLessThan(headings.indexOf("佐證與景點資訊"));
+});
+
+it("opens proposal thumbnails during normal and selection modes without per-row credits", async () => {
+  const selectableProposal = { ...proposal, latitude: 35.005, longitude: 135.765 };
+  const requestWithPhoto = (photo: GooglePlacePhotoDto | PlacePhotoDto) => async <T,>(
+    path: string,
+    init?: PlaceDetailRequestOptions,
+  ): Promise<T> => {
+    let value: unknown;
+    if (path.endsWith("/discovery")) {
+      value = { discovery: {
+        brief: null,
+        latestRun: null,
+        proposals: [selectableProposal],
+        decided: [],
+        feedback: [],
+        modelAvailable: true,
+        placeProviderAvailable: true,
+      } };
+    } else if (path.endsWith("/trip-places")) {
+      value = { tripPlaces: [] };
+    } else if (path.includes("/place-previews?")) {
+      value = { previews: [{
+        reference: { kind: "proposal", id: selectableProposal.id },
+        photo,
+        photoCount: 1,
+      }] };
+    } else if (path.includes("/place-details?")) {
+      value = { detail: {
+        reference: { kind: "proposal", id: selectableProposal.id },
+        canonicalPlaceId: null,
+        name: selectableProposal.name,
+        asOfDate: null,
+        sections: [],
+        sources: [],
+        photos: [],
+        googlePhotos: [],
+      } };
+    } else {
+      throw new Error(`Unexpected request: ${path}`);
+    }
+    return (init?.parse ? init.parse(value) : value) as T;
+  };
+
+  const rendered = render(
+    <DiscoveryWorkspace trip={trip} request={requestWithPhoto(googlePhoto)} placesRevision={0} onPlacesChanged={vi.fn()} />,
+  );
+  const row = await waitFor(() => {
+    const element = rendered.container.querySelector<HTMLElement>(`[data-discovery-proposal="${selectableProposal.name}"]`);
+    expect(element?.querySelector("img")).toBeInTheDocument();
+    return element!;
+  });
+  expect(row.querySelector(".place-photo-credit")).not.toBeInTheDocument();
+
+  fireEvent.click(row.querySelector(".list-place-row__media")!);
+  let detail = await screen.findByRole("dialog", { name: selectableProposal.name });
+  fireEvent.click(within(detail).getByRole("button", { name: "關閉" }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: selectableProposal.name })).not.toBeInTheDocument());
+
+  fireEvent.click(screen.getByRole("button", { name: "排入行程" }));
+  expect(screen.getByRole("heading", { name: "已選 0 個地點" })).toBeInTheDocument();
+  fireEvent.click(row.querySelector(".list-place-row__media")!);
+  detail = await screen.findByRole("dialog", { name: selectableProposal.name });
+  expect(detail).toBeInTheDocument();
+  rendered.unmount();
+});
+
+it("updates a discovery vote immediately, blocks a double tap, never lets a late vote response undo a decision, and confirms with a fresh read", async () => {
+  const discovery = {
+    brief: null,
+    latestRun: null,
+    proposals: [proposal],
+    decided: [],
+    feedback: [],
+    modelAvailable: true,
+    placeProviderAvailable: true,
+  };
+  // While the vote is in flight another owner accepts the proposal; a refresh carries that.
+  const accepted = { ...proposal, status: "accepted" as const, version: proposal.version + 1 };
+  const concurrentRead = deferred<{ discovery: typeof discovery }>();
+  const confirmedRead = deferred<{ discovery: typeof discovery }>();
+  const voteResponse = deferred<{ proposal: typeof proposal }>();
+  let discoveryReads = 0;
+  let voteRequests = 0;
+  const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
+    if (path.endsWith("/discovery") && !init?.method) {
+      discoveryReads += 1;
+      const value = discoveryReads === 1 ? { discovery }
+        : discoveryReads === 2 ? await concurrentRead.promise
+        : await confirmedRead.promise;
+      return (init?.parse ? init.parse(value) : value) as T;
+    }
+    if (path.endsWith("/trip-places") && !init?.method) return { tripPlaces: [] } as T;
+    if (path.includes("/place-previews?")) return { previews: [] } as T;
+    if (path.endsWith(`/${proposal.id}/vote`) && init?.method === "PUT") {
+      voteRequests += 1;
+      const value = await voteResponse.promise;
+      return (init.parse ? init.parse(value) : value) as T;
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  };
+
+  const rendered = render(
+    <DiscoveryWorkspace trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />,
+  );
+  const button = await screen.findByRole("button", { name: "想去，0 票" });
+  rendered.rerender(
+    <DiscoveryWorkspace trip={trip} request={request} placesRevision={1} onPlacesChanged={vi.fn()} />,
+  );
+  await waitFor(() => expect(discoveryReads).toBe(2));
+
+  fireEvent.click(button);
+  fireEvent.click(button);
+
+  expect(voteRequests).toBe(1);
+  expect(button).toHaveAttribute("aria-pressed", "true");
+  expect(button).toHaveAttribute("aria-busy", "true");
+  expect(button).toHaveAccessibleName("已表態想去，1 票");
+  expect(button).toBeDisabled();
+  expect(screen.getByText("已選擇「錦市場」想去，正在儲存")).toBeInTheDocument();
+
+  await act(async () => concurrentRead.resolve({ discovery: { ...discovery, proposals: [accepted] } }));
+  expect(await screen.findByText("已加入口袋名單")).toBeInTheDocument();
+
+  // The vote committed before the acceptance, so its response still says pending.
+  await act(async () => voteResponse.resolve({ proposal: { ...proposal, ownVote: true, voteCount: 1 } }));
+  await waitFor(() => expect(discoveryReads).toBe(3));
+  expect(screen.getByText("已加入口袋名單")).toBeInTheDocument();
+  expect(screen.queryByText("待討論")).not.toBeInTheDocument();
+
+  await act(async () => confirmedRead.resolve({ discovery: { ...discovery, proposals: [{ ...accepted, ownVote: true, voteCount: 1 }] } }));
+  expect(screen.getByText("已加入口袋名單")).toBeInTheDocument();
+  expect(screen.queryByText("待討論")).not.toBeInTheDocument();
+});
+
+it("restores a failed discovery vote, announces the exact error, and reuses its idempotency key", async () => {
+  const discovery = {
+    brief: null,
+    latestRun: null,
+    proposals: [proposal],
+    decided: [],
+    feedback: [],
+    modelAvailable: true,
+    placeProviderAvailable: true,
+  };
+  const failedVote = deferred<never>();
+  const idempotencyKeys: string[] = [];
+  let voteRequests = 0;
+  const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
+    let value: unknown;
+    if (path.endsWith("/discovery") && !init?.method) value = { discovery };
+    else if (path.endsWith("/trip-places") && !init?.method) value = { tripPlaces: [] };
+    else if (path.includes("/place-previews?")) value = { previews: [] };
+    else if (path.endsWith(`/${proposal.id}/vote`) && init?.method === "PUT") {
+      voteRequests += 1;
+      idempotencyKeys.push(new Headers(init.headers).get("Idempotency-Key") ?? "");
+      if (voteRequests === 1) return await failedVote.promise;
+      value = { proposal: { ...proposal, ownVote: true, voteCount: 1 } };
+    } else throw new Error(`Unexpected request: ${path}`);
+    return (init?.parse ? init.parse(value) : value) as T;
+  };
+
+  render(<DiscoveryWorkspace trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  const button = await screen.findByRole("button", { name: "想去，0 票" });
+  fireEvent.click(button);
+  expect(button).toHaveAttribute("aria-pressed", "true");
+  await act(async () => failedVote.reject(new Error("offline")));
+
+  await waitFor(() => expect(button).not.toBeDisabled());
+  expect(button).toHaveAttribute("aria-pressed", "false");
+  expect(button).toHaveAccessibleName("想去，0 票");
+  expect(screen.getByRole("alert")).toHaveTextContent("無法更新「錦市場」的想去狀態；已恢復原狀，請再試一次。");
+
+  fireEvent.click(button);
+  await waitFor(() => expect(button).toHaveAttribute("aria-pressed", "true"));
+  expect(voteRequests).toBe(2);
+  expect(idempotencyKeys[0]).toBeTruthy();
+  expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
 });

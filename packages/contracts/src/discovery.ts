@@ -214,6 +214,11 @@ export interface UpdateCandidateProposalVoteInput {
   voted: boolean;
 }
 
+export interface UpdateCandidateProposalVoteResponse {
+  proposal: CandidateProposalDto;
+}
+
+
 
 export interface CreateDiscoveryFeedbackInput {
   originalText: string;
@@ -474,4 +479,8 @@ export function parseDiscoveryWorkspaceResponse(value: unknown): DiscoveryWorksp
 
 export function parseScheduleDiscoveryProposalsResponse(value: unknown): ScheduleDiscoveryProposalsResponse {
   return parseDiscoveryWorkspaceResponse(value);
+}
+
+export function parseUpdateCandidateProposalVoteResponse(value: unknown): UpdateCandidateProposalVoteResponse {
+  return { proposal: proposal(record(value).proposal) };
 }

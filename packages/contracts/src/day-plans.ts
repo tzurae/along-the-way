@@ -121,6 +121,18 @@ export interface DayLoadDto {
   level: DayLoadLevel;
 }
 
+/**
+ * Why the day has the room it has, straight from the scheduler: places are only ever tried in
+ * `gaps`, so these facts explain every `not_enough_time` without the client re-deriving rules.
+ */
+export interface DayCapacityDto {
+  /** The fixed item that brings the traveller in (e.g. the outbound flight); nothing is placed before it ends plus its after-buffer. */
+  arrival: { title: string; endMinute: number; afterBufferMinutes: number } | null;
+  /** The last day's departure; nothing is placed once the traveller leaves for it. */
+  departure: { title: string; startMinute: number } | null;
+  /** Free time places may use, in order, before any place is put in; empty when there is none. */
+  gaps: { startMinute: number; endMinute: number }[];
+}
 
 /** A draft computed on request; it is never stored and never changes the itinerary. */
 export interface DayTimetableDto {
@@ -137,6 +149,7 @@ export interface DayTimetableDto {
   rows: DayTimetableRowDto[];
   unscheduled: UnscheduledPlaceDto[];
   load: DayLoadDto;
+  capacity: DayCapacityDto;
 }
 
 export interface DayTimetableResponse {
@@ -343,6 +356,22 @@ function timetable(value: unknown): DayTimetableDto {
       windowMinutes: integer(load.windowMinutes),
       level: oneOf(load.level, ["relaxed", "balanced", "packed"] as const),
     },
+    capacity: capacity(record(row.capacity)),
+  };
+}
+
+function capacity(value: Record<string, unknown>): DayCapacityDto {
+  const arrival = value.arrival === null ? null : record(value.arrival);
+  const departure = value.departure === null ? null : record(value.departure);
+  return {
+    arrival: arrival
+      ? { title: text(arrival.title), endMinute: integer(arrival.endMinute), afterBufferMinutes: integer(arrival.afterBufferMinutes) }
+      : null,
+    departure: departure ? { title: text(departure.title), startMinute: integer(departure.startMinute) } : null,
+    gaps: list(value.gaps, (entry) => {
+      const gap = record(entry);
+      return { startMinute: integer(gap.startMinute), endMinute: integer(gap.endMinute) };
+    }),
   };
 }
 

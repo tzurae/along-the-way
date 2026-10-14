@@ -36,6 +36,7 @@ import { VoteControl, VoteVoters } from "./VoteControl";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews } from "./PlaceThumbnail";
 import { PlaceListRow } from "./PlaceListRow";
+import { FlipList } from "./FlipList";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import { PlaceMustItems, type PlaceMustItemsHandle } from "./PlaceMustItems";
 import { NativeSelect } from "./components/ui/native-select";
@@ -74,6 +75,20 @@ function formatScheduleDate(date: string, locale: string) {
     timeZone: "UTC",
   }).format(instant);
   return `${calendarDate}（${weekday}）`;
+}
+
+/**
+ * Row fallback when a member left no 想去 reason: the area part of the provider address
+ * ("1-chōme-294 Kiyomizu, Higashiyama Ward, Kyoto, 605-0862" → "Higashiyama Ward, Kyoto").
+ * Street and postal segments are dropped because a truncated street line says nothing at a glance.
+ */
+function addressArea(address: string | null) {
+  if (!address) return null;
+  const parts = address.split(/[,，]/)
+    .map((part) => part.trim().replace(/(日本|Japan)$/u, "").trim())
+    .filter((part) => part && !/^[〒\d\s-]+$/u.test(part));
+  if (parts.length === 0) return null;
+  return (parts.length >= 3 ? parts.slice(-2) : parts).join(", ");
 }
 
 function canSelectForSchedule(place: TripPlaceDto, available: boolean) {
@@ -149,10 +164,6 @@ function clearRetryKey(store: RetryKeys, operation: string) {
   store.delete(operation);
 }
 
-function errorCode(error: unknown) {
-  if (typeof error !== "object" || error === null || !("code" in error)) return null;
-  return typeof error.code === "string" ? error.code : null;
-}
 
 function nullableNumber(value: FormDataEntryValue | null) {
   if (typeof value !== "string" || value.trim() === "") return null;
@@ -597,8 +608,10 @@ export function TripPlaceWorkspace({
   const [readError, setReadError] = useState("");
   const [loading, setLoading] = useState(true);
   const [voteDrafts, setVoteDrafts] = useState<Record<string, boolean>>({});
+  const [optimisticVotes, setOptimisticVotes] = useState<Record<string, { ownVote: boolean; voteCount: number }>>({});
   const [failedVotes, setFailedVotes] = useState<Record<string, true>>({});
   const [pendingVotes, setPendingVotes] = useState<Record<string, true>>({});
+  const [voteAnnouncement, setVoteAnnouncement] = useState("");
   const pendingVoteIds = useRef(new Set<string>());
   const retryKeys = useRef<RetryKeys>(new Map());
   const editingPlaceIds = useRef(new Set<string>());
@@ -786,7 +799,14 @@ export function TripPlaceWorkspace({
   async function setVote(place: TripPlaceDto, voted: boolean) {
     if (pendingVoteIds.current.has(place.id)) return;
     pendingVoteIds.current.add(place.id);
+    const optimisticVote = {
+      ownVote: voted,
+      voteCount: Math.max(0, place.voteCount + (voted ? 1 : 0) - (place.ownVote ? 1 : 0)),
+    };
     setPendingVotes((current) => ({ ...current, [place.id]: true }));
+    setOptimisticVotes((current) => ({ ...current, [place.id]: optimisticVote }));
+    setVoteAnnouncement(t.vote.saving(place.name, voted));
+    setMessage("");
     const operation = `vote:${place.id}`;
     const payload = { voted };
     setVoteDrafts((current) => ({ ...current, [place.id]: voted }));
@@ -796,7 +816,7 @@ export function TripPlaceWorkspace({
       return next;
     });
     try {
-      await request(
+      const { tripPlace: updated } = await request<{ tripPlace: TripPlaceDto }>(
         `/api/trips/${trip.id}/trip-places/${place.id}/vote`,
         {
           method: "PUT",
@@ -805,29 +825,45 @@ export function TripPlaceWorkspace({
           parse: parseTripPlaceResponse,
         },
       );
-      const refreshed = await refreshPlaces();
+      setReadModel((previous) => {
+        const current = previous.current.map((candidate) => candidate.id === updated.id ? updated : candidate);
+        if (updated.votingAvailable) {
+          current.sort((left, right) => right.voteCount - left.voteCount);
+        }
+        return {
+          current,
+          retained: previous.retained.map((candidate) => candidate.id === updated.id ? updated : candidate),
+        };
+      });
       clearRetryKey(retryKeys.current, operation);
       setVoteDrafts((current) => {
         const next = { ...current };
         delete next[place.id];
         return next;
       });
-      if (refreshed) setMessage("");
+      setOptimisticVotes((current) => {
+        const next = { ...current };
+        delete next[place.id];
+        return next;
+      });
       setFailedVotes((current) => {
         const next = { ...current };
         delete next[place.id];
         return next;
       });
-      onPlacesChanged();
-    } catch (error) {
-      if (errorCode(error) === "conflict" || errorCode(error) === "voting_unavailable") {
-        try {
-          await refreshPlaces();
-        } catch {
-          // Keep the original mutation error actionable.
-        }
-      }
-      setMessage(errorMessage(error, t.errors.requestFailed));
+      setVoteAnnouncement(t.vote.saved(place.name, updated.voteCount));
+      // The merge above is immediate; this authoritative read then replaces it. It also delivers
+      // anything a concurrent refresh carried (e.g. another member's new place), because a vote
+      // never invalidates in-flight reads itself — this newer read supersedes them instead.
+      void refreshPlaces().catch(() => undefined);
+    } catch {
+      setOptimisticVotes((current) => {
+        const next = { ...current };
+        delete next[place.id];
+        return next;
+      });
+      setVoteAnnouncement("");
+      setMessage(t.vote.updateFailed(place.name));
       setFailedVotes((current) => ({ ...current, [place.id]: true }));
     } finally {
       pendingVoteIds.current.delete(place.id);
@@ -1010,10 +1046,12 @@ export function TripPlaceWorkspace({
   function voteActions(place: TripPlaceDto) {
     if (!placesById.has(place.id)) return null;
     const voteDraft = voteDrafts[place.id];
+    const optimisticVote = optimisticVotes[place.id];
+    const pending = Boolean(pendingVotes[place.id]);
     return <>
-      <VoteControl compact name={place.name} voters={place.voters} voteCount={place.voteCount} ownVote={place.ownVote} votingAvailable={place.votingAvailable} disabled={Boolean(pendingVotes[place.id])} onChange={(voted) => void setVote(place, voted)} />
+      <VoteControl compact name={place.name} voters={place.voters} voteCount={optimisticVote?.voteCount ?? place.voteCount} ownVote={optimisticVote?.ownVote ?? place.ownVote} votingAvailable={place.votingAvailable} disabled={pending} busy={pending} onChange={(voted) => void setVote(place, voted)} />
       {failedVotes[place.id] && voteDraft !== undefined ? (
-        <button className="pd-secondary" disabled={pendingVotes[place.id]} onClick={() => void setVote(place, voteDraft)}>{t.vote.retry}</button>
+        <button className="pd-secondary" disabled={pending} onClick={() => void setVote(place, voteDraft)}>{t.vote.retry}</button>
       ) : null}
     </>;
   }
@@ -1176,6 +1214,7 @@ export function TripPlaceWorkspace({
       {!canSchedule ? <p className="pd-subhead">{schedule.ownerOnly}</p> : null}
       {readError ? <div className="pd-notice pd-read-error" role="alert"><p>{readError}</p><button type="button" className="pd-secondary" disabled={loading} onClick={() => void load()}>{t.workspace.reload}</button></div> : null}
       {message ? <p className="pd-notice" role="alert">{message}</p> : null}
+      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{voteAnnouncement}</p>
       {loading && places.length === 0 ? <p className="pd-subhead" role="status">{t.workspace.loading}</p> : null}
       {!loading && !readError && places.length === 0 && readModel.retained.length === 0 ? (
         <section className="pd-empty">
@@ -1189,7 +1228,7 @@ export function TripPlaceWorkspace({
         </section>
       ) : null}
       {listedPlaces.length > 0 ? (
-        <div className="pd-list" aria-label={t.workspace.tableLabel}>
+        <FlipList className="pd-list" ariaLabel={t.workspace.tableLabel}>
           {listedPlaces.map((place) => {
             const available = placesById.has(place.id);
             const located = place.latitude !== null && place.longitude !== null;
@@ -1214,12 +1253,15 @@ export function TripPlaceWorkspace({
                 variant="wishlist"
                 name={place.name}
                 typeLabel={t.placeType[place.type]}
-                secondary={place.notes ? <span>{t.workspace.reason(place.notes)}</span> : undefined}
+                secondary={place.notes
+                  ? <span>{t.workspace.reason(place.notes)}</span>
+                  : addressArea(place.address)
+                    ? <span className="list-place-row__area"><MapPin aria-hidden="true" />{addressArea(place.address)}</span>
+                    : undefined}
                 status={status}
                 photo={preview?.photo}
                 photoCount={preview?.photoCount ?? 0}
                 loadingPhoto={previews.loading}
-                photoCredit={preview?.photo ? <PlacePhotoCredit photo={preview.photo} /> : undefined}
                 voteAction={voteActions(place)}
                 selectionControl={canSchedule && selecting ? selectionCheckbox(place) : undefined}
                 ariaLabel={repeatedName ? t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress) : place.name}
@@ -1241,7 +1283,7 @@ export function TripPlaceWorkspace({
               />
             );
           })}
-        </div>
+        </FlipList>
       ) : null}
       {selectedPlace ? (
         <PlaceDetailSheet

@@ -4,6 +4,7 @@ import { Ban, CalendarCheck, CalendarPlus, Check, ChevronRight, ExternalLink, Im
 import {
   parseDiscoveryWorkspaceResponse,
   parseScheduleDiscoveryProposalsResponse,
+  parseUpdateCandidateProposalVoteResponse,
   type CandidateProposalDto,
   type DiscoveryClaimSentenceDto,
   type DiscoveryEndorsement,
@@ -13,6 +14,7 @@ import {
   type DiscoveryWorkspaceDto,
   type ScheduleDiscoveryProposalsInput,
   type ScheduleDiscoveryProposalsResponse,
+  type UpdateCandidateProposalVoteResponse,
 } from "@along-the-way/contracts/discovery";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import { parseTripPlaceListResponse, type TripPlaceDto } from "@along-the-way/contracts/trip-places";
@@ -22,8 +24,9 @@ import { useI18n, type Messages } from "./i18n";
 import { VoteControl, VoteVoters } from "./VoteControl";
 import { ConflictPanel, useVersionConflict } from "./ConflictPanel";
 import { PlaceDetailContent } from "./PlaceDetailContent";
-import { PlacePhotoCredit, usePlacePreviews, type PlaceDetailRequest } from "./PlaceThumbnail";
+import { usePlacePreviews, type PlaceDetailRequest } from "./PlaceThumbnail";
 import { PlaceListRow } from "./PlaceListRow";
+import { FlipList } from "./FlipList";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import { PlaceMustItems } from "./PlaceMustItems";
 import { SchedulePlacesSheet } from "./SchedulePlacesSheet";
@@ -233,7 +236,7 @@ function ResearchPanel({ first, open, onClose, children, footer }: { first: bool
 
 
 export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChanged }: DiscoveryWorkspaceProps) {
-  const { locale, t: { discovery: t, schedule: scheduleT } } = useI18n();
+  const { locale, t: { discovery: t, schedule: scheduleT, tripPlaces: tripPlacesT } } = useI18n();
   const [workspace, setWorkspace] = useState<DiscoveryWorkspaceDto | null>(null);
   const [tripPlaces, setTripPlaces] = useState<TripPlaceDto[]>([]);
   const [briefDraft, setBriefDraft] = useState("");
@@ -242,6 +245,9 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const [editingFeedbackId, setEditingFeedbackId] = useState<string | null>(null);
   const [feedbackEditDraft, setFeedbackEditDraft] = useState<FeedbackEditDraft | null>(null);
   const [loading, setLoading] = useState(true);
+  const [optimisticVotes, setOptimisticVotes] = useState<Record<string, { ownVote: boolean; voteCount: number }>>({});
+  const [pendingProposalVotes, setPendingProposalVotes] = useState<Record<string, true>>({});
+  const [voteAnnouncement, setVoteAnnouncement] = useState("");
   const [operationPending, setPending] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const pending = operationPending ?? (bulkBusy ? "schedule-selection" : null);
@@ -305,6 +311,8 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   }, [detailFocusSection, selectedProposalId]);
 
   const retryKeys = useRef<RetryKeys>(new Map());
+  const pendingProposalVoteIds = useRef(new Set<string>());
+  const workspaceReadGeneration = useRef(0);
   const briefBase = useRef<DiscoveryWorkspaceDto["brief"]>(null);
   const answersBase = useRef<DiscoveryWorkspaceDto["brief"]>(null);
   const feedbackBase = useRef<DiscoveryFeedbackDto | null>(null);
@@ -357,26 +365,62 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     return next;
   }, []);
 
+  /** True once the editable brief/question drafts were filled from a server read. */
+  const draftsInitialized = useRef(false);
+
   const load = useCallback(async () => {
+    const generation = ++workspaceReadGeneration.current;
     setLoading(true);
     try {
       const [discovery, places] = await Promise.all([
         request<unknown>(`/api/trips/${trip.id}/discovery`),
         request<unknown>(`/api/trips/${trip.id}/trip-places`),
       ]);
+      if (generation !== workspaceReadGeneration.current) return;
       apply(discovery);
+      draftsInitialized.current = true;
       setTripPlaces(parseTripPlaceListResponse(places).tripPlaces);
       setNotice(null);
     } catch (error) {
-      setNotice({ area: "general", text: errorMessage(error, t.errors.failed) });
+      if (generation === workspaceReadGeneration.current) {
+        setNotice({ area: "general", text: errorMessage(error, t.errors.failed) });
+      }
     } finally {
-      setLoading(false);
+      if (generation === workspaceReadGeneration.current) setLoading(false);
     }
   }, [apply, request, t.errors.failed, trip.id]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  /**
+   * Re-reads projections without touching drafts the member is typing. It supersedes any read
+   * still in flight; if that was the initial load, this read fills the drafts instead.
+   */
+  const refresh = useCallback(() => {
+    const generation = ++workspaceReadGeneration.current;
+    return Promise.all([
+      request<unknown>(`/api/trips/${trip.id}/discovery`),
+      request<unknown>(`/api/trips/${trip.id}/trip-places`),
+    ]).then(([discovery, places]) => {
+      if (generation !== workspaceReadGeneration.current) return;
+      if (draftsInitialized.current) setWorkspace(parseDiscoveryWorkspaceResponse(discovery).discovery);
+      else {
+        apply(discovery);
+        draftsInitialized.current = true;
+      }
+      setTripPlaces(parseTripPlaceListResponse(places).tripPlaces);
+    }).catch((error: unknown) => {
+      if (generation === workspaceReadGeneration.current) {
+        setNotice({ area: "general", text: errorMessage(error, t.errors.failed) });
+      }
+    }).finally(() => {
+      // This read may supersede the initial load, which then skips clearing `loading`;
+      // the latest read must clear it or the page stays on 「正在載入 AI 研究…」.
+      if (generation === workspaceReadGeneration.current) setLoading(false);
+    });
+  }, [apply, request, t.errors.failed, trip.id]);
 
   // Place and member changes made in other tabs only refresh projections; unsaved brief
   // and question drafts typed here must survive them.
@@ -385,14 +429,8 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   useEffect(() => {
     if (lastRefreshSignal.current === refreshSignal) return;
     lastRefreshSignal.current = refreshSignal;
-    void Promise.all([
-      request<unknown>(`/api/trips/${trip.id}/discovery`),
-      request<unknown>(`/api/trips/${trip.id}/trip-places`),
-    ]).then(([discovery, places]) => {
-      setWorkspace(parseDiscoveryWorkspaceResponse(discovery).discovery);
-      setTripPlaces(parseTripPlaceListResponse(places).tripPlaces);
-    }).catch((error: unknown) => setNotice({ area: "general", text: errorMessage(error, t.errors.failed) }));
-  }, [refreshSignal, request, t.errors.failed, trip.id]);
+    void refresh();
+  }, [refreshSignal, refresh]);
 
   async function mutate(
     operation: string,
@@ -528,14 +566,68 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     );
   }
   async function setProposalVote(proposal: CandidateProposalDto, voted: boolean) {
-    await mutate(
-      `vote:${proposal.id}`,
-      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/vote`,
-      { voted },
-      "general",
-      undefined,
-      "PUT",
-    );
+    if (pendingProposalVoteIds.current.has(proposal.id)) return;
+    pendingProposalVoteIds.current.add(proposal.id);
+    const optimisticVote = {
+      ownVote: voted,
+      voteCount: Math.max(0, proposal.voteCount + (voted ? 1 : 0) - (proposal.ownVote ? 1 : 0)),
+    };
+    setOptimisticVotes((current) => ({ ...current, [proposal.id]: optimisticVote }));
+    setPendingProposalVotes((current) => ({ ...current, [proposal.id]: true }));
+    setVoteAnnouncement(tripPlacesT.vote.saving(proposal.name, voted));
+    setNotice(null);
+    const operation = `vote:${proposal.id}`;
+    const payload = { voted };
+    try {
+      const { proposal: updated } = await request<UpdateCandidateProposalVoteResponse>(
+        `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/vote`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": retryKey(retryKeys.current, operation, payload),
+          },
+          body: JSON.stringify(payload),
+          parse: parseUpdateCandidateProposalVoteResponse,
+        },
+      );
+      // Merge only the vote fields: a late vote response must not restore a status (pending) the
+      // proposal has since left through accept/reject. The authoritative read that follows also
+      // replaces any read this vote overlapped.
+      setWorkspace((current) => current ? {
+        ...current,
+        proposals: current.proposals.map((candidate) => candidate.id === updated.id ? {
+          ...candidate,
+          voters: updated.voters,
+          voteCount: updated.voteCount,
+          ownVote: updated.ownVote,
+          votingAvailable: updated.votingAvailable,
+        } : candidate),
+      } : current);
+      void refresh();
+      clearRetryKey(retryKeys.current, operation);
+      setOptimisticVotes((current) => {
+        const next = { ...current };
+        delete next[proposal.id];
+        return next;
+      });
+      setVoteAnnouncement(tripPlacesT.vote.saved(proposal.name, updated.voteCount));
+    } catch {
+      setOptimisticVotes((current) => {
+        const next = { ...current };
+        delete next[proposal.id];
+        return next;
+      });
+      setVoteAnnouncement("");
+      setNotice({ area: "general", text: tripPlacesT.vote.updateFailed(proposal.name) });
+    } finally {
+      pendingProposalVoteIds.current.delete(proposal.id);
+      setPendingProposalVotes((current) => {
+        const next = { ...current };
+        delete next[proposal.id];
+        return next;
+      });
+    }
   }
 
   function proposalActions(proposal: CandidateProposalDto) {
@@ -558,7 +650,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
             <Ban aria-hidden="true" className="size-4" />
             {t.proposal.decline}
           </button>
-        ) : null : <span className="font-bold">{t.status[proposal.status]}</span>}
+        ) : null : <span className="font-bold">{proposalStatusLabel(proposal)}</span>}
         <div className="flex flex-wrap items-center justify-end gap-2">
           {proposal.status === "pending" && trip.role === "owner" ? (
             <button
@@ -766,8 +858,15 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     );
   }
   const tripPlacesById = new Map(tripPlaces.map((place) => [place.id, place]));
+  // 「不要再推薦」 removes the proposal from the shortlist; it is never shown there again.
+  const listedProposals = workspace?.proposals.filter((proposal) => proposal.status !== "rejected") ?? [];
   const acceptedPlaceFor = (proposal: CandidateProposalDto) =>
     proposal.acceptedTripPlaceId ? tripPlacesById.get(proposal.acceptedTripPlaceId) ?? null : null;
+  /** Status label; an accepted proposal whose wishlist place is scheduled reads 「已加入行程」. */
+  const proposalStatusLabel = (proposal: CandidateProposalDto, status: CandidateProposalDto["status"] = proposal.status) => {
+    const place = status === "accepted" ? acceptedPlaceFor(proposal) : null;
+    return place && (place.scheduled || place.assignedDayId !== null) ? t.status.acceptedScheduled : t.status[status];
+  };
   const proposalIsLocated = (proposal: CandidateProposalDto) => {
     const place = acceptedPlaceFor(proposal);
     return (place?.latitude ?? proposal.latitude) !== null && (place?.longitude ?? proposal.longitude) !== null;
@@ -992,7 +1091,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
             <div className="pd-pagehead-copy" data-compact-mobile={Boolean(workspace?.proposals.length) || undefined}>
               <h2 id="ai-discovery-heading" className="schedule-page-title" aria-label={t.header.title}>
                 <span className="pd-pagehead-title--full" aria-hidden="true">{t.header.title}</span>
-                <span className="pd-pagehead-title--compact" aria-hidden="true">{t.header.compactTitle(workspace?.proposals.length ?? 0)}</span>
+                <span className="pd-pagehead-title--compact" aria-hidden="true">{t.header.compactTitle(listedProposals.length)}</span>
               </h2>
               <p>{t.header.description}</p>
             </div>
@@ -1014,6 +1113,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
         )}
       </div>
       <p className="sr-only" role="status" aria-live="polite">{proposalAnnouncement}</p>
+      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{voteAnnouncement}</p>
       {trip.role !== "owner" ? <p className="pd-subhead">{t.header.ownerSchedulingOnly}</p> : null}
       {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={pending !== null}
         onAccept={() => {
@@ -1143,11 +1243,13 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
             </section>
           ) : null}
 
-          {workspace?.proposals.length ? (
+          {listedProposals.length ? (
             <section className="order-2" aria-label={t.proposal.shortlistLabel}>
               <h3 className="sr-only">{t.proposal.shortlistTitle}</h3>
-              <div className="pd-list mt-4" aria-label={t.proposal.shortlistLabel}>
-                {workspace.proposals.map((proposal) => {
+              <FlipList className="pd-list mt-4" ariaLabel={t.proposal.shortlistLabel}>
+                {/* Same order as 口袋名單: most confirmed votes first (stable). Confirmed counts, not the
+                    optimistic overlay, so a tapped row does not jump before the server confirms. */}
+                {[...listedProposals].sort((left, right) => right.voteCount - left.voteCount).map((proposal) => {
                   const firstSentence = proposal.recommendationSentences?.[0];
                   const repeatedName = (proposalNameCounts.get(proposal.name) ?? 0) > 1;
                   const selectable = proposalCanBeSelected(proposal);
@@ -1188,15 +1290,18 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                       ? t.proposal.tradeoffPrefix(tradeoffs[0])
                       : null;
                   const cautionCount = proposal.unknowns.length + tradeoffs.length;
+                  const optimisticVote = optimisticVotes[proposal.id];
+                  const votePending = Boolean(pendingProposalVotes[proposal.id]);
                   const voteAction = proposal.status === "pending" ? (
                     <VoteControl
                       compact
                       name={proposal.name}
                       voters={proposal.voters}
-                      voteCount={proposal.voteCount}
-                      ownVote={proposal.ownVote}
+                      voteCount={optimisticVote?.voteCount ?? proposal.voteCount}
+                      ownVote={optimisticVote?.ownVote ?? proposal.ownVote}
                       votingAvailable={proposal.votingAvailable}
-                      disabled={pending !== null}
+                      disabled={votePending}
+                      busy={votePending}
                       onChange={(voted) => void setProposalVote(proposal, voted)}
                     />
                   ) : undefined;
@@ -1231,14 +1336,14 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                       variant="proposal"
                       name={proposal.name}
                       typeLabel={proposal.category ?? t.placeType[proposal.type]}
-                      stateLabel={t.status[displayStatus]}
+                      stateLabel={proposalStatusLabel(proposal, displayStatus)}
                       secondary={firstSentence?.text ?? proposal.recommendation}
                       evidence={<button type="button" className="list-place-row__inline-action" onClick={() => openProposalDetail(proposal.id, "evidence")}>{evidenceLabel}</button>}
-                      caution={caution ? <span>{caution}{cautionCount > 1 ? <>・<button type="button" className="list-place-row__inline-action" onClick={() => openProposalDetail(proposal.id, "cautions")}>{t.proposal.moreItems(cautionCount - 1)}</button></> : null}</span> : undefined}
+                      caution={caution ?? undefined}
+                      cautionAction={caution && cautionCount > 1 ? <span className="list-place-row__caution-action">・<button type="button" className="list-place-row__inline-action" onClick={() => openProposalDetail(proposal.id, "cautions")}>{t.proposal.moreItems(cautionCount - 1)}</button></span> : undefined}
                       photo={preview?.photo}
                       photoCount={preview?.photoCount ?? 0}
                       loadingPhoto={previews.loading}
-                      photoCredit={preview?.photo ? <PlacePhotoCredit photo={preview.photo} /> : undefined}
                       voteAction={voteAction}
                       rowActions={rowActions}
                       selectionControl={selectionControl}
@@ -1258,9 +1363,9 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                     />
                   );
                 })}
-              </div>
+              </FlipList>
             </section>
-          ) : workspace?.latestRun?.status === "completed" ? <p className="order-2 rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.length ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}
+          ) : workspace?.proposals.length ? null : workspace?.latestRun?.status === "completed" ? <p className="order-2 rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.length ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}
 
           {selectedProposal ? (
             <PlaceDetailSheet
@@ -1280,7 +1385,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
               onClose={closeProposalDetail}
               footer={
               rejectConfirmation && trip.role === "owner" ? <div className="pd-confirm-footer"><p>{t.proposal.rejectConfirmTitle(rejectConfirmation.name)}</p><p>{t.proposal.rejectConfirmDescription}</p>{notice?.area === "general" ? <p role="alert">{notice.text}</p> : null}<div><button className="pd-secondary" disabled={pending !== null} onClick={() => setRejectConfirmation(null)}>{t.proposal.cancel}</button><button className="pd-danger-button" disabled={pending !== null} onClick={() => { const proposal = rejectConfirmation; void rejectProposal(proposal).then((next) => { if (next) { setRejectConfirmation(null); closeProposalDetail(); } }); }}>{t.proposal.rejectConfirm}</button></div></div>
-              : <div>{notice?.area === "general" ? <p className="pd-notice" role="alert">{notice.text}</p> : null}<div className="pd-fixed-actions">{selectedProposal.status === "pending" && selectedProposal.votingAvailable ? <VoteControl compact name={selectedProposal.name} voters={selectedProposal.voters} voteCount={selectedProposal.voteCount} ownVote={selectedProposal.ownVote} votingAvailable disabled={pending !== null} onChange={(voted) => void setProposalVote(selectedProposal, voted)} /> : null}{proposalActions(selectedProposal)}</div></div>
+              : <div>{notice?.area === "general" ? <p className="pd-notice" role="alert">{notice.text}</p> : null}<div className="pd-fixed-actions">{selectedProposal.status === "pending" && selectedProposal.votingAvailable ? <VoteControl compact name={selectedProposal.name} voters={selectedProposal.voters} voteCount={optimisticVotes[selectedProposal.id]?.voteCount ?? selectedProposal.voteCount} ownVote={optimisticVotes[selectedProposal.id]?.ownVote ?? selectedProposal.ownVote} votingAvailable disabled={Boolean(pendingProposalVotes[selectedProposal.id])} busy={Boolean(pendingProposalVotes[selectedProposal.id])} onChange={(voted) => void setProposalVote(selectedProposal, voted)} /> : null}{proposalActions(selectedProposal)}</div></div>
             }>
               {proposalDetail(selectedProposal)}
             </PlaceDetailSheet>

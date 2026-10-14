@@ -14,7 +14,7 @@ import type {
   ScheduleDiscoveryProposalsInput,
   UpdateCandidateProposalVoteInput,
 } from "@along-the-way/contracts/discovery";
-import { parseDiscoveryWorkspaceResponse } from "@along-the-way/contracts/discovery";
+import { parseDiscoveryWorkspaceResponse, parseUpdateCandidateProposalVoteResponse } from "@along-the-way/contracts/discovery";
 import type { ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
 import { sql, type Kysely, type Selectable, type Transaction } from "kysely";
 
@@ -218,6 +218,19 @@ function upgradeStoredWorkspace(value: unknown) {
 
 function replayedWorkspace(value: unknown) {
   return parseDiscoveryWorkspaceResponse({ discovery: upgradeStoredWorkspace(value) }).discovery;
+}
+
+/**
+ * Votes recorded before 0.8.0 stored the whole workspace as their response; newer ones store the
+ * proposal. A retried old vote must still replay, so pick its proposal out of the stored workspace.
+ */
+function replayedProposal(value: unknown, proposalId: string) {
+  if (typeof value === "object" && value !== null && "proposals" in value && Array.isArray(value.proposals)) {
+    const proposal = replayedWorkspace(value).proposals.find((candidate) => candidate.id === proposalId);
+    if (!proposal) throw new AppError("discovery_proposal_not_found", "Candidate proposal not found", 404);
+    return proposal;
+  }
+  return parseUpdateCandidateProposalVoteResponse({ proposal: value }).proposal;
 }
 
 const AI_REQUEST_STATE = "discovery-ai-request-state";
@@ -753,13 +766,14 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       await transaction.selectFrom("trips").select("id").where("id", "=", tripId).forUpdate().executeTakeFirstOrThrow();
       await this.requireMember(transaction, userId, tripId);
       const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replayedWorkspace(replay);
+      if (replay) return replayedProposal(replay, proposalId);
       const members = await transaction.selectFrom("trip_members")
         .select((builder) => builder.fn.countAll().as("count"))
         .where("trip_id", "=", tripId).where("removed_at", "is", null)
         .executeTakeFirstOrThrow();
-      if (Number(members.count) < 2) {
-        throw new AppError("voting_unavailable", "Voting needs at least two active trip members", 409);
+      // Owner decision (2026-10-14): a solo traveller can mark proposals too; any active member may vote.
+      if (Number(members.count) < 1) {
+        throw new AppError("voting_unavailable", "Voting needs an active trip member", 409);
       }
       const proposal = await transaction.selectFrom("candidate_proposals")
         .select(["id", "status"])
@@ -787,7 +801,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         targetId: proposalId,
         summary: input.voted ? "Voted for an AI place proposal" : "Removed own vote from an AI place proposal",
       });
-      const response = await this.readWorkspace(transaction, tripId, userId);
+      const response = await this.readProposal(transaction, tripId, userId, proposalId);
       await remember(transaction, userId, operation, key, response);
       return response;
     });
@@ -1352,6 +1366,120 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     ].join("\n"));
   }
 
+  private async readProposal(
+    executor: DatabaseExecutor,
+    tripId: string,
+    userId: string,
+    proposalId: string,
+  ): Promise<CandidateProposalDto> {
+    const proposal = await executor.selectFrom("candidate_proposals")
+      .select([
+        "id",
+        "run_id",
+        "provider_place_id",
+        "name",
+        "place_type",
+        "address",
+        "latitude",
+        "longitude",
+        "source_url",
+        "recommendation",
+        "recommendation_sentences",
+        "matched_needs",
+        "tradeoffs",
+        "tradeoff_sentences",
+        "unknowns",
+        "status",
+        "accepted_trip_place_id",
+        "version",
+        "category",
+        "endorsements",
+      ])
+      .where("trip_id", "=", tripId)
+      .where("id", "=", proposalId)
+      .executeTakeFirst();
+    if (!proposal) throw new AppError("discovery_proposal_not_found", "Candidate proposal not found", 404);
+
+    const members = await executor.selectFrom("trip_members as member")
+      .innerJoin("users", "users.id", "member.user_id")
+      .select(["member.user_id", "users.email", "users.display_name"])
+      .where("member.trip_id", "=", tripId)
+      .where("member.removed_at", "is", null)
+      .orderBy("member.joined_at")
+      .execute();
+    const voteRows = await executor.selectFrom("discovery_proposal_votes")
+      .select("member_user_id")
+      .where("proposal_id", "=", proposalId)
+      .execute();
+    const votedMemberIds = new Set(voteRows.map((vote) => vote.member_user_id));
+    const voters = members.filter((member) => votedMemberIds.has(member.user_id)).map((member) => ({
+      memberUserId: member.user_id,
+      memberEmail: member.email,
+      memberDisplayName: member.display_name,
+    }));
+    const evidenceRows = await executor.selectFrom("candidate_proposal_evidence as link")
+      .innerJoin("discovery_evidence as evidence", "evidence.id", "link.evidence_id")
+      .select([
+        "evidence.id",
+        "evidence.evidence_kind",
+        "evidence.provider_place_id",
+        "evidence.source_url",
+        "evidence.title",
+        "evidence.attribution",
+        "evidence.observed_at",
+        "evidence.expires_at",
+      ])
+      .where("link.proposal_id", "=", proposalId)
+      .orderBy("evidence.evidence_kind")
+      .orderBy("evidence.id")
+      .execute();
+    const readAt = this.now().getTime();
+    const evidence = evidenceRows.map((row) => {
+      const staleAt = row.expires_at?.getTime()
+        ?? (row.evidence_kind === "web-source"
+          ? row.observed_at.getTime() + WEB_EVIDENCE_FRESHNESS_MS
+          : null);
+      return {
+        id: row.id,
+        kind: row.evidence_kind,
+        providerPlaceId: row.provider_place_id,
+        sourceUrl: row.source_url,
+        title: row.title,
+        attribution: row.attribution,
+        observedAt: isoTimestamp(row.observed_at),
+        expiresAt: row.expires_at ? isoTimestamp(row.expires_at) : null,
+        isStale: staleAt !== null && staleAt < readAt,
+      };
+    });
+    return {
+      id: proposal.id,
+      runId: proposal.run_id,
+      providerPlaceId: proposal.provider_place_id,
+      name: proposal.name,
+      type: proposal.place_type,
+      address: proposal.address,
+      latitude: proposal.latitude,
+      longitude: proposal.longitude,
+      sourceUrl: proposal.source_url,
+      recommendation: proposal.recommendation,
+      recommendationSentences: jsonClaimSentences(proposal.recommendation_sentences),
+      matchedNeeds: jsonStrings(proposal.matched_needs),
+      tradeoffs: jsonStrings(proposal.tradeoffs),
+      tradeoffSentences: jsonClaimSentences(proposal.tradeoff_sentences),
+      unknowns: jsonStrings(proposal.unknowns),
+      status: proposal.status,
+      evidence,
+      voters,
+      voteCount: voters.length,
+      ownVote: voters.some((member) => member.memberUserId === userId),
+      votingAvailable: members.length >= 1,
+      acceptedTripPlaceId: proposal.accepted_trip_place_id,
+      version: proposal.version,
+      category: proposal.category,
+      endorsements: this.readEndorsements(proposal.endorsements),
+    };
+  }
+
   private async readWorkspace(
     executor: DatabaseExecutor,
     tripId: string,
@@ -1551,7 +1679,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           voters,
           voteCount: voters.length,
           ownVote: voters.some((member) => member.memberUserId === userId),
-          votingAvailable: members.length >= 2,
+          votingAvailable: members.length >= 1,
           acceptedTripPlaceId: proposal.accepted_trip_place_id,
           version: proposal.version,
           category: proposal.category,

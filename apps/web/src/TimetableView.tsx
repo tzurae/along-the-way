@@ -44,6 +44,16 @@ export function loadLabel(level: DayTimetableDto["load"]["level"], t: Messages["
   }
 }
 
+/**
+ * The day's load as a colored badge. Color is a rule, not decoration: each level maps to one
+ * token pair in styles.css (--load-relaxed / --load-balanced / --load-packed), and the label
+ * always carries the meaning too, so color is never the only signal.
+ */
+export function LoadBadge({ level }: { level: DayTimetableDto["load"]["level"] }) {
+  const { t } = useI18n();
+  return <span className={`load-badge load-badge--${level}`}>{loadLabel(level, t.timetable)}</span>;
+}
+
 export function clock(minute: number) {
   return `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
 }
