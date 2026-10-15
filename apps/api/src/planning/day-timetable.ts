@@ -13,8 +13,13 @@ import type { DayHours } from "./opening-hours";
 
 /** Stay used when nobody entered one, by place type. */
 export const DEFAULT_STAY_MINUTES: Record<PlaceType, number> = {
-  restaurant: 75,
   activity: 90,
+  worship: 60,
+  museum: 90,
+  nature: 75,
+  restaurant: 75,
+  cafe: 45,
+  shopping: 60,
   other: 60,
   lodging: 60,
   station: 30,

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 
 import { useI18n } from "./i18n";
+import { canArrangeItinerary } from "./trip-permissions";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import "./schedule-flow.css";
 
@@ -52,7 +53,7 @@ export function SchedulePlacesSheet(props: {
   const description = props.places.length === 1
     ? props.places[0]?.name ?? ""
     : t.schedule.selectedCount(props.places.length);
-  const canConfirm = props.trip.role === "owner" && (selectedDayId === null
+  const canConfirm = canArrangeItinerary(props.trip) && (selectedDayId === null
     ? Boolean(props.allowUnscheduled)
     : Boolean(selectedDay));
 
@@ -66,7 +67,7 @@ export function SchedulePlacesSheet(props: {
       : t.schedule.confirmMany(props.places.length, selectedDay.copy.label);
   }
 
-  if (props.trip.role !== "owner") return null;
+  if (!canArrangeItinerary(props.trip)) return null;
 
   return (
     <PlaceDetailSheet

@@ -125,6 +125,29 @@ export async function requireOwner(
   }
 }
 
+/**
+ * Arranging the itinerary (placing, moving, ordering or removing scheduled places): always the
+ * owner, and editors too once the owner turns on 「編輯者可以安排行程」 for the trip.
+ */
+export async function requireScheduler(
+  executor: DatabaseExecutor,
+  userId: string,
+  tripId: string,
+) {
+  const membership = await executor
+    .selectFrom("trip_members")
+    .innerJoin("trips", "trips.id", "trip_members.trip_id")
+    .select(["trip_members.role", "trips.editors_can_schedule"])
+    .where("trip_members.trip_id", "=", tripId)
+    .where("trip_members.user_id", "=", userId)
+    .where("trip_members.removed_at", "is", null)
+    .executeTakeFirst();
+  if (!membership) throw new AppError("trip_not_found", "Trip not found", 404);
+  if (membership.role === "owner" || (membership.role === "editor" && membership.editors_can_schedule)) return;
+  // Same error as requireOwner, so clients and existing integrations see an unchanged contract.
+  throw new AppError("forbidden", "Only the trip owner can do that", 403);
+}
+
 export async function recordEvent(
   executor: DatabaseExecutor,
   event: {

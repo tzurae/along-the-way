@@ -1,12 +1,27 @@
 import { isRecord } from "./type-guards";
 
-export type PlaceType =
-  | "airport"
-  | "station"
-  | "lodging"
-  | "restaurant"
-  | "activity"
-  | "other";
+/**
+ * Normalized place categories, derived from Google's fine-grained types. Lodging, station and
+ * airport stay distinct because flights and lodging rely on them; the UI groups them as 住宿・交通.
+ */
+export const PLACE_TYPES = [
+  "activity",
+  "worship",
+  "museum",
+  "nature",
+  "restaurant",
+  "cafe",
+  "shopping",
+  "lodging",
+  "station",
+  "airport",
+  "other",
+] as const;
+export type PlaceType = (typeof PLACE_TYPES)[number];
+
+export function isPlaceType(value: unknown): value is PlaceType {
+  return typeof value === "string" && (PLACE_TYPES as readonly string[]).includes(value);
+}
 
 export type PlaceLocationStatus =
   | "complete"
@@ -254,17 +269,7 @@ function nullableInteger(value: unknown) {
 }
 
 function placeTypeValue(value: unknown): PlaceType {
-  if (
-    value === "airport" ||
-    value === "station" ||
-    value === "lodging" ||
-    value === "restaurant" ||
-    value === "activity" ||
-    value === "other"
-  ) {
-    return value;
-  }
-  return invalidResponse();
+  return isPlaceType(value) ? value : invalidResponse();
 }
 
 function locationStatusValue(value: unknown): PlaceLocationStatus {

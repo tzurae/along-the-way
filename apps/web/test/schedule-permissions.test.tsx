@@ -13,7 +13,7 @@ import { createTodayModel } from "../src/today-model";
 import { todayActivity, todaySkeleton, todayTrip, todayUser } from "./today-fixtures";
 import tripSkeletonWorkspaceSource from "../src/TripSkeletonWorkspace.tsx?raw";
 
-const ownerOnly = "只有旅程擁有者可以排入、改期或移出行程。你仍可加入地點、投票與編輯備註。";
+const ownerOnly = "只有旅程擁有者，或擁有者開放的編輯者，可以排入、改期或移出行程。你仍可加入地點、投票與編輯備註。";
 
 beforeEach(() => {
   localStorage.clear();
@@ -80,12 +80,12 @@ describe("owner-only schedule surfaces", () => {
       onClose: () => {},
       onApplied: () => {},
     };
-    const { rerender } = render(<TripPlanDialog {...props} isOwner={false} />);
+    const { rerender } = render(<TripPlanDialog {...props} canArrange={false} />);
 
     expect(await screen.findByText(ownerOnly)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "套用這個規劃" })).not.toBeInTheDocument();
 
-    rerender(<TripPlanDialog {...props} isOwner />);
+    rerender(<TripPlanDialog {...props} canArrange />);
     expect(await screen.findByRole("button", { name: "套用這個規劃" })).toBeInTheDocument();
     expect(screen.queryByText(ownerOnly)).not.toBeInTheDocument();
   });
@@ -111,7 +111,7 @@ describe("owner-only schedule surfaces", () => {
         tripId="A"
         open
         dayLabels={new Map([["day21", "第 1 天"]])}
-        isOwner
+        canArrange
         request={request}
         onClose={() => {}}
         onApplied={() => {}}
@@ -121,7 +121,7 @@ describe("owner-only schedule surfaces", () => {
     const applyPlan = await screen.findByRole("button", { name: "套用這個規劃" });
     await waitFor(() => expect(applyPlan).toBeEnabled());
     fireEvent.click(applyPlan);
-    expect(await screen.findByRole("alert")).toHaveTextContent("只有旅程擁有者可以更改行程安排。");
+    expect(await screen.findByRole("alert")).toHaveTextContent("你目前沒有安排行程的權限；請旅程擁有者在「成員」開放。");
   });
 
   it("keeps day-order previews viewable but hides the order apply action from editors", async () => {
@@ -136,13 +136,13 @@ describe("owner-only schedule surfaces", () => {
       onClose: () => {},
       onOrderSaved: async () => {},
     };
-    const { rerender } = render(<DayPlanDialog {...props} isOwner={false} />);
+    const { rerender } = render(<DayPlanDialog {...props} canArrange={false} />);
 
     expect(await screen.findByText(ownerOnly)).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole("button", { name: "使用這個順序" })).not.toBeInTheDocument());
     expect(screen.getByRole("tab", { name: /建議/ })).toBeInTheDocument();
 
-    rerender(<DayPlanDialog {...props} isOwner />);
+    rerender(<DayPlanDialog {...props} canArrange />);
     expect(await screen.findByRole("button", { name: "使用這個順序" })).toBeInTheDocument();
     expect(screen.queryByText(ownerOnly)).not.toBeInTheDocument();
   });
@@ -160,7 +160,7 @@ describe("owner-only schedule surfaces", () => {
       <DayPlanDialog
         tripId="A"
         day={{ id: "day21", date: "2026-10-21", label: "第 1 天" }}
-        isOwner
+        canArrange
         request={request}
         onClose={() => {}}
         onOrderSaved={async () => {}}
@@ -170,7 +170,7 @@ describe("owner-only schedule surfaces", () => {
     const applyOrder = await screen.findByRole("button", { name: "使用這個順序" });
     await waitFor(() => expect(applyOrder).toBeEnabled());
     fireEvent.click(applyOrder);
-    expect(await screen.findByRole("alert")).toHaveTextContent("只有旅程擁有者可以更改行程安排。");
+    expect(await screen.findByRole("alert")).toHaveTextContent("你目前沒有安排行程的權限；請旅程擁有者在「成員」開放。");
   });
 
   it("shows an editor why an empty Today cannot be arranged while preserving the owner action", () => {
@@ -183,12 +183,12 @@ describe("owner-only schedule surfaces", () => {
       fetchedAt: "2026-10-21T01:30:00Z",
       retry: () => {},
     };
-    const { rerender } = render(<TodayWorkspace {...common} isOwner={false} />);
+    const { rerender } = render(<TodayWorkspace {...common} canArrange={false} />);
 
     expect(screen.getByText(ownerOnly)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "安排這一天" })).not.toBeInTheDocument();
 
-    rerender(<TodayWorkspace {...common} isOwner onArrangeDay={() => {}} />);
+    rerender(<TodayWorkspace {...common} canArrange onArrangeDay={() => {}} />);
     expect(screen.getByRole("button", { name: "安排這一天" })).toBeInTheDocument();
     expect(screen.queryByText(ownerOnly)).not.toBeInTheDocument();
   });

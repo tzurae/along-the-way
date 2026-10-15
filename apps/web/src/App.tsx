@@ -29,6 +29,7 @@ import { TripSkeletonWorkspace } from "./TripSkeletonWorkspace";
 import { TripPlaceWorkspace } from "./TripPlaceWorkspace";
 import { TravelWorkspace } from "./TravelWorkspace";
 import { useI18n, type Messages } from "./i18n";
+import { canArrangeItinerary } from "./trip-permissions";
 import { parseTripSkeletonResponse, type TripSkeletonResponse } from "@along-the-way/contracts/trip-skeleton";
 import { parseTripPlaceListResponse, type TripPlaceListResponse } from "@along-the-way/contracts/trip-places";
 import { TodayWorkspace } from "./TodayWorkspace";
@@ -38,18 +39,19 @@ import { TodaySnapshotStore, TODAY_SCHEMA_VERSION, TODAY_SIGNED_OUT_STORAGE_KEY,
 import {
   defaultSegment,
   itinerarySegmentIds,
+  membersSegmentIds,
   placesSegmentIds,
   readTripLocation,
   tripTabIds,
   writeTripLocation,
   type ItinerarySegment,
+  type MembersSegment,
   type PlacesSegment,
   type TripSegment,
   type TripTab,
 } from "./trip-location";
 import { ApiRequestError, localizedApiErrorMessage } from "./api-error";
 import { useTripLiveUpdates } from "./useTripLiveUpdates";
-import { TripHistory } from "./TripHistory";
 interface OnboardingFacts {
   tripId: string;
   hasLodging: boolean;
@@ -148,7 +150,10 @@ function removeTokenFragment(remove: "magicToken" | "inviteToken") {
 interface TripMembersWorkspaceProps {
   trip: TripDto;
   currentUser: UserDto;
+  /** Which responsibility is shown: people, your own profile, invitations or permissions. */
+  segment: MembersSegment;
   onChanged: () => Promise<void>;
+  onProfileSaved(user: UserDto): void;
   request<T>(url: string, options?: RequestOptions): Promise<T>;
 }
 
@@ -183,7 +188,7 @@ function TripFlightWorkspace({ trip, request, revision, onChanged }: {
   );
 }
 
-function TripMembersWorkspace({ trip, currentUser, onChanged, request }: TripMembersWorkspaceProps) {
+function TripMembersWorkspace({ trip, currentUser, segment, onChanged, onProfileSaved, request }: TripMembersWorkspaceProps) {
   const { t } = useI18n();
   const [inviteEmail, setInviteEmail] = useState("");
   const [message, setMessage] = useState("");
@@ -248,56 +253,180 @@ function TripMembersWorkspace({ trip, currentUser, onChanged, request }: TripMem
     }
   }
 
-  return (
-    <section className="rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8">
-      <div className="grid gap-6 lg:grid-cols-[1fr_0.9fr]">
-        <div>
-          <h3 className="font-display text-2xl">{t.app.members}</h3>
-          <ul className="mt-3 grid gap-3">
-            {trip.members.map((member) => {
-              const memberLabel = member.displayName ?? member.email;
-              return (
-                <li key={member.id} className="flex min-h-14 items-center gap-3 rounded-xl bg-surface-subtle px-4 py-3">
-                  <span aria-hidden="true" className="grid size-8 shrink-0 place-items-center rounded-full bg-ink-strong text-sm font-bold text-on-dark">
-                    {memberLabel.slice(0, 1).toLocaleUpperCase()}
-                  </span>
-                  <span className="min-w-0 flex-1 [overflow-wrap:anywhere]"><strong className="block">{memberLabel}</strong><small className="text-muted-foreground">{t.app.role(member.role)}{member.userId === currentUser.id ? `・${t.app.you}` : ""}</small></span>
-                  {trip.role === "owner" && member.role === "editor" ? (
-                    <button className="min-h-11 rounded-lg border border-accent-strong px-3 text-sm font-bold text-accent-strong outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={() => void removeMember(member.userId)}>
-                      {t.app.remove}
-                    </button>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
-        </div>
+  const [savingArrange, setSavingArrange] = useState(false);
+  async function setEditorsCanSchedule(enabled: boolean) {
+    const identity = `editors-can-schedule:${enabled}`;
+    setSavingArrange(true);
+    setMessage("");
+    try {
+      await request(`/api/trips/${trip.id}/editors-can-schedule`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": actionKey(identity) },
+        body: JSON.stringify({ enabled }),
+      });
+      actionKeys.current.delete(identity);
+      await onChanged();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : t.errors.unknown);
+    } finally {
+      setSavingArrange(false);
+    }
+  }
 
-        <div>
-          <h3 className="font-display text-2xl">{t.app.pendingInvitations}</h3>
-          <ul className="mt-3 grid gap-3">
-            {trip.invites.filter((invite) => invite.status === "pending").map((invite) => (
-              <li key={invite.id} className="flex min-h-14 items-center justify-between gap-3 rounded-xl bg-surface-subtle px-4 py-3">
-                <span className="min-w-0 [overflow-wrap:anywhere]">{invite.email}</span>
-                {trip.role === "owner" ? (
-                  <button className="min-h-11 rounded-lg border px-3 text-sm font-bold outline-none hover:bg-surface focus:ring-4 focus:ring-focus/30" onClick={() => void revokeInvite(invite.id)}>{t.app.revoke}</button>
-                ) : null}
-              </li>
-            ))}
-            {trip.invites.every((invite) => invite.status !== "pending") ? <li className="text-muted-foreground">{t.app.noPendingInvitations}</li> : null}
-          </ul>
-          {trip.role === "owner" ? (
-            <form className="mt-5 grid gap-3" onSubmit={inviteMember}>
-              <label className="grid gap-1 font-semibold">
-                {t.app.inviteEditorByEmail}
-                <input className="min-h-11 rounded-lg border px-3 outline-none focus:border-focus focus:ring-2 focus:ring-focus/30" type="email" required value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} />
-              </label>
-              <button className="min-h-11 rounded-xl bg-ink-strong px-4 font-bold text-white outline-none hover:bg-ink focus:ring-4 focus:ring-focus/30">{t.app.sendInvitation}</button>
-            </form>
-          ) : null}
-          {message ? <p className="mt-3" role="status">{message}</p> : null}
-        </div>
-      </div>
+  const [nickname, setNickname] = useState(currentUser.displayName ?? "");
+  const [savingNickname, setSavingNickname] = useState(false);
+  const [profileMessage, setProfileMessage] = useState("");
+  useEffect(() => { setNickname(currentUser.displayName ?? ""); }, [currentUser.displayName]);
+  async function saveNickname(event: FormEvent) {
+    event.preventDefault();
+    setSavingNickname(true);
+    setProfileMessage("");
+    try {
+      const { user } = await request<{ user: UserDto }>("/api/session/profile", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: nickname.trim() || null }),
+        parse: parseSessionResponse,
+      });
+      onProfileSaved(user);
+      setProfileMessage(t.app.membersPage.nicknameSaved);
+      await onChanged();
+    } catch (error) {
+      setProfileMessage(error instanceof Error ? error.message : t.errors.unknown);
+    } finally {
+      setSavingNickname(false);
+    }
+  }
+
+  const page = t.app.membersPage;
+  const isOwner = trip.role === "owner";
+  const pendingInvites = trip.invites.filter((invite) => invite.status === "pending");
+  const panelClass = "rounded-card border border-ink/10 bg-surface p-5 shadow-card sm:p-8";
+
+  if (segment === "profile") {
+    return (
+      <section className={panelClass} aria-labelledby="members-profile-title">
+        <h3 id="members-profile-title" className="font-display text-2xl">{page.profileTitle}</h3>
+        <p className="mt-1 max-w-[62ch] text-sm text-muted-foreground">{page.profileHelp}</p>
+        <form className="mt-5 grid max-w-md gap-2" onSubmit={saveNickname}>
+          <label className="grid gap-1 font-semibold" htmlFor="member-nickname">{page.nicknameLabel}</label>
+          <input
+            id="member-nickname"
+            className="min-h-11 rounded-lg border px-3 outline-none focus:border-focus focus:ring-2 focus:ring-focus/30"
+            maxLength={40}
+            placeholder={page.nicknamePlaceholder}
+            value={nickname}
+            onChange={(event) => setNickname(event.target.value)}
+          />
+          <small className="text-muted-foreground">{page.nicknameHint}</small>
+          <button className="mt-2 min-h-11 justify-self-start rounded-xl bg-ink-strong px-4 font-bold text-white outline-none hover:bg-ink focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={savingNickname || nickname.trim() === (currentUser.displayName ?? "")}>
+            {savingNickname ? page.savingNickname : page.saveNickname}
+          </button>
+          {profileMessage ? <p role="status" className="text-sm">{profileMessage}</p> : null}
+        </form>
+        <dl className="mt-8 grid max-w-xl gap-4 border-t border-ink/10 pt-6 sm:grid-cols-[10rem_1fr]">
+          <dt className="text-sm text-muted-foreground">{page.loginEmail}</dt>
+          <dd className="[overflow-wrap:anywhere]">{currentUser.email}</dd>
+          <dt className="text-sm text-muted-foreground">{page.roleInTrip}</dt>
+          <dd>{t.app.role(trip.role)}</dd>
+          <dt className="text-sm text-muted-foreground">{page.whatYouCanDo}</dt>
+          <dd>
+            <ul className="grid gap-1">
+              <li>{page.canDoCollaborate}</li>
+              <li>{canArrangeItinerary(trip) ? page.canDoArrange : page.cannotArrange}</li>
+              {isOwner ? <li>{page.canDoManage}</li> : null}
+            </ul>
+          </dd>
+        </dl>
+      </section>
+    );
+  }
+
+  if (segment === "invites" && isOwner) {
+    return (
+      <section className={panelClass} aria-labelledby="members-invites-title">
+        <h3 id="members-invites-title" className="font-display text-2xl">{page.invitesTitle}</h3>
+        <p className="mt-1 max-w-[62ch] text-sm text-muted-foreground">{page.invitesHelp}</p>
+        <form className="mt-5 grid max-w-md gap-3" onSubmit={inviteMember}>
+          <label className="grid gap-1 font-semibold">
+            {t.app.inviteEditorByEmail}
+            <input className="min-h-11 rounded-lg border px-3 outline-none focus:border-focus focus:ring-2 focus:ring-focus/30" type="email" required value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} />
+          </label>
+          <button className="min-h-11 justify-self-start rounded-xl bg-ink-strong px-4 font-bold text-white outline-none hover:bg-ink focus:ring-4 focus:ring-focus/30">{t.app.sendInvitation}</button>
+        </form>
+        <h4 className="mt-8 font-semibold">{t.app.pendingInvitations}</h4>
+        <ul className="mt-3 grid max-w-xl gap-3">
+          {pendingInvites.map((invite) => (
+            <li key={invite.id} className="flex min-h-14 items-center justify-between gap-3 rounded-xl bg-surface-subtle px-4 py-3">
+              <span className="min-w-0 [overflow-wrap:anywhere]">{invite.email}</span>
+              <button className="min-h-11 rounded-lg border px-3 text-sm font-bold outline-none hover:bg-surface focus:ring-4 focus:ring-focus/30" onClick={() => void revokeInvite(invite.id)}>{t.app.revoke}</button>
+            </li>
+          ))}
+          {pendingInvites.length === 0 ? <li className="text-muted-foreground">{t.app.noPendingInvitations}</li> : null}
+        </ul>
+        {message ? <p className="mt-3" role="status">{message}</p> : null}
+      </section>
+    );
+  }
+
+  if (segment === "permissions") {
+    return (
+      <section className={panelClass} aria-labelledby="members-permissions-title">
+        <h3 id="members-permissions-title" className="font-display text-2xl">{page.permissionsTitle}</h3>
+        <p className="mt-1 max-w-[62ch] text-sm text-muted-foreground">{page.permissionsHelp}</p>
+        {isOwner ? (
+          <label className="mt-5 flex max-w-xl min-h-11 cursor-pointer items-start gap-3 rounded-xl border border-ink/10 px-4 py-3">
+            <input
+              type="checkbox"
+              className="mt-1 size-5 shrink-0 accent-[var(--accent)]"
+              checked={trip.editorsCanSchedule}
+              disabled={savingArrange}
+              onChange={(event) => void setEditorsCanSchedule(event.target.checked)}
+            />
+            <span>
+              <strong className="block">{t.app.editorsCanSchedule}</strong>
+              <small className="text-muted-foreground">{t.app.editorsCanScheduleHelp}</small>
+            </span>
+          </label>
+        ) : (
+          <div className="mt-5 grid max-w-xl gap-1 rounded-xl bg-surface-subtle px-4 py-3">
+            <p>{trip.editorsCanSchedule ? t.app.editorsCanScheduleGranted : page.editorsCannotSchedule}</p>
+            <small className="text-muted-foreground">{page.permissionsReadOnly}</small>
+          </div>
+        )}
+        {message ? <p className="mt-3" role="status">{message}</p> : null}
+      </section>
+    );
+  }
+
+  return (
+    <section className={panelClass} aria-labelledby="members-people-title">
+      <h3 id="members-people-title" className="font-display text-2xl">{page.peopleTitle}</h3>
+      <p className="mt-1 max-w-[62ch] text-sm text-muted-foreground">{page.peopleHelp(trip.members.length)}</p>
+      <ul className="mt-5 grid max-w-2xl gap-3">
+        {trip.members.map((member) => {
+          const memberLabel = member.displayName ?? member.email;
+          return (
+            <li key={member.id} className="flex min-h-16 items-center gap-3 rounded-xl bg-surface-subtle px-4 py-3">
+              <span aria-hidden="true" className="grid size-10 shrink-0 place-items-center rounded-full bg-ink-strong font-bold text-on-dark">
+                {memberLabel.slice(0, 1).toLocaleUpperCase()}
+              </span>
+              <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
+                <strong className="block">{memberLabel}{member.userId === currentUser.id ? `（${t.app.you}）` : ""}</strong>
+                <small className="block text-muted-foreground">
+                  {t.app.role(member.role)}・{member.displayName ? member.email : page.noNickname}
+                </small>
+              </span>
+              {isOwner && member.role === "editor" ? (
+                <button className="min-h-11 rounded-lg border border-accent-strong px-3 text-sm font-bold text-accent-strong outline-none hover:bg-surface focus:ring-4 focus:ring-focus/30" onClick={() => void removeMember(member.userId)}>
+                  {t.app.remove}
+                </button>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+      {message ? <p className="mt-3" role="status">{message}</p> : null}
     </section>
   );
 }
@@ -376,12 +505,16 @@ function TripSwitcher({ layout, trips, selectedTrip, signedInEmail, openCreateTr
   );
 }
 
-function TripNavigation({ layout, activeTab, selectTab, itinerarySegment, selectItinerarySegment }: {
+function TripNavigation({ layout, activeTab, selectTab, itinerarySegment, selectItinerarySegment, membersSegment, membersSegments, selectMembersSegment }: {
   layout: "mobile" | "desktop";
   activeTab: TripTab;
   selectTab(tab: TripTab): void;
   itinerarySegment: ItinerarySegment;
   selectItinerarySegment(segment: ItinerarySegment): void;
+  membersSegment: MembersSegment;
+  /** The 成員 sub-pages this member can open (邀請 is owner-only). */
+  membersSegments: readonly MembersSegment[];
+  selectMembersSegment(segment: MembersSegment): void;
 }) {
   const { t } = useI18n();
   const destinations = [
@@ -440,6 +573,22 @@ function TripNavigation({ layout, activeTab, selectTab, itinerarySegment, select
                     onClick={() => selectItinerarySegment(segment)}
                   >
                     {t.app.itinerarySegments[segment]}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {layout === "desktop" && value === "members" && activeTab === "members" ? (
+              <div className="atw-railnav__children" role="group" aria-label={t.app.membersSectionPicker}>
+                {membersSegments.map((segment) => (
+                  <button
+                    key={segment}
+                    type="button"
+                    data-members-child={segment}
+                    aria-current={membersSegment === segment ? "page" : undefined}
+                    className={membersSegment === segment ? "is-active" : ""}
+                    onClick={() => selectMembersSegment(segment)}
+                  >
+                    {t.app.membersSegments[segment]}
                   </button>
                 ))}
               </div>
@@ -1126,6 +1275,11 @@ export function App() {
     ? activeSegment as PlacesSegment
     : "wishlist";
   const itinerarySegments = itinerarySegmentIds.map((value) => ({ value, label: t.app.itinerarySegments[value] }));
+  // 邀請 is the owner's job; other members do not get a page they cannot use.
+  const availableMembersSegments = membersSegmentIds.filter((segment) => segment !== "invites" || selectedTrip?.role === "owner");
+  const membersSegment = availableMembersSegments.includes(activeSegment as MembersSegment)
+    ? activeSegment as MembersSegment
+    : "people";
   const placeSegments = [
     { value: "wishlist", label: t.app.placesSegments.wishlist },
     { value: "discovery", label: t.app.placesSegments.discovery },
@@ -1167,7 +1321,7 @@ export function App() {
       <div className="atw-frame">
         <aside className="atw-rail">
           <TripSwitcher layout="desktop" trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} openCreateTrip={openCreateTrip} selectTrip={selectTrip} signOut={() => void logout()} />
-          {selectedTrip ? <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} /> : null}
+          {selectedTrip ? <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} /> : null}
           <div className="mt-2 border-t border-ink/10 pt-4">
             {selectedTrip && liveConnected ? (
               <span className="mb-2 flex items-center gap-2 text-xs text-muted-foreground" title={t.collaboration.live}>
@@ -1212,14 +1366,9 @@ export function App() {
                   }}
                 />
               ) : null}
-              <section className={activeTripTab === "today" || activeTripTab === "itinerary" ? "sr-only" : "atw-trip-context"} aria-labelledby="trip-title-heading">
-                <h1 id="trip-title-heading" className="sr-only">{selectedTrip.name}</h1>
-                <p>
-                  {selectedTrip.startDate} – {selectedTrip.endDate}
-                  {selectedTrip.defaultCurrency ? t.app.defaultCurrency(selectedTrip.defaultCurrency) : t.app.noDefaultCurrency}
-                  {`・${t.app.tripVersion(t.app.role(selectedTrip.role), selectedTrip.version)}`}
-                </p>
-              </section>
+              {/* The trip name stays as the page's heading for screen readers; dates, currency, role and
+                  version were noise above every page (dates live in the trip switcher). */}
+              <h1 id="trip-title-heading" className="sr-only">{selectedTrip.name}</h1>
               {!liveConnected ? <p aria-live="polite" role="status" className="rounded-xl border border-ink/10 bg-surface-subtle p-3 text-sm text-muted-foreground">{t.collaboration.reconnecting}</p> : null}
 
               <div id="trip-panel-today" role="tabpanel" aria-label={t.app.tabs.today} hidden={activeTripTab !== "today"}>
@@ -1230,8 +1379,8 @@ export function App() {
                     fetchedAt={todaySnapshot.fetchedAt}
                     selectedDate={selectedDate}
                     onDayChanged={selectDay}
-                    isOwner={selectedTrip.role === "owner"}
-                    onArrangeDay={selectedTrip.role === "owner" ? (date) => {
+                    canArrange={canArrangeItinerary(selectedTrip)}
+                    onArrangeDay={canArrangeItinerary(selectedTrip) ? (date) => {
                       setArrangeDate(date);
                       selectSegment("itinerary", "daily");
                     } : undefined}
@@ -1319,8 +1468,18 @@ export function App() {
               </div>
 
               <div id="trip-panel-members" role="tabpanel" aria-label={t.app.tabs.members} hidden={activeTripTab !== "members"} className="grid gap-5">
-                <TripMembersWorkspace trip={selectedTrip} currentUser={user} onChanged={() => loadTrip(selectedTrip.id)} request={request} />
-                <TripHistory key={selectedTrip.id} tripId={selectedTrip.id} revision={workspaceRevision} active={activeTripTab === "members"} request={request} />
+                <div className="lg:hidden">
+                  <SegmentControl
+                    label={t.app.membersSectionPicker}
+                    id="members"
+                    items={availableMembersSegments.map((value) => ({ value, label: t.app.membersSegments[value] }))}
+                    active={membersSegment}
+                    onSelect={(segment) => selectSegment("members", segment)}
+                  />
+                </div>
+                <div id={`members-segment-panel-${membersSegment}`} role="tabpanel" aria-labelledby={`members-segment-${membersSegment}`}>
+                  <TripMembersWorkspace trip={selectedTrip} currentUser={user} segment={membersSegment} onChanged={() => loadTrip(selectedTrip.id)} onProfileSaved={setUser} request={request} />
+                </div>
               </div>
             </>
           ) : (
@@ -1328,7 +1487,7 @@ export function App() {
           )}
         </div>
       </div>
-      {selectedTrip ? <TripNavigation layout="mobile" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} /> : null}
+      {selectedTrip ? <TripNavigation layout="mobile" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} /> : null}
       <CreateTripDialog
         open={createDialogOpen}
         onOpenChange={changeCreateDialogOpen}

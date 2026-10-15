@@ -38,6 +38,7 @@ import { ItineraryItemDialog } from "./ItineraryItemDialog";
 import { PlaceDialog } from "./PlaceDialog";
 import { TripPlanDialog } from "./TripPlanDialog";
 import { useI18n, type Messages } from "./i18n";
+import { canArrangeItinerary } from "./trip-permissions";
 import { ApiRequestError } from "./api-error";
 import "./plan-route.css";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
@@ -371,7 +372,8 @@ export function TripSkeletonWorkspace({
   onArrangeOpened,
 }: TripSkeletonWorkspaceProps) {
   const { t, locale } = useI18n();
-  const isOwner = trip.role === "owner";
+  // Owner always; editors when the owner turned on 「編輯者可以安排行程」.
+  const canArrange = canArrangeItinerary(trip);
   const [skeleton, setSkeleton] = useState<TripSkeletonDto | null>(null);
   const [tripPlaces, setTripPlaces] = useState<TripPlaceDto[]>([]);
   const [error, setError] = useState("");
@@ -471,7 +473,7 @@ export function TripSkeletonWorkspace({
 
   useEffect(() => {
     if (!arrangeDate || !skeleton) return;
-    if (!isOwner) {
+    if (!canArrange) {
       onArrangeOpened?.();
       return;
     }
@@ -481,7 +483,7 @@ export function TripSkeletonWorkspace({
     updateAssignmentErrorPlaceId(null);
     setError("");
     onArrangeOpened?.();
-  }, [arrangeDate, isOwner, skeleton, onArrangeOpened, updateAssignmentErrorPlaceId]);
+  }, [arrangeDate, canArrange, skeleton, onArrangeOpened, updateAssignmentErrorPlaceId]);
 
   useEffect(() => {
     if (!skeleton || managePlacesHandled.current) return;
@@ -725,7 +727,7 @@ export function TripSkeletonWorkspace({
     tripDayId: string | null,
     place: TripPlaceDto,
   ) {
-    if (!isOwner) {
+    if (!canArrange) {
       setError(t.schedule.ownerOnlyAction);
       updateAssignmentErrorPlaceId(place.id);
       return;
@@ -976,7 +978,7 @@ export function TripSkeletonWorkspace({
           <p>{t.tripSkeleton.introduction}</p>
         </header>
 
-        {!isOwner ? (
+        {!canArrange ? (
           <p className="mb-4 rounded-xl border border-ink/10 bg-surface-subtle p-3 text-sm text-muted-foreground">
             {t.schedule.ownerOnly}
           </p>
@@ -1031,7 +1033,7 @@ export function TripSkeletonWorkspace({
                           </span>
                         </div>
                       </div>
-                      {blocked ? renderLocationEditor(place) : isOwner ? (
+                      {blocked ? renderLocationEditor(place) : canArrange ? (
                         <button
                           type="button"
                           className="plan-schedule-button"
@@ -1077,7 +1079,7 @@ export function TripSkeletonWorkspace({
                 places={skeleton.places}
                 save={(input) => saveItem(input)}
               />
-              {isOwner && tripPlaces.some((place) =>
+              {canArrange && tripPlaces.some((place) =>
                 !place.scheduled
                 && place.assignedDayId === null
                 && place.latitude !== null
@@ -1140,7 +1142,7 @@ export function TripSkeletonWorkspace({
                             save={(input, conflictBase) => savePlace(input, place, conflictBase)}
                           />
                         )}
-                        {isOwner || !scheduledLegacyPlaceIds.has(place.id) ? (
+                        {canArrange || !scheduledLegacyPlaceIds.has(place.id) ? (
                           <Button
                             size="sm"
                             variant="outline"
@@ -1282,7 +1284,7 @@ export function TripSkeletonWorkspace({
                         {t.tripSkeleton.optimizeRoute}
                       </button>
                     )}
-                    {isOwner ? (
+                    {canArrange ? (
                       <button
                         type="button"
                         className="plan-outline-button min-h-11"
@@ -1304,7 +1306,7 @@ export function TripSkeletonWorkspace({
                     <li className="plan-no-plan">
                       <CalendarDays aria-hidden="true" />
                       <span>{t.tripSkeleton.emptyDay}</span>
-                      {isOwner ? (
+                      {canArrange ? (
                         <button
                           type="button"
                           className="plan-row-button"
@@ -1375,7 +1377,7 @@ export function TripSkeletonWorkspace({
             {itemDetail(itemsById.get(viewingItem.itemId)!, viewingItem.continuation)}
           </PlaceDetailSheet>
         ) : null}
-        {isOwner && assignmentDayId !== null && assignmentDay ? (
+        {canArrange && assignmentDayId !== null && assignmentDay ? (
           <PlaceDetailSheet
             appearance="workspace"
             open
@@ -1426,7 +1428,7 @@ export function TripSkeletonWorkspace({
               setViewingAssignedPlaceId(null);
               updateAssignmentErrorPlaceId(null);
             }}
-            footer={isOwner ? (
+            footer={canArrange ? (
               <button
                 type="button"
                 className="plan-remove-button"
@@ -1511,7 +1513,7 @@ export function TripSkeletonWorkspace({
           day={planningDay}
           request={request}
           onClose={() => setPlanningDay(null)}
-          isOwner={isOwner}
+          canArrange={canArrange}
           onOrderSaved={async () => {
             await load();
             onPlacesChanged();
@@ -1525,7 +1527,7 @@ export function TripSkeletonWorkspace({
             skeleton.days.map((day, index) => [day.id, t.tripSkeleton.dayLabel(index + 1)])
           )}
           request={request}
-          isOwner={isOwner}
+          canArrange={canArrange}
           onClose={() => setPlanningTrip(false)}
           onApplied={() => {
             setPlanningTrip(false);

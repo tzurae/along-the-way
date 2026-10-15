@@ -30,7 +30,7 @@ export function TripPlanDialog({
   tripId,
   open,
   dayLabels,
-  isOwner,
+  canArrange,
   request,
   onClose,
   onApplied,
@@ -39,7 +39,8 @@ export function TripPlanDialog({
   open: boolean;
   /** "Day N" by day ID. */
   dayLabels: Map<string, string>;
-  isOwner: boolean;
+  /** Owner, or an editor the owner allows to arrange the itinerary. */
+  canArrange: boolean;
   request: JsonRequest;
   onClose(): void;
   onApplied(): void;
@@ -79,7 +80,7 @@ export function TripPlanDialog({
   }, [open, draft]);
 
   async function applyPlan() {
-    if (!isOwner) {
+    if (!canArrange) {
       setError(t.schedule.ownerOnlyAction);
       return;
     }
@@ -124,7 +125,7 @@ export function TripPlanDialog({
           <DialogTitle>{t.tripPlan.title}</DialogTitle>
           <DialogDescription>{t.tripPlan.description}</DialogDescription>
         </DialogHeader>
-        {!isOwner ? <p className="route-status">{t.schedule.ownerOnly}</p> : null}
+        {!canArrange ? <p className="route-status">{t.schedule.ownerOnly}</p> : null}
 
         {error ? <p role="alert" className="route-error">{error}</p> : null}
         {busy === "planning" ? <p role="status" className="route-status">{t.tripPlan.planning}</p> : null}
@@ -233,14 +234,14 @@ export function TripPlanDialog({
           </div>
         ) : null}
 
-        {error || isOwner ? (
+        {error || canArrange ? (
           <DialogFooter className="route-actionbar">
             {error ? (
               <Button variant="outline" size="lg" disabled={busy !== null} onClick={() => void draft()}>
                 {t.tripPlan.planAgain}
               </Button>
             ) : null}
-            {isOwner ? (
+            {canArrange ? (
               <Button size="lg" disabled={busy !== null || !plan || plan.days.length === 0} onClick={() => void applyPlan()}>
                 <Check />
                 {busy === "saving" ? t.tripPlan.saving : t.tripPlan.useThisPlan}

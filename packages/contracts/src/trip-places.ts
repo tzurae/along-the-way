@@ -1,6 +1,6 @@
 import { parseGooglePlacePhoto, type GooglePlacePhotoDto } from "./place-details";
 import { isRecord } from "./type-guards";
-import type { PlaceType } from "./trip-skeleton";
+import { isPlaceType, type PlaceType } from "./trip-skeleton";
 
 export type TripPlaceStatus =
   | "ready"
@@ -221,15 +221,7 @@ function strings(value: unknown) {
 }
 
 function placeType(value: unknown): PlaceType {
-  if (
-    value === "airport" ||
-    value === "station" ||
-    value === "lodging" ||
-    value === "restaurant" ||
-    value === "activity" ||
-    value === "other"
-  ) return value;
-  return invalid();
+  return isPlaceType(value) ? value : invalid();
 }
 
 

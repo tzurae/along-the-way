@@ -5,19 +5,23 @@ export const itinerarySegmentIds = ["daily", "flight", "lodging"] as const;
 export type ItinerarySegment = (typeof itinerarySegmentIds)[number];
 export const placesSegmentIds = ["wishlist", "discovery"] as const;
 export type PlacesSegment = (typeof placesSegmentIds)[number];
-export type TripSegment = ItinerarySegment | PlacesSegment;
+/** 成員 sub-pages by responsibility: who is on the trip, your own profile, invitations, permissions. */
+export const membersSegmentIds = ["people", "profile", "invites", "permissions"] as const;
+export type MembersSegment = (typeof membersSegmentIds)[number];
+export type TripSegment = ItinerarySegment | PlacesSegment | MembersSegment;
 
 const legacyLocations: Record<string, { tab: TripTab; segment: TripSegment | null }> = {
   overview: { tab: "itinerary", segment: "flight" },
   discovery: { tab: "places", segment: "discovery" },
   wishlist: { tab: "places", segment: "wishlist" },
   lodging: { tab: "itinerary", segment: "lodging" },
-  recent: { tab: "members", segment: null },
+  recent: { tab: "members", segment: "people" },
 };
 
 export function defaultSegment(tab: TripTab): TripSegment | null {
   if (tab === "itinerary") return "daily";
   if (tab === "places") return "wishlist";
+  if (tab === "members") return "people";
   return null;
 }
 
@@ -37,6 +41,11 @@ export function readTripLocation() {
     segment = placesSegmentIds.includes(rawSegment as PlacesSegment)
       ? rawSegment as PlacesSegment
       : "wishlist";
+  }
+  if (!legacy && tab === "members") {
+    segment = membersSegmentIds.includes(rawSegment as MembersSegment)
+      ? rawSegment as MembersSegment
+      : "people";
   }
   return {
     trip: query.get("trip"),
@@ -62,7 +71,9 @@ export function writeTripLocation(
     ? (itinerarySegmentIds.includes(segment as ItinerarySegment) ? segment : "daily")
     : tab === "places"
       ? (placesSegmentIds.includes(segment as PlacesSegment) ? segment : "wishlist")
-      : null;
+      : tab === "members"
+        ? (membersSegmentIds.includes(segment as MembersSegment) ? segment : "people")
+        : null;
   if (normalizedSegment) url.searchParams.set("segment", normalizedSegment);
   else url.searchParams.delete("segment");
   if (day) url.searchParams.set("day", day); else url.searchParams.delete("day");

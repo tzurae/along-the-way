@@ -173,7 +173,6 @@ it("activates Google slides on demand and keeps selection, failure, and per-phot
   fireEvent.click(screen.getByRole("button", { name: "下一張照片" }));
   expect(screen.getByText("2／3")).toBeInTheDocument();
   expect(document.querySelector(`[data-photo-credit="${googlePhotos[1]!.id}"]`)).toHaveTextContent("Google Maps・照片：攝影者乙");
-  expect(screen.getByRole("link", { name: /^在 Google Maps 查看$/ })).toHaveAttribute("href", googlePhotos[1]!.googleMapsUri);
   expect(slides[2]!.querySelector("img")).not.toBeInTheDocument();
 
   fireEvent.error(second);

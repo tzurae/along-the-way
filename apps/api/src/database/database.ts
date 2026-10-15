@@ -5,6 +5,7 @@ import {
   type Generated,
 } from "kysely";
 import { Pool } from "pg";
+import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 
 type Timestamp = ColumnType<Date, Date | string | undefined, Date | string>;
 type DateOnly = ColumnType<Date, string, string>;
@@ -50,6 +51,8 @@ export interface TripTable {
   default_currency: string | null;
   status: "planning";
   version: Generated<number>;
+  /** The owner lets editors place, move, order and remove itinerary places. */
+  editors_can_schedule: Generated<boolean>;
   created_at: Timestamp;
   updated_at: Timestamp;
 }
@@ -84,7 +87,7 @@ export interface PlaceTable {
   id: Generated<string>;
   trip_id: string;
   name: string;
-  place_type: "airport" | "station" | "lodging" | "restaurant" | "activity" | "other";
+  place_type: PlaceType;
   travel_only: Generated<boolean>;
   address: string | null;
   latitude: number | null;
@@ -112,7 +115,7 @@ export interface PlaceIdentityTable {
   provider: "google" | "manual";
   provider_place_id: string | null;
   canonical_name: string;
-  canonical_type: "airport" | "station" | "lodging" | "restaurant" | "activity" | "other";
+  canonical_type: PlaceType;
   canonical_address: string | null;
   latitude: number | null;
   longitude: number | null;
@@ -132,7 +135,7 @@ export interface TripPlaceTable {
   legacy_place_version: number;
   facts_source: "provider" | "member";
   name: string;
-  place_type: "airport" | "station" | "lodging" | "restaurant" | "activity" | "other";
+  place_type: PlaceType;
   address: string | null;
   latitude: number | null;
   longitude: number | null;
@@ -260,7 +263,7 @@ export interface CandidateProposalTable {
   run_id: string;
   provider_place_id: string;
   name: string;
-  place_type: "airport" | "station" | "lodging" | "restaurant" | "activity" | "other";
+  place_type: PlaceType;
   address: string | null;
   latitude: number | null;
   longitude: number | null;

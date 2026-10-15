@@ -1,8 +1,9 @@
+import { placeTypeLabels } from "./place-types";
+
 export const discovery = {
   errors: {
     failed: "無法完成 AI 研究",
     researchUnavailable: (services: string) => `無法進行 AI 研究：此伺服器尚未設定${services}。你的旅程說明會保留。`,
-    feedbackUnavailable: (services: string) => `無法解讀意見：此伺服器尚未設定${services}。你的意見會保留。`,
     ownerOnly: "只有旅程建立者可以操作 AI 建議。",
     questionsChanged: "這些問題已經更新，你的回答無法對應目前的問題。請重新確認回答後再送出。",
   },
@@ -34,25 +35,12 @@ export const discovery = {
   status: {
     pending: "待討論",
     accepting: "處理中",
-    accepted: "已加入口袋名單",
-    // Accepted and its wishlist place is already on the itinerary (same rule as the wishlist row).
-    acceptedScheduled: "已加入行程",
+    // AI 建議 only ever go into the itinerary: accepted means it is in 行程, with or without a day.
+    accepted: "已選進行程・待排日期",
+    acceptedScheduled: "已排入行程",
     rejected: "不再推薦",
   },
-  feedbackStatus: {
-    // Another member's feedback awaiting its author's decision.
-    pending: "等待提出者確認",
-    confirmed: "已確認",
-    rejected: "已拒絕",
-  },
-  placeType: {
-    activity: "活動",
-    restaurant: "餐廳",
-    lodging: "住宿",
-    station: "車站",
-    airport: "機場",
-    other: "其他",
-  },
+  placeType: placeTypeLabels,
   progress: {
     saving: "儲存中…",
     researching: "研究中…",
@@ -125,7 +113,7 @@ export const discovery = {
     unknownAddress: "地址未知",
     recommendedByFor: (name: string) => `${name} 的推薦來源`,
     recommendedBy: "推薦來源",
-    viewPhotos: "在 Google Maps 看照片",
+    viewPhotos: "在 Google Maps 開啟",
     fitLine: (needs: string[]) => `符合：${needs.length ? needs.join("・") : "尚未列出"}`,
     whyRecommended: "為什麼推薦",
     where: "在哪裡",
@@ -150,8 +138,8 @@ export const discovery = {
     citationLabel: (number: number, title: string) => `佐證 ${number}：${title}`,
     inference: "AI 推論，未查證",
     staleEvidence: "已過期，請重新確認",
-    accept: "加入口袋名單",
     decline: "不要再推薦",
+    pickDay: "安排日期",
     nonePassed: "這次沒有地點通過品質檢查。",
     noneNew: "這次沒有新的候選地點；原因列在「缺少的內容」。",
     viewDetail: (name: string) => `查看 ${name} 的詳情`,
@@ -177,30 +165,5 @@ export const discovery = {
     title: "缺少的內容",
     description: "未進入候選清單的地點和地點類別，以及未列入的原因。",
     requested: "你提出的需求",
-  },
-  feedback: {
-    areaLabel: "研究意見",
-    title: "用自己的話調整結果",
-    label: "意見",
-    placeholder: "寺廟太多了。保留一天逛庭園，再多加幾個美食市場。",
-    interpreting: "解讀中…",
-    interpret: "解讀意見",
-    target: (name: string) => `針對：${name}`,
-    overallTarget: "針對：整體研究結果",
-    interpretation: "AI 解讀：",
-    summary: "摘要",
-    interests: "興趣",
-    avoid: "避開",
-    pace: "步調",
-    budget: "預算",
-    none: "無",
-    unchanged: "不變",
-    onePerLine: "每行一項",
-    edited: "已由成員修改",
-    edit: "修改解讀",
-    cancelEdit: "取消修改",
-    confirmEdited: "確認並套用修改",
-    confirm: "確認解讀",
-    reject: "拒絕解讀",
   },
 };

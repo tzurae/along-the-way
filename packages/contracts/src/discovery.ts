@@ -1,8 +1,7 @@
 import { parseMemberVote, type MemberVoteDto } from "./trip-places";
 import { isRecord } from "./type-guards";
-import type { PlaceType } from "./trip-skeleton";
+import { isPlaceType, type PlaceType } from "./trip-skeleton";
 export type DiscoveryProposalStatus = "pending" | "accepting" | "accepted" | "rejected";
-export type DiscoveryFeedbackStatus = "pending" | "confirmed" | "rejected";
 /** Independent kinds of source that can vouch for a recommendation. */
 export type DiscoveryEndorsement = "google_reviews" | "wikivoyage" | "official_tourism";
 export type DiscoveryShortfallCode =
@@ -145,26 +144,6 @@ export interface DiscoveryRunDto {
   shortfalls: DiscoveryShortfallDto[];
 }
 
-export interface DiscoveryFeedbackInterpretationDto {
-  interests: string[];
-  exclusions: string[];
-  pace: string | null;
-  budget: string | null;
-  summary: string;
-}
-
-export interface DiscoveryFeedbackDto {
-  id: string;
-  proposalId: string | null;
-  proposalName: string | null;
-  originalText: string;
-  interpretation: DiscoveryFeedbackInterpretationDto;
-  interpretationEdited: boolean;
-  isOwn: boolean;
-  status: DiscoveryFeedbackStatus;
-  version: number;
-  createdAt: string;
-}
 
 export interface DiscoveryWorkspaceDto {
   brief: DiscoveryBriefDto | null;
@@ -175,7 +154,6 @@ export interface DiscoveryWorkspaceDto {
    * one per place; a new run replaces earlier undecided proposals.
    */
   decided: DiscoveryDecisionDto[];
-  feedback: DiscoveryFeedbackDto[];
   modelAvailable: boolean;
   placeProviderAvailable: boolean;
 }
@@ -220,15 +198,6 @@ export interface UpdateCandidateProposalVoteResponse {
 
 
 
-export interface CreateDiscoveryFeedbackInput {
-  originalText: string;
-}
-
-export interface DecideDiscoveryFeedbackInput {
-  expectedVersion: number;
-  decision: "confirm" | "reject";
-  interpretation?: DiscoveryFeedbackInterpretationDto;
-}
 
 function invalid(): never {
   throw new Error("Invalid discovery response");
@@ -269,16 +238,6 @@ function questionAnswer(value: unknown): DiscoveryQuestionAnswerDto {
   };
 }
 
-function feedbackInterpretation(value: unknown): DiscoveryFeedbackInterpretationDto {
-  const item = record(value);
-  return {
-    interests: strings(item.interests),
-    exclusions: strings(item.exclusions),
-    pace: nullableText(item.pace),
-    budget: nullableText(item.budget),
-    summary: text(item.summary),
-  };
-}
 
 function endorsements(value: unknown): DiscoveryEndorsement[] {
   return strings(value).map((entry) =>
@@ -317,9 +276,7 @@ function decision(value: unknown): DiscoveryDecisionDto {
 }
 
 function placeType(value: unknown): PlaceType {
-  if (["airport", "station", "lodging", "restaurant", "activity", "other"].includes(String(value))) {
-    return value as PlaceType;
-  }
+  if (isPlaceType(value)) return value;
   return invalid();
 }
 
@@ -413,22 +370,6 @@ function proposal(value: unknown): CandidateProposalDto {
   };
 }
 
-function feedback(value: unknown): DiscoveryFeedbackDto {
-  const item = record(value);
-  if (!["pending", "confirmed", "rejected"].includes(String(item.status))) invalid();
-  return {
-    id: text(item.id),
-    proposalId: nullableText(item.proposalId),
-    proposalName: nullableText(item.proposalName),
-    originalText: text(item.originalText),
-    interpretation: feedbackInterpretation(item.interpretation),
-    interpretationEdited: typeof item.interpretationEdited === "boolean" ? item.interpretationEdited : invalid(),
-    isOwn: typeof item.isOwn === "boolean" ? item.isOwn : invalid(),
-    status: item.status as DiscoveryFeedbackStatus,
-    version: integer(item.version),
-    createdAt: text(item.createdAt),
-  };
-}
 
 export function parseDiscoveryWorkspaceResponse(value: unknown): DiscoveryWorkspaceResponse {
   const root = record(record(value).discovery);
@@ -470,7 +411,6 @@ export function parseDiscoveryWorkspaceResponse(value: unknown): DiscoveryWorksp
       latestRun,
       proposals: Array.isArray(root.proposals) ? root.proposals.map(proposal) : invalid(),
       decided: Array.isArray(root.decided) ? root.decided.map(decision) : invalid(),
-      feedback: Array.isArray(root.feedback) ? root.feedback.map(feedback) : invalid(),
       modelAvailable: typeof root.modelAvailable === "boolean" ? root.modelAvailable : invalid(),
       placeProviderAvailable: typeof root.placeProviderAvailable === "boolean" ? root.placeProviderAvailable : invalid(),
     },

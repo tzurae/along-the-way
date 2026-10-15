@@ -28,7 +28,8 @@ import {
 } from "@along-the-way/contracts/trip-places";
 import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./ConflictPanel";
 import { ApiRequestError } from "./api-error";
-import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
+import { PLACE_TYPES, type PlaceType } from "@along-the-way/contracts/trip-skeleton";
+import { placeTypeFilterLabel } from "./locales/zh-TW/place-types";
 
 import { googleMapsPlaceUrl } from "./google-maps";
 import { useI18n, type Messages } from "./i18n";
@@ -36,6 +37,9 @@ import { VoteControl, VoteVoters } from "./VoteControl";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews } from "./PlaceThumbnail";
 import { PlaceListRow } from "./PlaceListRow";
+import { RowMenu } from "./RowMenu";
+import { PlaceFilterBar, PlaceFilterEmpty, placeArea, usePlaceFilters } from "./PlaceFilters";
+import { canArrangeItinerary } from "./trip-permissions";
 import { FlipList } from "./FlipList";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import { PlaceMustItems, type PlaceMustItemsHandle } from "./PlaceMustItems";
@@ -119,14 +123,7 @@ function itineraryMembershipLabel(
     : t.workspace.pocketCandidate;
 }
 
-const placeTypeValues: PlaceType[] = [
-  "activity",
-  "restaurant",
-  "lodging",
-  "station",
-  "airport",
-  "other",
-];
+const placeTypeValues: readonly PlaceType[] = PLACE_TYPES;
 
 
 function duplicateReason(reason: string, t: Messages["tripPlaces"]) {
@@ -602,7 +599,9 @@ export function TripPlaceWorkspace({
   const { locale, t: { tripPlaces: t, app: appText, schedule } } = useI18n();
   const { toast, show: showScheduleToast } = useScheduleToast();
   const [readModel, setReadModel] = useState<{ current: TripPlaceDto[]; retained: TripPlaceDto[] }>({ current: [], retained: [] });
-  const places = readModel.current;
+  // 口袋名單 lists only places members added themselves; AI 建議 placed into the itinerary
+  // (aiProposalId set) live in 行程 only.
+  const places = readModel.current.filter((place) => place.aiProposalId === null);
   const [adding, setAdding] = useState(false);
   const [message, setMessage] = useState("");
   const [readError, setReadError] = useState("");
@@ -628,10 +627,9 @@ export function TripPlaceWorkspace({
   const mustItemsRef = useRef<PlaceMustItemsHandle>(null);
   const [mergeConfirmation, setMergeConfirmation] = useState<{ source: TripPlaceDto; target: TripPlaceDto } | null>(null);
   const [merging, setMerging] = useState(false);
-  const [removalConfirmation, setRemovalConfirmation] = useState<TripPlaceDto | null>(null);
   const [removing, setRemoving] = useState(false);
 
-  const canSchedule = trip.role === "owner";
+  const canSchedule = canArrangeItinerary(trip);
 
   useEffect(() => {
     if (canSchedule) return;
@@ -639,7 +637,6 @@ export function TripPlaceWorkspace({
     setSelectedPlaceIds(new Set());
     setScheduleContext(null);
     setScheduleBusy(false);
-    setRemovalConfirmation(null);
     setScheduleError("");
   }, [canSchedule]);
 
@@ -661,14 +658,6 @@ export function TripPlaceWorkspace({
   function cancelSelection() {
     setSelectedPlaceIds(new Set());
     setSelecting(false);
-  }
-
-  function openScheduleForPlace(place: TripPlaceDto) {
-    if (!canSchedule) return;
-    setScheduleError("");
-    setRemovalConfirmation(null);
-    setSelectedPlaceId(null);
-    setScheduleContext({ placeIds: [place.id] });
   }
 
   function closeSchedule() {
@@ -749,7 +738,6 @@ export function TripPlaceWorkspace({
     const position = detailReturnPosition.current;
     detailReturnPosition.current = null;
     setSelectedPlaceId(null);
-    setRemovalConfirmation(null);
     const url = new URL(window.location.href);
     if (placeId && url.searchParams.get("place") === placeId) {
       url.searchParams.delete("place");
@@ -891,7 +879,6 @@ export function TripPlaceWorkspace({
       editingPlaceIds.current.delete(place.id);
       await load();
       onPlacesChanged();
-      setRemovalConfirmation(null);
     } catch (error) {
       setMessage(error instanceof ApiRequestError && (error.code === "forbidden" || error.status === 403)
         ? schedule.ownerOnlyAction
@@ -950,6 +937,17 @@ export function TripPlaceWorkspace({
   }
 
   const listedPlaces = [...places, ...readModel.retained];
+  const filters = usePlaceFilters(listedPlaces.map((place) => ({
+    id: place.id,
+    name: place.name,
+    status: place.scheduled || place.assignedDayId !== null
+      ? "已排入行程"
+      : place.latitude === null || place.longitude === null ? "缺少位置" : "尚未排入",
+    typeLabel: placeTypeFilterLabel(place.type),
+    area: placeArea(place.address),
+    mine: place.ownVote,
+  })));
+  const filteredPlaces = listedPlaces.filter((place) => filters.visibleIds.has(place.id));
   const placeNameCounts = new Map<string, number>();
   for (const place of listedPlaces) {
     placeNameCounts.set(place.name, (placeNameCounts.get(place.name) ?? 0) + 1);
@@ -1088,12 +1086,13 @@ export function TripPlaceWorkspace({
             <h3>地點</h3>
             <p className="pd-detail-meta"><MapPin aria-hidden="true" className="size-4" /><span>{place.address ?? t.workspace.unknownAddress}</span></p>
             {place.latitude === null || place.longitude === null ? <a className="pd-secondary mt-3" href={manageLocationHref}><MapPinOff aria-hidden="true" className="size-4" />{schedule.addLocation}</a> : null}
+            {/* One way out to Google Maps; a source link that is itself Google Maps would only repeat it. */}
             <div className="pd-source-links mt-3">
-              {place.provider === "google" && place.providerPlaceId ? <a className="pd-secondary" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
-              {place.sourceUrl ? <a className="inline-flex min-h-11 items-center break-all text-sm font-bold text-accent-strong underline underline-offset-2" href={place.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
+              {place.provider === "google" && place.providerPlaceId ? <a className="pd-secondary" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><MapPin aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
+              {place.sourceUrl && !/google\.[a-z.]+\/maps|maps\.google\.|goo\.gl\/maps|maps\.app\.goo\.gl/i.test(place.sourceUrl) ? <a className="inline-flex min-h-11 items-center break-all text-sm font-bold text-accent-strong underline underline-offset-2" href={place.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
             </div>
           </section>
-          {available && place.votingAvailable ? <section className="pd-detail-section"><VoteVoters voters={place.voters} /></section> : null}
+          {available && place.votingAvailable && place.voters.length > 0 ? <section className="pd-detail-section"><VoteVoters voters={place.voters} /></section> : null}
           {available ? duplicateSuggestions.map((suggestion) => {
             const other = placesById.get(suggestion.otherTripPlaceId);
             const mergeIsOwnerOnly = isScheduledForRemovalPolicy(place) || Boolean(other && isScheduledForRemovalPolicy(other));
@@ -1155,27 +1154,6 @@ export function TripPlaceWorkspace({
     );
   }
 
-  function detailScheduleAction(place: TripPlaceDto) {
-    if (!canSchedule || !placesById.has(place.id)) return null;
-    if (place.latitude === null || place.longitude === null) {
-      return (
-        <a className="schedule-secondary-button" href={`?trip=${encodeURIComponent(trip.id)}&tab=itinerary&segment=daily&manage=places`}>
-          <MapPin aria-hidden="true" />
-          {schedule.addLocation}
-        </a>
-      );
-    }
-    if (place.scheduled) return null;
-    return (
-      <button type="button" className="schedule-primary-button" onClick={() => openScheduleForPlace(place)}>
-        <CalendarPlus aria-hidden="true" />
-        {place.assignedDayId ? schedule.changeDate : schedule.pageAction}
-      </button>
-    );
-  }
-
-
-
   return (
     <section className="pd-workspace" data-selecting={selecting || undefined} aria-labelledby="shared-wishlist-heading">
       <div className={`pd-pagehead${selecting ? " pd-pagehead--selecting" : ""}`}>
@@ -1227,9 +1205,11 @@ export function TripPlaceWorkspace({
           </div>
         </section>
       ) : null}
-      {listedPlaces.length > 0 ? (
+      {listedPlaces.length > 1 ? <PlaceFilterBar filters={filters} total={listedPlaces.length} label="搜尋口袋名單" /> : null}
+      {listedPlaces.length > 0 && filteredPlaces.length === 0 ? <PlaceFilterEmpty onClear={filters.clear} /> : null}
+      {filteredPlaces.length > 0 ? (
         <FlipList className="pd-list" ariaLabel={t.workspace.tableLabel}>
-          {listedPlaces.map((place) => {
+          {filteredPlaces.map((place) => {
             const available = placesById.has(place.id);
             const located = place.latitude !== null && place.longitude !== null;
             const scheduled = place.scheduled || place.assignedDayId !== null;
@@ -1263,6 +1243,23 @@ export function TripPlaceWorkspace({
                 photoCount={preview?.photoCount ?? 0}
                 loadingPhoto={previews.loading}
                 voteAction={voteActions(place)}
+                menu={selecting ? undefined : (
+                  <RowMenu
+                    label={t.workspace.rowMenu(place.name)}
+                    items={[
+                      ...(canSchedule && available && located && place.assignedDayId ? [{
+                        label: schedule.changeDate,
+                        onSelect: () => { setScheduleError(""); setScheduleContext({ placeIds: [place.id] }); },
+                      }] : []),
+                      ...(available && (canSchedule || !isScheduledForRemovalPolicy(place)) ? [{
+                        label: t.workspace.remove,
+                        danger: true,
+                        disabled: removing,
+                        onSelect: () => { if (window.confirm(t.workspace.confirmRemove(place.name))) void remove(place); },
+                      }] : []),
+                    ]}
+                  />
+                )}
                 selectionControl={canSchedule && selecting ? selectionCheckbox(place) : undefined}
                 ariaLabel={repeatedName ? t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress) : place.name}
                 current={!selecting && selectedPlaceId === place.id}
@@ -1308,10 +1305,8 @@ export function TripPlaceWorkspace({
           </div>}
           titleRef={detailTitleRef}
           onClose={requestCloseDetail}
-          footer={
-          removalConfirmation ? <div className="pd-confirm-footer"><p>{t.workspace.confirmRemove(removalConfirmation.name)}</p>{message ? <p role="alert">{message}</p> : null}<div><button className="pd-secondary" disabled={removing} onClick={() => setRemovalConfirmation(null)}>保留地點</button><button className="pd-danger-button" disabled={removing} onClick={() => void remove(removalConfirmation)}>{removing ? "移除中…" : t.workspace.remove}</button></div></div>
-          : <div>{message ? <p className="pd-notice" role="alert">{message}</p> : null}<div className="pd-fixed-actions">{detailScheduleAction(selectedPlace)}{voteActions(selectedPlace)}{placesById.has(selectedPlace.id) && (canSchedule || !isScheduledForRemovalPolicy(selectedPlace)) ? <button className="pd-danger-link" disabled={removing} onClick={() => { setMessage(""); setRemovalConfirmation(selectedPlace); }}>{t.workspace.remove}</button> : null}</div></div>
-        }>
+          // The detail only shows the place: like, scheduling and removal live on the list row.
+          footer={message ? <p className="pd-notice" role="alert">{message}</p> : undefined}>
           {placeDetail(selectedPlace)}
         </PlaceDetailSheet>
       ) : null}

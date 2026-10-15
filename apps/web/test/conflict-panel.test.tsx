@@ -30,7 +30,6 @@ it.each([
   ["notes", (value: string) => ({ notes: value })],
   ["place names", (value: string) => ({ name: value })],
   ["brief text", (value: string) => ({ originalText: value })],
-  ["feedback summaries", (value: string) => ({ interpretation: { summary: value } })],
   ["transport descriptions", (value: string) => ({ details: { mode: value } })],
   ["confirmation descriptions", (value: string) => ({ details: { confirmationStatus: value } })],
 ] as const)("preserves %s verbatim when text matches an enum catalog key", async (_label, input) => {

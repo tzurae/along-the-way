@@ -21,7 +21,6 @@ export const errors = {
     voting_unavailable: "旅程至少需要兩位成員才能投票。",
     duplicate_suggestion_not_found: "找不到可能重複的建議。",
     discovery_proposal_not_found: "找不到候選地點推薦。",
-    discovery_feedback_not_found: "找不到 AI 研究回饋。",
     model_unavailable: "AI 模型目前無法使用，請稍後再試。",
     provider_unavailable: "服務供應商目前無法使用，請稍後再試。",
     research_in_progress: "這趟旅程已經有研究在進行中，請稍後重新整理查看結果。",

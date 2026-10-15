@@ -213,17 +213,6 @@ function stringArrayField(body: Record<string, unknown>, name: string) {
   }
   return values as string[];
 }
-function feedbackInterpretationField(body: Record<string, unknown>) {
-  if (body.interpretation === undefined) return undefined;
-  const interpretation = objectBody(body.interpretation);
-  return {
-    interests: stringArrayField(interpretation, "interests"),
-    exclusions: stringArrayField(interpretation, "exclusions"),
-    pace: nullableStringField(interpretation, "pace"),
-    budget: nullableStringField(interpretation, "budget"),
-    summary: stringField(interpretation, "summary"),
-  };
-}
 
 function discoveryQuestionAnswersField(body: Record<string, unknown>) {
   return arrayField(body, "answers").map((value) => {
@@ -512,6 +501,16 @@ export function createApp({
   app.get("/api/session", async (context) => {
     const { user } = await authenticated(context);
     return context.json({ user });
+  });
+
+  // A member edits only their own nickname: the target is always the session's user.
+  app.put("/api/session/profile", async (context) => {
+    const { user } = await authenticated(context);
+    const body = await jsonBody(context);
+    if (body.displayName !== null && typeof body.displayName !== "string") {
+      throw new AppError("validation_error", "displayName must be a string or null");
+    }
+    return context.json({ user: await identityAccess.updateDisplayName(user.id, body.displayName) });
   });
 
   app.post("/api/logout", async (context) => {
@@ -845,21 +844,6 @@ export function createApp({
     });
   });
 
-  app.post("/api/trips/:tripId/discovery/proposals/:proposalId/accept", async (context) => {
-    const { user } = await authenticated(context);
-    await rateLimiter.consume("trip_content", clientIp(context), user.id);
-    const body = await jsonBody(context);
-    return context.json({
-      discovery: await discovery.acceptProposal(
-        user.id,
-        uuidParam(context, "tripId"),
-        uuidParam(context, "proposalId"),
-        idempotencyKey(context),
-        { expectedVersion: numberField(body, "expectedVersion") },
-      ),
-    });
-  });
-
   app.post("/api/trips/:tripId/discovery/proposals/:proposalId/reject", async (context) => {
     const { user } = await authenticated(context);
     await rateLimiter.consume("trip_content", clientIp(context), user.id);
@@ -875,47 +859,6 @@ export function createApp({
     });
   });
 
-  app.post("/api/trips/:tripId/discovery/feedback", async (context) => {
-    const { user } = await authenticated(context);
-    await rateLimiter.consume("trip_content", clientIp(context), user.id);
-    const body = await jsonBody(context);
-    if ("proposalId" in body) {
-      throw new AppError("validation_error", "Feedback must apply to the whole trip");
-    }
-    return context.json({
-      discovery: await discovery.createFeedback(
-        user.id,
-        uuidParam(context, "tripId"),
-        idempotencyKey(context),
-        {
-          originalText: stringField(body, "originalText"),
-        },
-      ),
-    });
-  });
-
-  app.post("/api/trips/:tripId/discovery/feedback/:feedbackId/decision", async (context) => {
-    const { user } = await authenticated(context);
-    await rateLimiter.consume("trip_content", clientIp(context), user.id);
-    const body = await jsonBody(context);
-    const decision = stringField(body, "decision");
-    if (decision !== "confirm" && decision !== "reject") {
-      throw new AppError("validation_error", "decision must be confirm or reject");
-    }
-    return context.json({
-      discovery: await discovery.decideFeedback(
-        user.id,
-        uuidParam(context, "tripId"),
-        uuidParam(context, "feedbackId"),
-        idempotencyKey(context),
-        {
-          expectedVersion: numberField(body, "expectedVersion"),
-          decision,
-          interpretation: feedbackInterpretationField(body),
-        },
-      ),
-    });
-  });
 
   app.post("/api/trips/:tripId/trip-places/search", async (context) => {
     const { user } = await authenticated(context);
@@ -1474,6 +1417,14 @@ export function createApp({
     return context.body(null, 204);
   });
 
+  app.put("/api/trips/:tripId/editors-can-schedule", async (context) => {
+    const { user } = await authenticated(context);
+    const body = await jsonBody(context);
+    if (typeof body.enabled !== "boolean") throw new AppError("validation_error", "enabled must be true or false");
+    await identityAccess.setEditorsCanSchedule(user.id, uuidParam(context, "tripId"), idempotencyKey(context), body.enabled);
+    return context.body(null, 204);
+  });
+
   app.onError(async (error, context) => {
     if (error instanceof AppError) {
       if (error.retryAfterSeconds) {
@@ -1483,7 +1434,7 @@ export function createApp({
       if (error.code === "conflict" && error.currentVersion !== undefined && context.req.param("tripId")) {
         const user = await identityAccess.authenticate(getCookie(context, SESSION_COOKIE) ?? "");
         if (!user) return context.json({ error: { code: "unauthenticated", message: "Sign in to continue" } }, 401);
-        const targetIds = ["constraintId", "itemId", "placeId", "tripPlaceId", "proposalId", "feedbackId", "dayId"]
+        const targetIds = ["constraintId", "itemId", "placeId", "tripPlaceId", "proposalId", "dayId"]
           .map((name) => context.req.param(name)).filter((id): id is string => Boolean(id));
         try {
           latestChange = await collaboration.latestChange(user.id, context.req.param("tripId")!, error.conflictTargetId ? [error.conflictTargetId] : targetIds.length ? targetIds : [context.req.param("tripId")!]);

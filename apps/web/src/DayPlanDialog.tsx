@@ -49,14 +49,15 @@ function minuteOf(value: string) {
 export function DayPlanDialog({
   tripId,
   day,
-  isOwner,
+  canArrange,
   request,
   onClose,
   onOrderSaved,
 }: {
   tripId: string;
   day: PlannedDay | null;
-  isOwner: boolean;
+  /** Owner, or an editor the owner allows to arrange the itinerary. */
+  canArrange: boolean;
   request: JsonRequest;
   onClose(): void;
   onOrderSaved(): Promise<void>;
@@ -203,7 +204,7 @@ export function DayPlanDialog({
   }
 
   async function saveOrder() {
-    if (!isOwner) {
+    if (!canArrange) {
       setError(t.schedule.ownerOnlyAction);
       return;
     }
@@ -348,7 +349,7 @@ export function DayPlanDialog({
               : t.dayPlan.draftNotice}
           </DialogDescription>
         </DialogHeader>
-        {!isOwner ? <p className="route-status">{t.schedule.ownerOnly}</p> : null}
+        {!canArrange ? <p className="route-status">{t.schedule.ownerOnly}</p> : null}
 
         {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={busy !== null}
           formatValue={(_path, value) => typeof value === "number" ? clock(value) : undefined}
@@ -484,7 +485,7 @@ export function DayPlanDialog({
               >
                 <ListOrdered /> {t.dayPlan.backToCurrentOrder}
               </Button>
-              {isOwner ? (
+              {canArrange ? (
                 <Button
                   size="lg"
                   disabled={busy !== null || orderStale || !timetable || timetable.orderedTripPlaceIds.length === 0}

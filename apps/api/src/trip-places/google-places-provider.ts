@@ -220,37 +220,83 @@ const DETAILS_FIELD_MASK = [
   "photos",
 ].join(",");
 
-function mappedPlaceType(value: string): PlaceType {
+/** Google's fine-grained primary type → one normalized place category (order matters). */
+export function mappedPlaceType(value: string): PlaceType {
   if (value.includes("airport")) return "airport";
+  // Transit only: gas/charging stations are not where a traveller arrives.
+  if (/(^|_)(train|transit|subway|bus|light_rail|railway)_station$/.test(value) || value === "transit_depot") return "station";
+  if (value === "lodging" || value.includes("hotel") || value.includes("hostel") || value === "inn" || value.endsWith("_inn") || value === "ryokan") return "lodging";
+  if (value.includes("parking")) return "other";
+  // A whole area (嵐山、祇園) is visited like a sight, not an "other".
+  if (["neighborhood", "locality", "sublocality", "sublocality_level_1", "administrative_area_level_3", "colloquial_area"].includes(value)) return "activity";
+  // Google's scenic_spot (嵐山、嵐山竹林小徑) is a sight to visit.
+  if (value.includes("scenic")) return "activity";
+  // Coffee, tea and sweets before restaurants: `cafe_restaurant`-like types read as a café visit.
   if (
-    value.includes("station") ||
-    value === "transit_station" ||
-    value === "subway_station"
-  ) return "station";
-  if (value === "lodging" || value.includes("hotel")) return "lodging";
+    value.includes("cafe") ||
+    value.includes("coffee") ||
+    value.includes("tea_house") ||
+    value.includes("bakery") ||
+    value.includes("dessert") ||
+    value.includes("ice_cream") ||
+    value.includes("confectionery") ||
+    value.includes("candy")
+  ) return "cafe";
   if (
     value.includes("restaurant") ||
-    value === "cafe" ||
-    value === "bakery" ||
-    value === "bar"
+    value.includes("food_court") ||
+    value.includes("diner") ||
+    value === "bar" ||
+    value.endsWith("_bar") ||
+    value === "pub" ||
+    value === "brewery" ||
+    value === "winery" ||
+    value === "meal_takeaway"
   ) return "restaurant";
   if (
-    value.includes("museum") ||
-    value.includes("park") ||
-    value.includes("tourist_attraction") ||
-    value.includes("amusement") ||
-    value.includes("zoo") ||
-    value.includes("aquarium") ||
-    // Temples, shrines and other sights a traveller visits (e.g. 東福寺 is `buddhist_temple`).
     value.includes("temple") ||
     value.includes("shrine") ||
     value.includes("church") ||
-    value === "place_of_worship" ||
-    value === "historical_landmark" ||
-    value === "historical_place" ||
+    value.includes("mosque") ||
+    value.includes("synagogue") ||
+    value === "place_of_worship"
+  ) return "worship";
+  if (
+    value.includes("museum") ||
+    value.includes("gallery") ||
+    value.includes("aquarium") ||
+    value.includes("zoo") ||
+    value.includes("planetarium") ||
+    value === "cultural_center"
+  ) return "museum";
+  if (
+    value.includes("amusement") ||
+    value.includes("theme_park") ||
+    value.includes("water_park")
+  ) return "activity";
+  if (
+    value.includes("park") ||
+    value.includes("garden") ||
+    value.includes("hiking") ||
+    value.includes("beach") ||
+    value.includes("nature") ||
+    value.includes("mountain") ||
+    value.includes("lake")
+  ) return "nature";
+  if (
+    value.includes("market") ||
+    value.includes("shopping") ||
+    value.includes("store") ||
+    value.includes("_shop") ||
+    value === "department_store"
+  ) return "shopping";
+  if (
+    value.includes("tourist_attraction") ||
+    value.includes("historical") ||
     value === "monument" ||
-    value === "garden" ||
-    value === "botanical_garden"
+    value.includes("observation") ||
+    value.includes("landmark") ||
+    value.includes("castle")
   ) return "activity";
   return "other";
 }

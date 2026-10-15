@@ -1,0 +1,128 @@
+/* Search + quick chips above a place list. */
+.place-filters {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 14px;
+}
+
+.place-filters__search {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted-foreground);
+}
+
+.place-filters__search:focus-within {
+  border-color: var(--color-focus, var(--ring));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 25%, transparent);
+}
+
+.place-filters__search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--color-ink);
+  font-size: 15px;
+  outline: none;
+}
+
+.place-filters__search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.place-filters__search button {
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 999px;
+}
+
+.place-filters__chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+
+.place-filters__chips::-webkit-scrollbar {
+  display: none;
+}
+
+.place-filters__chip-slot {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.place-filters__group {
+  margin-left: 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.place-filters__chip {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--color-ink);
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.place-filters__chip[aria-pressed="true"] {
+  border-color: var(--color-ink-strong);
+  background: var(--color-ink-strong);
+  color: var(--color-on-dark);
+}
+
+.place-filters__count {
+  color: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.7;
+}
+
+.place-filters__summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.place-filters__summary button {
+  min-height: 32px;
+  color: var(--accent-strong, var(--color-ink));
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.place-filters__empty {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 32px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 18px;
+  color: var(--muted-foreground);
+  text-align: center;
+}

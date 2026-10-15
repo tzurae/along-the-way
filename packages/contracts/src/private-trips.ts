@@ -52,6 +52,8 @@ export interface TripDto {
   dayCount: number;
   role: MemberRole;
   version: number;
+  /** The owner has let editors arrange the itinerary (place, move, order, remove scheduled places). */
+  editorsCanSchedule: boolean;
 }
 
 export interface TripSummaryDto {
@@ -285,6 +287,8 @@ function tripValue(value: unknown): TripDto {
       ? value.invites.map(inviteValue)
       : invalidResponse(),
     version: countValue(value.version),
+    // Absent in snapshots saved before the setting existed: those trips only let owners schedule.
+    editorsCanSchedule: value.editorsCanSchedule === true,
   };
 }
 

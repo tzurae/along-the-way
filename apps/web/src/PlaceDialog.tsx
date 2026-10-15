@@ -1,9 +1,10 @@
 import { useRef, useState, type ReactNode } from "react";
-import type {
-  CreatePlaceInput,
-  PlaceDto,
-  PlaceType,
-  UpdatePlaceInput,
+import {
+  PLACE_TYPES,
+  type CreatePlaceInput,
+  type PlaceDto,
+  type PlaceType,
+  type UpdatePlaceInput,
 } from "@along-the-way/contracts/trip-skeleton";
 import { MapPin, Pencil, Plus } from "lucide-react";
 
@@ -36,14 +37,7 @@ interface PlaceDialogProps {
   triggerDisabled?: boolean;
 }
 
-const placeTypes: PlaceType[] = [
-  "airport",
-  "station",
-  "lodging",
-  "restaurant",
-  "activity",
-  "other",
-];
+const placeTypes: readonly PlaceType[] = PLACE_TYPES;
 
 function placeValues(place: PlaceDto): CreatePlaceInput {
   return { name: place.name, type: place.type, address: place.address, latitude: place.latitude, longitude: place.longitude, timeZone: place.timeZone, sourceUrl: place.sourceUrl, notes: place.notes };

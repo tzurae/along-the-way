@@ -11,23 +11,65 @@
   transition: background-color 550ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.list-place-row--wishlist {
-  min-height: 120px;
-}
-
-.list-place-row--proposal {
-  min-height: 208px;
-}
-
-/* The proposal min-heights reserve room for the vote/accept actions row. Decided proposals
-   (已加入口袋名單／已加入行程) have no actions, so they hug their content instead of leaving a gap.
-   Two-class specificity also beats the mobile min-height below. */
-.list-place-row--proposal:not(:has(.list-place-row__actions)) {
-  min-height: 0;
-}
-
 .list-place-row + .list-place-row {
   border-top: 1px solid var(--border);
+}
+
+/* 「⋯」 row menu: a quiet trigger beside the like, a small card under it. */
+.row-menu {
+  position: relative;
+}
+
+.row-menu__trigger {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  color: var(--muted-foreground);
+}
+
+.row-menu__trigger:hover,
+.row-menu__trigger[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--color-ink) 8%, transparent);
+  color: var(--color-ink);
+}
+
+.row-menu__list {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  display: grid;
+  min-width: 140px;
+  margin: 0;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: 0 10px 28px -12px #1f302955;
+  list-style: none;
+}
+
+.row-menu__item {
+  display: flex;
+  width: 100%;
+  min-height: 40px;
+  align-items: center;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.row-menu__item:hover {
+  background: color-mix(in srgb, var(--color-ink) 6%, transparent);
+}
+
+.row-menu__item--danger {
+  color: var(--destructive);
 }
 
 .list-place-row:hover {
@@ -340,7 +382,7 @@ button.list-place-row__title:hover {
 
 .list-place-row__actions {
   justify-content: space-between;
-  min-height: 44px;
+  min-height: 34px;
   margin: 4px 0 0;
 }
 .list-place-row--proposal .list-place-row__actions {
@@ -351,19 +393,35 @@ button.list-place-row__title:hover {
   justify-content: flex-end;
 }
 
+/* Row controls are secondary to the place itself: 34px visually, but an invisible 5px ring
+   keeps every tap target at 44px. */
 .list-place-row__actions :is(button, a),
 .list-place-row__aside :is(button, a) {
-  min-width: 44px;
-  min-height: 44px;
+  position: relative;
+  min-width: 34px;
+  min-height: 34px;
+}
+
+.list-place-row__actions :is(button, a)::after,
+.list-place-row__aside :is(button, a)::after {
+  position: absolute;
+  inset: -5px;
+  content: "";
+}
+
+.list-place-row__row-actions .pd-primary {
+  padding-inline: 12px;
+  font-size: 13px;
 }
 
 .list-place-row .pd-vote-button,
 .list-place-row .pd-vote-tally {
-  min-width: 52px;
-  height: 44px;
+  min-width: 44px;
+  height: 34px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: transparent;
+  font-size: 13px;
 }
 
 .list-place-row .pd-vote-button[aria-pressed="true"] {
@@ -391,12 +449,11 @@ button.list-place-row__title:hover {
     --place-row-pad-x: 16px;
   }
 
-  .list-place-row--wishlist {
-    min-height: 96px;
-  }
-
+  /* Both lists share one desktop row: controls sit in the right column, centered, so
+     口袋名單 and AI 建議 rows have the same height and the like sits in the same place. */
+  .list-place-row--wishlist,
   .list-place-row--proposal {
-    min-height: 152px;
+    min-height: 96px;
   }
 
   .list-place-row__status--mobile {
@@ -415,9 +472,10 @@ button.list-place-row__title:hover {
   .list-place-row--proposal .list-place-row__actions {
     grid-column: 3;
     grid-row: 1;
-    align-self: end;
+    align-self: center;
     flex-wrap: nowrap;
     column-gap: 16px;
+    margin: 0;
   }
   .list-place-row--proposal:has(> .list-place-row__selection) .list-place-row__actions {
     grid-column: 4;
