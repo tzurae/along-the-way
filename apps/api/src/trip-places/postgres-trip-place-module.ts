@@ -15,7 +15,7 @@ import {
   type UpdateTripPlaceDayAssignmentsInput,
   type UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
-import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
+import { isPlaceType, type PlaceType } from "@along-the-way/contracts/trip-skeleton";
 import { sql, type Kysely, type Transaction } from "kysely";
 import type { ApplyTripPlanInput } from "@along-the-way/contracts/day-plans";
 
@@ -32,7 +32,7 @@ import {
   replayed,
   requireIdempotencyKey,
   requireDayVersion,
-  requireOwner,
+  requireScheduler,
   type DatabaseExecutor,
 } from "../private-trips/postgres-private-trip-store";
 import {
@@ -76,14 +76,6 @@ interface ManualPlaceFacts {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const PLACE_TYPES = new Set<PlaceType>([
-  "airport",
-  "station",
-  "lodging",
-  "restaurant",
-  "activity",
-  "other",
-]);
 const ISO_CURRENCIES = new Set(Intl.supportedValuesOf("currency"));
 
 function requiredText(value: unknown, name: string, maximum: number) {
@@ -138,10 +130,8 @@ function uuid(value: unknown, name: string) {
 }
 
 function placeType(value: unknown): PlaceType {
-  if (typeof value !== "string" || !PLACE_TYPES.has(value as PlaceType)) {
-    throw new AppError("validation_error", "type is invalid");
-  }
-  return value as PlaceType;
+  if (!isPlaceType(value)) throw new AppError("validation_error", "type is invalid");
+  return value;
 }
 
 function coordinates(latitudeValue: unknown, longitudeValue: unknown) {
@@ -1009,7 +999,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     const key = requireIdempotencyKey(rawKey);
     const operation = `tp:day-assignments:${tripId}`;
     return this.database.transaction().execute(async (transaction) => {
-      await requireOwner(transaction, userId, tripId);
+      await requireScheduler(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedTripPlaces(replay);
@@ -1133,7 +1123,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     const key = requireIdempotencyKey(rawKey);
     const operation = `tp:trip-plan:${tripId}`;
     return this.database.transaction().execute(async (transaction) => {
-      await requireOwner(transaction, userId, tripId);
+      await requireScheduler(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedTripPlaces(replay);
@@ -1369,7 +1359,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         || hasDayAssignment !== undefined
         || hasTimedEndpoint !== undefined
       ) {
-        await requireOwner(transaction, userId, tripId);
+        await requireScheduler(transaction, userId, tripId);
       }
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
@@ -1621,7 +1611,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         || authorization.has_day_assignment
         || authorization.has_timed_endpoint
       ) {
-        await requireOwner(transaction, userId, tripId);
+        await requireScheduler(transaction, userId, tripId);
       } else {
         // Re-check membership under the trip lock before replaying a prior success.
         await this.requireMember(transaction, userId, tripId);

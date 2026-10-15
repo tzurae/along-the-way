@@ -181,8 +181,8 @@ function PhotoViewer({ photo, failed, open, onOpenChange }: { photo: PlacePhotoD
   );
 }
 
+/** Only the attribution Google requires; opening the place in Google Maps lives once, in the 地點 section. */
 function GoogleGalleryCredit({ photo }: { photo: GooglePlacePhotoDto }) {
-  const maps = safeExternalUrl(photo.googleMapsUri);
   return (
     <div className="place-gallery__google-credit">
       <span className="place-gallery__google-byline">
@@ -192,7 +192,6 @@ function GoogleGalleryCredit({ photo }: { photo: GooglePlacePhotoDto }) {
           return <span key={`${author.displayName}:${index}`}>{index > 0 ? "、" : ""}{uri ? <a href={uri} target="_blank" rel="noreferrer">{author.displayName}</a> : author.displayName}</span>;
         })}</span> : null}
       </span>
-      {maps ? <a className="place-gallery__google-maps" href={maps} target="_blank" rel="noreferrer">在 Google Maps 查看</a> : null}
     </div>
   );
 }
@@ -403,6 +402,8 @@ function DetailArticle({ detail, collapsible, disclosureLabel, disclosureHeading
   useEffect(() => {
     if (disclosureOpen) setExpanded(true);
   }, [disclosureOpen]);
+  // A folded 「旅遊資訊與資料來源」 with nothing inside is just an empty bar: leave it out.
+  if (collapsible && !articlePrelude && detail.sections.length === 0 && detail.sources.length === 0) return null;
   const article = (
     <div className="place-detail__article">
       {articlePrelude}
@@ -447,7 +448,7 @@ function DetailArticle({ detail, collapsible, disclosureLabel, disclosureHeading
   ) : article;
 }
 
-export function PlaceDetailContent({ tripId, reference, date, request, interlude, collapsible = false, disclosureLabel, disclosureHeadingId, disclosureOpen, articlePrelude, focusHeadingId }: {
+export function PlaceDetailContent({ tripId, reference, date, request, interlude, collapsible = false, disclosureLabel, disclosureHeadingId, disclosureOpen, articlePrelude, focusHeadingId, showArticle = true }: {
   tripId: string;
   reference: PlaceDetailReference;
   date?: string | null;
@@ -459,6 +460,8 @@ export function PlaceDetailContent({ tripId, reference, date, request, interlude
   disclosureOpen?: boolean;
   articlePrelude?: ReactNode;
   focusHeadingId?: string;
+  /** False shows only the gallery and the caller's sections (AI 建議 cite sources inline instead). */
+  showArticle?: boolean;
 }) {
   const { t } = useI18n();
   const identity = `${reference.kind}:${reference.id}`;
@@ -520,7 +523,7 @@ export function PlaceDetailContent({ tripId, reference, date, request, interlude
         photos={detail.photos.length > 0 ? detail.photos : detail.googlePhotos}
       /> : null}
       {interlude}
-      {detail ? <DetailArticle
+      {detail && showArticle ? <DetailArticle
         detail={detail}
         collapsible={collapsible}
         disclosureLabel={disclosureLabel}

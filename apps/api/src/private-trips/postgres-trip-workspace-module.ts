@@ -283,6 +283,7 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
         "trips.end_date",
         "trips.default_currency",
         "trips.version",
+        "trips.editors_can_schedule",
         "trip_members.role",
       ])
       .where("trips.id", "=", tripId)
@@ -365,6 +366,7 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
       dayCount: days.length,
       role: trip.role,
       version: trip.version,
+      editorsCanSchedule: trip.editors_can_schedule,
     };
   }
 }

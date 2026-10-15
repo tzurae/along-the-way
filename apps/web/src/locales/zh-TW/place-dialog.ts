@@ -1,12 +1,7 @@
+import { placeTypeLabels } from "./place-types";
+
 export const placeDialog = {
-  placeTypes: {
-    airport: "機場",
-    station: "車站",
-    lodging: "住宿",
-    restaurant: "餐廳",
-    activity: "活動場地",
-    other: "其他",
-  },
+  placeTypes: placeTypeLabels,
   coordinatesTogether: "請同時輸入緯度與經度，或兩者都留白。",
   latitudeRange: "緯度必須是 -90 到 90 之間的數字。",
   longitudeRange: "經度必須是 -180 到 180 之間的數字。",

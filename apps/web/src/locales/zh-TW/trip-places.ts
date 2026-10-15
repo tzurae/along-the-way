@@ -1,3 +1,5 @@
+import { placeTypeLabels } from "./place-types";
+
 export const tripPlaces = {
   status: {
     ready: "可供規劃",
@@ -18,14 +20,7 @@ export const tripPlaces = {
     saved: (name: string, count: number) => `「${name}」想去狀態已儲存，目前 ${count} 票`,
     updateFailed: (name: string) => `無法更新「${name}」的想去狀態；已恢復原狀，請再試一次。`,
   },
-  placeType: {
-    activity: "活動或景點",
-    restaurant: "餐廳或咖啡廳",
-    lodging: "住宿",
-    station: "車站",
-    airport: "機場",
-    other: "其他",
-  },
+  placeType: placeTypeLabels,
   errors: {
     requestFailed: "無法完成要求",
     alreadyInWishlist: "這個地點已在口袋名單。",
@@ -128,9 +123,10 @@ export const tripPlaces = {
     saveReason: "儲存",
     savingReason: "儲存中…",
     placeAndSources: "地點與資料來源",
-    viewPhotos: "在 Google Maps 看照片",
+    viewPhotos: "在 Google Maps 開啟",
     unavailableTripDay: "無法取得的旅程日期",
     remove: "從口袋名單移除",
+    rowMenu: (name: string) => `${name} 的更多動作`,
     confirmRemove: (name: string) => `確定要把「${name}」移出口袋名單嗎？票和天數安排會一起清除。`,
     openOriginalSource: "開啟原始來源",
     viewDetail: (name: string) => `查看 ${name} 的詳情`,

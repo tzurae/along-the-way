@@ -1,8 +1,6 @@
 import type {
   CandidateProposalDto,
-  CreateDiscoveryFeedbackInput,
   DecideCandidateProposalInput,
-  DecideDiscoveryFeedbackInput,
   DiscoveryWorkspaceDto,
   GenerateDiscoveryInput,
   SaveDiscoveryBriefInput,
@@ -38,13 +36,6 @@ export interface DiscoveryModule {
     idempotencyKey: string,
     input: UpdateCandidateProposalVoteInput,
   ): Promise<CandidateProposalDto>;
-  acceptProposal(
-    userId: string,
-    tripId: string,
-    proposalId: string,
-    idempotencyKey: string,
-    input: DecideCandidateProposalInput,
-  ): Promise<DiscoveryWorkspaceDto>;
   scheduleProposals(
     userId: string,
     tripId: string,
@@ -57,18 +48,5 @@ export interface DiscoveryModule {
     proposalId: string,
     idempotencyKey: string,
     input: DecideCandidateProposalInput,
-  ): Promise<DiscoveryWorkspaceDto>;
-  createFeedback(
-    userId: string,
-    tripId: string,
-    idempotencyKey: string,
-    input: CreateDiscoveryFeedbackInput,
-  ): Promise<DiscoveryWorkspaceDto>;
-  decideFeedback(
-    userId: string,
-    tripId: string,
-    feedbackId: string,
-    idempotencyKey: string,
-    input: DecideDiscoveryFeedbackInput,
   ): Promise<DiscoveryWorkspaceDto>;
 }

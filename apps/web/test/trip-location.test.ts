@@ -14,7 +14,10 @@ describe("trip workspace locations", () => {
     ["itinerary", "lodging"],
     ["places", "wishlist"],
     ["places", "discovery"],
-    ["members", null],
+    ["members", "people"],
+    ["members", "profile"],
+    ["members", "invites"],
+    ["members", "permissions"],
   ] as const)("keeps the canonical %s/%s destination", (tab, segment) => {
     const query = new URLSearchParams({ trip: "trip-1", tab });
     if (segment) query.set("segment", segment);
@@ -32,7 +35,7 @@ describe("trip workspace locations", () => {
     ["lodging", "itinerary", "lodging"],
     ["wishlist", "places", "wishlist"],
     ["discovery", "places", "discovery"],
-    ["recent", "members", null],
+    ["recent", "members", "people"],
   ] as const)("normalizes legacy tab=%s to %s/%s", (legacy, tab, segment) => {
     history.replaceState({}, "", `/?trip=trip-1&tab=${legacy}`);
 

@@ -97,14 +97,6 @@ export interface DiscoveryResearchResult {
   sources: DiscoveryWebSource[];
 }
 
-export interface InterpretedDiscoveryFeedback {
-  modelId: string;
-  interests: string[];
-  exclusions: string[];
-  pace: string | null;
-  budget: string | null;
-  summary: string;
-}
 
 export interface DiscoveryModel {
   readonly available: boolean;
@@ -112,23 +104,17 @@ export interface DiscoveryModel {
   plan(input: {
     brief: string;
     trip: DiscoveryTripFacts;
-    confirmedFeedback: string[];
     questionAnswers: DiscoveryQuestionAnswer[];
   }): Promise<DiscoveryPlanResult>;
   research(input: {
     brief: StructuredDiscoveryBrief;
     request: DiscoveryRequest;
     trip: DiscoveryTripFacts;
-    confirmedFeedback: string[];
     questionAnswers: DiscoveryQuestionAnswer[];
     /** Names of places the traveler already rejected. */
     rejectedPlaces: string[];
     outputLanguage: string;
   }): Promise<DiscoveryResearchResult>;
-  interpretFeedback(input: {
-    text: string;
-    proposalName: string | null;
-  }): Promise<InterpretedDiscoveryFeedback>;
 }
 
 export class DiscoveryModelUnavailableError extends Error {

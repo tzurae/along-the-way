@@ -11,6 +11,7 @@ import {
   type ItineraryItemType,
   type ItineraryParticipantDto,
   type PlaceDto,
+  isPlaceType,
   type PlaceType,
   type PlaceLocationStatus,
   type TimelineDayDto,
@@ -33,7 +34,7 @@ import {
   remember,
   replayed,
   requireIdempotencyKey,
-  requireOwner,
+  requireScheduler,
   type DatabaseExecutor,
 } from "../private-trips/postgres-private-trip-store";
 import {
@@ -122,16 +123,7 @@ function placeLocationStatus(place: {
 }
 
 function placeType(value: unknown): PlaceType {
-  if (
-    value === "airport" ||
-    value === "station" ||
-    value === "lodging" ||
-    value === "restaurant" ||
-    value === "activity" ||
-    value === "other"
-  ) {
-    return value;
-  }
+  if (isPlaceType(value)) return value;
   throw new AppError("validation_error", "Unknown place type");
 }
 
@@ -916,7 +908,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
           .executeTakeFirst()
         : undefined;
       if (tripPlace?.selected_for_itinerary || tripPlace?.has_day_assignment) {
-        await requireOwner(transaction, userId, tripId);
+        await requireScheduler(transaction, userId, tripId);
       }
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);

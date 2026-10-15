@@ -40,6 +40,7 @@ function trip(role: "owner" | "editor"): TripDto {
     dayCount: 1,
     role,
     version: 1,
+    editorsCanSchedule: false,
   };
 }
 
@@ -305,7 +306,7 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
 
   render(<TripPlaceWorkspace trip={trip("editor")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
   await screen.findByText("未排程咖啡店", { exact: true });
-  expect(screen.getAllByText("只有旅程擁有者可以排入、改期或移出行程。你仍可加入地點、投票與編輯備註。", { exact: true })).toHaveLength(1);
+  expect(screen.getAllByText("只有旅程擁有者，或擁有者開放的編輯者，可以排入、改期或移出行程。你仍可加入地點、投票與編輯備註。", { exact: true })).toHaveLength(1);
   expect(screen.queryByRole("button", { name: /^排入行程$/ })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: /^加入地點$/ })).toBeInTheDocument();
   expect(screen.getAllByRole("button", { name: /^想去，/ }).length).toBeGreaterThan(0);
@@ -323,7 +324,8 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
   let detail = await screen.findByRole("dialog", { name: /^未排程咖啡店$/ });
   expect(within(detail).getByRole("button", { name: /^修改原因$/ })).toBeInTheDocument();
   expect(within(detail).getByRole("button", { name: "新增" })).toBeEnabled();
-  expect(within(detail).getByRole("button", { name: /^從口袋名單移除$/ })).toBeInTheDocument();
+  // The detail only displays; removal lives in the row's ⋯ menu.
+  expect(within(detail).queryByRole("button", { name: /^從口袋名單移除$/ })).not.toBeInTheDocument();
   expect(within(detail).queryByRole("button", { name: /^排入行程$/ })).not.toBeInTheDocument();
   expect(within(detail).queryByRole("button", { name: /^合併$/ })).not.toBeInTheDocument();
   expect(within(detail).getByRole("button", { name: /^關閉$/ })).toHaveClass("min-h-11", "min-w-11");
@@ -335,6 +337,13 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
   expect(within(detail).getByRole("button", { name: /^修改原因$/ })).toBeInTheDocument();
   expect(within(detail).queryByRole("button", { name: /^更改日期$/ })).not.toBeInTheDocument();
   expect(within(detail).queryByRole("button", { name: /^從口袋名單移除$/ })).not.toBeInTheDocument();
+
+  // An editor without scheduling rights may remove an unscheduled place but not move or remove a scheduled one.
+  fireEvent.click(within(detail).getByRole("button", { name: /^關閉$/ }));
+  fireEvent.click(screen.getByRole("button", { name: "未排程咖啡店 的更多動作" }));
+  expect(screen.getByRole("menuitem", { name: "從口袋名單移除" })).toBeInTheDocument();
+  expect(screen.queryByRole("menuitem", { name: "更改日期" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "固定行程餐廳 的更多動作" })).not.toBeInTheDocument();
 });
 
 it("round-trips duration and budget values when saving only the wishlist reason", async () => {

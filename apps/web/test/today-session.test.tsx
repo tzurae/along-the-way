@@ -3,7 +3,6 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { fireEvent, waitFor } from "@testing-library/react";
-import type { TripHistoryResponse } from "@along-the-way/contracts/private-trips";
 import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
 import { App } from "../src/App";
 import { createTodayModel } from "../src/today-model";
@@ -14,7 +13,6 @@ let root: Root;
 let host: HTMLDivElement;
 let trips = [todayTrip(), todayTrip("B", "11")];
 let skeleton = todaySkeleton(trips[0]);
-let tripHistory: TripHistoryResponse = { events: [], nextCursor: null };
 let dayVersion = 1;
 let savedOrder = false;
 let gate: Promise<void> | null = null;
@@ -34,7 +32,6 @@ beforeEach(() => {
   localStorage.clear();
   trips = [todayTrip(), todayTrip("B", "11")];
   skeleton = todaySkeleton(trips[0]);
-  tripHistory = { events: [], nextCursor: null };
   dayVersion = 1;
   savedOrder = false; gate = null; requests = [];
   liveVersion = 0; liveSources = []; previewFails = false;
@@ -92,7 +89,6 @@ beforeEach(() => {
     const trip = trips.find((entry) => input.startsWith(`/api/trips/${entry.id}`));
     if (!trip) return reply({ error: { code: "trip_not_found", message: "Trip unavailable" } }, 404);
     if (input === `/api/trips/${trip.id}`) return reply({ trip });
-    if (input.endsWith("/history")) return reply(trip.id === "A" ? tripHistory : { events: [], nextCursor: null });
     if (input.endsWith("/version")) return reply({ tripVersion: liveVersion, lastEventId: liveVersion ? "latest-event" : null });
     if (input.endsWith("/skeleton")) return reply({ skeleton: trip.id === "A" ? skeleton : todaySkeleton(trip) });
     if (input.endsWith("/trip-places")) return reply({ tripPlaces: trip.id === "A" ? (tripPlacesOverride ?? todayWishlist(savedOrder)) : [] });
@@ -115,7 +111,7 @@ beforeEach(() => {
         load: { busyMinutes: 120, windowMinutes: 600, level: "relaxed" },
         capacity: { arrival: null, departure: null, gaps: [{ startMinute: 540, endMinute: 1140 }] } } });
     }
-    if (input.endsWith("/discovery")) return reply({ discovery: { brief: null, latestRun: null, proposals: [], decided: [], feedback: [], modelAvailable: false, placeProviderAvailable: false } });
+    if (input.endsWith("/discovery")) return reply({ discovery: { brief: null, latestRun: null, proposals: [], decided: [], modelAvailable: false, placeProviderAvailable: false } });
     throw new Error(`Unexpected request: ${input}`);
   }));
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
@@ -336,7 +332,7 @@ it("preserves destination dates and forward history while a cross-trip Back read
   expect(document.querySelector("#trip-panel-today select")).toHaveValue("2026-11-21");
 });
 
-it("refreshes itinerary and recent changes after reconnecting from Today without a reload loop", async () => {
+it("refreshes the itinerary after reconnecting from Today without a reload loop", async () => {
   const lodging = { ...todayActivity("REMOVED_LODGING"), type: "lodging" as const, details: { bookedBy: null, confirmationCode: null } };
   skeleton = todaySkeleton(trips[0], [todayActivity("REMOVED_ACTIVITY"), lodging]);
   await mount();
@@ -348,19 +344,10 @@ it("refreshes itinerary and recent changes after reconnecting from Today without
   expect(document.body).toHaveTextContent("離線資料");
   trips[0] = { ...trips[0]!, version: 8 };
   skeleton = todaySkeleton(trips[0]);
-  tripHistory = { events: [{
-    id: "new-event", actorId: todayUser.id, actorDisplayName: "History editor", actorEmail: todayUser.email,
-    eventType: "itinerary_item.deleted", targetType: "itinerary_item", targetId: "REMOVED_ACTIVITY", targetName: null,
-    summary: "Deleted an itinerary item", createdAt: "2026-10-21T03:00:00Z", reappliedFromVersion: null,
-  }], nextCursor: null };
   await click(button("重新連線並同步", host));
   await click(document.querySelector<HTMLButtonElement>('button[data-trip-tab="itinerary"]')!);
   expect(document.getElementById("itinerary-segment-panel-daily")).not.toHaveTextContent("REMOVED_ACTIVITY");
   expect(document.getElementById("itinerary-segment-panel-daily")).not.toHaveTextContent("REMOVED_LODGING");
-  await click(document.querySelector<HTMLButtonElement>('button[data-trip-tab="members"]')!);
-  expect(document.getElementById("trip-panel-members")).toHaveTextContent("刪除了固定行程");
-  expect(document.getElementById("trip-panel-members")).toHaveTextContent("History editor");
-  expect(document.getElementById("trip-panel-members")).not.toHaveTextContent("REMOVED_ACTIVITY");
   const afterSync = requests.length;
   await act(async () => {
     const { promise, resolve } = Promise.withResolvers<void>();
@@ -410,12 +397,12 @@ it("removes editor scheduling entry points while keeping itinerary previews read
   await mount();
 
   const today = document.getElementById("trip-panel-today")!;
-  expect(today).toHaveTextContent("只有旅程擁有者可以排入、改期或移出行程");
+  expect(today).toHaveTextContent("只有旅程擁有者，或擁有者開放的編輯者，可以排入、改期或移出行程");
   expect([...today.querySelectorAll("button")].some((entry) => entry.textContent?.includes("安排這一天"))).toBe(false);
 
   await click(document.querySelector<HTMLButtonElement>('[data-trip-tab="itinerary"]')!);
   const itinerary = document.getElementById("itinerary-segment-panel-daily")!;
-  expect(itinerary.textContent?.match(/只有旅程擁有者可以排入、改期或移出行程/g)).toHaveLength(1);
+  expect(itinerary.textContent?.match(/只有旅程擁有者，或擁有者開放的編輯者，可以排入、改期或移出行程/g)).toHaveLength(1);
   for (const ownerAction of ["安排日期", "安排這一天", "加入地點", "排整趟行程", "從這天移出並列為待安排"]) {
     expect([...itinerary.querySelectorAll("button")].some((entry) => entry.textContent?.includes(ownerAction))).toBe(false);
   }
@@ -433,7 +420,7 @@ it("removes editor scheduling entry points while keeping itinerary previews read
   expect(unscheduledDelete).toBeDefined();
   vi.spyOn(window, "confirm").mockReturnValue(true);
   await click(unscheduledDelete!);
-  await waitFor(() => expect(itinerary).toHaveTextContent("只有旅程擁有者可以更改行程安排。"));
+  await waitFor(() => expect(itinerary).toHaveTextContent("你目前沒有安排行程的權限；請旅程擁有者在「成員」開放。"));
 
   const assignedPlace = [...itinerary.querySelectorAll<HTMLButtonElement>(".plan-item-row")]
     .find((entry) => entry.textContent?.includes("FIRST"));
@@ -447,7 +434,7 @@ it("removes editor scheduling entry points while keeping itinerary previews read
   await waitFor(() => expect(document.querySelector('[role="dialog"]')).not.toBeInTheDocument());
 
   await click(button("幫我排順路", itinerary));
-  await waitFor(() => expect(document.querySelector('[role="dialog"]')).toHaveTextContent("只有旅程擁有者可以排入、改期或移出行程"));
+  await waitFor(() => expect(document.querySelector('[role="dialog"]')).toHaveTextContent("只有旅程擁有者，或擁有者開放的編輯者，可以排入、改期或移出行程"));
   expect([...document.querySelectorAll("button")].some((entry) => entry.textContent?.trim() === "使用這個順序")).toBe(false);
 });
 
@@ -531,6 +518,7 @@ it("shows localized copy instead of a browser network error for a failed mutatio
   await mount();
   inviteNetworkFailure = true;
   await click(document.querySelector<HTMLButtonElement>('[data-trip-tab="members"]')!);
+  await click(document.querySelector<HTMLButtonElement>('[data-members-child="invites"]')!);
   const panel = document.getElementById("trip-panel-members")!;
   const input = panel.querySelector<HTMLInputElement>('input[type="email"]')!;
   fireEvent.change(input, { target: { value: "companion@example.test" } });

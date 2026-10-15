@@ -56,6 +56,7 @@ const tripResponse = {
     dayCount: 1,
     role: "owner",
     version: 1,
+    editorsCanSchedule: false,
   },
 };
 

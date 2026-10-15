@@ -319,13 +319,44 @@
   border-top: 1px solid var(--border);
 }
 
+/* The photo credit already separates the gallery from the first section; no extra top padding. */
+.pd-detail > .pd-detail-section:first-child {
+  padding-top: 0;
+}
+
+/* 補上原因 keeps its 44px tap area without pushing the heading row taller than its text. */
+.pd-reason-head .pd-reason-action {
+  margin-block: -10px;
+}
+
+/* One heading style for every detail section (想去原因、必買、地點、需要注意、旅遊資訊…),
+   including headings nested in a section's action row or a disclosure summary. */
 .pd-detail-section > h3,
-.pd-detail-section > strong:first-child {
+.pd-detail-section > strong:first-child,
+.pd-detail-section .pd-reason-head h3,
+.pd-detail-section .must-items__heading h3,
+.place-detail-sheet .place-detail__disclosure > summary h3 {
   display: block;
   margin: 0 0 0.625rem;
-  color: var(--muted-foreground);
-  font-size: 0.8125rem;
+  color: var(--color-ink);
+  font-size: 14px;
   font-weight: 700;
+  line-height: 1.4;
+}
+
+/* Headings sharing a row with an action (補上原因、新增) or a chevron sit on that row, not above it. */
+.pd-detail-section .must-items__heading h3,
+.place-detail-sheet .place-detail__disclosure > summary h3 {
+  margin: 0;
+}
+
+/* One body size inside detail sections. */
+.place-detail-sheet .pd-reason-copy,
+.place-detail-sheet .must-items__empty,
+.place-detail-sheet .pd-detail-meta,
+.place-detail-sheet .pd-detail-section p,
+.place-detail-sheet .pd-detail-section li {
+  font-size: 14px;
 }
 
 .pd-detail-section p,
@@ -675,18 +706,14 @@
   margin-top: 1rem;
 }
 
-.pd-brief-card,
-.pd-feedback-card {
+.pd-brief-card {
   padding: 1rem;
   border-radius: 1rem;
   background: var(--color-surface-subtle);
 }
 
 .pd-brief-card textarea,
-.pd-feedback-card textarea,
-.pd-question-list input,
-.pd-feedback-edit input,
-.pd-feedback-edit textarea {
+.pd-question-list input {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: 0.75rem;
@@ -724,7 +751,6 @@
   font-size: 1.5rem;
 }
 
-.pd-feedback-list,
 .pd-compact-list {
   display: grid;
   gap: 0;
@@ -737,12 +763,10 @@
   list-style: none;
 }
 
-.pd-feedback-list > li,
 .pd-compact-list > li {
   padding: 0.875rem;
 }
 
-.pd-feedback-list > li + li,
 .pd-compact-list > li + li {
   border-top: 1px solid var(--border);
 }
@@ -810,7 +834,7 @@
 }
 
 .pd-fixed-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
-.pd-danger-button { min-height: 44px; padding: 0 16px; border-radius: 999px; background: var(--destructive); color: var(--destructive-foreground); font-weight: 700; }
+.pd-danger-button { display: inline-flex; min-height: 44px; align-items: center; gap: 6px; padding: 0 16px; border-radius: 999px; background: var(--destructive); color: var(--destructive-foreground); font-weight: 700; white-space: nowrap; }
 .pd-confirm-footer { display: grid; gap: 10px; font-size: 14px; line-height: 1.5; }
 .pd-confirm-footer > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .pd-discovery[data-selecting="true"] { padding-bottom: 200px; }
