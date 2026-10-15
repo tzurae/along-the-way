@@ -1,7 +1,7 @@
 export const schedule = {
   title: "排入行程",
-  ownerOnly: "只有旅程擁有者可以排入、改期或移出行程。你仍可加入地點、投票與編輯備註。",
-  ownerOnlyAction: "只有旅程擁有者可以更改行程安排。",
+  ownerOnly: "只有旅程擁有者，或擁有者開放的編輯者，可以排入、改期或移出行程。你仍可加入地點、投票與編輯備註。",
+  ownerOnlyAction: "你目前沒有安排行程的權限；請旅程擁有者在「成員」開放。",
   pageAction: "排入行程",
   changeDate: "更改日期",
   cancel: "取消",

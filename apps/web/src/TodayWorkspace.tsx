@@ -182,11 +182,12 @@ function TodayCard({ item, zone, selectedDate, parallel, state, onOpen }: {
   </li>;
 }
 
-export function TodayWorkspace({ model, selectedDate, onDayChanged, isOwner, onArrangeDay, offline = false, fetchedAt, retry, retrying = false, persisted = true, request }: {
+export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, onArrangeDay, offline = false, fetchedAt, retry, retrying = false, persisted = true, request }: {
   model: TodayModel;
   selectedDate: string | null;
   onDayChanged(date: string, replace?: boolean): void;
-  isOwner?: boolean;
+  /** Owner, or an editor the owner allows to arrange the itinerary. */
+  canArrange?: boolean;
   onArrangeDay?(date: string): void;
   offline?: boolean;
   fetchedAt: string;
@@ -429,7 +430,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, isOwner, onA
             <CalendarDays size={28} aria-hidden="true" />
             <h3>{text.empty}</h3>
             <p>{text.emptyHelp}</p>
-            {isOwner === false ? <p>{t.schedule.ownerOnly}</p> : null}
+            {canArrange === false ? <p>{t.schedule.ownerOnly}</p> : null}
             {onArrangeDay && !offline ? <button type="button" className="today-primary-action" onClick={() => onArrangeDay(day.date)}><CalendarDays size={17} aria-hidden="true" />{t.tripSkeleton.arrangeThisDay}</button> : null}
           </div>
         </>}

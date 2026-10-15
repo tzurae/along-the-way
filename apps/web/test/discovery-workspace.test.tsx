@@ -31,6 +31,7 @@ const trip: TripDto = {
   dayCount: 1,
   role: "owner",
   version: 1,
+  editorsCanSchedule: false,
 };
 
 const proposal = {
@@ -98,7 +99,6 @@ it("renders proposal behavior in the compact shared row without exposing the add
         latestRun: null,
         proposals: [proposal],
         decided: [],
-        feedback: [],
         modelAvailable: true,
         placeProviderAvailable: true,
       } };
@@ -128,10 +128,11 @@ it("renders proposal behavior in the compact shared row without exposing the add
   expect(row).not.toHaveTextContent("地址未知");
   expect(row.querySelectorAll(".pd-vote-control")).toHaveLength(1);
   expect(within(row).getByRole("button", { name: "不要再推薦" })).toBeVisible();
-  expect(within(row).getByRole("button", { name: "加入口袋名單" })).toBeVisible();
+  // AI 建議 go only into the itinerary; there is no path into 口袋名單.
+  expect(within(row).queryByRole("button", { name: "加入口袋名單" })).not.toBeInTheDocument();
 });
 
-it("orders accepted proposal detail and shows its wishlist items read-only with a deep link", async () => {
+it("shows an accepted proposal's detail as reasons then location, without wishlist-only sections", async () => {
   const acceptedPlaceId = "66666666-6666-4666-8666-666666666666";
   const accepted = { ...proposal, status: "accepted", acceptedTripPlaceId: acceptedPlaceId };
   const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
@@ -142,7 +143,6 @@ it("orders accepted proposal detail and shows its wishlist items read-only with 
         latestRun: null,
         proposals: [accepted],
         decided: [],
-        feedback: [],
         modelAvailable: true,
         placeProviderAvailable: true,
       } };
@@ -161,16 +161,6 @@ it("orders accepted proposal detail and shows its wishlist items read-only with 
         photos: [],
         googlePhotos: [],
       } };
-    } else if (path.endsWith(`/${acceptedPlaceId}/must-items`)) {
-      value = { items: [{
-        id: "77777777-7777-4777-8777-777777777777",
-        tripPlaceId: acceptedPlaceId,
-        kind: "eat",
-        label: "豆乳甜甜圈",
-        version: 1,
-        createdAt: "2026-10-14T00:00:00.000Z",
-        updatedAt: "2026-10-14T00:00:00.000Z",
-      }] };
     } else {
       throw new Error(`Unexpected request: ${path}`);
     }
@@ -181,17 +171,16 @@ it("orders accepted proposal detail and shows its wishlist items read-only with 
   await waitFor(() => expect(document.querySelector(`[data-proposal-detail-trigger="${proposal.id}"]`)).not.toBeNull());
   fireEvent.click(document.querySelector(`[data-proposal-detail-trigger="${proposal.id}"]`)!);
   const detail = await screen.findByRole("dialog", { name: "錦市場" });
-  expect(await within(detail).findByText("豆乳甜甜圈")).toBeInTheDocument();
-  expect(within(detail).queryByRole("button", { name: "編輯『豆乳甜甜圈』" })).not.toBeInTheDocument();
-  const wishlist = within(detail).getByRole("link", { name: "到口袋名單查看或新增" });
-  expect(wishlist).toHaveAttribute("href", expect.stringContaining(`place=${acceptedPlaceId}`));
+  expect(within(detail).queryByText("豆乳甜甜圈")).not.toBeInTheDocument();
+  expect(within(detail).queryByRole("link", { name: "到口袋名單查看或新增" })).not.toBeInTheDocument();
 
   const headings = within(detail).getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent);
-  expect(headings).toEqual(expect.arrayContaining(["推薦重點", "必買／必吃／必喝", "需要注意", "地點", "佐證與景點資訊"]));
-  expect(headings.indexOf("推薦重點")).toBeLessThan(headings.indexOf("必買／必吃／必喝"));
-  expect(headings.indexOf("必買／必吃／必喝")).toBeLessThan(headings.indexOf("需要注意"));
-  expect(headings.indexOf("需要注意")).toBeLessThan(headings.indexOf("地點"));
-  expect(headings.indexOf("地點")).toBeLessThan(headings.indexOf("佐證與景點資訊"));
+  expect(headings).toEqual(expect.arrayContaining(["推薦重點", "地點"]));
+  expect(headings.indexOf("推薦重點")).toBeLessThan(headings.indexOf("地點"));
+  // Empty cautions and the article-style evidence section are not rendered.
+  expect(headings).not.toEqual(expect.arrayContaining(["必買／必吃／必喝"]));
+  expect(headings).not.toEqual(expect.arrayContaining(["需要注意"]));
+  expect(headings).not.toEqual(expect.arrayContaining(["佐證與景點資訊"]));
 });
 
 it("opens proposal thumbnails during normal and selection modes without per-row credits", async () => {
@@ -207,7 +196,6 @@ it("opens proposal thumbnails during normal and selection modes without per-row 
         latestRun: null,
         proposals: [selectableProposal],
         decided: [],
-        feedback: [],
         modelAvailable: true,
         placeProviderAvailable: true,
       } };
@@ -251,7 +239,8 @@ it("opens proposal thumbnails during normal and selection modes without per-row 
   fireEvent.click(within(detail).getByRole("button", { name: "關閉" }));
   await waitFor(() => expect(screen.queryByRole("dialog", { name: selectableProposal.name })).not.toBeInTheDocument());
 
-  fireEvent.click(screen.getByRole("button", { name: "排入行程" }));
+  // The row has its own 排入行程; the page-level one starts selection mode.
+  fireEvent.click(screen.getAllByRole("button", { name: "排入行程" }).find((button) => !row.contains(button))!);
   expect(screen.getByRole("heading", { name: "已選 0 個地點" })).toBeInTheDocument();
   fireEvent.click(row.querySelector(".list-place-row__media")!);
   detail = await screen.findByRole("dialog", { name: selectableProposal.name });
@@ -265,7 +254,6 @@ it("updates a discovery vote immediately, blocks a double tap, never lets a late
     latestRun: null,
     proposals: [proposal],
     decided: [],
-    feedback: [],
     modelAvailable: true,
     placeProviderAvailable: true,
   };
@@ -314,16 +302,16 @@ it("updates a discovery vote immediately, blocks a double tap, never lets a late
   expect(screen.getByText("已選擇「錦市場」想去，正在儲存")).toBeInTheDocument();
 
   await act(async () => concurrentRead.resolve({ discovery: { ...discovery, proposals: [accepted] } }));
-  expect(await screen.findByText("已加入口袋名單")).toBeInTheDocument();
+  expect(await screen.findByText("已選進行程・待排日期")).toBeInTheDocument();
 
   // The vote committed before the acceptance, so its response still says pending.
   await act(async () => voteResponse.resolve({ proposal: { ...proposal, ownVote: true, voteCount: 1 } }));
   await waitFor(() => expect(discoveryReads).toBe(3));
-  expect(screen.getByText("已加入口袋名單")).toBeInTheDocument();
+  expect(screen.getByText("已選進行程・待排日期")).toBeInTheDocument();
   expect(screen.queryByText("待討論")).not.toBeInTheDocument();
 
   await act(async () => confirmedRead.resolve({ discovery: { ...discovery, proposals: [{ ...accepted, ownVote: true, voteCount: 1 }] } }));
-  expect(screen.getByText("已加入口袋名單")).toBeInTheDocument();
+  expect(screen.getByText("已選進行程・待排日期")).toBeInTheDocument();
   expect(screen.queryByText("待討論")).not.toBeInTheDocument();
 });
 
@@ -333,7 +321,6 @@ it("restores a failed discovery vote, announces the exact error, and reuses its 
     latestRun: null,
     proposals: [proposal],
     decided: [],
-    feedback: [],
     modelAvailable: true,
     placeProviderAvailable: true,
   };

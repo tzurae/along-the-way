@@ -35,7 +35,6 @@ function response() {
         endorsements: [],
       }],
       decided: [],
-      feedback: [],
       modelAvailable: true,
       placeProviderAvailable: true,
     },

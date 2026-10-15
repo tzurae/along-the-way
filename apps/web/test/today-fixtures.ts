@@ -8,7 +8,7 @@ export function todayTrip(id = "A", month = "10"): TripDto {
     countryStops: [{ id: "stop", countryCode: "JP", position: 0, timeZone: "Asia/Tokyo" }],
     days: [21, 22, 23].map((day) => ({ id: `day${day}`, date: `2026-${month}-${day}`, title: null })),
     members: [{ id: "member", userId: todayUser.id, email: todayUser.email, displayName: null, role: "owner" }],
-    invites: [], memberCount: 1, dayCount: 3, role: "owner", version: 7 };
+    invites: [], memberCount: 1, dayCount: 3, role: "owner", version: 7, editorsCanSchedule: false };
 }
 export function todayActivity(id = "activity"): ItineraryItemDto {
   return { id, tripId: "A", title: id, type: "activity", notes: null, sourceUrl: null, money: null, lockedAt: null, lockedBy: null, version: 1,

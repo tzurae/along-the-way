@@ -10,9 +10,6 @@ export const unrelatedDiscoveryModule = {
   saveQuestionAnswers: unexpectedDiscoveryCall,
   generate: unexpectedDiscoveryCall,
   setProposalVote: unexpectedDiscoveryCall,
-  acceptProposal: unexpectedDiscoveryCall,
   scheduleProposals: unexpectedDiscoveryCall,
   rejectProposal: unexpectedDiscoveryCall,
-  createFeedback: unexpectedDiscoveryCall,
-  decideFeedback: unexpectedDiscoveryCall,
 } satisfies DiscoveryModule;

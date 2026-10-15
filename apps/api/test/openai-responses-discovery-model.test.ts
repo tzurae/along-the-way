@@ -90,7 +90,6 @@ describe("OpenAI Responses discovery model", () => {
     const result = await model(fetch).plan({
       trip: facts,
       brief: "Temples and food; we stay at an airport hotel",
-      confirmedFeedback: [],
       questionAnswers,
     });
 
@@ -106,7 +105,6 @@ describe("OpenAI Responses discovery model", () => {
     expect(body.tools).toBeUndefined();
     expect(JSON.parse(body.input[1].content)).toMatchObject({ questionAnswers });
     expect(body.input[0].content).toContain("Never ask any question already present in questionAnswers again");
-    expect(body.input[0].content).toContain("member-corrected interpretation");
   });
 
   it("uses default kinds of place when the model returns none", async () => {
@@ -115,7 +113,7 @@ describe("OpenAI Responses discovery model", () => {
       unresolvedQuestions: [],
       request: { ...request, namedPlaces: [], categories: [], defaultCategories: false },
       outputLanguage: "en",
-    }))).plan({ trip: facts, brief: "Just recommend", confirmedFeedback: [], questionAnswers: [] });
+    }))).plan({ trip: facts, brief: "Just recommend", questionAnswers: [] });
 
     expect(result.request.categories).toHaveLength(3);
     expect(result.request.defaultCategories).toBe(true);
@@ -127,7 +125,7 @@ describe("OpenAI Responses discovery model", () => {
       unresolvedQuestions: [],
       request,
       outputLanguage,
-    }))).plan({ trip: facts, brief: "Temples", confirmedFeedback: [], questionAnswers: [] });
+    }))).plan({ trip: facts, brief: "Temples", questionAnswers: [] });
 
     for (const invalid of ["Traditional Chinese", "", null]) {
       const failure = plan(invalid);
@@ -170,7 +168,7 @@ describe("OpenAI Responses discovery model", () => {
       { question: "How much walking?", answer: null },
     ];
     const result = await model(fetch).research({
-      trip: facts, brief, request, confirmedFeedback: [], questionAnswers, rejectedPlaces: [], outputLanguage: "en",
+      trip: facts, brief, request, questionAnswers, rejectedPlaces: [], outputLanguage: "en",
     });
 
     expect(result.candidates).toEqual([expect.objectContaining({
@@ -191,7 +189,6 @@ describe("OpenAI Responses discovery model", () => {
     expect(body.max_tool_calls).toBe(20);
     expect(JSON.parse(body.input[1].content)).toMatchObject({ questionAnswers });
     expect(body.input[0].content).toContain("A null answer was explicitly skipped");
-    expect(body.input[0].content).toContain("member-corrected interpretation");
     const item = body.text.format.schema.properties.candidates.items.properties;
     expect(item.category.anyOf[0].enum).toEqual(["Temples", "Local food"]);
     expect(item.namedPlace.anyOf[0].enum).toEqual(["Saihoji"]);
@@ -208,7 +205,7 @@ describe("OpenAI Responses discovery model", () => {
         researched({ name: "Empty recommendation place", recommendation: [] }),
         researched({ name: "Nishiki Market", category: "Local food" }),
       ],
-    }))).research({ trip: facts, brief, request, confirmedFeedback: [], questionAnswers: [], rejectedPlaces: [], outputLanguage: "en" });
+    }))).research({ trip: facts, brief, request, questionAnswers: [], rejectedPlaces: [], outputLanguage: "en" });
 
     expect(result.candidates.map((entry) => entry.name)).toEqual(["Nishiki Market"]);
   });
@@ -222,7 +219,7 @@ describe("OpenAI Responses discovery model", () => {
         researched({ name: "Ginkaku-ji", namedPlace: "Eikando" }),
         researched({ name: "Nishiki Market", category: "Local food" }),
       ],
-    }))).research({ trip: facts, brief, request, confirmedFeedback: [], questionAnswers: [], rejectedPlaces: [], outputLanguage: "en" });
+    }))).research({ trip: facts, brief, request, questionAnswers: [], rejectedPlaces: [], outputLanguage: "en" });
 
     expect(result.candidates.map((entry) => [entry.name, entry.namedPlace])).toEqual([
       ["Saiho-ji", "Saihoji"],
@@ -236,7 +233,7 @@ describe("OpenAI Responses discovery model", () => {
         researched({ name: "Saiho-ji", namedPlace: "Saihoji", category: null }),
         researched({ name: "Arashiyama", category: null }),
       ],
-    }))).research({ trip: facts, brief, request, confirmedFeedback: [], questionAnswers: [], rejectedPlaces: [], outputLanguage: "en" });
+    }))).research({ trip: facts, brief, request, questionAnswers: [], rejectedPlaces: [], outputLanguage: "en" });
 
     expect(result.candidates.map((entry) => [entry.name, entry.category])).toEqual([["Saiho-ji", null]]);
   });
@@ -248,7 +245,7 @@ describe("OpenAI Responses discovery model", () => {
       unresolvedQuestions: [],
       request: { ...request, categories: [long, "Local food"] },
       outputLanguage: "en",
-    }))).plan({ trip: facts, brief: "Gardens", confirmedFeedback: [], questionAnswers: [] });
+    }))).plan({ trip: facts, brief: "Gardens", questionAnswers: [] });
 
     expect(result.request.categories).toEqual([long.slice(0, 80).trim(), "Local food"]);
   });
@@ -256,7 +253,7 @@ describe("OpenAI Responses discovery model", () => {
   it("fails closed before making a request when no server credential is configured", async () => {
     const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => completed({}));
     const unavailable = new OpenAiResponsesDiscoveryModel({ model: "gpt-test", fetch });
-    await expect(unavailable.plan({ trip: facts, brief: "Food", confirmedFeedback: [], questionAnswers: [] }))
+    await expect(unavailable.plan({ trip: facts, brief: "Food", questionAnswers: [] }))
       .rejects.toBeInstanceOf(DiscoveryModelUnavailableError);
     expect(fetch).not.toHaveBeenCalled();
   });

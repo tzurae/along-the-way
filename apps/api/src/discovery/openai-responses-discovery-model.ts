@@ -7,7 +7,6 @@ import {
   type DiscoveryModel,
   type DiscoveryPlanResult,
   type DiscoveryResearchResult,
-  type InterpretedDiscoveryFeedback,
   type ResearchedCandidate,
   type StructuredDiscoveryBrief,
   type WebSourceType,
@@ -190,7 +189,6 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
             "localLanguage: the BCP-47 tag of the main language spoken at the destination.",
             "Ask at most three questions, and only when the answer materially changes which places are recommended; a traveler who only asks for recommendations gets none.",
             "questionAnswers are the traveler's answers to earlier clarification questions. Apply each non-null answer. A null answer was explicitly skipped: keep it unknown and do not assume an answer. Never ask any question already present in questionAnswers again.",
-            "In confirmedFeedback, a member-corrected interpretation is authoritative and takes precedence over any conflicting original wording.",
             "Set outputLanguage to the BCP-47 tag of the language the trip brief is written in (for example zh-TW for Traditional Chinese, en for English), and write every structuredBrief, unresolvedQuestions, and request text in that language except localLanguage.",
             "Return only the required schema.",
           ].join(" "),
@@ -283,7 +281,6 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
             "For every category, return three to five places that independent sources recommend for the trip dates: prefer places a Wikivoyage guide lists, that the destination's government or official tourism organization recommends, and that many travelers review well. A seasonal category means specific places at their best during the trip dates (for example a garden known for its autumn leaves), never the season, a festival, or an event itself.",
             "Never recommend anything in request.alreadyArranged, request.exclusions, or rejectedPlaces.",
             "Apply every non-null questionAnswers answer. A null answer was explicitly skipped: keep it unknown, state any resulting uncertainty, and never assume an answer.",
-            "In confirmedFeedback, a member-corrected interpretation is authoritative and takes precedence over any conflicting original wording.",
             "name is the place's own name in outputLanguage, exactly as it is commonly written; localName is its own name in request.localLanguage; englishName is its own English name; area is the city to look it up in, in request.localLanguage.",
             "sources: cite only URLs web search returned that describe or recommend the place, labeled government (a government site), tourism_board (an official tourism organization), wikivoyage (a Wikivoyage page), place_official (the place's own website), or other.",
             "recommendation and tradeoffs are lists of short, standalone plain-text sentences. For each sentence, sourceUrls cites only the web-search result URLs that support that sentence. Never put Markdown links or citation markers in text. Use an empty sourceUrls list for model inference.",
@@ -352,34 +349,6 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
     return { modelId: response.modelId, candidates, sources: response.sources };
   }
 
-  async interpretFeedback(input: Parameters<DiscoveryModel["interpretFeedback"]>[0]): Promise<InterpretedDiscoveryFeedback> {
-    const schema = objectSchema({
-      interests: stringArray(12),
-      exclusions: stringArray(12),
-      pace: nullableString,
-      budget: nullableString,
-      summary: { type: "string" },
-    });
-    const response = await this.request(
-      "trip_discovery_feedback",
-      schema,
-      [
-        {
-          role: "developer",
-          content: "Interpret travel-discovery feedback without adding facts the user did not state. Preserve uncertainty. Never infer health, mobility, age, or medical needs. Write interests, exclusions, pace, budget, and summary in the language the feedback is written in. Return only the required schema.",
-        },
-        { role: "user", content: JSON.stringify(input) },
-      ],
-    );
-    return {
-      modelId: response.modelId,
-      interests: asStrings(response.value.interests, 12, "AI discovery returned invalid feedback interests"),
-      exclusions: asStrings(response.value.exclusions, 12, "AI discovery returned invalid feedback exclusions"),
-      pace: asNullableString(response.value.pace, "AI discovery returned invalid feedback pace"),
-      budget: asNullableString(response.value.budget, "AI discovery returned invalid feedback budget"),
-      summary: asString(response.value.summary, "AI discovery omitted the feedback summary"),
-    };
-  }
 
   private async request(
     schemaName: string,

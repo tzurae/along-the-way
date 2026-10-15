@@ -377,6 +377,20 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
     };
   }
 
+  /** The signed-in member's own nickname; there is no way to set anyone else's. Blank clears it. */
+  async updateDisplayName(userId: string, rawDisplayName: string | null): Promise<AuthenticatedUser> {
+    const trimmed = rawDisplayName?.trim() ?? "";
+    if (trimmed.length > 40) throw new AppError("validation_error", "displayName must be at most 40 characters");
+    const updated = await this.database
+      .updateTable("users")
+      .set({ display_name: trimmed || null, updated_at: this.now() })
+      .where("id", "=", userId)
+      .returning(["id", "email", "display_name"])
+      .executeTakeFirst();
+    if (!updated) throw new AppError("unauthenticated", "Sign in to continue", 401);
+    return { id: updated.id, email: updated.email, displayName: updated.display_name };
+  }
+
   async logout(sessionToken: string) {
     if (!sessionToken) return;
     await this.database
@@ -670,6 +684,39 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         summary: "Removed an editor",
       });
       await remember(transaction, userId, operation, key, { deleted: true });
+    });
+  }
+
+  async setEditorsCanSchedule(userId: string, tripId: string, rawKey: string, enabled: boolean) {
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `ecs:${tripId}`;
+    await this.database.transaction().execute(async (transaction) => {
+      await requireOwner(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return;
+      const trip = await transaction.selectFrom("trips")
+        .select("editors_can_schedule")
+        .where("id", "=", tripId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!trip) throw new AppError("trip_not_found", "Trip not found", 404);
+      if (trip.editors_can_schedule !== enabled) {
+        await transaction.updateTable("trips")
+          .set({ editors_can_schedule: enabled, updated_at: this.now() })
+          .where("id", "=", tripId)
+          .execute();
+        // The event also advances the trip version, so editors' open sessions pick up the change.
+        await recordEvent(transaction, {
+          tripId,
+          actorId: userId,
+          eventType: enabled ? "trip.editors_can_schedule_enabled" : "trip.editors_can_schedule_disabled",
+          targetType: "trip",
+          targetId: tripId,
+          summary: enabled ? "Let editors arrange the itinerary" : "Stopped editors from arranging the itinerary",
+        });
+      }
+      await remember(transaction, userId, operation, key, { editorsCanSchedule: enabled });
     });
   }
 }

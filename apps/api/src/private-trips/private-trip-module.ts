@@ -31,6 +31,8 @@ export interface IdentityAccessModule {
   consumeMagicLink(token: string): Promise<SessionResult>;
   authenticate(sessionToken: string): Promise<AuthenticatedUser | null>;
   logout(sessionToken: string): Promise<void>;
+  /** Self-only: set or clear the signed-in member's nickname. */
+  updateDisplayName(userId: string, displayName: string | null): Promise<AuthenticatedUser>;
   inviteMember(
     userId: string,
     tripId: string,
@@ -53,6 +55,13 @@ export interface IdentityAccessModule {
     tripId: string,
     memberUserId: string,
     idempotencyKey: string,
+  ): Promise<void>;
+  /** Owner-only: let editors arrange the itinerary, or take that back. */
+  setEditorsCanSchedule(
+    userId: string,
+    tripId: string,
+    idempotencyKey: string,
+    enabled: boolean,
   ): Promise<void>;
 }
 
@@ -95,7 +104,6 @@ export class AppError extends Error {
       | "must_item_limit"
       | "duplicate_suggestion_not_found"
       | "discovery_proposal_not_found"
-      | "discovery_feedback_not_found"
       | "model_unavailable"
       | "provider_unavailable"
       | "research_in_progress"

@@ -123,7 +123,7 @@
 .place-detail-content {
   display: grid;
   min-width: 0;
-  gap: 24px;
+  gap: 12px;
 }
 
 .place-detail__article {
@@ -386,14 +386,15 @@
   white-space: nowrap;
 }
 
+/* One-line Google credit: hug its text instead of reserving the two-line Commons height. */
 .place-gallery__caption--google {
   display: block;
-  height: 56px;
+  height: auto;
 }
 
 .place-gallery__google-credit {
   display: grid;
-  height: 56px;
+  min-height: 32px;
   min-width: 0;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -402,7 +403,7 @@
 
 .place-gallery__google-byline {
   display: flex;
-  height: 56px;
+  min-height: 32px;
   min-width: 0;
   align-items: center;
   gap: 0;

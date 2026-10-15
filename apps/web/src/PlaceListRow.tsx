@@ -18,6 +18,8 @@ export interface PlaceListRowProps {
   loadingPhoto?: boolean;
   voteAction?: ReactNode;
   rowActions?: ReactNode;
+  /** The 「⋯」 menu: row-level actions that are not about reading the detail (移除、更改日期). */
+  menu?: ReactNode;
   selectionControl?: ReactNode;
   ariaLabel?: string;
   current?: boolean;
@@ -55,6 +57,7 @@ export function PlaceListRow({
   loadingPhoto = false,
   voteAction,
   rowActions,
+  menu,
   selectionControl,
   ariaLabel,
   current = false,
@@ -127,10 +130,11 @@ export function PlaceListRow({
           {rowActions ? <div className="list-place-row__row-actions">{rowActions}</div> : null}
         </footer>
       ) : null}
-      {variant === "wishlist" && (status || voteAction) ? (
+      {variant === "wishlist" && (status || voteAction || menu) ? (
         <aside className="list-place-row__aside">
           {status ? <div className="list-place-row__status list-place-row__status--desktop">{status}</div> : null}
           {voteAction ? <div className="list-place-row__vote">{voteAction}</div> : null}
+          {menu}
         </aside>
       ) : null}
     </article>

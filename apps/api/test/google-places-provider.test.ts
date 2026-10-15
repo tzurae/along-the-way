@@ -8,7 +8,7 @@ import {
 } from "../src/trip-places/google-places-provider";
 
 describe("Google Places provider adapter", () => {
-  it("classifies temples and shrines as sights instead of other", async () => {
+  it("normalizes Google primary types into the shared place categories", async () => {
     const place = (id: string, primaryType: string) => ({
       id, displayName: { text: id }, formattedAddress: "Kyoto",
       location: { latitude: 34.97, longitude: 135.77 }, primaryType,
@@ -20,12 +20,19 @@ describe("Google Places provider adapter", () => {
         place("ChIJ-temple-000001", "buddhist_temple"),
         place("ChIJ-shrine-000001", "shinto_shrine"),
         place("ChIJ-station-00001", "train_station"),
+        place("ChIJ-scenic-000001", "scenic_spot"),
+        place("ChIJ-coffee-000001", "coffee_shop"),
+        place("ChIJ-market-000001", "market"),
+        place("ChIJ-parkng-000001", "parking"),
+        place("ChIJ-gasstn-000001", "gas_station"),
       ] }),
     });
 
     const candidates = await provider.search("東福寺");
 
-    expect(candidates.map((candidate) => candidate.type)).toEqual(["activity", "activity", "station"]);
+    expect(candidates.map((candidate) => candidate.type)).toEqual([
+      "worship", "worship", "station", "activity", "cafe", "shopping", "other", "other",
+    ]);
   });
 
   it("requests only confirmation fields and returns attributed timestamped candidates", async () => {

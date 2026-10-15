@@ -13,9 +13,7 @@ export const collaboration = {
   identicalFields: (count: number) => `其他 ${count} 個欄位沒有差異`,
   saving: "處理中…", loadError: "無法取得目前版本，請保留輸入並再試一次。",
   live: "即時更新已連線", reconnecting: "即時更新重新連線中；仍可閱讀與儲存",
-  history: "最近變更", loadMore: "載入更多", loading: "載入中…", noHistory: "尚無變更紀錄", retry: "重試",
-  historyError: "無法載入最近變更。", target: "變更對象", savedChange: "已保存變更",
-  reapplied: (version: number) => `比較衝突後重新套用（從第 ${version} 版開始編輯）`,
+  savedChange: "已保存變更",
   replanDay: "這天的時間或地點安排已由其他成員更新，尚未儲存這份順序。請按「重新排」取得最新安排，確認後再儲存。",
   fields: {
     name: "名稱", type: "類型", address: "地址", latitude: "緯度", longitude: "經度", timeZone: "時區",
@@ -32,5 +30,4 @@ export const collaboration = {
     startMinute: "開始時間", endMinute: "結束時間", bookedBy: "訂房人", ticketInfo: "票券資料", confirmationNotes: "確認備註",
   } as Record<string, string>,
   values: { flight: "航班", lodging: "住宿", activity: "活動", restaurant: "餐廳", airport: "機場", station: "車站", other: "其他", transport: "交通", start: "開始", end: "結束", confirmed: "已確認", unknown: "未確認", conflicted: "有衝突", walking: "步行", transit: "大眾運輸", driving: "開車", confirm: "確認", reject: "拒絕" } as Record<string, string>,
-  targets: { trip: "旅程", trip_place: "想去地點", place: "地點", itinerary_item: "行程項目", constraint: "行程限制", trip_day: "旅程日期", invite: "邀請", member: "旅程成員", discovery_brief: "旅程需求", discovery_run: "探索建議", candidate_proposal: "地點提案", discovery_feedback: "探索回饋", duplicate_suggestion: "相似地點" } as Record<string, string>,
 };

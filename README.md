@@ -89,8 +89,41 @@ attribution line (owner decision #127; this conflicts with Google's Places
 attribution policy for list thumbnails, and the detail gallery keeps its credits).
 Both lists are ordered by confirmed vote count and slide rows to their new
 position when the order changes (`FlipList`; a fade under reduced motion).
-AI 建議 hides rejected proposals and labels an accepted proposal 「已加入行程」
-once its wishlist place is on the itinerary.
+AI 建議 hides rejected proposals. AI suggestions only go into the itinerary: there
+is no accept-to-wishlist endpoint, an accepted proposal never appears in 口袋名單,
+and its row reads 「已選進行程・待排日期」 until it has a day (「已排入行程」).
+Detail sheets only display information; voting, scheduling and removal live on
+the row and its 「⋯」 menu (`RowMenu`).
+
+Both lists share search (name or area) and filter chips (`PlaceFilters`):
+我按過讚, 狀態, 類型 and 地區. Chips within a group combine with OR, groups with
+AND, and only values that occur are offered. Filters are not kept in the URL.
+
+### Place categories (migration 027)
+
+Every place uses one category set (`PLACE_TYPES` in
+`packages/contracts/src/trip-skeleton.ts`): `activity` 景點, `worship` 寺社,
+`museum` 博物館・展覽, `nature` 自然・公園, `restaurant` 餐廳, `cafe` 咖啡・甜點,
+`shopping` 購物・市場, `lodging`, `station`, `airport` and `other`. The type chip
+groups lodging/station/airport as 住宿・交通. Google places get their category
+from Google's `primaryType` (`mappedPlaceType`); AI proposals use the same
+mapping. Migration `027_normalized_place_types` only widens the CHECK
+constraints. Existing rows keep their category until
+`bun apps/api/src/database/reclassify-place-types.ts` (dry run; `--apply` writes)
+re-reads each Google place's `primaryType` once (Place Details, `primaryType`
+field only) and updates `place_identities`, provider-backed `trip_places`/`places`
+and `candidate_proposals`. Places Google returns without a type are skipped.
+A pre-0.9.0 build rejects the new categories when it reads them.
+
+### Members and scheduling permission (migration 026)
+
+成員 has sub-pages 成員, 我的資料, 邀請 (owner only) and 權限. Each member edits
+only their own nickname (`PUT /api/session/profile`, at most 40 characters).
+The owner can let every editor schedule (`PUT /api/trips/:tripId/editors-can-schedule`
+with `{ "enabled": boolean }`, stored in `trips.editors_can_schedule`, default
+false). Scheduling, rescheduling, reordering and removing scheduled places then
+accept editors; otherwise they return 403 as before. Rejecting AI proposals stays
+owner-only.
 
 Wishlist details list members' 必買／必吃／必喝 items:
 
@@ -269,36 +302,19 @@ Every evidence entry reports `isStale`: true once its `expiresAt` has passed,
 or, for web sources stored without an expiry, 30 days after `observedAt`.
 Stale evidence is labelled for re-checking and is never refreshed automatically.
 
-## AI discovery feedback and questions (Issue #66)
+## AI discovery questions (Issue #66)
 
-Discovery mutations require an `Idempotency-Key` and the current version:
-
-Generation and feedback interpretation share billed-AI limits of 10 starts per
-account per hour and 10 starts per trip per hour. Generation keeps the tighter
-limit of 6 starts per trip per hour because it also incurs Google lookups. A
-claimed request counts even when its provider call fails; replaying the same
-`Idempotency-Key` does not count or call the provider again.
+Discovery mutations require an `Idempotency-Key` and the current version.
+Generation is limited to 10 starts per account per hour and 6 starts per trip
+per hour because each run incurs model and Google lookups. A claimed request
+counts even when its provider call fails; replaying the same `Idempotency-Key`
+does not count or call the provider again.
 
 `GET /api/trips/:tripId/discovery` is read-only. Wishlist removal, legacy-place
 deletion, and trip-place reconciliation reopen stale accepted proposals in
 their own mutation/reconciliation transactions rather than attributing writes
 to the member who reads the discovery workspace.
 
-
-- `POST /api/trips/:tripId/discovery/feedback` accepts only whole-trip
-  `originalText`; a `proposalId` field is rejected with `400 validation_error`.
-  Candidate cards no longer offer a targeted feedback form. Historical targeted
-  records still display 「針對：X」 and reach the model labelled with that place.
-  Feedback responses retain `proposalId`, `proposalName`, `interpretationEdited`,
-  and `isOwn`; clients only offer pending-feedback actions when `isOwn` is true.
-- `POST /api/trips/:tripId/discovery/feedback/:feedbackId/decision` accepts
-  `expectedVersion`, `decision` (`confirm` or `reject`), and, when confirming,
-  an optional complete `interpretation` containing `interests`, `exclusions`,
-  nullable `pace` and `budget`, and `summary`. Supplying it replaces only the
-  structured interpretation, marks it edited, and makes that member-corrected
-  interpretation authoritative over conflicting original wording in later
-  planning and research; `originalText` is immutable. Only the feedback author
-  may confirm, edit, or reject it.
 - `PUT /api/trips/:tripId/discovery/brief/questions` accepts
   `expectedVersion` and ordered `answers` entries `{ question, answer }`.
   `answer: null` explicitly means skipped and unknown. Saving answers increments
@@ -309,8 +325,9 @@ to the member who reads the discovery workspace.
 `DiscoveryBriefDto.questionAnswers` reloads saved answers and skips. Planning
 and research receive both forms: answered questions constrain the request,
 while skipped questions remain unknown and must not be guessed or asked again.
-Migration `014_discovery_feedback_answers` stores these answer records and the
-edited-interpretation marker.
+Migration `014_discovery_feedback_answers` stores these answer records. The
+legacy `discovery_feedback` table and its columns remain for migration
+compatibility, but the application no longer reads, writes, or exposes them.
 
 ## AI proposal confidence and rejection wording (Issue #78)
 
@@ -680,7 +697,7 @@ the default. `?trip=<id>&tab=today&day=YYYY-MM-DD` preserves the selected trip,
 tab and valid day across reloads and browser history. Automatic corrections replace
 the current history entry and wait for the destination trip's model. Other tabs
 remain mounted; a successful Today sync publishes a separate read-refresh revision
-so itinerary, lodging and recent changes update without a Today reload loop.
+so itinerary and lodging update without a Today reload loop.
 With #27 enabled, SSE refreshes use that same `workspaceRevision`, while only
 local mutations advance `placesRevision` and its mutation-to-Today effect.
 An old trip's notification cannot supersede an in-flight URL/Back navigation.
@@ -811,8 +828,8 @@ field, with the latest actor/time. Changed fields appear first; identical fields
 collapse into one count rather than repeating three values on a phone. Actor
 labels use display name, then email, including removed members' past events.
 Only typed enum fields receive translated values. Member-entered names, notes,
-briefs, feedback summaries and free-form detail fields remain verbatim, even
-when their text equals an enum key such as `walking`.
+briefs, and free-form detail fields remain verbatim, even when their text equals
+an enum key such as `walking`.
 A change by the signed-in member is identified as an update in another window
 or device. Members can accept the saved version, return to editing their preserved
 input against the newly read version, or explicitly
@@ -821,17 +838,12 @@ uses a new idempotency key, the freshly read version, and
 `Conflict-Base-Version: <original version>` for audit only; normal membership,
 lock, constraint, deletion, and version checks still run. Another intervening
 edit can produce another conflict. An unavailable target cannot be reapplied.
-Discovery brief text, clarification answers and feedback keep independent edit
-bases: returning from one conflict cannot silently rebase another input.
-Direct feedback confirmation compares the submitted feedback's interpretation,
-not a previously opened editor. This comparison context stays separate from the
-mutation payload: an unedited confirmation omits `interpretation`, preserves
-`interpretationEdited: false`, and retains the original feedback in the next
-research input. Only an explicitly edited interpretation is submitted as a correction.
+Discovery brief text and clarification answers keep independent edit bases:
+returning from one conflict cannot silently rebase the other input.
 Reapply validation errors stay visible beside
 the comparison panel.
 Generation uses the current saved brief version even after a standalone answer
-save; accepting a brief conflict preserves an unrelated feedback editor draft.
+save.
 
 Removed wishlist places disappear from the active read model. A dirty editor
 may retain a separate, unavailable snapshot with its unsaved input, no active
@@ -941,18 +953,18 @@ The complete Chromium browser suite passed through an isolated stack using the
 real Caddyfile after integrating #28 at `fbf46bd`: **28 passed**. It exercises all three conflict actions, mobile
 input preservation, independent place edits, day conflicts, discovery-brief
 creation conflicts, participant comparisons, focus recovery and SSE reconnect,
-plus the independent discovery bases, direct-feedback target, visible reapply
-errors, removed editor dismissal, failed-projection recovery, and create-dialog
-version/idempotency regressions. API regressions reproduce concurrent
-invite/day writes and a reorder during draft reading. A deterministic queued
+plus visible reapply errors, removed editor dismissal, failed-projection
+recovery, and create-dialog version/idempotency regressions. API regressions
+reproduce concurrent invite/day writes and a reorder during draft reading. A
+deterministic queued
 SSE test fails when per-event authorization is removed and passes with it
 restored, proving that revocation between batch read and send releases no payload.
 After the final review fixes, the tree passes typecheck, **242 unit tests**, **118 integration tests**
 and the production build in `/i27` against `along_the_way_test27`. Browser tag `27`
-also verifies standalone answer generation, unrelated feedback draft preservation,
-actor email fallback, named/deleted targets, reapply base-version wording, compact
-field comparisons, same-account updates, and Today's live day-order/offline
-snapshot refresh. Real 390px/1440px Chromium captures show the changed note first
+also verifies standalone answer generation, actor email fallback, named/deleted
+targets, reapply base-version wording, compact field comparisons, same-account
+updates, and Today's live day-order/offline snapshot refresh. Real 390px/1440px
+Chromium captures show the changed note first
 and three unchanged fields collapsed, without horizontal phone overflow.
 Mounted-App regressions fail before and pass after guarding pending navigation
 from an old trip's live change/revocation and retaining failed mutation errors
@@ -961,10 +973,7 @@ with metadata-only notifications restored.
 The final discovery and wishlist Chromium rerun passed **20 tests**, including a
 conflict whose current note is `步行` but whose attempted and reapplied note is
 `walking`. Rendered-component regressions fail before and pass after preserving
-free text while still translating typed enums. A mounted discovery UI test uses
-the real HTTP/PostgreSQL path to confirm feedback and start research: before the
-fix it stored a false member correction and dropped the original text; afterward
-`interpretationEdited` remains false and the original reaches the model input.
+free text while still translating typed enums.
 Production TLS/deployment and real-device behaviour remain **UNVERIFIED**;
 these checks used only the isolated issue-27 stack.
 

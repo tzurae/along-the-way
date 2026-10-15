@@ -46,7 +46,7 @@ describe("account-scoped read-only Today snapshots", () => {
     expect(store.read("account", "trip")).toBeNull();
   });
   it("persists only the allowlisted Today read model, not private API metadata or drafts", () => {
-    const trip: TripDto = { id: "trip", name: "Trip", startDate: "2026-10-21", endDate: "2026-10-21", defaultCurrency: "JPY", countryStops: [{ id: "stop", countryCode: "JP", position: 0, timeZone: "Asia/Tokyo" }], days: [{ id: "day", date: "2026-10-21", title: null }], members: [{ id: "member", userId: "account", email: "private@example.test", displayName: "甲", role: "owner" }], invites: [{ id: "invite", email: "invite@example.test", role: "editor", status: "pending", expiresAt: "2026-12-01" }], memberCount: 1, dayCount: 1, role: "owner", version: 7 };
+    const trip: TripDto = { id: "trip", name: "Trip", startDate: "2026-10-21", endDate: "2026-10-21", defaultCurrency: "JPY", countryStops: [{ id: "stop", countryCode: "JP", position: 0, timeZone: "Asia/Tokyo" }], days: [{ id: "day", date: "2026-10-21", title: null }], members: [{ id: "member", userId: "account", email: "private@example.test", displayName: "甲", role: "owner" }], invites: [{ id: "invite", email: "invite@example.test", role: "editor", status: "pending", expiresAt: "2026-12-01" }], memberCount: 1, dayCount: 1, role: "owner", version: 7, editorsCanSchedule: false };
     const skeleton: TripSkeletonDto = { tripVersion: 7, places: [], days: [{ id: "day", date: "2026-10-21", entries: [] }], items: [], tripInformationItemIds: [] };
     const enriched = Object.assign(skeleton, { draft: "unaccepted suggestion", token: "session secret", providerKey: "key", healthNotes: "private health" });
     const readModel = createTodayModel(trip, enriched, [], "account");

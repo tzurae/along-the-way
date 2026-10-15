@@ -291,14 +291,16 @@
 .atw-frame { max-width: none; margin: 0; }
 .atw-rail { display: none; }
 .atw-main { min-width: 0; padding: 18px 12px 28px; }
-.atw-trip-context { margin: 0 2px 12px; color: var(--muted-foreground); font-size: 12px; }
 .atw-wrap-two-lines { display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.25; }
 .atw-bottomnav { position: fixed; inset: auto 0 0; z-index: 40; padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: #fbf8f2f0; backdrop-filter: blur(12px); }
 .atw-bottomnav > div { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .atw-bottomnav button { display: grid; justify-items: center; gap: 4px; min-height: 56px; padding: 6px 0; border-radius: 14px; font-size: 13px; font-weight: 700; }
 .atw-bottomnav button.is-active { color: #9a4a2c; background: var(--card); }
 .atw-railnav { display: none; }
-.atw-segments { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); padding: 4px; margin-bottom: 18px; border-radius: 18px; background: #e8e2d8; }
+/* Sub-page tabs (口袋名單／AI 建議, 總覽／航班／住宿 …): clear space from the trip meta line above
+   and the page title below, so the tabs read as navigation rather than part of either. */
+.atw-segments { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); padding: 4px; margin: 16px 0 24px; border-radius: 18px; background: #e8e2d8; }
+@media (min-width: 1024px) { .atw-segments { margin: 24px 0 32px; } }
 .atw-segments button { min-width: 0; min-height: 46px; padding: 8px; border-radius: 14px; font-size: 16px; font-weight: 700; color: var(--muted-foreground); }
 .atw-segments button.is-active { background: var(--card); color: #9a4a2c; box-shadow: 0 2px 8px -4px #1f302940; }
 .today-workspace { width: 100%; min-width: 0; max-width: 900px; overflow-wrap: anywhere; }

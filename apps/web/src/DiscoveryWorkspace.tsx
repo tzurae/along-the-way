@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Ban, CalendarCheck, CalendarPlus, Check, ChevronRight, ExternalLink, Images, MapPinOff, Pencil, RotateCw, Search } from "lucide-react";
+import { Ban, CalendarCheck, CalendarPlus, Check, ChevronRight, ExternalLink, Images, MapPin, MapPinOff, Pencil, RotateCw, Search } from "lucide-react";
 
 import {
   parseDiscoveryWorkspaceResponse,
@@ -8,7 +8,6 @@ import {
   type CandidateProposalDto,
   type DiscoveryClaimSentenceDto,
   type DiscoveryEndorsement,
-  type DiscoveryFeedbackDto,
   type DiscoveryQuestionAnswerDto,
   type DiscoveryShortfallDto,
   type DiscoveryWorkspaceDto,
@@ -26,9 +25,11 @@ import { ConflictPanel, useVersionConflict } from "./ConflictPanel";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { usePlacePreviews, type PlaceDetailRequest } from "./PlaceThumbnail";
 import { PlaceListRow } from "./PlaceListRow";
+import { canArrangeItinerary } from "./trip-permissions";
+import { PlaceFilterBar, PlaceFilterEmpty, placeArea, usePlaceFilters } from "./PlaceFilters";
+import { placeTypeFilterLabel } from "./locales/zh-TW/place-types";
 import { FlipList } from "./FlipList";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
-import { PlaceMustItems } from "./PlaceMustItems";
 import { SchedulePlacesSheet } from "./SchedulePlacesSheet";
 import { SelectionBar } from "./SelectionBar";
 import { useScheduleToast } from "./ScheduleToast";
@@ -69,8 +70,8 @@ function shouldStartFreshRequest(error: unknown) {
 
 
 // Where an outcome is reported: next to the control that caused it, or at the top.
-type NoticeArea = "general" | "find" | "again" | "feedback" | "questions";
-type DetailFocusSection = "evidence" | "cautions";
+type NoticeArea = "general" | "find" | "again" | "questions";
+type DetailFocusSection = "cautions";
 
 function missingServices(
   workspace: DiscoveryWorkspaceDto,
@@ -165,11 +166,13 @@ function ClaimSentence({
     <>
       <span>{sentence.text}</span>
       {cited.length ? (
-        <span className="ml-1 inline-flex flex-wrap items-baseline gap-1">
+        <span className="ml-1 whitespace-nowrap">
           {cited.map(({ item, number }) => (
             <a
               key={item.id}
-              className="inline-flex min-h-11 min-w-11 items-center justify-center text-xs font-bold text-accent-strong underline"
+              // Inline citation: must not grow the text line (a 44px box pushed bullets apart);
+              // padding plus the gap keeps it tappable without breaking the sentence.
+              className="mr-1 inline-block px-1 align-baseline text-xs font-bold leading-none text-accent-strong underline"
               href={item.sourceUrl}
               target="_blank"
               rel="noreferrer"
@@ -213,13 +216,6 @@ interface QuestionDraft {
   skipped: boolean;
 }
 
-interface FeedbackEditDraft {
-  interests: string;
-  exclusions: string;
-  pace: string;
-  budget: string;
-  summary: string;
-}
 
 function resolvedQuestionAnswers(drafts: Record<string, QuestionDraft>): DiscoveryQuestionAnswerDto[] {
   return Object.entries(drafts).flatMap(([question, draft]): DiscoveryQuestionAnswerDto[] => {
@@ -240,10 +236,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const [workspace, setWorkspace] = useState<DiscoveryWorkspaceDto | null>(null);
   const [tripPlaces, setTripPlaces] = useState<TripPlaceDto[]>([]);
   const [briefDraft, setBriefDraft] = useState("");
-  const [feedbackDraft, setFeedbackDraft] = useState("");
   const [questionDrafts, setQuestionDrafts] = useState<Record<string, QuestionDraft>>({});
-  const [editingFeedbackId, setEditingFeedbackId] = useState<string | null>(null);
-  const [feedbackEditDraft, setFeedbackEditDraft] = useState<FeedbackEditDraft | null>(null);
   const [loading, setLoading] = useState(true);
   const [optimisticVotes, setOptimisticVotes] = useState<Record<string, { ownVote: boolean; voteCount: number }>>({});
   const [pendingProposalVotes, setPendingProposalVotes] = useState<Record<string, true>>({});
@@ -274,7 +267,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   }, []);
 
   useEffect(() => {
-    if (trip.role === "owner") return;
+    if (canArrangeItinerary(trip)) return;
     setSelecting(false);
     setSelectedProposalIds(new Set());
     setScheduleProposalIds([]);
@@ -315,7 +308,6 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const workspaceReadGeneration = useRef(0);
   const briefBase = useRef<DiscoveryWorkspaceDto["brief"]>(null);
   const answersBase = useRef<DiscoveryWorkspaceDto["brief"]>(null);
-  const feedbackBase = useRef<DiscoveryFeedbackDto | null>(null);
   const conflictLatest = useRef<DiscoveryWorkspaceDto | null>(null);
   const resolution = useVersionConflict<Record<string, unknown>>();
   const conflictAction = useRef<{ operation: string; path: string; payload: Record<string, unknown>; area: NoticeArea; after?: () => void; method?: "POST" | "PUT" } | null>(null);
@@ -338,7 +330,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     pending === "save-brief" || pending === "save-questions"
       ? t.progress.saving
       : pending === "generate" ? t.progress.researching : idle;
-  const apply = useCallback((value: unknown, inputs: "all" | "brief" | "questions" | "none" = "all") => {
+  const apply = useCallback((value: unknown, inputs: "all" | "brief" | "questions" = "all") => {
     const next = parseDiscoveryWorkspaceResponse(value).discovery;
     setWorkspace(next);
     if (inputs === "all" || inputs === "brief") {
@@ -444,8 +436,6 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     if (pending) return;
     setPending(operation);
     setNotice(null);
-    const submittedFeedbackId = operation.startsWith("feedback-confirm:") ? operation.slice("feedback-confirm:".length) : null;
-    const submittedFeedback = feedbackBase.current?.id === submittedFeedbackId ? feedbackBase.current : null;
     try {
       const next = apply(await request(path, {
         method: method ?? (operation === "save-brief" || operation === "save-questions" ? "PUT" : "POST"),
@@ -455,30 +445,25 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
           ...(conflictBase ? { "Conflict-Base-Version": String(conflictBase) } : {}),
         },
         body: JSON.stringify(payload),
-      }), operation === "save-questions" ? "questions" : operation.startsWith("feedback-") ? "none" : "all");
+      }), operation === "save-questions" ? "questions" : "all");
       clearRetryKey(retryKeys.current, operation);
       resolution.clear();
       after?.();
       return next;
     } catch (error) {
-      if (operation === "save-brief" || operation === "save-questions" || operation.startsWith("feedback-confirm:")) {
+      if (operation === "save-brief" || operation === "save-questions") {
         const { expectedVersion, ...attempted } = payload;
-        // Comparing the AI interpretation must not turn an unedited confirmation into a correction.
-        const comparison = submittedFeedback ? { interpretation: submittedFeedback.interpretation, ...attempted } : attempted;
         const base = operation === "save-brief"
           ? { originalText: briefBase.current?.originalText ?? "" }
-          : operation === "save-questions" ? { answers: answersBase.current?.questionAnswers ?? [] }
-          : { decision: "confirm", interpretation: submittedFeedback?.interpretation };
+          : { answers: answersBase.current?.questionAnswers ?? [] };
         try {
-          const captured = await resolution.capture(error, { input: base, version: typeof expectedVersion === "number" ? expectedVersion : 1 }, comparison, async () => {
+          const captured = await resolution.capture(error, { input: base, version: typeof expectedVersion === "number" ? expectedVersion : 1 }, attempted, async () => {
             const latest = parseDiscoveryWorkspaceResponse(await request(`/api/trips/${trip.id}/discovery`)).discovery;
             conflictLatest.current = latest;
-            if (operation === "save-brief" || operation === "save-questions") return latest.brief ? {
+            return latest.brief ? {
               input: operation === "save-brief" ? { originalText: latest.brief.originalText } : { answers: latest.brief.questionAnswers },
               version: latest.brief.version,
             } : null;
-            const feedback = latest.feedback.find((entry) => entry.id === submittedFeedbackId);
-            return feedback ? { input: { decision: "confirm", interpretation: feedback.interpretation }, version: feedback.version } : null;
           });
           if (captured) { conflictAction.current = { operation, path, payload, area, after, method }; return; }
         } catch (failure) {
@@ -543,20 +528,6 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     if (researched) setResearchSettingsOpen(false);
   }
 
-  async function acceptProposal(proposal: CandidateProposalDto) {
-    setProposalAnnouncement(t.proposal.statusAnnouncement(proposal.name, t.status.accepting));
-    const next = await mutate(
-      `accept:${proposal.id}`,
-      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/accept`,
-      { expectedVersion: proposal.version },
-      "general",
-      onPlacesChanged,
-    );
-    const updated = next?.proposals.find((candidate) => candidate.id === proposal.id);
-    setProposalAnnouncement(updated ? t.proposal.statusAnnouncement(proposal.name, t.status[updated.status]) : "");
-    return next;
-  }
-
   async function rejectProposal(proposal: CandidateProposalDto) {
     return mutate(
       `reject:${proposal.id}`,
@@ -565,6 +536,33 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       "general",
     );
   }
+  /**
+   * Once an AI place is in the itinerary its votes live on that trip place, so the like on its
+   * AI row reads and writes the trip place's vote (the proposal itself no longer takes votes).
+   */
+  const placeVoteBusy = useRef(new Set<string>());
+  async function setAcceptedPlaceVote(placeId: string, voted: boolean) {
+    if (placeVoteBusy.current.has(placeId)) return;
+    placeVoteBusy.current.add(placeId);
+    setTripPlaces((current) => current.map((place) => place.id === placeId ? {
+      ...place,
+      ownVote: voted,
+      voteCount: Math.max(0, place.voteCount + (voted ? 1 : 0) - (place.ownVote ? 1 : 0)),
+    } : place));
+    try {
+      await request(`/api/trips/${trip.id}/trip-places/${placeId}/vote`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ voted }),
+      });
+    } catch {
+      setNotice({ area: "general", text: tripPlacesT.vote.updateFailed(tripPlacesById.get(placeId)?.name ?? "") });
+    } finally {
+      placeVoteBusy.current.delete(placeId);
+      void refresh();
+    }
+  }
+
   async function setProposalVote(proposal: CandidateProposalDto, voted: boolean) {
     if (pendingProposalVoteIds.current.has(proposal.id)) return;
     pendingProposalVoteIds.current.add(proposal.id);
@@ -630,114 +628,6 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     }
   }
 
-  function proposalActions(proposal: CandidateProposalDto) {
-    const place = acceptedPlaceFor(proposal);
-    const located = proposalIsLocated(proposal);
-    const canSchedule = trip.role === "owner"
-      && (proposal.status === "pending" || proposal.status === "accepted")
-      && Boolean(proposal.status === "pending" || place);
-    return (
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        {proposal.status === "pending" ? trip.role === "owner" ? (
-          <button
-            className="pd-danger-button"
-            disabled={pending !== null}
-            onClick={() => {
-              openProposalDetail(proposal.id);
-              setRejectConfirmation(proposal);
-            }}
-          >
-            <Ban aria-hidden="true" className="size-4" />
-            {t.proposal.decline}
-          </button>
-        ) : null : <span className="font-bold">{proposalStatusLabel(proposal)}</span>}
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          {proposal.status === "pending" && trip.role === "owner" ? (
-            <button
-              type="button"
-              className="pd-secondary"
-              disabled={pending !== null}
-              onClick={() => void acceptProposal(proposal)}
-            >
-              <Check aria-hidden="true" className="size-4" />
-              {t.proposal.accept}
-            </button>
-          ) : null}
-          {canSchedule && located ? (
-            <button
-              type="button"
-              className="schedule-primary-button"
-              disabled={pending !== null}
-              onClick={() => openProposalSchedule(proposal)}
-            >
-              <CalendarPlus aria-hidden="true" className="size-4" />
-              {place?.assignedDayId ? scheduleT.changeDate : scheduleT.pageAction}
-            </button>
-          ) : null}
-        </div>
-      </div>
-    );
-  }
-
-
-  async function createFeedback() {
-    const text = feedbackDraft.trim();
-    if (!text || pending || !workspace) return;
-    const missing = missingServices(workspace, false, t);
-    const area: NoticeArea = "feedback";
-    if (missing.length > 0) {
-      setNotice({
-        area,
-        text: t.errors.feedbackUnavailable(missing.join(t.services.separator)),
-      });
-      return;
-    }
-    const operation = "feedback:overall";
-    await mutate(operation, `/api/trips/${trip.id}/discovery/feedback`, {
-      originalText: text,
-    }, area, () => {
-      setFeedbackDraft("");
-    });
-  }
-
-  function editFeedback(feedback: DiscoveryFeedbackDto) {
-    feedbackBase.current = feedback;
-    setEditingFeedbackId(feedback.id);
-    setFeedbackEditDraft({
-      interests: feedback.interpretation.interests.join("\n"),
-      exclusions: feedback.interpretation.exclusions.join("\n"),
-      pace: feedback.interpretation.pace ?? "",
-      budget: feedback.interpretation.budget ?? "",
-      summary: feedback.interpretation.summary,
-    });
-  }
-
-  async function decideFeedback(feedback: DiscoveryFeedbackDto, decision: "confirm" | "reject") {
-    const edited = editingFeedbackId === feedback.id ? feedbackEditDraft : null;
-    if (editingFeedbackId !== feedback.id) feedbackBase.current = feedback;
-    await mutate(
-      `feedback-${decision}:${feedback.id}`,
-      `/api/trips/${trip.id}/discovery/feedback/${feedback.id}/decision`,
-      {
-        expectedVersion: editingFeedbackId === feedback.id ? feedbackBase.current?.version ?? feedback.version : feedback.version,
-        decision,
-        ...(decision === "confirm" && edited ? {
-          interpretation: {
-            interests: edited.interests.split("\n").map((entry) => entry.trim()).filter(Boolean),
-            exclusions: edited.exclusions.split("\n").map((entry) => entry.trim()).filter(Boolean),
-            pace: edited.pace.trim() || null,
-            budget: edited.budget.trim() || null,
-            summary: edited.summary,
-          },
-        } : {}),
-      },
-      "general",
-      () => {
-        setEditingFeedbackId(null);
-        setFeedbackEditDraft(null);
-      },
-    );
-  }
 
   async function saveQuestionAnswers() {
     if (!answersBase.current) return;
@@ -768,43 +658,14 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     const hasTradeoffs = proposal.tradeoffSentences !== null
       ? proposal.tradeoffSentences.length > 0
       : proposal.tradeoffs.length > 0;
-    const status: CandidateProposalDto["status"] = pending === `accept:${proposal.id}` ? "accepting" : proposal.status;
-    const wishlistHref = proposal.acceptedTripPlaceId
-      ? `?${new URLSearchParams({ trip: trip.id, tab: "places", segment: "wishlist", place: proposal.acceptedTripPlaceId })}`
-      : undefined;
-    const evidence = (
-      <section className="pd-detail-section" aria-label={t.proposal.evidence}>
-        {proposal.evidence.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{t.proposal.noEvidence}</p>
-        ) : (
-          <ul className="grid gap-2">
-            {proposal.evidence.map((item, evidenceIndex) => {
-              const number = evidenceIndex + 1;
-              return (
-                <li key={item.id}>
-                  <a className="pd-inline-link min-h-11 items-center break-all font-bold text-accent-strong underline underline-offset-2" href={item.sourceUrl} target="_blank" rel="noreferrer" aria-label={t.proposal.citationLabel(number, item.title)}>
-                    <span>[{number}] {item.title}</span><ExternalLink aria-hidden="true" className="size-4" />
-                  </a>
-                  <span className="block text-xs text-muted-foreground">{item.attribution}・{t.proposal.observedAt(new Date(item.observedAt).toLocaleString(locale))}</span>
-                  {item.isStale ? <span className="text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span> : null}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
-    );
     return (
       <PlaceDetailContent
         tripId={trip.id}
         reference={{ kind: "proposal", id: proposal.id }}
         request={request}
-        collapsible
-        disclosureLabel="佐證與景點資訊"
-        disclosureHeadingId="evidence"
-        disclosureOpen={detailFocusSection === "evidence"}
+        // Sources are linked inline from each sentence ([1][2]…); a separate evidence list only repeated them.
+        showArticle={false}
         focusHeadingId={detailFocusSection ?? undefined}
-        articlePrelude={evidence}
         interlude={<div className="pd-detail">
           <section className="pd-detail-section">
             <h3>推薦重點</h3>
@@ -812,47 +673,27 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
             {proposal.recommendationSentences?.length
               ? <ClaimSentenceList sentences={proposal.recommendationSentences} numberedEvidence={numberedEvidence} t={t} />
               : null}
-            <div className="mt-3">
-              <strong>{t.proposal.matchesYourNeeds}</strong>
-              <p className="text-sm">{proposal.matchedNeeds.length ? proposal.matchedNeeds.join("・") : t.proposal.noMatchesListed}</p>
-            </div>
-            {proposal.endorsements.length ? <div className="mt-3" aria-label={t.proposal.recommendedByFor(proposal.name)}><strong>{t.proposal.recommendedBy}</strong><ul className="mt-1 flex flex-wrap gap-2">{proposal.endorsements.map((endorsement) => <li key={endorsement} className="rounded-full border bg-surface px-3 py-1 text-sm font-bold">{endorsementLabel(endorsement, t)}</li>)}</ul></div> : null}
+            {/* 符合你的需求 only when it says more than the category chip already shows; 推薦來源 lives in 佐證與景點資訊. */}
+            {proposal.matchedNeeds.some((need) => need !== proposal.category) ? (
+              <p className="mt-3 text-sm text-muted-foreground">{t.proposal.fitLine(proposal.matchedNeeds)}</p>
+            ) : null}
           </section>
-          {status === "pending" ? (
+          {hasTradeoffs || proposal.unknowns.length ? (
             <section className="pd-detail-section">
-              <h3>必買／必吃／必喝</h3>
-              <p className="must-items__empty">加入口袋名單後，同行成員可以新增</p>
+              <h3 id="cautions" tabIndex={-1}>需要注意</h3>
+              {hasTradeoffs ? proposal.tradeoffSentences !== null
+                ? <ClaimSentenceList sentences={proposal.tradeoffSentences} numberedEvidence={numberedEvidence} t={t} />
+                : <ul className="list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul>
+                : null}
+              {proposal.unknowns.length ? <ul className="mt-2 list-disc pl-5 text-sm text-muted-foreground">{proposal.unknowns.map((item) => <li key={item}>{t.proposal.unknownPrefix(item)}</li>)}</ul> : null}
             </section>
-          ) : status === "accepting" ? (
-            <section className="pd-detail-section">
-              <h3>必買／必吃／必喝</h3>
-              <p className="must-items__empty" role="status">正在加入口袋名單…</p>
-            </section>
-          ) : status === "accepted" && proposal.acceptedTripPlaceId ? (
-            <PlaceMustItems
-              tripId={trip.id}
-              tripPlaceId={proposal.acceptedTripPlaceId}
-              request={request}
-              editable={false}
-              revision={placesRevision}
-              wishlistHref={wishlistHref}
-            />
           ) : null}
-          <section className="pd-detail-section">
-            <h3 id="cautions" tabIndex={-1}>需要注意</h3>
-            {hasTradeoffs ? proposal.tradeoffSentences !== null
-              ? <ClaimSentenceList sentences={proposal.tradeoffSentences} numberedEvidence={numberedEvidence} t={t} />
-              : <ul className="list-disc pl-5 text-sm">{proposal.tradeoffs.map((item) => <li key={item}>{item}</li>)}</ul>
-              : null}
-            {proposal.unknowns.length ? <ul className="mt-2 list-disc pl-5 text-sm text-muted-foreground">{proposal.unknowns.map((item) => <li key={item}>{t.proposal.unknownPrefix(item)}</li>)}</ul> : null}
-            {!hasTradeoffs && proposal.unknowns.length === 0 ? <p className="text-sm text-muted-foreground">目前沒有需要注意的事項。</p> : null}
-          </section>
           <section className="pd-detail-section">
             <h3>地點</h3>
             <p className="text-sm">{proposal.address ?? t.proposal.unknownAddress}</p>
-            <a className="pd-secondary mt-3" href={googleMapsPlaceUrl(proposal.name, proposal.providerPlaceId)} target="_blank" rel="noreferrer"><Images aria-hidden="true" className="size-4" />{t.proposal.viewPhotos}</a>
+            <a className="pd-secondary mt-3" href={googleMapsPlaceUrl(proposal.name, proposal.providerPlaceId)} target="_blank" rel="noreferrer"><MapPin aria-hidden="true" className="size-4" />{t.proposal.viewPhotos}</a>
           </section>
-          {proposal.status === "pending" && proposal.votingAvailable ? <section className="pd-detail-section"><VoteVoters voters={proposal.voters} /></section> : null}
+          {proposal.status === "pending" && proposal.votingAvailable && proposal.voters.length > 0 ? <section className="pd-detail-section"><VoteVoters voters={proposal.voters} /></section> : null}
         </div>}
       />
     );
@@ -862,10 +703,23 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   const listedProposals = workspace?.proposals.filter((proposal) => proposal.status !== "rejected") ?? [];
   const acceptedPlaceFor = (proposal: CandidateProposalDto) =>
     proposal.acceptedTripPlaceId ? tripPlacesById.get(proposal.acceptedTripPlaceId) ?? null : null;
+  // Filter by the coarse place type (景點、餐廳…): AI categories are free text and too varied for chips.
+  const proposalFilters = usePlaceFilters(listedProposals.map((proposal) => {
+    const place = acceptedPlaceFor(proposal);
+    return {
+      id: proposal.id,
+      name: proposal.name,
+      status: proposal.status === "pending" ? "待討論" : place?.assignedDayId ? "已排入行程" : "待排日期",
+      typeLabel: placeTypeFilterLabel(proposal.type),
+      area: placeArea(proposal.address),
+      mine: proposal.status === "pending" ? proposal.ownVote : Boolean(place?.ownVote),
+    };
+  }));
+  const filteredProposals = listedProposals.filter((proposal) => proposalFilters.visibleIds.has(proposal.id));
   /** Status label; an accepted proposal whose wishlist place is scheduled reads 「已加入行程」. */
   const proposalStatusLabel = (proposal: CandidateProposalDto, status: CandidateProposalDto["status"] = proposal.status) => {
     const place = status === "accepted" ? acceptedPlaceFor(proposal) : null;
-    return place && (place.scheduled || place.assignedDayId !== null) ? t.status.acceptedScheduled : t.status[status];
+    return place && place.assignedDayId !== null ? t.status.acceptedScheduled : t.status[status];
   };
   const proposalIsLocated = (proposal: CandidateProposalDto) => {
     const place = acceptedPlaceFor(proposal);
@@ -873,7 +727,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   };
   const proposalDayId = (proposal: CandidateProposalDto) => acceptedPlaceFor(proposal)?.assignedDayId ?? null;
   const proposalCanBeSelected = (proposal: CandidateProposalDto) => {
-    if (trip.role !== "owner" || !proposalIsLocated(proposal)) return false;
+    if (!canArrangeItinerary(trip) || !proposalIsLocated(proposal)) return false;
     if (proposal.status === "pending") return true;
     const place = acceptedPlaceFor(proposal);
     return proposal.status === "accepted" && Boolean(place && !place.scheduled && !place.assignedDayId);
@@ -899,7 +753,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   }
 
   function beginSelection() {
-    if (trip.role !== "owner") return;
+    if (!canArrangeItinerary(trip)) return;
     setSelectedProposalIds(new Set());
     setScheduleError("");
     setSelecting(true);
@@ -921,7 +775,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     allowUnscheduled = false,
     fromDetail = false,
   ) {
-    if (trip.role !== "owner" || ids.length === 0) return;
+    if (!canArrangeItinerary(trip) || ids.length === 0) return;
     setScheduleProposalIds(ids);
     setScheduleInitialDayId(initialDayId);
     setScheduleAllowUnscheduled(allowUnscheduled);
@@ -930,7 +784,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   }
 
   function openProposalSchedule(proposal: CandidateProposalDto) {
-    if (trip.role !== "owner") return;
+    if (!canArrangeItinerary(trip)) return;
     const dayId = proposalDayId(proposal);
     setSelectedProposalId(null);
     setRejectConfirmation(null);
@@ -1015,7 +869,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
   }
 
   async function confirmSchedule(dayId: string | null) {
-    if (trip.role !== "owner") {
+    if (!canArrangeItinerary(trip)) {
       setScheduleError(t.errors.ownerOnly);
       return;
     }
@@ -1096,7 +950,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
               <p>{t.header.description}</p>
             </div>
             <div className="schedule-head-buttons">
-              {trip.role === "owner" && hasSelectableProposals ? (
+              {canArrangeItinerary(trip) && hasSelectableProposals ? (
                 <button className="schedule-primary-button" disabled={pending !== null || loading} onClick={beginSelection}>
                   <CalendarPlus aria-hidden="true" className="size-4" />
                   <span>{scheduleT.pageAction}</span>
@@ -1114,14 +968,14 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       </div>
       <p className="sr-only" role="status" aria-live="polite">{proposalAnnouncement}</p>
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{voteAnnouncement}</p>
-      {trip.role !== "owner" ? <p className="pd-subhead">{t.header.ownerSchedulingOnly}</p> : null}
+      {!canArrangeItinerary(trip) ? <p className="pd-subhead">{t.header.ownerSchedulingOnly}</p> : null}
       {resolution.conflict ? <ConflictPanel conflict={resolution.conflict} busy={pending !== null}
         onAccept={() => {
           const operation = conflictAction.current?.operation;
-          if (conflictLatest.current) apply({ discovery: conflictLatest.current },
-            operation === "save-brief" ? "brief" : operation === "save-questions" ? "questions" : "none");
-          if (operation === `feedback-confirm:${editingFeedbackId}`) {
-            setEditingFeedbackId(null); setFeedbackEditDraft(null);
+          if (conflictLatest.current && operation === "save-brief") {
+            apply({ discovery: conflictLatest.current }, "brief");
+          } else if (conflictLatest.current && operation === "save-questions") {
+            apply({ discovery: conflictLatest.current }, "questions");
           }
           resolution.clear();
         }}
@@ -1134,9 +988,6 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
           const operation = conflictAction.current?.operation;
           if (operation === "save-brief") briefBase.current = conflictLatest.current?.brief ?? null;
           else if (operation === "save-questions") answersBase.current = conflictLatest.current?.brief ?? null;
-          else if (operation?.startsWith("feedback-confirm:")) {
-            feedbackBase.current = conflictLatest.current?.feedback.find((entry) => entry.id === operation.slice("feedback-confirm:".length)) ?? null;
-          }
           resolution.resume();
         }}
       /> : null}
@@ -1147,7 +998,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       {loading ? <p className="mt-6" role="status">{t.header.loading}</p> : null}
 
       {!loading ? (
-        <div hidden={Boolean(resolution.conflict)} className="mt-6 grid gap-5">
+        <div hidden={Boolean(resolution.conflict)} className="grid gap-5">
           {Object.keys(questionDrafts).length ? (
             <section className="order-1 rounded-panel border border-ink/10 p-4" aria-label={t.brief.questions}>
                   <strong>{t.brief.questions}</strong>
@@ -1246,10 +1097,12 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
           {listedProposals.length ? (
             <section className="order-2" aria-label={t.proposal.shortlistLabel}>
               <h3 className="sr-only">{t.proposal.shortlistTitle}</h3>
-              <FlipList className="pd-list mt-4" ariaLabel={t.proposal.shortlistLabel}>
+              {listedProposals.length > 1 ? <PlaceFilterBar filters={proposalFilters} total={listedProposals.length} label="搜尋 AI 建議" /> : null}
+              {filteredProposals.length === 0 ? <PlaceFilterEmpty onClear={proposalFilters.clear} /> : (
+              <FlipList className="pd-list" ariaLabel={t.proposal.shortlistLabel}>
                 {/* Same order as 口袋名單: most confirmed votes first (stable). Confirmed counts, not the
                     optimistic overlay, so a tapped row does not jump before the server confirms. */}
-                {[...listedProposals].sort((left, right) => right.voteCount - left.voteCount).map((proposal) => {
+                {[...filteredProposals].sort((left, right) => right.voteCount - left.voteCount).map((proposal) => {
                   const firstSentence = proposal.recommendationSentences?.[0];
                   const repeatedName = (proposalNameCounts.get(proposal.name) ?? 0) > 1;
                   const selectable = proposalCanBeSelected(proposal);
@@ -1273,7 +1126,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                       <Check aria-hidden="true" size={16} strokeWidth={3} />
                     </button>
                   ) : undefined;
-                  const displayStatus: CandidateProposalDto["status"] = pending === `accept:${proposal.id}` ? "accepting" : proposal.status;
+                  const displayStatus: CandidateProposalDto["status"] = proposal.status;
                   const evidenceLabel = proposal.evidence.some((item) => item.isStale)
                     ? t.proposal.rowEvidenceStale
                     : proposal.evidence.length > 0
@@ -1304,30 +1157,52 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                       busy={votePending}
                       onChange={(voted) => void setProposalVote(proposal, voted)}
                     />
+                  ) : acceptedPlaceFor(proposal) ? (
+                    // In the itinerary: the like is the trip place's own vote.
+                    <VoteControl
+                      compact
+                      name={proposal.name}
+                      voters={acceptedPlaceFor(proposal)!.voters}
+                      voteCount={acceptedPlaceFor(proposal)!.voteCount}
+                      ownVote={acceptedPlaceFor(proposal)!.ownVote}
+                      votingAvailable={acceptedPlaceFor(proposal)!.votingAvailable}
+                      disabled={false}
+                      onChange={(voted) => void setAcceptedPlaceVote(acceptedPlaceFor(proposal)!.id, voted)}
+                    />
                   ) : undefined;
-                  const rowActions = proposal.status === "pending" && trip.role === "owner" ? (
+                  // AI 建議 only go into the itinerary (排入行程); 口袋名單 is for places members add themselves.
+                  const acceptedPlace = proposal.status === "accepted" ? acceptedPlaceFor(proposal) : null;
+                  // Pending: put it into the itinerary. Accepted but no day yet: pick its day.
+                  const canScheduleRow = canArrangeItinerary(trip) && proposalIsLocated(proposal)
+                    && (proposal.status === "pending" || Boolean(acceptedPlace && acceptedPlace.assignedDayId === null));
+                  const canDecline = proposal.status === "pending" && trip.role === "owner";
+                  const rowActions = canScheduleRow || canDecline ? (
                     <>
-                      <button
-                        type="button"
-                        className="pd-danger-link"
-                        disabled={pending !== null}
-                        onClick={() => {
-                          openProposalDetail(proposal.id);
-                          setRejectConfirmation(proposal);
-                        }}
-                      >
-                        <Ban aria-hidden="true" className="size-4" />
-                        {t.proposal.decline}
-                      </button>
-                      <button
-                        type="button"
-                        className="pd-primary"
-                        disabled={pending !== null}
-                        onClick={() => void acceptProposal(proposal)}
-                      >
-                        <Check aria-hidden="true" className="size-4" />
-                        {t.proposal.accept}
-                      </button>
+                      {canDecline ? (
+                        <button
+                          type="button"
+                          className="pd-danger-link"
+                          disabled={pending !== null}
+                          onClick={() => {
+                            openProposalDetail(proposal.id);
+                            setRejectConfirmation(proposal);
+                          }}
+                        >
+                          <Ban aria-hidden="true" className="size-4" />
+                          {t.proposal.decline}
+                        </button>
+                      ) : null}
+                      {canScheduleRow ? (
+                        <button
+                          type="button"
+                          className="pd-primary"
+                          disabled={pending !== null}
+                          onClick={() => openProposalSchedule(proposal)}
+                        >
+                          <CalendarPlus aria-hidden="true" className="size-4" />
+                          {proposal.status === "pending" ? scheduleT.pageAction : t.proposal.pickDay}
+                        </button>
+                      ) : null}
                     </>
                   ) : undefined;
                   return (
@@ -1335,10 +1210,10 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                       key={proposal.id}
                       variant="proposal"
                       name={proposal.name}
-                      typeLabel={proposal.category ?? t.placeType[proposal.type]}
+                      typeLabel={t.placeType[proposal.type]}
                       stateLabel={proposalStatusLabel(proposal, displayStatus)}
                       secondary={firstSentence?.text ?? proposal.recommendation}
-                      evidence={<button type="button" className="list-place-row__inline-action" onClick={() => openProposalDetail(proposal.id, "evidence")}>{evidenceLabel}</button>}
+                      evidence={<span>{evidenceLabel}</span>}
                       caution={caution ?? undefined}
                       cautionAction={caution && cautionCount > 1 ? <span className="list-place-row__caution-action">・<button type="button" className="list-place-row__inline-action" onClick={() => openProposalDetail(proposal.id, "cautions")}>{t.proposal.moreItems(cautionCount - 1)}</button></span> : undefined}
                       photo={preview?.photo}
@@ -1364,6 +1239,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
                   );
                 })}
               </FlipList>
+              )}
             </section>
           ) : workspace?.proposals.length ? null : workspace?.latestRun?.status === "completed" ? <p className="order-2 rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.length ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}
 
@@ -1373,7 +1249,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
               appearance="workspace"
               title={selectedProposal.name}
               description={<div className="pd-detail-badges">
-                <span className="pd-chip">{selectedProposal.category ?? t.placeType[selectedProposal.type]}</span>
+                <span className="pd-chip">{t.placeType[selectedProposal.type]}</span>
                 {proposalDayId(selectedProposal) ? (
                   <span className="schedule-status-pill">
                     <CalendarCheck aria-hidden="true" className="size-[15px]" />
@@ -1385,7 +1261,8 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
               onClose={closeProposalDetail}
               footer={
               rejectConfirmation && trip.role === "owner" ? <div className="pd-confirm-footer"><p>{t.proposal.rejectConfirmTitle(rejectConfirmation.name)}</p><p>{t.proposal.rejectConfirmDescription}</p>{notice?.area === "general" ? <p role="alert">{notice.text}</p> : null}<div><button className="pd-secondary" disabled={pending !== null} onClick={() => setRejectConfirmation(null)}>{t.proposal.cancel}</button><button className="pd-danger-button" disabled={pending !== null} onClick={() => { const proposal = rejectConfirmation; void rejectProposal(proposal).then((next) => { if (next) { setRejectConfirmation(null); closeProposalDetail(); } }); }}>{t.proposal.rejectConfirm}</button></div></div>
-              : <div>{notice?.area === "general" ? <p className="pd-notice" role="alert">{notice.text}</p> : null}<div className="pd-fixed-actions">{selectedProposal.status === "pending" && selectedProposal.votingAvailable ? <VoteControl compact name={selectedProposal.name} voters={selectedProposal.voters} voteCount={optimisticVotes[selectedProposal.id]?.voteCount ?? selectedProposal.voteCount} ownVote={optimisticVotes[selectedProposal.id]?.ownVote ?? selectedProposal.ownVote} votingAvailable disabled={Boolean(pendingProposalVotes[selectedProposal.id])} busy={Boolean(pendingProposalVotes[selectedProposal.id])} onChange={(voted) => void setProposalVote(selectedProposal, voted)} /> : null}{proposalActions(selectedProposal)}</div></div>
+              // The detail only describes the place; liking and scheduling happen on the list row.
+              : notice?.area === "general" ? <p className="pd-notice" role="alert">{notice.text}</p> : undefined
             }>
               {proposalDetail(selectedProposal)}
             </PlaceDetailSheet>
@@ -1408,50 +1285,6 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
             </section>
           ) : null}
 
-          <section className="order-4 rounded-panel bg-surface-subtle p-4" aria-label={t.feedback.areaLabel}>
-            <h3 className="font-display text-2xl">{t.feedback.title}</h3>
-            <label className="mt-3 grid gap-2 font-bold">{t.feedback.label}<textarea className="min-h-24 rounded-xl border bg-surface p-3 font-normal" value={feedbackDraft} onChange={(event) => setFeedbackDraft(event.target.value)} placeholder={t.feedback.placeholder} /></label>
-            <button className="mt-3 min-h-11 rounded-xl border px-4 font-bold" disabled={pending !== null || !feedbackDraft.trim()} onClick={() => void createFeedback()}>{pending === "feedback:overall" ? t.feedback.interpreting : t.feedback.interpret}</button>
-            {notice?.area === "feedback" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
-            <div className="mt-4 grid gap-3">
-              {workspace?.feedback.map((feedback) => {
-                const edit = feedback.status === "pending" && feedback.isOwn && editingFeedbackId === feedback.id
-                  ? feedbackEditDraft
-                  : null;
-                return (
-                  <article key={feedback.id} className="rounded-xl bg-surface p-3">
-                    {feedback.proposalName ? <p className="text-sm font-bold text-accent-strong">{t.feedback.target(feedback.proposalName)}</p> : <p className="text-sm font-bold text-muted-foreground">{t.feedback.overallTarget}</p>}
-                    <p className="whitespace-pre-wrap">「{feedback.originalText}」</p>
-                    {edit ? (
-                      <div className="mt-3 grid gap-3 rounded-xl border p-3">
-                        <label className="grid gap-1 font-bold">{t.feedback.summary}<textarea className="min-h-20 rounded-lg border p-2 font-normal" value={edit.summary} onChange={(event) => setFeedbackEditDraft({ ...edit, summary: event.target.value })} /></label>
-                        <label className="grid gap-1 font-bold">{t.feedback.interests}<textarea className="min-h-20 rounded-lg border p-2 font-normal" value={edit.interests} onChange={(event) => setFeedbackEditDraft({ ...edit, interests: event.target.value })} placeholder={t.feedback.onePerLine} /></label>
-                        <label className="grid gap-1 font-bold">{t.feedback.avoid}<textarea className="min-h-20 rounded-lg border p-2 font-normal" value={edit.exclusions} onChange={(event) => setFeedbackEditDraft({ ...edit, exclusions: event.target.value })} placeholder={t.feedback.onePerLine} /></label>
-                        <div className="grid gap-3 sm:grid-cols-2">
-                          <label className="grid gap-1 font-bold">{t.feedback.pace}<input className="min-h-10 rounded-lg border px-2 font-normal" value={edit.pace} onChange={(event) => setFeedbackEditDraft({ ...edit, pace: event.target.value })} /></label>
-                          <label className="grid gap-1 font-bold">{t.feedback.budget}<input className="min-h-10 rounded-lg border px-2 font-normal" value={edit.budget} onChange={(event) => setFeedbackEditDraft({ ...edit, budget: event.target.value })} /></label>
-                        </div>
-                      </div>
-                    ) : (
-                      <>
-                        <p className="mt-2"><strong>{t.feedback.interpretation}</strong> {feedback.interpretation.summary}{feedback.interpretationEdited ? <span className="ml-2 rounded-full border px-2 py-1 text-xs font-bold">{t.feedback.edited}</span> : null}</p>
-                        <p className="mt-1 text-sm text-muted-foreground">{t.feedback.interests}：{feedback.interpretation.interests.join("、") || t.feedback.none}・{t.feedback.avoid}：{feedback.interpretation.exclusions.join("、") || t.feedback.none}・{t.feedback.pace}：{feedback.interpretation.pace ?? t.feedback.unchanged}・{t.feedback.budget}：{feedback.interpretation.budget ?? t.feedback.unchanged}</p>
-                      </>
-                    )}
-                    {feedback.status === "pending" && feedback.isOwn ? (
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <button className="min-h-10 rounded-lg bg-accent px-3 font-bold" disabled={pending !== null || Boolean(edit && !edit.summary.trim())} onClick={() => void decideFeedback(feedback, "confirm")}>{edit ? t.feedback.confirmEdited : t.feedback.confirm}</button>
-                        {edit
-                          ? <button className="min-h-10 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => { setEditingFeedbackId(null); setFeedbackEditDraft(null); }}>{t.feedback.cancelEdit}</button>
-                          : <button className="min-h-10 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => editFeedback(feedback)}>{t.feedback.edit}</button>}
-                        <button className="min-h-10 rounded-lg border px-3 font-bold" disabled={pending !== null} onClick={() => void decideFeedback(feedback, "reject")}>{t.feedback.reject}</button>
-                      </div>
-                    ) : <span className="mt-2 inline-block text-sm font-bold">{t.feedbackStatus[feedback.status]}</span>}
-                  </article>
-                );
-              })}
-            </div>
-          </section>
         </div>
       ) : null}
       <SelectionBar

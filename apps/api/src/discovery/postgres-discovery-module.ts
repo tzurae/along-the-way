@@ -1,11 +1,8 @@
 import type {
   CandidateProposalDto,
-  CreateDiscoveryFeedbackInput,
   DecideCandidateProposalInput,
-  DecideDiscoveryFeedbackInput,
   DiscoveryDecisionDto,
   DiscoveryEndorsement,
-  DiscoveryFeedbackDto,
   DiscoveryShortfallDto,
   DiscoveryWorkspaceDto,
   GenerateDiscoveryInput,
@@ -29,6 +26,7 @@ import {
   replayed,
   requireIdempotencyKey,
   requireOwner as requireTripOwner,
+  requireScheduler,
   type DatabaseExecutor,
 } from "../private-trips/postgres-private-trip-store";
 import {
@@ -43,7 +41,6 @@ import {
   type DiscoveryModel,
   type DiscoverySearchPlan,
   type DiscoveryTripFacts,
-  type InterpretedDiscoveryFeedback,
   type StructuredDiscoveryBrief,
 } from "./discovery-model";
 import type { DiscoveryModule } from "./discovery-module";
@@ -72,11 +69,9 @@ const SHORTFALL_CODES: readonly DiscoveryShortfallDto["code"][] = [
 
 /** Research runs one trip may start per hour; each run also incurs Google calls. */
 const RESEARCH_PER_TRIP_PER_HOUR = 6;
-/** All billed AI requests one trip or one member may start per hour. */
-const AI_REQUESTS_PER_TRIP_PER_HOUR = 10;
-const AI_REQUESTS_PER_ACCOUNT_PER_HOUR = 10;
+/** Research runs one member may start across all trips per hour. */
+const RESEARCH_PER_ACCOUNT_PER_HOUR = 10;
 const GENERATE_OPERATION_PREFIX = "discovery:generate:";
-const FEEDBACK_OPERATION_PREFIX = "discovery:feedback:";
 const AI_LIMIT_LOCK_PREFIX = "discovery:ai-limit:";
 const WEB_EVIDENCE_FRESHNESS_MS = 30 * 24 * 60 * 60 * 1_000;
 
@@ -149,23 +144,6 @@ function storedQuestionAnswers(value: unknown) {
   });
 }
 
-function validatedStringList(value: unknown, field: string) {
-  if (!Array.isArray(value) || value.length > 12 || value.some((entry) => typeof entry !== "string")) {
-    throw new AppError("validation_error", `${field} must be an array of at most 12 strings`);
-  }
-  return value.map((entry) => requiredText(entry, field, 200));
-}
-
-function validatedInterpretation(input: DecideDiscoveryFeedbackInput["interpretation"]) {
-  if (!input) return null;
-  return {
-    interests: validatedStringList(input.interests, "interpretation.interests"),
-    exclusions: validatedStringList(input.exclusions, "interpretation.exclusions"),
-    pace: input.pace === null ? null : requiredText(input.pace, "interpretation.pace", 500),
-    budget: input.budget === null ? null : requiredText(input.budget, "interpretation.budget", 500),
-    summary: requiredText(input.summary, "interpretation.summary", 2_000),
-  };
-}
 /**
  * Older idempotent workspace snapshots lack later additive fields. A retry uses the
  * documented empty or unknown value instead of rejecting a response already returned.
@@ -205,14 +183,6 @@ function upgradeStoredWorkspace(value: unknown) {
       })
       : workspace.proposals,
     decided: Array.isArray(workspace.decided) ? workspace.decided : [],
-    feedback: Array.isArray(workspace.feedback)
-      ? workspace.feedback.map((feedback) => ({
-        proposalName: null,
-        interpretationEdited: false,
-        isOwn: false,
-        ...jsonObject(feedback),
-      }))
-      : workspace.feedback,
   };
 }
 
@@ -440,7 +410,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     }
     const questionAnswers = storedQuestionAnswers(brief.question_answers);
     const trip = await this.tripFacts(userId, tripId);
-    const feedback = await this.confirmedFeedback(tripId);
     const rejected = await this.database.selectFrom("candidate_proposals")
       .select(["provider_place_id", "name"])
       .where("trip_id", "=", tripId)
@@ -450,7 +419,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       await lockMutation(transaction, userId, operation, key);
       const existing = await replayed(transaction, userId, operation, key);
       if (existing) return existing;
-      await this.claimAiSlot(transaction, userId, tripId, "research");
+      await this.claimAiSlot(transaction, userId, tripId);
       await remember(transaction, userId, operation, key, {
         type: AI_REQUEST_STATE,
         state: "in-progress",
@@ -462,7 +431,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       const plan = await this.model.plan({
         brief: brief.original_text,
         trip,
-        confirmedFeedback: feedback,
         questionAnswers,
       });
       if (this.placeLookup.available === false) {
@@ -472,7 +440,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         brief: plan.structuredBrief,
         request: plan.request,
         trip,
-        confirmedFeedback: feedback,
         questionAnswers,
         rejectedPlaces: [...new Set(rejected.map((row) => row.name))],
         outputLanguage: plan.outputLanguage,
@@ -807,41 +774,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     });
   }
 
-  async acceptProposal(
-    userId: string,
-    tripId: string,
-    proposalId: string,
-    rawKey: string,
-    input: DecideCandidateProposalInput,
-  ) {
-    uuid(tripId, "tripId");
-    uuid(proposalId, "proposalId");
-    const key = requireIdempotencyKey(rawKey);
-    const version = expectedVersion(input.expectedVersion);
-    const operation = `discovery:accept:${proposalId}`;
-    return this.database.transaction().execute(async (transaction) => {
-      await requireTripOwner(transaction, userId, tripId);
-      await lockMutation(transaction, userId, operation, key);
-      await transaction.selectFrom("trips").select("id").where("id", "=", tripId)
-        .forUpdate().executeTakeFirstOrThrow();
-      await requireTripOwner(transaction, userId, tripId);
-      const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replayedWorkspace(replay);
-      await PostgresTripPlaceModule.reconcileLegacyPlacesInTransaction(transaction, tripId, this.now);
-      const proposal = await transaction.selectFrom("candidate_proposals").selectAll()
-        .where("id", "=", proposalId).where("trip_id", "=", tripId)
-        .forUpdate().executeTakeFirst();
-      if (!proposal) throw new AppError("discovery_proposal_not_found", "Candidate proposal not found", 404);
-      await this.acceptProposalInTransaction(transaction, userId, tripId, proposal, version, {
-        resumeKey: key,
-        scheduling: false,
-      });
-      const response = await this.readWorkspace(transaction, tripId, userId);
-      await remember(transaction, userId, operation, key, response);
-      return response;
-    });
-  }
-
   async scheduleProposals(
     userId: string,
     tripId: string,
@@ -865,11 +797,11 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     const key = requireIdempotencyKey(rawKey);
     const operation = `discovery:schedule:${tripId}`;
     return this.database.transaction().execute(async (transaction) => {
-      await requireTripOwner(transaction, userId, tripId);
+      await requireScheduler(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
       await transaction.selectFrom("trips").select("id").where("id", "=", tripId)
         .forUpdate().executeTakeFirstOrThrow();
-      await requireTripOwner(transaction, userId, tripId);
+      await requireScheduler(transaction, userId, tripId);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedWorkspace(replay);
       await PostgresTripPlaceModule.reconcileLegacyPlacesInTransaction(transaction, tripId, this.now);
@@ -1096,151 +1028,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     });
   }
 
-  async createFeedback(
-    userId: string,
-    tripId: string,
-    rawKey: string,
-    input: CreateDiscoveryFeedbackInput,
-  ) {
-    uuid(tripId, "tripId");
-    const key = requireIdempotencyKey(rawKey);
-    const originalText = requiredText(input.originalText, "originalText", 2_000);
-    if ("proposalId" in input) {
-      throw new AppError("validation_error", "Feedback must apply to the whole trip");
-    }
-    const operation = `${FEEDBACK_OPERATION_PREFIX}${tripId}`;
-    await this.requireMember(this.database, userId, tripId);
-    const earlyReplay = await replayed(this.database, userId, operation, key);
-    if (earlyReplay) return aiRequestReplay(earlyReplay);
-    const claimedReplay = await this.database.transaction().execute(async (transaction) => {
-      await lockMutation(transaction, userId, operation, key);
-      const existing = await replayed(transaction, userId, operation, key);
-      if (existing) return existing;
-      await this.claimAiSlot(transaction, userId, tripId, "feedback");
-      await remember(transaction, userId, operation, key, {
-        type: AI_REQUEST_STATE,
-        state: "in-progress",
-      });
-      return null;
-    });
-    if (claimedReplay) return aiRequestReplay(claimedReplay);
-    let interpretation: InterpretedDiscoveryFeedback;
-    try {
-      interpretation = await this.model.interpretFeedback({ text: originalText, proposalName: null });
-    } catch (error) {
-      const failure = error instanceof DiscoveryModelUnavailableError || error instanceof DiscoveryModelResponseError
-        ? new AppError("model_unavailable", error.message, 503)
-        : null;
-      await this.database.updateTable("mutation_requests").set({
-        response: {
-          type: AI_REQUEST_STATE,
-          state: "failed",
-          code: "model_unavailable",
-          message: failure?.message ?? "The feedback interpretation failed; try again",
-        },
-      })
-        .where("actor_id", "=", userId)
-        .where("operation", "=", operation)
-        .where("idempotency_key", "=", key)
-        .execute();
-      if (failure) throw failure;
-      throw error;
-    }
-    return this.database.transaction().execute(async (transaction) => {
-      await this.requireMember(transaction, userId, tripId);
-      await lockMutation(transaction, userId, operation, key);
-      const replay = await replayed(transaction, userId, operation, key);
-      if (replay && !isAiRequestClaim(replay)) return replayedWorkspace(replay);
-      const feedback = await transaction.insertInto("discovery_feedback").values({
-        trip_id: tripId,
-        proposal_id: null,
-        actor_id: userId,
-        original_text: originalText,
-        interpretation: {
-          interests: interpretation.interests,
-          exclusions: interpretation.exclusions,
-          pace: interpretation.pace,
-          budget: interpretation.budget,
-          summary: interpretation.summary,
-        },
-        status: "pending",
-        decided_at: null,
-      }).returning("id").executeTakeFirstOrThrow();
-      await recordEvent(transaction, {
-        tripId,
-        actorId: userId,
-        eventType: "discovery.feedback_interpreted",
-        targetType: "discovery_feedback",
-        targetId: feedback.id,
-        summary: "Interpreted discovery feedback for member confirmation",
-      });
-      const response = await this.readWorkspace(transaction, tripId, userId);
-      await transaction.updateTable("mutation_requests").set({ response })
-        .where("actor_id", "=", userId)
-        .where("operation", "=", operation)
-        .where("idempotency_key", "=", key)
-        .execute();
-      return response;
-    });
-  }
-
-  async decideFeedback(
-    userId: string,
-    tripId: string,
-    feedbackId: string,
-    rawKey: string,
-    input: DecideDiscoveryFeedbackInput,
-  ) {
-    uuid(tripId, "tripId");
-    uuid(feedbackId, "feedbackId");
-    const key = requireIdempotencyKey(rawKey);
-    const version = expectedVersion(input.expectedVersion);
-    if (input.decision !== "confirm" && input.decision !== "reject") {
-      throw new AppError("validation_error", "decision must be confirm or reject");
-    }
-    const interpretation = validatedInterpretation(input.interpretation);
-    if (input.decision === "reject" && interpretation) {
-      throw new AppError("validation_error", "interpretation can only be edited when confirming feedback");
-    }
-    const operation = `discovery:feedback-decision:${feedbackId}`;
-    return this.database.transaction().execute(async (transaction) => {
-      await this.requireMember(transaction, userId, tripId);
-      await lockMutation(transaction, userId, operation, key);
-      const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replayedWorkspace(replay);
-      const updated = await transaction.updateTable("discovery_feedback").set({
-        ...(interpretation ? { interpretation, interpretation_edited: true } : {}),
-        status: input.decision === "confirm" ? "confirmed" : "rejected",
-        decided_at: this.now(),
-        version: sql`version + 1`,
-        updated_at: this.now(),
-      }).where("id", "=", feedbackId)
-        .where("trip_id", "=", tripId)
-        .where("actor_id", "=", userId)
-        .where("status", "=", "pending")
-        .where("version", "=", version)
-        .returning("id")
-        .executeTakeFirst();
-      if (!updated) {
-        const current = await transaction.selectFrom("discovery_feedback").select(["version", "actor_id"])
-          .where("id", "=", feedbackId).where("trip_id", "=", tripId).executeTakeFirst();
-        if (!current) throw new AppError("discovery_feedback_not_found", "Discovery feedback not found", 404);
-        if (current.actor_id !== userId) throw new AppError("forbidden", "Only the feedback author can decide it", 403);
-        throw new AppError("conflict", "The discovery feedback changed; reload before deciding", 409, undefined, current.version);
-      }
-      await recordEvent(transaction, {
-        tripId,
-        actorId: userId,
-        eventType: input.decision === "confirm" ? "discovery.feedback_confirmed" : "discovery.feedback_rejected",
-        targetType: "discovery_feedback",
-        targetId: feedbackId,
-        summary: input.decision === "confirm" ? "Confirmed interpreted discovery feedback" : "Rejected interpreted discovery feedback",
-      });
-      const response = await this.readWorkspace(transaction, tripId, userId);
-      await remember(transaction, userId, operation, key, response);
-      return response;
-    });
-  }
 
   private async requireMember(executor: DatabaseExecutor, userId: string, tripId: string) {
     const member = await executor.selectFrom("trip_members").select("user_id")
@@ -1252,15 +1039,13 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
   }
 
   /**
-   * Model calls cost money, so research and feedback interpretation share account and trip
-   * limits. Research keeps its tighter trip limit because it also incurs Google lookups.
-   * A request counts once claimed, whatever its outcome; an idempotent replay never gets here.
+   * Model calls cost money, so research has per-account and per-trip limits. A request
+   * counts once claimed, whatever its outcome; an idempotent replay never gets here.
    */
   private async claimAiSlot(
     transaction: Transaction<AlongTheWayDatabase>,
     userId: string,
     tripId: string,
-    kind: "research" | "feedback",
   ) {
     for (const lock of [
       `${AI_LIMIT_LOCK_PREFIX}account:${userId}`,
@@ -1268,12 +1053,9 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     ]) {
       await sql`select pg_advisory_xact_lock(hashtextextended(${lock}, 0))`.execute(transaction);
     }
-    const tripOperations = [
-      `${GENERATE_OPERATION_PREFIX}${tripId.toLowerCase()}`,
-      `${FEEDBACK_OPERATION_PREFIX}${tripId.toLowerCase()}`,
-    ];
-    // Both arms lead with actor_id, the primary key's first column: the trip's claims can
-    // only come from its members, removed ones included. The database clock stamps created_at.
+    const tripOperation = `${GENERATE_OPERATION_PREFIX}${tripId.toLowerCase()}`;
+    // The query leads with actor_id, the primary key's first column. Trip claims can only
+    // come from its members, removed ones included. The database clock stamps created_at.
     const recent = await transaction.selectFrom("mutation_requests")
       .select([
         "operation",
@@ -1282,36 +1064,26 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         sql<boolean>`created_at > now() - interval '10 minutes'`.as("started_recently"),
         sql<number>`ceil(extract(epoch from (created_at + interval '1 hour' - now())))::int`.as("seconds_left"),
       ])
-      .where((where) => where.or([
-        where("operation", "like", `${GENERATE_OPERATION_PREFIX}%`),
-        where("operation", "like", `${FEEDBACK_OPERATION_PREFIX}%`),
-      ]))
+      .where("operation", "like", `${GENERATE_OPERATION_PREFIX}%`)
       .where("created_at", ">", sql<Date>`now() - interval '1 hour'`)
       .where((where) => where.or([
         where.and([
           where("actor_id", "in", where.selectFrom("trip_members").select("user_id").where("trip_id", "=", tripId)),
-          where("operation", "in", tripOperations),
+          where("operation", "=", tripOperation),
         ]),
         where("actor_id", "=", userId),
       ]))
       .execute();
-    const forTrip = recent.filter((row) => tripOperations.includes(row.operation));
+    const forTrip = recent.filter((row) => row.operation === tripOperation);
     // Still marked running after ten minutes means the process running it died.
     if (forTrip.some((row) => row.started_recently && row.claim_state === "in-progress")) {
       throw new AppError("research_in_progress", "An AI request for this trip is already running", 409);
     }
     const byAccount = recent.filter((row) => row.actor_id === userId);
-    const limits: Array<[typeof recent, number]> = [
-      [forTrip, AI_REQUESTS_PER_TRIP_PER_HOUR],
-      [byAccount, AI_REQUESTS_PER_ACCOUNT_PER_HOUR],
-    ];
-    if (kind === "research") {
-      limits.unshift([
-        forTrip.filter((row) => row.operation.startsWith(GENERATE_OPERATION_PREFIX)),
-        RESEARCH_PER_TRIP_PER_HOUR,
-      ]);
-    }
-    for (const [rows, limit] of limits) {
+    for (const [rows, limit] of [
+      [forTrip, RESEARCH_PER_TRIP_PER_HOUR],
+      [byAccount, RESEARCH_PER_ACCOUNT_PER_HOUR],
+    ] as const) {
       if (rows.length >= limit) {
         throw new AppError(
           "research_limit_reached",
@@ -1344,27 +1116,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     };
   }
 
-  private async confirmedFeedback(tripId: string) {
-    const rows = await this.database.selectFrom("discovery_feedback as feedback")
-      .leftJoin("candidate_proposals as proposal", "proposal.id", "feedback.proposal_id")
-      .select([
-        "feedback.original_text",
-        "feedback.interpretation",
-        "feedback.interpretation_edited",
-        "proposal.name as proposal_name",
-      ])
-      .where("feedback.trip_id", "=", tripId)
-      .where("feedback.status", "=", "confirmed")
-      .orderBy("feedback.created_at")
-      .execute();
-    return rows.map((row) => [
-      row.proposal_name ? `Place: ${row.proposal_name}` : "Overall feedback",
-      ...(row.interpretation_edited ? [] : [`Original: ${row.original_text}`]),
-      row.interpretation_edited
-        ? `Member-corrected interpretation (authoritative; overrides original text): ${JSON.stringify(row.interpretation)}`
-        : `Member-confirmed interpretation: ${JSON.stringify(row.interpretation)}`,
-    ].join("\n"));
-  }
 
   private async readProposal(
     executor: DatabaseExecutor,
@@ -1624,14 +1375,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       });
       evidenceByProposal.set(row.proposal_id, values);
     }
-    const feedbackRows = await executor.selectFrom("discovery_feedback as feedback")
-      .leftJoin("candidate_proposals as proposal", "proposal.id", "feedback.proposal_id")
-      .selectAll("feedback")
-      .select("proposal.name as proposal_name")
-      .where("feedback.trip_id", "=", tripId)
-      .orderBy("feedback.created_at", "desc")
-      .orderBy("feedback.id", "desc")
-      .execute();
     return {
       brief: briefRow ? {
         originalText: briefRow.original_text,
@@ -1687,27 +1430,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         };
       }),
       decided,
-      feedback: feedbackRows.map((feedback): DiscoveryFeedbackDto => {
-        const interpretation = jsonObject(feedback.interpretation);
-        return {
-          id: feedback.id,
-          proposalId: feedback.proposal_id,
-          proposalName: feedback.proposal_name,
-          originalText: feedback.original_text,
-          interpretation: {
-            interests: jsonStrings(interpretation.interests),
-            exclusions: jsonStrings(interpretation.exclusions),
-            pace: typeof interpretation.pace === "string" ? interpretation.pace : null,
-            budget: typeof interpretation.budget === "string" ? interpretation.budget : null,
-            summary: typeof interpretation.summary === "string" ? interpretation.summary : "",
-          },
-          interpretationEdited: feedback.interpretation_edited,
-          isOwn: feedback.actor_id === userId,
-          status: feedback.status,
-          version: feedback.version,
-          createdAt: isoTimestamp(feedback.created_at),
-        };
-      }),
       modelAvailable: this.model.available,
       placeProviderAvailable: this.placeLookup.available !== false,
     };
