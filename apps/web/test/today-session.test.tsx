@@ -98,15 +98,24 @@ beforeEach(() => {
     if (input.endsWith("/places/legacy-UNSCHEDULED") && init?.method === "DELETE") {
       return reply({ error: { code: "forbidden", message: "server copy" } }, 403);
     }
-    if (input.endsWith("/place-order")) {
+    if (input.endsWith("/arrangement")) {
+      const body: unknown = JSON.parse(String(init?.body));
+      expect(init?.method).toBe("PUT");
+      expect(body).toEqual({
+        orderedTripPlaceIds: ["SECOND", "FIRST"],
+        expectedVersion: dayVersion,
+        legModes: {},
+      });
       savedOrder = true;
-      return reply({ orderedTripPlaceIds: ["SECOND", "FIRST"], version: ++dayVersion });
+      return reply({ tripPlaces: todayWishlist(true) });
     }
     if (input.endsWith("/timetable")) {
       const body: unknown = JSON.parse(String(init?.body));
       if (!body || typeof body !== "object" || !("order" in body) || typeof body.order !== "string") throw new Error("Missing timetable order");
       const order = body.order;
-      return reply({ timetable: { dayId: "day21", date: "2026-10-21", window: { startMinute: 540, endMinute: 1140, version: dayVersion }, order,
+      return reply({ timetable: { dayId: "day21", date: "2026-10-21", window: {
+        startMinute: 540, endMinute: 1140, version: dayVersion, travelMode: "transit", walkLimitMinutes: 15,
+      }, order,
         orderedTripPlaceIds: order === "suggested" ? ["SECOND", "FIRST"] : ["FIRST", "SECOND"], startsAt: null, endsAt: null, rows: [], unscheduled: [],
         load: { busyMinutes: 120, windowMinutes: 600, level: "relaxed" },
         capacity: { arrival: null, departure: null, gaps: [{ startMinute: 540, endMinute: 1140 }] } } });
@@ -444,11 +453,17 @@ it("updates the offline wishlist order and day timezone after accepting a sugges
   await click(document.querySelector<HTMLButtonElement>('[data-trip-tab="itinerary"]')!);
   expect(button("安排這一天", document.getElementById("itinerary-segment-panel-daily")!)).toBeEnabled();
   await click(button("幫我排順路", document.getElementById("itinerary-segment-panel-daily")!));
-  await waitFor(() => expect(button("使用這個順序")).toBeEnabled());
-  await click(button("使用這個順序"));
-  expect(savedOrder).toBe(true);
-  expect(snapshot().model.days[0]!.wishlist.map((place) => place.id)).toEqual(["SECOND", "FIRST"]);
-  expect(snapshot().model.days[0]!.timeZone).toBe("Europe/Paris");
+  const save = await waitFor(() => {
+    const candidate = button("儲存為第 1 天的安排");
+    expect(candidate).toBeEnabled();
+    return candidate;
+  });
+  await click(save);
+  await waitFor(() => {
+    expect(savedOrder).toBe(true);
+    expect(snapshot().model.days[0]!.wishlist.map((place) => place.id)).toEqual(["SECOND", "FIRST"]);
+    expect(snapshot().model.days[0]!.timeZone).toBe("Europe/Paris");
+  });
 });
 
 it.each(["change", "revocation"] as const)("does not let the old trip's %s supersede an in-flight Back navigation", async (invalidation) => {

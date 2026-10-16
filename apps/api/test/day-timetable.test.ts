@@ -28,7 +28,7 @@ function travelTable(minutes: Record<string, number | null> = {}) {
 }
 
 function stop(id: string, overrides: Partial<TimetableStop> = {}): TimetableStop {
-  return { id, name: id, type: "other", durationMinutes: 60, hours: { status: "unknown" }, ...overrides };
+  return { id, name: id, type: "other", durationMinutes: 60, hours: { status: "unknown", cause: "none" }, ...overrides };
 }
 
 function input(overrides: Partial<TimetableInput>): TimetableInput {

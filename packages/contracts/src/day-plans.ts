@@ -1,13 +1,76 @@
-import type { ItineraryItemType } from "./trip-skeleton";
+import type { ItineraryItemType, PlaceType } from "./trip-skeleton";
 import { isRecord } from "./type-guards";
 
-export type DayLegMode = "walking" | "transit";
+/** Stay used when nobody entered one, by place type; the scheduler and the client's estimates share it. */
+export const DEFAULT_STAY_MINUTES: Record<PlaceType, number> = {
+  activity: 90,
+  worship: 60,
+  museum: 90,
+  nature: 75,
+  restaurant: 75,
+  cafe: 45,
+  shopping: 60,
+  other: 60,
+  lodging: 60,
+  station: 30,
+  airport: 30,
+};
+
+/** A place's stay: what someone entered, else the default for its type. */
+export function stayMinutesFor(place: { type: PlaceType; durationMinutes: number | null }) {
+  return place.durationMinutes ?? DEFAULT_STAY_MINUTES[place.type];
+}
+
+/**
+ * A day's list after taking `removedId` out. Placed stops keep their order and the ones the day
+ * could not hold move after them, so a stop that the freed time now lets in can only use time
+ * after every placed one: taking a place out never pushes another out.
+ */
+export function orderWithout(orderedIds: readonly string[], removedId: string, placedIds: readonly string[]) {
+  const placed = new Set(placedIds);
+  const rest = orderedIds.filter((id) => id !== removedId);
+  return [...rest.filter((id) => placed.has(id)), ...rest.filter((id) => !placed.has(id))];
+}
+
+/**
+ * What dropping a place into a day comes to. It fits when it is placed and every place placed
+ * before still is; else taxi, when the server found a taxi choice that fits; else a swap, when
+ * it is placed only by pushing others out; else it does not fit and nothing changes.
+ */
+export type AddOutcome<Taxi> =
+  | { kind: "fits" }
+  | { kind: "taxi"; taxi: Taxi }
+  | { kind: "swap"; pushed: string[] }
+  | { kind: "nofit" };
+
+export function addOutcome<Taxi>(
+  placedBefore: readonly string[],
+  placedAfter: readonly string[],
+  placeId: string,
+  taxi: Taxi | null,
+): AddOutcome<Taxi> {
+  const after = new Set(placedAfter);
+  const pushed = placedBefore.filter((id) => !after.has(id));
+  if (after.has(placeId) && pushed.length === 0) return { kind: "fits" };
+  if (taxi !== null) return { kind: "taxi", taxi };
+  return after.has(placeId) ? { kind: "swap", pushed } : { kind: "nofit" };
+}
+
+/** How a leg was travelled. */
+export type DayLegMode = "walking" | "transit" | "taxi";
+
+/** How members choose to travel: a day's default, or one leg's. */
+export type TravelMode = "transit" | "taxi" | "walk";
+export const TRAVEL_MODES: readonly TravelMode[] = ["transit", "taxi", "walk"];
+/** Minutes added to a taxi ride for waiting and getting in and out. */
+export const TAXI_BUFFER_MINUTES = 5;
 
 export interface DayLegDto {
   fromName: string;
   toName: string;
-  /** Suggested way to travel; null when neither walking nor transit is known. */
+  /** Way travelled; null when the chosen way's time is unknown. */
   mode: DayLegMode | null;
+  /** Includes the taxi buffer for a taxi leg. */
   durationMinutes: number | null;
   walkingMinutes: number | null;
   transitMinutes: number | null;
@@ -25,13 +88,29 @@ export interface DayWindowDto {
 
 export interface SavedDayWindowDto extends DayWindowDto {
   version: number;
+  /** How the day's legs are travelled unless a leg says otherwise. */
+  travelMode: TravelMode;
+  /** Longest walk taken instead of transit (or a taxi), in minutes. */
+  walkLimitMinutes: number;
 }
 
-export type DayTimetableOrder = "current" | "suggested";
+/** `current` the day's saved order, `suggested` the shortest straight-line order, `custom` one a member arranged. */
+export type DayTimetableOrder = "current" | "suggested" | "custom";
 
 export interface CreateDayTimetableInput {
-  /** `current` keeps the day's order; `suggested` orders closest places first. */
+  /** `current` keeps the day's order; `suggested` orders closest places first; `custom` uses `orderedTripPlaceIds`. */
   order: DayTimetableOrder;
+  /** Only with `custom`: every located place planned on the day, each once. */
+  orderedTripPlaceIds?: string[];
+  /** Only with `custom`: a place to add; the server tries it in every slot and returns the best fit. */
+  insertTripPlaceId?: string;
+  /** Only with `custom`: how to reach a place, by trip place id; missing ones follow the day. */
+  legModes?: Record<string, TravelMode>;
+  /**
+   * Only with `custom`: a place just dropped into the list. When it does not fit (or pushes a
+   * placed one out), the server also tries taxi for the legs into and out of it.
+   */
+  taxiFallbackFor?: string;
 }
 
 export interface ApplyDayPlaceOrderInput {
@@ -41,6 +120,9 @@ export interface ApplyDayPlaceOrderInput {
 
 export interface UpdateDayWindowInput extends DayWindowDto {
   expectedVersion: number;
+  /** Omitted keeps the day's current value. */
+  travelMode?: TravelMode;
+  walkLimitMinutes?: number;
 }
 
 export interface DayPlaceOrderResponse {
@@ -64,8 +146,12 @@ export type DayTimetableRowDto =
       stayMinutes: number;
       /** The stay is a default for the place type, not a value someone entered. */
       stayEstimated: boolean;
-      /** `listed`: checked against Google opening hours, which never include last entry. */
-      hours: "listed" | "unknown";
+      /**
+       * `listed`: checked against Google opening hours, which never include last entry.
+       * Otherwise why hours were not checked: `none` Google has no hours for the place,
+       * `failed` the lookup failed (drafting again may succeed), `manual` not a Google place.
+       */
+      hours: "listed" | "none" | "failed" | "manual";
     }
   | {
       kind: "fixed";
@@ -150,6 +236,10 @@ export interface DayTimetableDto {
   unscheduled: UnscheduledPlaceDto[];
   load: DayLoadDto;
   capacity: DayCapacityDto;
+  /** Legs the draft travels differently from the day, keyed by the place they reach. */
+  legModes: Record<string, TravelMode>;
+  /** With `taxiFallbackFor`: the same list with taxi for the place's legs, when that fits and this does not. */
+  taxiAlternative: { legModes: Record<string, TravelMode>; timetable: DayTimetableDto } | null;
 }
 
 export interface DayTimetableResponse {
@@ -251,7 +341,7 @@ function leg(value: unknown): DayLegDto {
   return {
     fromName: text(row.fromName),
     toName: text(row.toName),
-    mode: row.mode === null ? null : oneOf(row.mode, ["walking", "transit"] as const),
+    mode: row.mode === null ? null : oneOf(row.mode, ["walking", "transit", "taxi"] as const),
     durationMinutes: nullableInteger(row.durationMinutes),
     walkingMinutes: nullableInteger(row.walkingMinutes),
     transitMinutes: nullableInteger(row.transitMinutes),
@@ -267,7 +357,18 @@ function nullableLeg(value: unknown) {
 
 function window(value: unknown): SavedDayWindowDto {
   const row = record(value);
-  return { startMinute: integer(row.startMinute), endMinute: integer(row.endMinute), version: integer(row.version) };
+  return {
+    startMinute: integer(row.startMinute),
+    endMinute: integer(row.endMinute),
+    version: integer(row.version),
+    travelMode: oneOf(row.travelMode, TRAVEL_MODES),
+    walkLimitMinutes: integer(row.walkLimitMinutes),
+  };
+}
+
+function legModes(value: unknown): Record<string, TravelMode> {
+  const row = record(value);
+  return Object.fromEntries(Object.entries(row).map(([id, mode]) => [id, oneOf(mode, TRAVEL_MODES)]));
 }
 
 function timetableRow(value: unknown): DayTimetableRowDto {
@@ -287,7 +388,7 @@ function timetableRow(value: unknown): DayTimetableRowDto {
         endMinute: integer(row.endMinute),
         stayMinutes: integer(row.stayMinutes),
         stayEstimated: bool(row.stayEstimated),
-        hours: oneOf(row.hours, ["listed", "unknown"] as const),
+        hours: oneOf(row.hours, ["listed", "none", "failed", "manual"] as const),
       };
     case "fixed":
       return {
@@ -338,7 +439,7 @@ function timetable(value: unknown): DayTimetableDto {
     dayId: text(row.dayId),
     date: text(row.date),
     window: window(row.window),
-    order: oneOf(row.order, ["current", "suggested"] as const),
+    order: oneOf(row.order, ["current", "suggested", "custom"] as const),
     orderedTripPlaceIds: list(row.orderedTripPlaceIds, text),
     startsAt: placeRef(row.startsAt),
     endsAt: placeRef(row.endsAt),
@@ -357,6 +458,11 @@ function timetable(value: unknown): DayTimetableDto {
       level: oneOf(load.level, ["relaxed", "balanced", "packed"] as const),
     },
     capacity: capacity(record(row.capacity)),
+    legModes: legModes(row.legModes ?? {}),
+    taxiAlternative: row.taxiAlternative == null ? null : {
+      legModes: legModes(record(row.taxiAlternative).legModes),
+      timetable: timetable(record(row.taxiAlternative).timetable),
+    },
   };
 }
 

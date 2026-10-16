@@ -5,17 +5,17 @@ import type {
   CreateDayTimetableInput,
   DayLegDto,
   DayTimetableDto,
+  DayTimetableOrder,
   SavedDayWindowDto,
   DayPlaceOrderResponse,
   TripPlanDayDto,
   TripPlanDto,
   TripPlanUnplacedDto,
   UpdateDayWindowInput,
+  TravelMode,
 } from "@along-the-way/contracts/day-plans";
-import type {
-  RouteObservation,
-  RouteObservationProvider,
-} from "@along-the-way/contracts/planning-observations";
+import { TRAVEL_MODES } from "@along-the-way/contracts/day-plans";
+import type { RouteObservationProvider } from "@along-the-way/contracts/planning-observations";
 import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
 import type { ItineraryItemDto, TimelineDayDto, TripSkeletonDto } from "@along-the-way/contracts/trip-skeleton";
 import type { Kysely, Transaction } from "kysely";
@@ -34,20 +34,22 @@ import {
 import type { TripPlaceModule } from "../trip-places/trip-place-module";
 import type { TripSkeletonModule } from "../trip-skeleton/trip-skeleton-module";
 import { orderByStraightLine, straightLineMeters, type GeoPoint } from "./day-route-order";
+import { stayMinutesFor } from "@along-the-way/contracts/day-plans";
 import {
-  DEFAULT_STAY_MINUTES,
   dayLoadLevel,
   scheduleDay,
   type TimetableBlock,
   type TimetableResult,
   type TimetableStop,
 } from "./day-timetable";
-import { hoursOn, type PlaceHoursLookup, type PlaceOpeningHours } from "./opening-hours";
+import { hoursOn, type LookedUpHours, type PlaceHoursLookup } from "./opening-hours";
 import { distributePlaces } from "./trip-distribution";
 import { tripPlanBasis } from "./trip-plan-basis";
+import { legFor, routeModesFor, taxiAlternative, walkLimitFor } from "./travel-modes";
 
-/** Walking is suggested when it takes at most this long. */
-const PREFERRED_WALK_MINUTES = 15;
+/** A lookup that failed (or a place that never had one): hours unknown, worth retrying. */
+const FAILED_LOOKUP: LookedUpHours = { missing: "failed" };
+
 const DAY_MINUTES = 24 * 60;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -131,6 +133,33 @@ function located(value: { latitude: number | null; longitude: number | null }) {
   return value.latitude !== null && value.longitude !== null;
 }
 
+/** A member's arranged day: located places on the day or on no day yet, each at most once. */
+function customOrder(ids: string[] | undefined, pool: Map<string, TripPlaceDto>) {
+  const ordered = (ids ?? []).map((id) => id.toLowerCase());
+  if (new Set(ordered).size !== ordered.length || ordered.some((id) => !pool.has(id))) {
+    throw new AppError("validation_error", "orderedTripPlaceIds must list located places on this day or on no day, each once");
+  }
+  return ordered;
+}
+
+/** A member's per-leg choices, kept only for places in the draft and known ways to travel. */
+function validLegModes(value: Record<string, TravelMode> | undefined, stops: Map<string, PlannedStop>) {
+  return Object.fromEntries(Object.entries(value ?? {}).flatMap(([id, mode]) => {
+    const key = id.toLowerCase();
+    return stops.has(key) && TRAVEL_MODES.includes(mode) ? [[key, mode] as const] : [];
+  })) as Record<string, TravelMode>;
+}
+
+function savedWindow(row: { day_start_minute: number; day_end_minute: number; version: number; travel_mode: TravelMode; walk_limit_minutes: number }): SavedDayWindowDto {
+  return {
+    startMinute: row.day_start_minute,
+    endMinute: row.day_end_minute,
+    version: row.version,
+    travelMode: row.travel_mode,
+    walkLimitMinutes: row.walk_limit_minutes,
+  };
+}
+
 
 /**
  * Every writer of day places, order or hours takes the trip row first, so they queue in one
@@ -152,7 +181,7 @@ function plannedStop(place: TripPlaceDto): PlannedStop {
 }
 
 function stayMinutes(place: TripPlaceDto) {
-  return place.durationMinutes ?? DEFAULT_STAY_MINUTES[place.type];
+  return stayMinutesFor(place);
 }
 
 /**
@@ -175,13 +204,6 @@ function unusableMinutes(context: DayContext) {
     countedUntil = Math.max(countedUntil, clippedEnd);
   }
   return total;
-}
-
-type AvailableObservation = Extract<RouteObservation, { status: "available" }>;
-
-function firstAvailable(observations: RouteObservation[], mode: RouteObservation["mode"]) {
-  return observations.find((entry): entry is AvailableObservation =>
-    entry.mode === mode && entry.status === "available") ?? null;
 }
 
 /** Applied order first; places without one keep their list order after them. */
@@ -232,14 +254,81 @@ export class PostgresDayPlanModule implements DayPlanModule {
     input: CreateDayTimetableInput,
   ): Promise<DayTimetableDto> {
     const order = input?.order;
-    if (order !== "current" && order !== "suggested") {
-      throw new AppError("validation_error", "order must be current or suggested");
+    if (order !== "current" && order !== "suggested" && order !== "custom") {
+      throw new AppError("validation_error", "order must be current, suggested or custom");
     }
+    const insertId = order === "custom" && input.insertTripPlaceId ? input.insertTripPlaceId.toLowerCase() : null;
+    const { context, planned, stops, stopsById, hours, storedModes } = await this.prepareDraft(
+      userId, tripId, dayId, order, insertId ? [...(input.orderedTripPlaceIds ?? []), insertId] : input.orderedTripPlaceIds,
+    );
+    // A member's draft says how each leg is travelled; the saved order uses what was saved.
+    const legModes = order === "custom" ? validLegModes(input.legModes, stopsById) : storedModes;
+    const legs = new Map<string, Promise<DayLegDto>>();
+    let orderedIds: string[];
+    let result: TimetableResult;
+    if (insertId) {
+      // Adding a place: keep the slot that fits the most places, then ends earliest, then travels least.
+      const { tries } = await this.everySlot(context, stops.map((stop) => stop.id).filter((id) => id !== insertId), insertId, stopsById, hours, legs, legModes);
+      let best = tries[0]!;
+      for (const entry of tries) {
+        const [a, b] = [entry.score, best.score];
+        if (a[0] < b[0] || (a[0] === b[0] && (a[1] < b[1] || (a[1] === b[1] && a[2] < b[2])))) best = entry;
+      }
+      ({ ids: orderedIds, result } = best);
+    } else {
+      orderedIds = order === "suggested"
+        ? orderByStraightLine(stops, context.night ?? context.start)
+        : stops.map((stop) => stop.id);
+      result = await this.draftDay(context, orderedIds.map((id) => stopsById.get(id)!), hours, legs, legModes);
+    }
+    // A place just added, at its best slot or where it was dropped: offer taxi when the day's way
+    // does not fit it (only that slot is tried, to keep drive lookups to two).
+    const fallbackId = insertId ?? (order === "custom" && input.taxiFallbackFor ? input.taxiFallbackFor.toLowerCase() : null);
+    if (!fallbackId || !stopsById.has(fallbackId)) return this.timetableDto(context, orderedIds, result, planned, order, legModes);
+    const alternative = await taxiAlternative({
+      orderedIds,
+      placeId: fallbackId,
+      legModes,
+      withPlace: result,
+      draft: (ids, modes) => this.draftDay(context, ids.map((id) => stopsById.get(id)!), hours, legs, modes),
+    });
+    return this.timetableDto(context, orderedIds, result, planned, order, legModes, alternative && {
+      legModes: alternative.legModes,
+      timetable: this.timetableDto(context, orderedIds, alternative.result, planned, order, alternative.legModes),
+    });
+  }
+
+  /** Drafts `insertId` in every slot of `base`; all tries share one route lookup per pair. */
+  private async everySlot(
+    context: DayContext,
+    base: string[],
+    insertId: string,
+    stopsById: Map<string, PlannedStop>,
+    hours: Map<string, LookedUpHours>,
+    legs: Map<string, Promise<DayLegDto>>,
+    legModes: Record<string, TravelMode> = {},
+  ) {
+    const tries: Array<{ ids: string[]; result: TimetableResult; score: [number, number, number] }> = [];
+    for (let index = 0; index <= base.length; index += 1) {
+      const ids = [...base.slice(0, index), insertId, ...base.slice(index)];
+      const result = await this.draftDay(context, ids.map((id) => stopsById.get(id)!), hours, legs, legModes);
+      const placed = result.rows.filter((row) => row.kind === "visit").length;
+      const last = result.rows.at(-1);
+      const end = last?.kind === "return" ? last.arriveMinute : Math.max(0, ...result.rows.flatMap((row) => (row.kind === "visit" ? [row.endMinute] : [])));
+      tries.push({ ids, result, score: [-placed, end, result.load.busyMinutes] });
+    }
+    return { tries };
+  }
+
+  /** Reads the day once and resolves its stops: the day's places, or a member's custom list. */
+  private async prepareDraft(userId: string, tripId: string, dayId: string, order: DayTimetableOrder, customList: string[] | undefined) {
     const before = await this.getWindow(userId, tripId, dayId);
-    // Both reads authorize membership and resolve names, coordinates, and zones.
-    const [skeleton, places] = await Promise.all([
+    // Both reads authorize membership and resolve names, coordinates, and zones. Saved ways of
+    // arrival are read before the version is checked again, so they belong to that version.
+    const [skeleton, places, arrivalModes] = await Promise.all([
       this.tripSkeleton.getSkeleton(userId, tripId),
       this.tripPlaces.list(userId, tripId),
+      this.arrivalModes(tripId),
     ]);
     const day = skeleton.days.find((entry) => entry.id === dayId.toLowerCase());
     if (!day) throw new AppError("trip_day_not_found", "Trip day not found", 404);
@@ -247,26 +336,38 @@ export class PostgresDayPlanModule implements DayPlanModule {
     if (window.version !== before.version) {
       throw new AppError("conflict", "The day changed while its draft was being read", 409, undefined, window.version, dayId);
     }
-
     const planned = this.plannedOn(places, day.id);
-    const stops = planned.filter(located).map(plannedStop);
+    // A custom order may leave out the day's places and bring in located places with no day yet.
+    const pool = order === "custom"
+      ? places.filter((place) => !place.scheduled && located(place) && (place.assignedDayId === day.id || place.assignedDayId === null))
+      : planned.filter(located);
+    const poolById = new Map(pool.map((place) => [place.id, place]));
+    const stops = (order === "custom" ? customOrder(customList, poolById).map((id) => poolById.get(id)!) : pool).map(plannedStop);
     const context = this.dayContext(skeleton, day, window, stops, null);
-    const orderedIds = order === "suggested"
-      ? orderByStraightLine(stops, context.night ?? context.start)
-      : stops.map((stop) => stop.id);
     const stopsById = new Map(stops.map((stop) => [stop.id, stop]));
-    const ordered = orderedIds.map((id) => stopsById.get(id)!);
-    const hours = await this.hoursFor(ordered.map((stop) => stop.place));
-    const result = await this.draftDay(context, ordered, hours);
-    return this.timetableDto(context, orderedIds, result, planned, order);
+    const hours = await this.hoursFor(stops.map((stop) => stop.place));
+    return { context, planned, stops, stopsById, hours, storedModes: arrivalModes.get(day.id) ?? {} };
+  }
+
+  /** Saved ways of arrival, by day and then by place; a place without one follows its day. */
+  private async arrivalModes(tripId: string) {
+    const rows = await this.database.selectFrom("trip_place_day_assignments")
+      .select(["trip_day_id", "trip_place_id", "arrival_mode"])
+      .where("trip_id", "=", tripId).where("arrival_mode", "is not", null).execute();
+    const byDay = new Map<string, Record<string, TravelMode>>();
+    for (const row of rows) {
+      byDay.set(row.trip_day_id, { ...byDay.get(row.trip_day_id), [row.trip_place_id]: row.arrival_mode as TravelMode });
+    }
+    return byDay;
   }
 
   async tripPlan(userId: string, tripId: string): Promise<TripPlanDto> {
     // Fingerprint before and after the reads: a plan never claims a basis it was not built on.
     const basis = await tripPlanBasis(this.database, tripId);
-    const [skeleton, places] = await Promise.all([
+    const [skeleton, places, arrivalModes] = await Promise.all([
       this.tripSkeleton.getSkeleton(userId, tripId),
       this.tripPlaces.list(userId, tripId),
+      this.arrivalModes(tripId),
     ]);
     const windows = await this.readWindows(tripId);
     if (await tripPlanBasis(this.database, tripId) !== basis) {
@@ -316,7 +417,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
         voteCount: stop.place.votingAvailable ? stop.place.voteCount : 0,
         hours: (dayId: string) => {
           const context = contextById.get(dayId)!;
-          return hoursOn(candidateHours.get(stop.id) ?? null, context.day.date, context.today);
+          return hoursOn(candidateHours.get(stop.id) ?? FAILED_LOOKUP, context.day.date, context.today);
         },
       })),
     );
@@ -333,13 +434,14 @@ export class PostgresDayPlanModule implements DayPlanModule {
       const keptStops = keptPlaces.filter(located).map(plannedStop);
       const hours = await this.hoursFor(keptStops.map((stop) => stop.place), candidateHours);
       const stops = [...keptStops, ...addedIds.map((id) => candidateById.get(id)!)];
-      const result = await this.draftDay(context, stops, hours);
-      return { context, addedIds, keptPlaces, keptStops, result };
+      const legModes = arrivalModes.get(context.day.id) ?? {};
+      const result = await this.draftDay(context, stops, hours, undefined, legModes);
+      return { context, addedIds, keptPlaces, keptStops, result, legModes };
     }));
     const days: TripPlanDayDto[] = [];
     for (const entry of checked) {
       if (!entry) continue;
-      const { context, addedIds, keptPlaces, keptStops, result } = entry;
+      const { context, addedIds, keptPlaces, keptStops, result, legModes } = entry;
       const dropped = new Map(result.unscheduled.map((place) => [place.tripPlaceId, place.reason]));
       for (const id of addedIds) {
         const reason = dropped.get(id);
@@ -357,7 +459,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
       };
       days.push({
         timetable: this.timetableDto(
-          context, [...keptStops.map((stop) => stop.id), ...placedIds], keptResult, keptPlaces, "current",
+          context, [...keptStops.map((stop) => stop.id), ...placedIds], keptResult, keptPlaces, "current", legModes,
         ),
         addedTripPlaceIds: placedIds,
         orderedTripPlaceIds: [...keptPlaces.map((place) => place.id), ...placedIds],
@@ -435,7 +537,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
   /** Opening hours per place ID, reusing `known` and looking each other place up once. */
   private async hoursFor(
     places: TripPlaceDto[],
-    known = new Map<string, PlaceOpeningHours | null>(),
+    known = new Map<string, LookedUpHours>(),
   ) {
     const missing = places.filter((place) => !known.has(place.id));
     const fetched = await Promise.all(missing.map((place) => this.openingHours(place)));
@@ -444,11 +546,13 @@ export class PostgresDayPlanModule implements DayPlanModule {
     return hours;
   }
 
-  /** The day's timetable with `stops` in this order. */
+  /** The day's timetable with `stops` in this order; `legs` lets several drafts of one day share route lookups. */
   private async draftDay(
     context: DayContext,
     stops: PlannedStop[],
-    hours: Map<string, PlaceOpeningHours | null>,
+    hours: Map<string, LookedUpHours>,
+    legs = new Map<string, Promise<DayLegDto>>(),
+    legModes: Record<string, TravelMode> = {},
   ): Promise<TimetableResult> {
     const { day, window, start, night, blocks } = context;
     const points = new Map(context.points);
@@ -458,12 +562,13 @@ export class PostgresDayPlanModule implements DayPlanModule {
       .toZonedDateTime({ timeZone: context.timeZone })
       .add({ minutes: window.startMinute })
       .toString({ timeZoneName: "never" });
-    const legs = new Map<string, Promise<DayLegDto>>();
+    // A leg is travelled the way chosen for the place it reaches, else the day's way.
     const travel = (fromId: string, toId: string) => {
-      const key = `${fromId}>${toId}`;
+      const mode = legModes[toId] ?? window.travelMode;
+      const key = `${fromId}>${toId}>${mode}`;
       let pending = legs.get(key);
       if (!pending) {
-        pending = this.leg(points.get(fromId)!, points.get(toId)!, departureTime);
+        pending = this.leg(points.get(fromId)!, points.get(toId)!, departureTime, mode, walkLimitFor(mode, window.walkLimitMinutes));
         legs.set(key, pending);
       }
       return pending;
@@ -473,7 +578,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
       name: stop.name,
       type: stop.place.type,
       durationMinutes: stop.place.durationMinutes,
-      hours: hoursOn(hours.get(stop.id) ?? null, day.date, context.today),
+      hours: hoursOn(hours.get(stop.id) ?? FAILED_LOOKUP, day.date, context.today),
     }));
     // Start, at once, the legs a schedule uses when every open place fits; the scheduler then
     // mostly reads finished answers. Returns to the lodging are only certain without fixed items.
@@ -503,6 +608,8 @@ export class PostgresDayPlanModule implements DayPlanModule {
     result: TimetableResult,
     planned: TripPlaceDto[],
     order: DayTimetableDto["order"],
+    legModes: Record<string, TravelMode> = {},
+    taxiAlternative: DayTimetableDto["taxiAlternative"] = null,
   ): DayTimetableDto {
     const unscheduled = [
       ...result.unscheduled,
@@ -512,6 +619,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
         reason: "no_location" as const,
       })),
     ];
+    const listed = new Set(orderedTripPlaceIds);
     return {
       dayId: context.day.id,
       date: context.day.date,
@@ -524,6 +632,8 @@ export class PostgresDayPlanModule implements DayPlanModule {
       unscheduled,
       load: result.load,
       capacity: result.capacity,
+      legModes: Object.fromEntries(Object.entries(legModes).filter(([id]) => listed.has(id))),
+      taxiAlternative,
     };
   }
 
@@ -596,6 +706,12 @@ export class PostgresDayPlanModule implements DayPlanModule {
     if (startMinute >= endMinute) {
       throw new AppError("validation_error", "The day must end after it starts");
     }
+    if (input.travelMode !== undefined && !TRAVEL_MODES.includes(input.travelMode)) {
+      throw new AppError("validation_error", "travelMode must be transit, taxi or walk");
+    }
+    if (input.walkLimitMinutes !== undefined && (!Number.isInteger(input.walkLimitMinutes) || input.walkLimitMinutes < 5 || input.walkLimitMinutes > 60)) {
+      throw new AppError("validation_error", "walkLimitMinutes must be a whole number from 5 to 60");
+    }
     const day = dayId.toLowerCase();
     const key = requireIdempotencyKey(rawKey);
     // mutation_requests.operation is varchar(80); two UUIDs leave room for a 6-character prefix.
@@ -611,9 +727,14 @@ export class PostgresDayPlanModule implements DayPlanModule {
       await lockTrip(transaction, tripId);
       await requireDayVersion(transaction, tripId, day, input.expectedVersion);
       const updated = await transaction.updateTable("trip_days")
-        .set({ day_start_minute: startMinute, day_end_minute: endMinute })
+        .set({
+          day_start_minute: startMinute,
+          day_end_minute: endMinute,
+          ...(input.travelMode !== undefined ? { travel_mode: input.travelMode } : {}),
+          ...(input.walkLimitMinutes !== undefined ? { walk_limit_minutes: input.walkLimitMinutes } : {}),
+        })
         .where("trip_id", "=", tripId).where("id", "=", day)
-        .returning(["id", "version"]).executeTakeFirst();
+        .returning(["id", "day_start_minute", "day_end_minute", "version", "travel_mode", "walk_limit_minutes"]).executeTakeFirst();
       if (!updated) throw new AppError("trip_day_not_found", "Trip day not found", 404);
       const time = (minute: number) =>
         `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
@@ -625,7 +746,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
         targetId: day,
         summary: `Set a day to plan from ${time(startMinute)} to ${time(endMinute)}`,
       });
-      const response = { startMinute, endMinute, version: updated.version };
+      const response = savedWindow(updated);
       await remember(transaction, userId, operation, key, response);
       return response;
     });
@@ -635,29 +756,36 @@ export class PostgresDayPlanModule implements DayPlanModule {
     const member = await this.database.selectFrom("trip_members").select("id")
       .where("trip_id", "=", tripId).where("user_id", "=", userId).where("removed_at", "is", null).executeTakeFirst();
     if (!member) throw new AppError("trip_not_found", "Trip not found", 404);
-    const day = await this.database.selectFrom("trip_days").select(["day_start_minute", "day_end_minute", "version"])
+    const day = await this.database.selectFrom("trip_days")
+      .select(["day_start_minute", "day_end_minute", "version", "travel_mode", "walk_limit_minutes"])
       .where("trip_id", "=", tripId).where("id", "=", dayId).executeTakeFirst();
     if (!day) throw new AppError("trip_day_not_found", "Trip day not found", 404);
-    return { startMinute: day.day_start_minute, endMinute: day.day_end_minute, version: day.version };
+    return savedWindow(day);
   }
 
   /** Each day's planned hours, by day ID. */
   private async readWindows(tripId: string) {
     const rows = await this.database.selectFrom("trip_days")
-      .select(["id", "day_start_minute", "day_end_minute", "version"])
+      .select(["id", "day_start_minute", "day_end_minute", "version", "travel_mode", "walk_limit_minutes"])
       .where("trip_id", "=", tripId)
       .execute();
-    return new Map(rows.map((row): [string, SavedDayWindowDto] =>
-      [row.id, { startMinute: row.day_start_minute, endMinute: row.day_end_minute, version: row.version }]));
+    return new Map(rows.map((row): [string, SavedDayWindowDto] => [row.id, savedWindow(row)]));
   }
 
-  /** Opening hours from the place's provider; unknown when it has none or lookup fails. */
-  private async openingHours(place: TripPlaceDto): Promise<PlaceOpeningHours | null> {
-    if (place.provider !== "google" || !place.providerPlaceId) return null;
+  /** Opening hours from the place's provider, or why there are none: not a provider place, or the lookup failed. */
+  private async openingHours(place: TripPlaceDto): Promise<LookedUpHours> {
+    if (place.provider !== "google" || !place.providerPlaceId) return { missing: "manual" };
     try {
       return await this.placeHours.openingHours(place.providerPlaceId);
-    } catch {
-      return null;
+    } catch (reason) {
+      // The timetable still drafts without hours; record the failure so a broken key or quota is visible.
+      console.error(JSON.stringify({
+        event: "opening_hours_lookup_failed",
+        tripPlaceId: place.id,
+        providerPlaceId: place.providerPlaceId,
+        error: reason instanceof Error ? reason.name : typeof reason,
+      }));
+      return FAILED_LOOKUP;
     }
   }
 
@@ -732,35 +860,27 @@ export class PostgresDayPlanModule implements DayPlanModule {
     };
   }
 
+  /**
+   * One leg, travelled `mode`: taxi drives (plus the wait); transit and walk walk when the walk is
+   * within `walkLimit` and otherwise take transit. A long walk never stands in for missing transit:
+   * the leg is then unknown, so the day is not judged on a two-hour walk nobody would take.
+   */
   private async leg(
     from: RoutePoint,
     to: RoutePoint,
     departureTime: string,
+    mode: TravelMode,
+    walkLimit: number,
   ): Promise<DayLegDto> {
     const query = {
       origin: { placeId: from.id, latitude: from.latitude, longitude: from.longitude },
       destination: { placeId: to.id, latitude: to.latitude, longitude: to.longitude },
       departureTime,
+      modes: routeModesFor(mode),
     };
     const observations = (await Promise.all(
       this.routeProviders.map((provider) => provider.observe(query)),
     )).flat();
-    const walking = firstAvailable(observations, "walking");
-    const transit = firstAvailable(observations, "transit");
-    const chosen = walking && walking.durationMinutes <= PREFERRED_WALK_MINUTES
-      ? walking
-      : transit ?? walking;
-    const reasons = [...new Set(observations.flatMap((entry) => entry.status === "unavailable" ? [entry.reason] : []))];
-    return {
-      fromName: from.name,
-      toName: to.name,
-      mode: chosen?.mode ?? null,
-      durationMinutes: chosen?.durationMinutes ?? null,
-      walkingMinutes: walking?.durationMinutes ?? null,
-      transitMinutes: transit?.durationMinutes ?? null,
-      estimated: chosen?.manualChecks.includes("transit_duration_estimated") ?? false,
-      attribution: chosen?.attribution ?? null,
-      unavailableReason: chosen ? null : (reasons.join(", ") || "no_route"),
-    };
+    return legFor(observations, { fromName: from.name, toName: to.name }, mode, walkLimit);
   }
 }

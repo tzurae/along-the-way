@@ -163,6 +163,36 @@ when there is no gap at all. A day with a place left out for lack of time is
 always `packed`. Load levels render as solid badges: 寬鬆 green, 剛好 amber,
 太趕 red (`--load-relaxed|balanced|packed` in `styles.css`).
 
+## Travel modes and the taxi fallback (migration 028)
+
+Each day has a way of travel (`trip_days.travel_mode`, default `transit`) and a
+walk limit (`walk_limit_minutes`, 5–60, default 15); a place's assignment can
+override the way it is reached (`trip_place_day_assignments.arrival_mode`,
+null follows the day). Legs back to the lodging use the day's way.
+
+- 大眾運輸 `transit`: walk when it takes 15 minutes or less, else transit.
+- 盡量走路 `walk`: walk up to the day's limit, else transit.
+- 計程車 `taxi`: the drive plus 5 minutes to get a cab.
+- With no transit beyond walking distance the leg is unknown (交通時間查不到);
+  a long walk never stands in for it.
+
+`POST …/days/:dayId/timetable` with `order: "custom"` accepts `legModes`
+(keyed by the place a leg reaches) and, when a place has just been dropped in,
+`taxiFallbackFor: <tripPlaceId>`. If the place does not fit as the day travels,
+or pushes a placed one out, the server tries taxi for the leg into it, the leg
+out of it, then both, and returns the first that fits as `taxiAlternative`.
+`insertTripPlaceId` instead tries the place in every slot, keeps the best, and
+offers the same taxi fallback for that slot. Taking a place out of a day keeps
+the placed ones in order and moves the unscheduled ones after them; if a placed
+place would still drop out (the new shortcut leg has no transit, say), the
+dialog refuses the removal and says why.
+
+The rules, fifteen blind-derived scenarios and open questions are in
+[`docs/day-scheduling-scenarios.md`](docs/day-scheduling-scenarios.md).
+`FAKE_EXTERNAL_DATA=1` (local and browser E2E only) replaces route and
+opening-hours providers with deterministic offline data; never set it in
+production.
+
 Flights and lodging are reached from the 行程 navigation: on desktop the rail
 shows 總覽／航班／住宿 under 行程; on mobile the same three appear as a segment
 strip at the top of the 行程 panel.
@@ -856,12 +886,18 @@ same request/version/key so retrying cannot duplicate an already saved item.
 Daily hours and place order share a `TripDay` version:
 
 - `GET /api/trips/:tripId/days/:dayId/window` returns
-  `{ window: { startMinute, endMinute, version } }` for active members.
+  `{ window: { startMinute, endMinute, version, travelMode, walkLimitMinutes } }`
+  for active members.
 - `PUT` on that URL requires `{ startMinute, endMinute, expectedVersion }`
-  and `Idempotency-Key`, and returns the saved window including its version.
+  (optionally `travelMode` and `walkLimitMinutes`) and `Idempotency-Key`, and
+  returns the saved window including its version.
 - `PUT /api/trips/:tripId/days/:dayId/place-order` requires
   `{ orderedTripPlaceIds, expectedVersion }` and returns
   `{ orderedTripPlaceIds, version }`.
+- `PUT /api/trips/:tripId/days/:dayId/arrangement` saves the day dialog's
+  candidate in one step: `{ orderedTripPlaceIds, expectedVersion, legModes }`
+  makes exactly those places the day's places, in that order, with each
+  place's way of arrival; places taken out return to 待安排. Schedulers only.
 - Timetable responses include `window.version`. Whole-trip plan application
   requires `expectedVersion` for each entry in `days`, in addition to its
   existing `basis`; a changed basis is never automatically rebased.

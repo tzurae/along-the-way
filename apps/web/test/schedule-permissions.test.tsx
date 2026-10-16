@@ -135,22 +135,25 @@ describe("owner-only schedule surfaces", () => {
       request,
       onClose: () => {},
       onOrderSaved: async () => {},
+      addablePlaces: [],
+      coordinates: new Map(),
+      stays: new Map(),
     };
     const { rerender } = render(<DayPlanDialog {...props} canArrange={false} />);
 
     expect(await screen.findByText(ownerOnly)).toBeInTheDocument();
-    await waitFor(() => expect(screen.queryByRole("button", { name: "使用這個順序" })).not.toBeInTheDocument());
-    expect(screen.getByRole("tab", { name: /建議/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "儲存為第 1 天的安排" })).not.toBeInTheDocument());
+    expect(screen.getByRole("tab", { name: /依距離排/ })).toBeInTheDocument();
 
     rerender(<DayPlanDialog {...props} canArrange />);
-    expect(await screen.findByRole("button", { name: "使用這個順序" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "儲存為第 1 天的安排" })).toBeInTheDocument();
     expect(screen.queryByText(ownerOnly)).not.toBeInTheDocument();
   });
 
 
   it("maps a forbidden day-order apply to the shared owner action message", async () => {
     const request = async <T,>(url: string, options?: RequestInit) => {
-      if (url.endsWith("/place-order")) {
+      if (url.endsWith("/arrangement")) {
         throw new ApiRequestError("forbidden", "server copy", undefined, undefined, undefined, 403);
       }
       const input = options?.body ? JSON.parse(String(options.body)) as { order?: "current" | "suggested" } : {};
@@ -164,10 +167,13 @@ describe("owner-only schedule surfaces", () => {
         request={request}
         onClose={() => {}}
         onOrderSaved={async () => {}}
+        addablePlaces={[]}
+        coordinates={new Map()}
+        stays={new Map()}
       />,
     );
 
-    const applyOrder = await screen.findByRole("button", { name: "使用這個順序" });
+    const applyOrder = await screen.findByRole("button", { name: "儲存為第 1 天的安排" });
     await waitFor(() => expect(applyOrder).toBeEnabled());
     fireEvent.click(applyOrder);
     expect(await screen.findByRole("alert")).toHaveTextContent("你目前沒有安排行程的權限；請旅程擁有者在「成員」開放。");
@@ -255,9 +261,12 @@ function timetable(order: "current" | "suggested"): DayTimetableDto {
   return {
     dayId: "day21",
     date: "2026-10-21",
-    window: { startMinute: 540, endMinute: 1140, version: 1 },
+    window: { startMinute: 540, endMinute: 1140, version: 1, travelMode: "transit", walkLimitMinutes: 15 },
+    legModes: {},
+    taxiAlternative: null,
     order,
-    orderedTripPlaceIds: ["place"],
+    // The straight-line order differs from the saved one, so there is something to save.
+    orderedTripPlaceIds: order === "suggested" ? ["b", "a"] : ["a", "b"],
     startsAt: null,
     endsAt: null,
     rows: [],

@@ -877,6 +877,69 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(rejected.status).toBe(200);
     expect(parseDiscoveryWorkspaceResponse(await rejected.json()).discovery.proposals)
       .toEqual([expect.objectContaining({ id: canonical.id, status: "rejected" })]);
+    // An undo names the rejection it undoes: a request built before it is refused.
+    const stale = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${canonical.id}/restore`,
+      "historical-restore-stale", { expectedVersion: canonical.version });
+    expect(stale.status).toBe(409);
+    const restored = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${canonical.id}/restore`,
+      "historical-restore", { expectedVersion: canonical.version + 1 });
+    expect(restored.status).toBe(200);
+    expect(parseDiscoveryWorkspaceResponse(await restored.json()).discovery.proposals)
+      .toEqual([expect.objectContaining({ id: canonical.id, status: "pending" })]);
+  });
+
+  it("lets research propose a restored place again although an earlier run had rejected it too", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie, "Restored after two rejections");
+    const ownerId = trip.members[0]!.userId;
+    model.releasePlan();
+    provider.known.set("Shoren Garden", {});
+    // Two earlier runs proposed the same place and both proposals were rejected.
+    const rejectedIds: string[] = [];
+    for (const index of [0, 1]) {
+      const at = new Date(Date.UTC(2026, 8, 20 + index));
+      const run = await sql<{ id: string }>`
+        insert into discovery_runs (trip_id, brief_version, policy_version, model_id, status, search_plan, created_by, created_at)
+        values (${trip.id}, 1, 'historical', 'historical', 'completed', '{}'::jsonb, ${ownerId}, ${at})
+        returning id
+      `.execute(database);
+      const proposal = await sql<{ id: string }>`
+        insert into candidate_proposals (
+          trip_id, run_id, provider_place_id, name, place_type, recommendation, matched_needs,
+          tradeoffs, unknowns, confidence, status, decided_by, decided_at, version, created_at, updated_at
+        ) values (
+          ${trip.id}, ${run.rows[0]!.id}, 'ChIJ-Shoren-Garden', 'Shoren Garden', 'activity', 'Historical recommendation',
+          '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'medium', 'rejected', ${ownerId}, ${at}, 2, ${at}, ${at}
+        ) returning id
+      `.execute(database);
+      rejectedIds.push(proposal.rows[0]!.id);
+    }
+    // Undoing the earlier rejection would not bring the place back while the later one stands.
+    const older = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${rejectedIds[0]}/restore`,
+      "restore-earlier", { expectedVersion: 2 });
+    expect(older.status).toBe(409);
+    // A decision replayed from before restore existed carries version 0: a conflict, not a validation error.
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${rejectedIds[1]}/restore`,
+      "restore-unknown-version", { expectedVersion: 0 })).status).toBe(409);
+    expect(await database.selectFrom("candidate_proposals").select(["status", "version"])
+      .where("id", "in", rejectedIds).orderBy("created_at").execute())
+      .toEqual([{ status: "rejected", version: 2 }, { status: "rejected", version: 2 }]);
+    // The owner restores the one the decided list shows (the later one).
+    const restored = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${rejectedIds[1]}/restore`,
+      "restore-later", { expectedVersion: 2 });
+    expect(restored.status).toBe(200);
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "restored-brief", {
+      originalText: "Quiet gardens.",
+      expectedVersion: null,
+    })).status).toBe(200);
+    model.researchedPlaces = ["Shoren Garden"];
+    const response = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "restored-run", {
+      expectedBriefVersion: 1,
+    });
+    expect(response.status).toBe(200);
+    const workspace = parseDiscoveryWorkspaceResponse(await response.json()).discovery;
+    expect(workspace.proposals.map((proposal) => proposal.name)).toContain("Shoren Garden");
+    expect(workspace.latestRun?.shortfalls.filter((entry) => entry.code === "rejected")).toEqual([]);
   });
 
   it("never proposes a closed, foreign or unmapped place, and keeps Google's facts out of storage", async () => {
@@ -1081,6 +1144,11 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
           version: 1,
           createdAt: "2026-10-03T16:38:02.000Z",
         }],
+        // A decision as the previous release stored it: no version.
+        decided: [{
+          proposalId: "00000000-0000-4000-8000-000000004404", providerPlaceId: "ChIJ-Older-Decision",
+          name: "Older decision", status: "rejected", decidedAt: "2026-10-02T09:00:00.000Z",
+        }],
         modelAvailable: true,
         placeProviderAvailable: true,
       },
@@ -1103,6 +1171,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(workspace.proposals[0]).not.toHaveProperty("confidence");
     expect(workspace.brief?.questionAnswers).toEqual([]);
     expect(workspace).not.toHaveProperty("feedback");
+    expect(workspace.decided).toEqual([expect.objectContaining({ proposalId: "00000000-0000-4000-8000-000000004404", version: 0 })]);
     expect(model.planCalls).toBe(0);
   });
 

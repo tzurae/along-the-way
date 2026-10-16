@@ -288,6 +288,107 @@
   text-align: left;
 }
 
+/* Untimed places can be dragged by their handle to another day or position. */
+.plan-day-list > li.plan-draggable {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.plan-day-list > li.plan-draggable.is-dragging {
+  opacity: 0.35;
+}
+
+.plan-drag-handle {
+  display: inline-grid;
+  width: 32px;
+  min-height: 44px;
+  flex: none;
+  margin-left: -8px;
+  place-items: center;
+  border-radius: 10px;
+  color: var(--muted-foreground);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.plan-drag-handle svg {
+  width: 18px;
+  height: 18px;
+}
+
+.plan-drag-handle:hover:not([aria-disabled="true"]) {
+  background: var(--color-surface-subtle, rgb(0 0 0 / 0.04));
+  color: var(--color-ink);
+}
+
+.plan-drag-handle:focus-visible {
+  outline: 2px solid var(--color-focus, var(--ring));
+  outline-offset: -2px;
+}
+
+.plan-drag-handle[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.plan-day-list.is-drop-target {
+  border-color: var(--accent-strong, var(--color-ink));
+}
+
+/* Where the dragged place lands: a line above a row, or below the day's last row. */
+.plan-day-list > li.drop-before::before,
+.plan-day-list > li.drop-after::after {
+  position: absolute;
+  right: 0;
+  left: 0;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--accent-strong, var(--color-ink));
+  content: "";
+  pointer-events: none;
+}
+
+.plan-day-list > li.drop-before::before {
+  top: -2px;
+}
+
+.plan-day-list > li.drop-after::after {
+  bottom: -2px;
+}
+
+.plan-drag-ghost {
+  position: fixed;
+  z-index: 60;
+  display: inline-flex;
+  max-width: min(70vw, 320px);
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px 8px 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  box-shadow: 0 10px 24px -8px rgb(0 0 0 / 0.28);
+  color: var(--color-ink);
+  font-size: 14px;
+  font-weight: 650;
+  pointer-events: none;
+  text-overflow: ellipsis;
+  transform: translate(12px, -50%);
+  white-space: nowrap;
+}
+
+.plan-drag-ghost svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--muted-foreground);
+}
+
 .plan-item-copy {
   display: grid;
   min-width: 0;
@@ -1107,6 +1208,71 @@
 .route-fixed-note svg { width: 12px; height: 12px; }
 .route-stop-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; color: var(--muted-foreground); font-size: 12px; }
 .route-stop-reason, .route-stop-evidence { margin-top: 6px; font-size: 12px; line-height: 1.5; color: #9a4a2c; }
+/* Reordering a suggested or arranged order: handle, dragged row, landing line, comparison. */
+.route-stop-draggable { position: relative; transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1); }
+.route-stop-draggable.is-dragging { opacity: 0.35; }
+.route-stop-draggable.drop-before::before,
+.route-stop-draggable.drop-after::after { content: ""; position: absolute; left: 52px; right: 0; height: 3px; border-radius: 999px; background: var(--accent-strong, var(--color-ink)); pointer-events: none; }
+.route-stop-draggable.drop-before::before { top: -2px; }
+.route-stop-draggable.drop-after::after { bottom: -2px; }
+.route-drag-handle { display: inline-grid; width: 28px; min-height: 36px; margin-left: -6px; place-items: center; border-radius: 8px; color: var(--muted-foreground); cursor: grab; touch-action: none; user-select: none; }
+.route-drag-handle svg { width: 16px; height: 16px; }
+.route-drag-handle:hover:not([aria-disabled="true"]) { background: #1f30290d; color: var(--color-ink); }
+.route-drag-handle:focus-visible { outline: 2px solid var(--color-focus, var(--ring)); outline-offset: -2px; }
+.route-drag-handle[aria-disabled="true"] { cursor: default; opacity: 0.5; }
+.route-version-note { margin: 0; padding: 12px 16px 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
+/* Difference from the saved order: what was just done, then the outcome, colored by meaning, not sign. */
+.route-diff { display: grid; gap: 8px; margin: 12px 16px 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--color-surface-subtle); }
+.route-diff-action { margin: 0; font-size: 14px; font-weight: 700; color: var(--color-ink); }
+.route-diff-label { margin: 0; color: var(--muted-foreground); font-size: 12px; font-weight: 600; }
+.route-diff-estimate { margin: 0; color: var(--muted-foreground); font-size: 12px; }
+.route-compare { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.route-compare li { padding: 4px 10px; border: 1px solid currentColor; border-radius: 999px; font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.route-compare-good { color: var(--load-relaxed); background: color-mix(in srgb, var(--load-relaxed) 10%, transparent); }
+.route-compare-warn { color: var(--load-balanced); background: color-mix(in srgb, var(--load-balanced) 10%, transparent); }
+.route-compare-bad { color: var(--load-packed); background: color-mix(in srgb, var(--load-packed) 10%, transparent); }
+.route-compare-neutral { color: var(--muted-foreground); background: transparent; border-style: dashed !important; }
+.route-link-button { display: inline-flex; align-items: center; gap: 4px; justify-self: start; min-height: 32px; color: var(--color-ink); font-size: 12px; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
+.route-link-button svg, .route-remove-button svg { width: 13px; height: 13px; }
+.route-remove-button { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; min-height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-foreground); font-size: 11px; font-weight: 650; }
+.route-remove-button:hover:not(:disabled) { color: var(--load-packed); border-color: currentColor; }
+/* 待選區: places that can be dragged into the day, and where a stop is dropped to take it out. */
+.route-pool { margin: 0 16px 16px; padding: 12px 14px; border: 1px dashed var(--border); border-radius: 14px; transition: border-color 160ms ease, background-color 160ms ease; }
+.route-pool.is-drop-target { border-color: var(--load-packed); background: color-mix(in srgb, var(--load-packed) 6%, transparent); }
+.route-pool h4 { margin: 0; font-size: 14px; font-weight: 700; }
+.route-pool-help { margin: 4px 0 8px; color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
+.route-pool li.is-dragging { opacity: 0.35; }
+/* While a 待選區 place hovers a slot: the stops on both sides tint green (fits) or red (does not). */
+.route-stop-draggable.fit-ok { background: color-mix(in srgb, var(--load-relaxed) 12%, transparent); border-radius: 12px; }
+.route-stop-draggable.fit-bad { background: color-mix(in srgb, var(--load-packed) 12%, transparent); border-radius: 12px; }
+.route-stop-draggable.fit-warn { background: color-mix(in srgb, var(--load-balanced) 14%, transparent); border-radius: 12px; }
+.route-stop-draggable.fit-pending { background: color-mix(in srgb, var(--color-ink) 5%, transparent); border-radius: 12px; }
+.route-drop-hint { position: sticky; top: 0; z-index: 2; margin: 0 0 8px; padding: 8px 12px; border-radius: 999px; font-size: 12px; font-weight: 700; list-style: none; text-align: center; }
+.route-drop-hint.fit-ok { color: var(--load-relaxed); background: color-mix(in srgb, var(--load-relaxed) 14%, var(--card)); }
+.route-drop-hint.fit-bad { color: var(--load-packed); background: color-mix(in srgb, var(--load-packed) 14%, var(--card)); }
+.route-drop-hint.fit-warn { color: var(--load-balanced); background: color-mix(in srgb, var(--load-balanced) 14%, var(--card)); }
+.route-drop-hint.fit-pending { color: var(--muted-foreground); background: var(--color-surface-subtle); }
+.route-unscheduled li { align-items: center; row-gap: 4px; }
+.route-pool ul { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.route-add-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
+.route-add-row > span { flex: 1; }
+.route-pool li { display: grid; gap: 6px; padding: 4px 0; }
+.route-pool li + li { border-top: 1px solid var(--border); padding-top: 8px; }
+/* The answer to 加入 sits under its own row: no fit, or a swap to confirm before anything changes. */
+.route-add-result { display: grid; gap: 8px; padding: 10px 12px; border-radius: 12px; font-size: 12px; line-height: 1.5; }
+.route-add-result p { margin: 0; }
+.route-add-result > div { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.route-add-result-nofit { color: var(--muted-foreground); background: var(--color-surface-subtle); }
+.route-add-result-swap, .route-add-result-taxi { color: var(--color-ink); background: color-mix(in srgb, var(--load-balanced) 10%, transparent); border: 1px solid color-mix(in srgb, var(--load-balanced) 40%, transparent); }
+/* Per-leg way of travel, beside the stop it arrives at; the day's own setting sits with its hours. */
+.route-leg-mode { margin-left: auto; min-height: 30px; max-width: 9.5rem; padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); color: var(--muted-foreground); font-size: 11px; font-weight: 650; }
+.route-leg-mode + .route-remove-button { margin-left: 6px; }
+.route-constraints select { min-height: 40px; padding: 0 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
+.route-mode-note { color: var(--muted-foreground); font-size: 12px; }
+.route-swap-button { min-height: 36px; padding: 0 14px; border-radius: 999px; background: var(--color-ink-strong); color: var(--color-on-dark, #fffaf2); font-size: 12px; font-weight: 700; }
+.route-reset { margin: 8px 16px 0; }
+.route-add-row > span { display: grid; min-width: 0; }
+.route-pool small { color: var(--muted-foreground); font-size: 11px; }
 .route-stop-reason svg { display: inline; width: 13px; height: 13px; margin-right: 4px; }
 .route-stop-fixed .route-stop-track::after { border-color: var(--primary); background: var(--primary); }
 .route-stop-unknown .route-stop-track::after { border-style: dashed; }
@@ -1136,6 +1302,9 @@
   backdrop-filter: blur(12px);
   padding: 14px 28px;
 }
+
+/* What saving will do, inside the difference box: the footer stays two buttons tall on phones. */
+.route-diff .route-save-consequence { margin: 0; padding-top: 6px; border-top: 1px solid var(--border); color: var(--color-ink); font-size: 12px; }
 
 .route-actionbar button {
   min-height: 46px;

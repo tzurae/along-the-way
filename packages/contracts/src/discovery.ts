@@ -130,6 +130,8 @@ export interface DiscoveryDecisionDto {
   name: string;
   status: "accepted" | "rejected";
   decidedAt: string;
+  /** Restoring a rejection names the version it undoes, so a stale undo cannot reopen a newer decision. */
+  version: number;
 }
 
 export interface DiscoveryRunDto {
@@ -272,6 +274,7 @@ function decision(value: unknown): DiscoveryDecisionDto {
     name: text(item.name),
     status: item.status,
     decidedAt: text(item.decidedAt),
+    version: integer(item.version),
   };
 }
 

@@ -7,7 +7,7 @@ import {
   type DistributionDay,
 } from "../src/planning/trip-distribution";
 
-const open: DayHours = { status: "unknown" };
+const open: DayHours = { status: "unknown", cause: "none" };
 const closed: DayHours = { status: "closed", reason: "closed_that_day" };
 
 const eikando = { id: "eikando", latitude: 35.0149, longitude: 135.7942, stayMinutes: 60 };

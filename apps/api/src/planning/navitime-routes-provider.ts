@@ -55,6 +55,8 @@ export class NavitimeRoutesProvider implements RouteObservationProvider {
   async observe(query: RouteObservationQuery): Promise<RouteObservation[]> {
     validateLocation(query.origin);
     validateLocation(query.destination);
+    // NAVITIME only answers transit; a caller not asking for transit costs no request here.
+    if (query.modes && !query.modes.includes("transit")) return [];
     let departure: Temporal.Instant;
     try {
       departure = Temporal.Instant.from(query.departureTime);

@@ -182,7 +182,11 @@ function upgradeStoredWorkspace(value: unknown) {
         };
       })
       : workspace.proposals,
-    decided: Array.isArray(workspace.decided) ? workspace.decided : [],
+    // Decisions stored before restore existed have no version: 0 never matches a row, so restoring
+    // from such a replay is refused as stale and the member reloads.
+    decided: Array.isArray(workspace.decided)
+      ? workspace.decided.map((entry) => ({ version: 0, ...jsonObject(entry) }))
+      : [],
   };
 }
 
@@ -1028,6 +1032,87 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     });
   }
 
+  async restoreProposal(
+    userId: string,
+    tripId: string,
+    proposalId: string,
+    rawKey: string,
+    input: DecideCandidateProposalInput,
+  ) {
+    uuid(tripId, "tripId");
+    uuid(proposalId, "proposalId");
+    const key = requireIdempotencyKey(rawKey);
+    // 0 stands for "unknown" in replays stored before restore existed: it never matches a row.
+    const version = input.expectedVersion;
+    if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 0) {
+      throw new AppError("validation_error", "expectedVersion must be a non-negative integer");
+    }
+    const operation = `discovery:restore:${proposalId}`;
+    return this.database.transaction().execute(async (transaction) => {
+      await requireTripOwner(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      await transaction.selectFrom("trips").select("id").where("id", "=", tripId)
+        .forUpdate().executeTakeFirstOrThrow();
+      await requireTripOwner(transaction, userId, tripId);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return replayedWorkspace(replay);
+      const target = await transaction.selectFrom("candidate_proposals")
+        .select(["provider_place_id", "status", "version", "decided_at"])
+        .where("id", "=", proposalId).where("trip_id", "=", tripId)
+        .forUpdate().executeTakeFirst();
+      if (!target) throw new AppError("discovery_proposal_not_found", "Candidate proposal not found", 404);
+      if (target.status !== "rejected" || target.version !== version || target.decided_at === null) {
+        throw new AppError("conflict", "The candidate proposal changed; reload before restoring", 409, undefined, target.version);
+      }
+      // A later rejection of the same place stands; undoing this older one would not bring it back.
+      const newer = await transaction.selectFrom("candidate_proposals").select("id")
+        .where("trip_id", "=", tripId)
+        .where("provider_place_id", "=", target.provider_place_id)
+        .where("status", "=", "rejected")
+        .where("id", "<>", proposalId)
+        .where("decided_at", ">", target.decided_at)
+        .executeTakeFirst();
+      if (newer) {
+        throw new AppError("conflict", "This place was marked not recommended again later; reload", 409, undefined, target.version);
+      }
+      // Pending with reopened_at keeps an earlier run's proposal on the current shortlist (readWorkspace).
+      await transaction.updateTable("candidate_proposals").set({
+        status: "pending",
+        reopened_at: this.now(),
+        decided_by: null,
+        decided_at: null,
+        version: sql`version + 1`,
+        updated_at: this.now(),
+      }).where("id", "=", proposalId).execute();
+      // Research leaves out any place with a rejected proposal, so this place's earlier rejections
+      // are lifted too. They stay off the shortlist (no reopened_at).
+      await transaction.updateTable("candidate_proposals").set({
+        status: "pending",
+        reopened_at: null,
+        decided_by: null,
+        decided_at: null,
+        version: sql`version + 1`,
+        updated_at: this.now(),
+      }).where("trip_id", "=", tripId)
+        .where("provider_place_id", "=", target.provider_place_id)
+        .where("status", "=", "rejected")
+        .where("id", "<>", proposalId)
+        .where("decided_at", "<=", target.decided_at)
+        .execute();
+      await recordEvent(transaction, {
+        tripId,
+        actorId: userId,
+        eventType: "discovery.proposal_restored",
+        targetType: "candidate_proposal",
+        targetId: proposalId,
+        summary: "Restored an AI place proposal marked as not recommended",
+      });
+      const response = await this.readWorkspace(transaction, tripId, userId);
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
 
   private async requireMember(executor: DatabaseExecutor, userId: string, tripId: string) {
     const member = await executor.selectFrom("trip_members").select("user_id")
@@ -1307,6 +1392,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           "proposal.name",
           "proposal.status",
           "proposal.decided_at",
+          "proposal.version",
           "proposal.accepted_trip_place_id",
           "tripPlace.archived_at as accepted_place_archived_at",
         ])
@@ -1332,6 +1418,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           name: row.name,
           status: row.status,
           decidedAt: isoTimestamp(row.decided_at),
+          version: row.version,
         });
       }
     }
