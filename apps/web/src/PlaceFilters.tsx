@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Search, X } from "lucide-react";
 
 import "./place-filters.css";
@@ -27,14 +27,53 @@ const MINE_KEY = "mine:yes";
 
 /** Small caption before each chip group so 「待排日期」 reads as a state and 「東山區」 as an area. */
 const GROUP_LABEL: Record<Group, string> = { mine: "", status: "狀態", type: "類型", area: "地區" };
+/** One row per group (我按過讚 rides with 狀態), so a long group wraps inside its own row. */
+const ROWS: Group[][] = [["mine", "status"], ["type"], ["area"]];
+/** Areas come from free-text addresses and can run to dozens; show the most common first. */
+const AREA_PREVIEW = 6;
+
+interface StoredFilters { query: string; selected: string[] }
+
+function readStoredFilters(storageKey: string): StoredFilters {
+  try {
+    const value: unknown = JSON.parse(window.localStorage.getItem(storageKey) ?? "null");
+    if (value && typeof value === "object") {
+      const { query, selected } = value as Partial<StoredFilters>;
+      return {
+        query: typeof query === "string" ? query : "",
+        selected: Array.isArray(selected) ? selected.filter((key): key is string => typeof key === "string") : [],
+      };
+    }
+  } catch {
+    // Unavailable storage or a corrupt entry: start unfiltered.
+  }
+  return { query: "", selected: [] };
+}
 
 /**
  * Search plus quick chips for a place list. Within a group chips are OR (two areas), across groups
  * AND (待排日期 in 東山區). Chips that match nothing or everything are not offered.
+ * The search and chips are kept in localStorage under `storageKey`, so a reload keeps them.
  */
-export function usePlaceFilters(places: FilterablePlace[]) {
-  const [query, setQuery] = useState("");
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+export function usePlaceFilters(places: FilterablePlace[], storageKey: string) {
+  const [stored, setStored] = useState(() => ({ key: storageKey, ...readStoredFilters(storageKey) }));
+  // Another trip or list reuses this component: load that list's own filters.
+  const current = stored.key === storageKey ? stored : { key: storageKey, ...readStoredFilters(storageKey) };
+  if (current !== stored) setStored(current);
+  const query = current.query;
+  const selected = useMemo(() => new Set(current.selected), [current.selected]);
+  const setQuery = (next: string) => setStored((value) => ({ ...value, query: next }));
+  const setSelected = (update: (value: Set<string>) => Set<string>) =>
+    setStored((value) => ({ ...value, selected: [...update(new Set(value.selected))] }));
+
+  useEffect(() => {
+    try {
+      if (stored.query === "" && stored.selected.length === 0) window.localStorage.removeItem(stored.key);
+      else window.localStorage.setItem(stored.key, JSON.stringify({ query: stored.query, selected: stored.selected }));
+    } catch {
+      // Storage full or blocked: filters still work for this page view.
+    }
+  }, [stored]);
 
   const facets = useMemo(() => {
     const counts = new Map<string, Facet>();
@@ -58,7 +97,10 @@ export function usePlaceFilters(places: FilterablePlace[]) {
   const visibleIds = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     const byGroup = new Map<Group, Set<string>>();
+    // A remembered chip whose value no longer occurs (place removed or renamed) does not filter.
+    const offered = new Set(facets.map((facet) => facet.key));
     for (const key of selected) {
+      if (!offered.has(key)) continue;
       const group = key.slice(0, key.indexOf(":")) as Group;
       byGroup.set(group, new Set([...(byGroup.get(group) ?? []), key]));
     }
@@ -76,7 +118,7 @@ export function usePlaceFilters(places: FilterablePlace[]) {
       }
       return true;
     }).map((place) => place.id));
-  }, [places, query, selected]);
+  }, [places, query, selected, facets]);
 
   return {
     query,
@@ -84,13 +126,13 @@ export function usePlaceFilters(places: FilterablePlace[]) {
     selected,
     facets,
     visibleIds,
-    active: query.trim() !== "" || selected.size > 0,
+    active: query.trim() !== "" || [...selected].some((key) => facets.some((facet) => facet.key === key)),
     toggle: (key: string) => setSelected((current) => {
       const next = new Set(current);
       if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     }),
-    clear: () => { setQuery(""); setSelected(new Set()); },
+    clear: () => setStored((value) => ({ ...value, query: "", selected: [] })),
   };
 }
 
@@ -101,6 +143,7 @@ export function PlaceFilterBar({ filters, total, label }: {
   label: string;
 }) {
   const shown = filters.visibleIds.size;
+  const [areasOpen, setAreasOpen] = useState(false);
   return (
     <div className="place-filters" role="search" aria-label={label}>
       <label className="place-filters__search">
@@ -117,22 +160,46 @@ export function PlaceFilterBar({ filters, total, label }: {
         ) : null}
       </label>
       <div className="place-filters__chips" role="group" aria-label="快速篩選">
-        {filters.facets.map((facet, index) => (
-          <span key={facet.key} className="place-filters__chip-slot">
-            {index === 0 || filters.facets[index - 1]!.group !== facet.group
-              ? GROUP_LABEL[facet.group] ? <span className="place-filters__group">{GROUP_LABEL[facet.group]}</span> : null
-              : null}
-            <button
-              type="button"
-              className="place-filters__chip"
-              aria-pressed={filters.selected.has(facet.key)}
-              onClick={() => filters.toggle(facet.key)}
-            >
-              {facet.label}
-              <span className="place-filters__count">{facet.count}</span>
-            </button>
-          </span>
-        ))}
+        {ROWS.map((groups) => {
+          const facets = filters.facets.filter((facet) => groups.includes(facet.group));
+          if (facets.length === 0) return null;
+          const label = groups.map((group) => GROUP_LABEL[group]).find(Boolean);
+          const collapsible = groups.includes("area") && facets.length > AREA_PREVIEW + 1;
+          // Collapsed: the most common areas plus any already selected, so a chosen chip never hides.
+          const visible = collapsible && !areasOpen
+            ? facets.filter((facet, index) => index < AREA_PREVIEW || filters.selected.has(facet.key))
+            : facets;
+          return (
+            <div key={groups.join()} className="place-filters__row">
+              {label ? <span className="place-filters__group">{label}</span> : null}
+              <div className="place-filters__row-chips">
+                {visible.map((facet) => (
+                  <button
+                    key={facet.key}
+                    type="button"
+                    className="place-filters__chip"
+                    aria-pressed={filters.selected.has(facet.key)}
+                    title={facet.label}
+                    onClick={() => filters.toggle(facet.key)}
+                  >
+                    <span className="place-filters__label">{facet.label}</span>
+                    <span className="place-filters__count">{facet.count}</span>
+                  </button>
+                ))}
+                {collapsible ? (
+                  <button
+                    type="button"
+                    className="place-filters__more"
+                    aria-expanded={areasOpen}
+                    onClick={() => setAreasOpen((open) => !open)}
+                  >
+                    {areasOpen ? "收起地區" : `更多地區 +${facets.length - visible.length}`}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
       </div>
       {filters.active ? (
         <p className="place-filters__summary" role="status">

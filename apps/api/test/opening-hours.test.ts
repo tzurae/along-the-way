@@ -65,8 +65,9 @@ describe("opening hours on a date", () => {
   });
 
   it("separates unknown hours from places that are closed", () => {
-    expect(hoursOn(null, "2026-10-23", longBefore)).toEqual({ status: "unknown" });
-    expect(hoursOn(hours({ regular: null }), "2026-10-23", longBefore)).toEqual({ status: "unknown" });
+    expect(hoursOn({ missing: "failed" }, "2026-10-23", longBefore)).toEqual({ status: "unknown", cause: "failed" });
+    expect(hoursOn({ missing: "manual" }, "2026-10-23", longBefore)).toEqual({ status: "unknown", cause: "manual" });
+    expect(hoursOn(hours({ regular: null }), "2026-10-23", longBefore)).toEqual({ status: "unknown", cause: "none" });
     expect(hoursOn(hours({ regular: [] }), "2026-10-23", longBefore)).toEqual({ status: "closed", reason: "temporarily_closed" });
     expect(hoursOn(hours({ businessStatus: "closed_permanently", regular: [period([0, 0, 0], null)] }), "2026-10-23", longBefore))
       .toEqual({ status: "closed", reason: "permanently_closed" });

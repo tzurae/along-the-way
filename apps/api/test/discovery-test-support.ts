@@ -12,4 +12,5 @@ export const unrelatedDiscoveryModule = {
   setProposalVote: unexpectedDiscoveryCall,
   scheduleProposals: unexpectedDiscoveryCall,
   rejectProposal: unexpectedDiscoveryCall,
+  restoreProposal: unexpectedDiscoveryCall,
 } satisfies DiscoveryModule;

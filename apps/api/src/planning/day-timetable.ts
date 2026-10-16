@@ -7,24 +7,10 @@ import type {
   UnscheduledPlaceDto,
   UnscheduledReason,
 } from "@along-the-way/contracts/day-plans";
+import { stayMinutesFor } from "@along-the-way/contracts/day-plans";
 import type { ItineraryItemType, PlaceType } from "@along-the-way/contracts/trip-skeleton";
 
 import type { DayHours } from "./opening-hours";
-
-/** Stay used when nobody entered one, by place type. */
-export const DEFAULT_STAY_MINUTES: Record<PlaceType, number> = {
-  activity: 90,
-  worship: 60,
-  museum: 90,
-  nature: 75,
-  restaurant: 75,
-  cafe: 45,
-  shopping: 60,
-  other: 60,
-  lodging: 60,
-  station: 30,
-  airport: 30,
-};
 
 /** Time at a lodging to leave or collect luggage. */
 export const LUGGAGE_MINUTES = 15;
@@ -168,7 +154,7 @@ function mostSpecific(reasons: UnscheduledReason[]) {
 }
 
 function stayFor(stop: TimetableStop) {
-  return stop.durationMinutes ?? DEFAULT_STAY_MINUTES[stop.type];
+  return stayMinutesFor(stop);
 }
 
 /** The first opening that can hold the whole stay, starting no earlier than `arrive`. */
@@ -470,7 +456,7 @@ export async function scheduleDay(input: TimetableInput): Promise<TimetableResul
       endMinute: placement.endMinute,
       stayMinutes: placement.stayMinutes,
       stayEstimated: stop.durationMinutes === null,
-      hours: stop.hours.status === "open" ? "listed" : "unknown",
+      hours: stop.hours.status === "open" ? "listed" : stop.hours.status === "unknown" ? stop.hours.cause : "failed",
     });
     busy += placement.stayMinutes + (placement.inbound?.durationMinutes ?? 0);
     current = { ...gap, startMinute: placement.endMinute, origin: pointOf(stop.id) };

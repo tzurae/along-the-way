@@ -49,4 +49,12 @@ export interface DiscoveryModule {
     idempotencyKey: string,
     input: DecideCandidateProposalInput,
   ): Promise<DiscoveryWorkspaceDto>;
+  /** Undoes 「不要再推薦」: the place returns to the shortlist and later research may recommend it. */
+  restoreProposal(
+    userId: string,
+    tripId: string,
+    proposalId: string,
+    idempotencyKey: string,
+    input: DecideCandidateProposalInput,
+  ): Promise<DiscoveryWorkspaceDto>;
 }

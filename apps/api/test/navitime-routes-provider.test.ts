@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { RouteObservationQuery } from "@along-the-way/contracts/planning-observations";
 import { NavitimeRoutesProvider } from "../src/planning/navitime-routes-provider";
 
@@ -43,6 +43,16 @@ describe("NAVITIME route observation adapter", () => {
       walkingLegMinutes: null,
       manualChecks: ["transit_duration_estimated", "walking_duration_unknown"],
     });
+  });
+
+  it("does not fetch when the requested modes exclude transit", async () => {
+    const fetch = vi.fn(async () => Response.json({ items: [route] }));
+    const provider = new NavitimeRoutesProvider({
+      apiKey: "test-only-key", now: () => NOW, fetch,
+    });
+
+    await expect(provider.observe({ ...query, modes: ["walking", "drive"] })).resolves.toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("includes time waiting before the provider route actually starts", async () => {

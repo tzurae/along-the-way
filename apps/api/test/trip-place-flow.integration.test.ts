@@ -46,6 +46,10 @@ import {
   down as removeDayVersionMigration,
   up as applyDayVersionMigration,
 } from "../src/database/migrations/020_trip_day_versions";
+import {
+  down as removeTravelModeMigration,
+  up as applyTravelModeMigration,
+} from "../src/database/migrations/028_day_travel_modes";
 import { seedDatabase } from "../src/database/seed";
 import type { PlaceHoursLookup, PlaceOpeningHours } from "../src/planning/opening-hours";
 import { PostgresDayPlanModule } from "../src/planning/postgres-day-plan-module";
@@ -626,10 +630,10 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect(await stale.json()).toMatchObject({ error: { code: "conflict", currentVersion: 2, latestChange: { actorId: owner.user.id } } });
     expect(await history(owner.cookie, trip.id)).toEqual(before);
     const current = await app.request(`/api/trips/${trip.id}/days/${day.id}/window`, { headers: { cookie: editor.cookie } });
-    expect(parseDayWindowResponse(await current.json()).window).toEqual({ version: 2, startMinute: 480, endMinute: 1140 });
+    expect(parseDayWindowResponse(await current.json()).window).toEqual({ version: 2, startMinute: 480, endMinute: 1140, travelMode: "transit", walkLimitMinutes: 15 });
     const saved = await update(editor.cookie, "day-reapplied", 2, 600);
     expect(saved.status).toBe(200);
-    expect(parseDayWindowResponse(await saved.json()).window).toEqual({ version: 3, startMinute: 600, endMinute: 1140 });
+    expect(parseDayWindowResponse(await saved.json()).window).toEqual({ version: 3, startMinute: 600, endMinute: 1140, travelMode: "transit", walkLimitMinutes: 15 });
   });
 
   it("keeps day ordering owner-only and invalidates a draft when the owner changes an assignment", async () => {
@@ -1898,6 +1902,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       )).json(),
     ).tripPlace;
 
+    // Later migrations that change these tables come off first and go back on last.
+    await removeTravelModeMigration(database as Kysely<unknown>);
     await removeDayVersionMigration(database as Kysely<unknown>);
     await removeDayOrderMigration(database as Kysely<unknown>);
     await removeDayAssignmentMigration(database as Kysely<unknown>);
@@ -1927,6 +1933,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     await applyDayAssignmentMigration(database as Kysely<unknown>);
     await applyDayOrderMigration(database as Kysely<unknown>);
     await applyDayVersionMigration(database as Kysely<unknown>);
+    await applyTravelModeMigration(database as Kysely<unknown>);
 
     expect(await database.selectFrom("trip_place_desired_days").selectAll()
       .where("trip_id", "=", trip.id).execute()).toHaveLength(3);
@@ -2471,7 +2478,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     const before = await skeleton();
 
     const first = await draft("current");
-    expect(first.window).toEqual({ startMinute: 9 * 60, endMinute: 19 * 60, version: await dayVersion() });
+    expect(first.window).toEqual({ startMinute: 9 * 60, endMinute: 19 * 60, version: await dayVersion(), travelMode: "transit", walkLimitMinutes: 15 });
     expect(first.startsAt).toEqual({ placeId: hotel.id, name: "Kyoto Station Hotel" });
     expect(first.endsAt).toEqual({ placeId: hotel.id, name: "Kyoto Station Hotel" });
     expect(first.orderedTripPlaceIds).toEqual(currentOrder);
@@ -2517,7 +2524,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         endMinute: 835,
         stayMinutes: 45,
         stayEstimated: false,
-        hours: "unknown",
+        hours: "manual",
       },
       {
         kind: "return",
@@ -2549,7 +2556,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     const changed = await send("PUT", windowPath, "day-window", { startMinute: 540, endMinute: 810, expectedVersion: first.window.version }, second.cookie);
     expect(changed.status).toBe(200);
     const changedWindow = parseDayWindowResponse(await changed.json()).window;
-    expect(changedWindow).toEqual({ startMinute: 540, endMinute: 810, version: first.window.version + 1 });
+    expect(changedWindow).toEqual({ startMinute: 540, endMinute: 810, version: first.window.version + 1, travelMode: "transit", walkLimitMinutes: 15 });
     const shortened = await draft("current");
     expect(shortened.window).toEqual(changedWindow);
     expect(shortened.rows.map((row) => row.kind)).toEqual(["start", "visit", "fixed"]);
@@ -2793,6 +2800,18 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect(moved.status).toBe(200);
     expect((await skeleton()).tripVersion).toBe(before.tripVersion);
     expect((await apply("plan-stale-dinner", beforeMove)).status).toBe(409);
+    expect(await placement()).toEqual(beforeChange);
+
+    // How another day travels is part of what a plan is built on, even a day the plan leaves alone.
+    const beforeMode = await draft();
+    const otherDay = dayOf("2026-10-25");
+    expect(beforeMode.days.map((day) => day.timetable.dayId)).not.toContain(otherDay);
+    const otherWindow = parseDayWindowResponse(await (await send("GET", `/api/trips/${trip.id}/days/${otherDay}/window`, null)).json()).window;
+    expect((await send("PUT", `/api/trips/${trip.id}/days/${otherDay}/window`, "plan-other-mode", {
+      startMinute: otherWindow.startMinute, endMinute: otherWindow.endMinute, travelMode: "taxi", walkLimitMinutes: 15,
+      expectedVersion: otherWindow.version,
+    })).status).toBe(200);
+    expect((await apply("plan-stale-mode", beforeMode)).status).toBe(409);
     expect(await placement()).toEqual(beforeChange);
 
     const fresh = await draft();

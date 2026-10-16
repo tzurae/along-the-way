@@ -83,6 +83,22 @@ function walkingLegs(route: Record<string, unknown>): number[] | null {
   return result;
 }
 
+/**
+ * Whether a point is in Japan, closely enough to pick a transit provider: Japan's bounding box
+ * without the parts of China, Korea and Russia that fall inside it.
+ */
+function inJapan(point: { latitude: number | null; longitude: number | null }) {
+  const { latitude, longitude } = point;
+  if (latitude === null || longitude === null) return false;
+  if (latitude < 24 || latitude > 46 || longitude < 122 || longitude > 154) return false;
+  if (longitude < 124 && latitude > 26) return false; // China's coast (Shandong)
+  if (longitude < 128.5 && latitude > 32.5) return false; // Korea's west and south coasts, Jeju
+  if (longitude < 129.6 && latitude > 34.75) return false; // Korea's east coast: Busan, Ulsan, Pohang
+  if (longitude < 132 && latitude > 37) return false; // Ulleungdo, North Korea
+  if (longitude < 139.3 && latitude > 38.7) return false; // North Korea's and Russia's coasts
+  return true;
+}
+
 export class GoogleRoutesProvider implements RouteObservationProvider {
   private readonly apiKey: string | undefined;
   private readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -114,10 +130,9 @@ export class GoogleRoutesProvider implements RouteObservationProvider {
       destination: { ...query.destination },
       departureTime,
     };
-    return Promise.all([
-      this.observeMode(input, "walking"),
-      this.observeMode(input, "transit"),
-    ]);
+    // Only the modes the caller will use are asked for: each one is a billed request.
+    const modes = query.modes ?? ["walking", "transit"];
+    return Promise.all(modes.map((mode) => this.observeMode(input, mode)));
   }
 
   private async observeMode(query: RouteObservationQuery, mode: RouteMode): Promise<RouteObservation> {
@@ -142,6 +157,9 @@ export class GoogleRoutesProvider implements RouteObservationProvider {
       return unavailable("location_unknown");
     }
     if (!this.apiKey) return unavailable("provider_not_configured");
+    // Google returns no transit routes in Japan (an empty answer still costs a request against the
+    // daily quota); Japanese train times come from NAVITIME, so only walking is asked of Google there.
+    if (mode === "transit" && inJapan(query.origin) && inJapan(query.destination)) return unavailable("unsupported_mode");
     const offset = Date.parse(query.departureTime) - this.now().getTime();
     if ((mode === "walking" && offset < 0) || (mode === "transit" && (offset < -7 * DAY_MS || offset > 100 * DAY_MS))) {
       return unavailable("unsupported_departure_time");
@@ -164,8 +182,9 @@ export class GoogleRoutesProvider implements RouteObservationProvider {
           destination: { location: { latLng: {
             latitude: query.destination.latitude, longitude: query.destination.longitude,
           } } },
-          travelMode: mode === "walking" ? "WALK" : "TRANSIT",
-          departureTime: query.departureTime,
+          travelMode: mode === "walking" ? "WALK" : mode === "transit" ? "TRANSIT" : "DRIVE",
+          // Driving is asked without traffic (the cheapest route tier); a departure time only applies to traffic-aware routes.
+          ...(mode === "drive" ? {} : { departureTime: query.departureTime }),
         }),
       });
       if (!response.ok) return unavailable(response.status === 429 ? "quota" : "provider_unavailable");
@@ -189,7 +208,7 @@ export class GoogleRoutesProvider implements RouteObservationProvider {
         return unavailable("invalid_response");
       }
       const durationMinutes = ceilMinutes(duration);
-      const walkingLegMinutes = mode === "walking" ? [durationMinutes] : walkingLegs(route);
+      const walkingLegMinutes = mode === "walking" ? [durationMinutes] : mode === "drive" ? [] : walkingLegs(route);
       return {
         ...source(), status: "available", durationMinutes, distanceMeters: distance as number,
         walkingLegMinutes,

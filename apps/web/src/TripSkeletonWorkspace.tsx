@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Temporal } from "@js-temporal/polyfill";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import {
@@ -22,7 +22,8 @@ import {
   type UpdatePlaceInput,
   type ZonedEndpointDto,
 } from "@along-the-way/contracts/trip-skeleton";
-import { CalendarClock, CalendarDays, CalendarMinus, CalendarPlus, ChevronDown, Clock3, Lock, MapPin, MapPinOff, Plane, Plus, Route, StickyNote, Trash2, Unlock } from "lucide-react";
+import { CalendarClock, CalendarDays, CalendarMinus, CalendarPlus, ChevronDown, Clock3, GripVertical, Lock, MapPin, MapPinOff, Plane, Plus, Route, StickyNote, Trash2, Unlock } from "lucide-react";
+import { parseDayWindowResponse, stayMinutesFor, type DayPlaceOrderResponse, type DayWindowResponse } from "@along-the-way/contracts/day-plans";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -219,6 +220,22 @@ function formatPlanShortDate(date: string, locale: string) {
       timeZone: "UTC",
     }).format(instant),
   };
+}
+
+/** A place row being dragged by its handle, and where it would land if released now. */
+interface PlaceDrag {
+  placeId: string;
+  name: string;
+  fromDayId: string;
+  startX: number;
+  startY: number;
+  x: number;
+  y: number;
+  /** Past the tap slop: only then does a drop move anything. */
+  moved: boolean;
+  targetDayId: string;
+  /** Index among the target day's untimed places, the dragged place excluded. */
+  targetIndex: number;
 }
 
 /** Applied route order first; places without one keep their list order at the end. */
@@ -730,7 +747,7 @@ export function TripSkeletonWorkspace({
     if (!canArrange) {
       setError(t.schedule.ownerOnlyAction);
       updateAssignmentErrorPlaceId(place.id);
-      return;
+      return false;
     }
     const operation = `day-assignment:${place.id}`;
     setBusyId(operation);
@@ -780,6 +797,7 @@ export function TripSkeletonWorkspace({
         await assign(tripDayId, current.version);
       }
       onPlacesChanged();
+      return true;
     } catch (reason) {
       const forbidden = reason instanceof ApiRequestError
         && (reason.code === "forbidden" || reason.status === 403);
@@ -798,9 +816,151 @@ export function TripSkeletonWorkspace({
       setError(assignmentError);
       updateAssignmentErrorPlaceId(place.id);
       if (removedOriginalDay) onPlacesChanged();
+      return false;
     } finally {
       setBusyId(null);
     }
+  }
+
+  /** Untimed places of a day in their applied order: the rows that can be dragged. */
+  function dayPlaces(dayId: string) {
+    return tripPlaces.filter((place) => !place.scheduled && place.assignedDayId === dayId).sort(byDayPosition);
+  }
+
+  async function saveDayOrder(dayId: string, orderedTripPlaceIds: string[]) {
+    const operation = `day-order:${dayId}`;
+    setBusyId(operation);
+    setError("");
+    updateAssignmentErrorPlaceId(null);
+    // Show the new order at once; a failure reloads the server's order.
+    setTripPlaces((current) => current.map((place) => {
+      const index = orderedTripPlaceIds.indexOf(place.id);
+      return index < 0 ? place : { ...place, dayPosition: index };
+    }));
+    try {
+      // The order is versioned by the day; read the current version right before writing.
+      const { window: dayWindow } = await request<DayWindowResponse>(`/api/trips/${trip.id}/days/${dayId}/window`, { parse: parseDayWindowResponse });
+      const identity = `${operation}:${dayWindow.version}:${orderedTripPlaceIds.join(",")}`;
+      await request<DayPlaceOrderResponse>(`/api/trips/${trip.id}/days/${dayId}/place-order`, {
+        method: "PUT",
+        headers: { "Idempotency-Key": actionKey(identity) },
+        body: JSON.stringify({ orderedTripPlaceIds, expectedVersion: dayWindow.version }),
+      });
+      actionKeys.current.delete(identity);
+      onPlacesChanged();
+    } catch (reason) {
+      // Reload first: a successful reload clears errors, and this one must stay on screen.
+      await load();
+      setError(reason instanceof ApiRequestError && (reason.code === "forbidden" || reason.status === 403)
+        ? t.schedule.ownerOnlyAction
+        : reason instanceof Error ? reason.message : t.tripSkeleton.dragOrderError);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  /** Drops `place` at `index` among the target day's other untimed places. */
+  async function movePlace(place: TripPlaceDto, targetDayId: string, index: number) {
+    const others = dayPlaces(targetDayId).filter((entry) => entry.id !== place.id).map((entry) => entry.id);
+    const ordered = [...others.slice(0, index), place.id, ...others.slice(index)];
+    if (place.assignedDayId === targetDayId) {
+      const before = dayPlaces(targetDayId).map((entry) => entry.id);
+      if (before.join() !== ordered.join()) await saveDayOrder(targetDayId, ordered);
+      return;
+    }
+    if (!await updateDayAssignment(targetDayId, place)) return;
+    if (ordered.length > 1) await saveDayOrder(targetDayId, ordered);
+  }
+
+  // Pointer drag on a row's handle (mouse, pen and touch alike). The row stays in place,
+  // dimmed; a line marks where it will land and a label follows the pointer.
+  const [drag, setDrag] = useState<PlaceDrag | null>(null);
+  const dragRef = useRef<PlaceDrag | null>(null);
+  const autoScroll = useRef<number | null>(null);
+
+  function updateDrag(next: PlaceDrag | null) {
+    dragRef.current = next;
+    setDrag(next);
+  }
+
+  function dropTarget(x: number, y: number, placeId: string): Pick<PlaceDrag, "targetDayId" | "targetIndex"> | null {
+    const list = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-drop-day]");
+    if (!list?.dataset.dropDay) return null;
+    const rows = [...list.querySelectorAll<HTMLElement>("[data-drag-place]")]
+      .filter((row) => row.dataset.dragPlace !== placeId);
+    const index = rows.filter((row) => {
+      const box = row.getBoundingClientRect();
+      return box.top + box.height / 2 < y;
+    }).length;
+    return { targetDayId: list.dataset.dropDay, targetIndex: index };
+  }
+
+  function stopAutoScroll() {
+    if (autoScroll.current !== null) cancelAnimationFrame(autoScroll.current);
+    autoScroll.current = null;
+  }
+
+  // Near the top or bottom edge the page scrolls, so a place can reach a day off screen.
+  function runAutoScroll() {
+    const current = dragRef.current;
+    if (!current?.moved) { stopAutoScroll(); return; }
+    const edge = 88;
+    const speed = current.y < edge ? -(edge - current.y) / 4 : current.y > window.innerHeight - edge ? (current.y - window.innerHeight + edge) / 4 : 0;
+    if (speed !== 0) {
+      window.scrollBy(0, speed);
+      const target = dropTarget(current.x, current.y, current.placeId);
+      if (target) updateDrag({ ...current, ...target });
+    }
+    autoScroll.current = requestAnimationFrame(runAutoScroll);
+  }
+
+  function dragHandlers(place: TripPlaceDto, dayId: string, index: number) {
+    return {
+      // Move/up are followed on the window: re-rendering rows during the drag must not lose them.
+      onPointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
+        if (!canArrange || busyId !== null || event.button !== 0) return;
+        event.preventDefault();
+        updateDrag({
+          placeId: place.id, name: place.name, fromDayId: dayId, startX: event.clientX, startY: event.clientY,
+          x: event.clientX, y: event.clientY, moved: false, targetDayId: dayId, targetIndex: index,
+        });
+        const pointerId = event.pointerId;
+        const move = (moveEvent: PointerEvent) => {
+          const current = dragRef.current;
+          if (moveEvent.pointerId !== pointerId || !current) return;
+          // A small slop keeps a tap on the handle from counting as a drag.
+          const moved = current.moved || Math.hypot(moveEvent.clientX - current.startX, moveEvent.clientY - current.startY) > 6;
+          const target = moved ? dropTarget(moveEvent.clientX, moveEvent.clientY, place.id) : null;
+          updateDrag({ ...current, x: moveEvent.clientX, y: moveEvent.clientY, moved, ...(target ?? {}) });
+          if (moved && autoScroll.current === null) autoScroll.current = requestAnimationFrame(runAutoScroll);
+        };
+        const finish = (endEvent: PointerEvent) => {
+          if (endEvent.pointerId !== pointerId) return;
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", finish);
+          window.removeEventListener("pointercancel", finish);
+          const current = dragRef.current;
+          stopAutoScroll();
+          updateDrag(null);
+          if (endEvent.type === "pointerup" && current?.moved) void movePlace(place, current.targetDayId, current.targetIndex);
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", finish);
+        window.addEventListener("pointercancel", finish);
+      },
+      // Keyboard: ↑/↓ move the place one row within its day.
+      onKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+        if (!canArrange || busyId !== null) return;
+        const step = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0;
+        if (step === 0) return;
+        event.preventDefault();
+        const next = index + step;
+        if (next < 0 || next >= dayPlaces(dayId).length) return;
+        // Reordering moves the row's DOM node, which drops focus; put it back on this handle.
+        void movePlace(place, dayId, next).then(() => requestAnimationFrame(() =>
+          document.querySelector<HTMLButtonElement>(`[data-drag-place="${place.id}"] .plan-drag-handle`)?.focus()));
+      },
+    };
   }
 
   function itemDetail(item: ItineraryItemDto, continuation = false) {
@@ -1301,7 +1461,7 @@ export function TripSkeletonWorkspace({
                     ) : null}
                   </div>
                 </header>
-                <ul className="plan-day-list">
+                <ul className={`plan-day-list${drag?.moved && drag.targetDayId === day.id ? " is-drop-target" : ""}`} data-drop-day={day.id}>
                   {itemCount === 0 ? (
                     <li className="plan-no-plan">
                       <CalendarDays aria-hidden="true" />
@@ -1331,40 +1491,75 @@ export function TripSkeletonWorkspace({
                       </li>
                     ) : null;
                   })}
-                  {assignedPlaces.map((place) => (
-                    <li key={place.id}>
-                      <button
-                        type="button"
-                        className="plan-item-row"
-                        aria-label={t.tripSkeleton.plannedWishlistPlace(place.name)}
-                        onClick={() => {
-                          setError("");
-                          setViewingAssignedPlaceId(place.id);
-                        }}
-                      >
-                        <span className="plan-item-copy">
-                          <span className="plan-place-name">
-                            <strong>{place.name}</strong>
-                            <span className="plan-kind-chip">
-                              {t.tripSkeleton.placeTypes[place.type]}
+                  {(() => {
+                    // The landing spot is drawn on an existing row (line above it, or below the last),
+                    // so no element is inserted or moved while the pointer is down.
+                    const dropping = drag?.moved && drag.targetDayId === day.id ? drag.targetIndex : null;
+                    const others = assignedPlaces.filter((place) => !(drag?.moved && place.id === drag.placeId));
+                    return assignedPlaces.map((place, placeIndex) => {
+                      const dragged = drag?.moved && drag.placeId === place.id;
+                      const slot = others.indexOf(place);
+                      const marker = dropping === null || dragged
+                        ? ""
+                        : slot === dropping ? " drop-before" : slot === others.length - 1 && dropping >= others.length ? " drop-after" : "";
+                      return (
+                        <li
+                          key={place.id}
+                          data-drag-place={place.id}
+                          className={`plan-draggable${dragged ? " is-dragging" : ""}${marker}`}
+                        >
+                          {canArrange ? (
+                            <button
+                              type="button"
+                              className="plan-drag-handle"
+                              aria-label={t.tripSkeleton.dragHandle(place.name)}
+                              // Not `disabled`: a keyboard move would drop focus while it saves. The handlers ignore input while busy.
+                              aria-disabled={busyId !== null}
+                              {...dragHandlers(place, day.id, placeIndex)}
+                            >
+                              <GripVertical aria-hidden="true" />
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="plan-item-row"
+                            aria-label={t.tripSkeleton.plannedWishlistPlace(place.name)}
+                            onClick={() => {
+                              setError("");
+                              setViewingAssignedPlaceId(place.id);
+                            }}
+                          >
+                            <span className="plan-item-copy">
+                              <span className="plan-place-name">
+                                <strong>{place.name}</strong>
+                                <span className="plan-kind-chip">
+                                  {t.tripSkeleton.placeTypes[place.type]}
+                                </span>
+                              </span>
+                              <small>
+                                <time>{t.tripSkeleton.timePending}</time>
+                                {"・"}
+                                {place.durationMinutes
+                                  ? t.tripSkeleton.plannedDuration(place.durationMinutes)
+                                  : t.tripSkeleton.durationUnknown}
+                              </small>
                             </span>
-                          </span>
-                          <small>
-                            <time>{t.tripSkeleton.timePending}</time>
-                            {"・"}
-                            {place.durationMinutes
-                              ? t.tripSkeleton.plannedDuration(place.durationMinutes)
-                              : t.tripSkeleton.durationUnknown}
-                          </small>
-                        </span>
-                      </button>
-                    </li>
-                  ))}
+                          </button>
+                        </li>
+                      );
+                    });
+                  })()}
                 </ul>
               </section>
             );
           })}
         </div>
+        {drag?.moved ? (
+          <div className="plan-drag-ghost" style={{ left: drag.x, top: drag.y }} aria-hidden="true">
+            <GripVertical aria-hidden="true" />
+            {drag.name}
+          </div>
+        ) : null}
 
 
         {viewingItem && itemsById.get(viewingItem.itemId) ? (
@@ -1414,7 +1609,7 @@ export function TripSkeletonWorkspace({
               busyPlaceId={busyId?.startsWith("day-assignment:") ? busyId.slice("day-assignment:".length) : null}
               errorPlaceId={assignmentErrorPlaceId}
               error={error}
-              assign={(place) => updateDayAssignment(assignmentDayId, place)}
+              assign={async (place) => { await updateDayAssignment(assignmentDayId, place); }}
               editLocation={renderLocationEditor}
             />
           </PlaceDetailSheet>
@@ -1514,6 +1709,14 @@ export function TripSkeletonWorkspace({
           request={request}
           onClose={() => setPlanningDay(null)}
           canArrange={canArrange}
+          // 待安排 first (already chosen for the itinerary), then wishlist places with no day.
+          addablePlaces={tripPlaces
+            .filter((place) => !place.scheduled && place.assignedDayId === null && place.latitude !== null && place.longitude !== null)
+            .sort((left, right) => Number(right.selectedForItinerary) - Number(left.selectedForItinerary))
+            .map((place) => ({ id: place.id, name: place.name, pending: place.selectedForItinerary, priorDate: place.unplacedFromDate }))}
+          coordinates={new Map(tripPlaces.flatMap((place) =>
+            place.latitude !== null && place.longitude !== null ? [[place.id, { latitude: place.latitude, longitude: place.longitude }] as const] : []))}
+          stays={new Map(tripPlaces.map((place) => [place.id, { minutes: stayMinutesFor(place), estimated: place.durationMinutes === null }] as const))}
           onOrderSaved={async () => {
             await load();
             onPlacesChanged();

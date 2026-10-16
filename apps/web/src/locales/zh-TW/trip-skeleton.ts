@@ -49,6 +49,8 @@ export const tripSkeleton = {
   },
   constraintUpdateError: "無法更新限制",
   plannedDayUpdateError: "無法更新規劃日期",
+  dragOrderError: "無法更新這天的地點順序，已重新載入。",
+  dragHandle: (name: string) => `拖曳「${name}」改到別天或調整順序；也可用上下鍵調整順序`,
   continues: "接續前一天",
   locked: "已鎖定",
   fixed: "固定",

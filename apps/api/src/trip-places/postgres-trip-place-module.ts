@@ -1191,6 +1191,92 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     });
   }
 
+  /**
+   * Saves one day's arranged order in a single transaction: located places left out move to
+   * 待安排 (still selected for the itinerary), listed places not yet on a day join it, and the
+   * listed order becomes the day's order. Places without a location are left as they are.
+   */
+  async arrangeDay(
+    userId: string,
+    tripId: string,
+    rawDayId: string,
+    rawKey: string,
+    input: { expectedVersion: number; orderedTripPlaceIds: string[]; legModes?: Record<string, "transit" | "taxi" | "walk"> },
+  ) {
+    const dayId = uuid(rawDayId, "dayId").toLowerCase();
+    const ids = Array.isArray(input.orderedTripPlaceIds) ? input.orderedTripPlaceIds : null;
+    if (!ids || ids.length > 100) throw new AppError("validation_error", "orderedTripPlaceIds must contain at most 100 places");
+    const ordered = ids.map((id) => uuid(id, "orderedTripPlaceIds").toLowerCase());
+    if (new Set(ordered).size !== ordered.length) throw new AppError("validation_error", "A place can appear only once");
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `tp:arrange:${dayId}`;
+    return this.database.transaction().execute(async (transaction) => {
+      await requireScheduler(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return replayedTripPlaces(replay);
+      await this.lockTripContent(transaction, tripId);
+      await this.reconcileLegacyPlaces(transaction, tripId);
+      const validDay = await transaction.selectFrom("trip_days").select("id")
+        .where("trip_id", "=", tripId).where("id", "=", dayId).forUpdate().executeTakeFirst();
+      if (!validDay) throw new AppError("trip_day_not_found", "Trip day not found", 404);
+      await requireDayVersion(transaction, tripId, dayId, input.expectedVersion);
+      const onDay = await transaction.selectFrom("trip_place_day_assignments as assignment")
+        .innerJoin("trip_places as place", "place.id", "assignment.trip_place_id")
+        .select(["assignment.trip_place_id", "place.latitude", "place.longitude"])
+        .where("assignment.trip_id", "=", tripId).where("assignment.trip_day_id", "=", dayId)
+        .orderBy("assignment.trip_place_id").forUpdate("assignment").execute();
+      const listed = new Set(ordered);
+      const onDayIds = new Set(onDay.map((row) => row.trip_place_id));
+      const removed = onDay.filter((row) => row.latitude !== null && row.longitude !== null && !listed.has(row.trip_place_id))
+        .map((row) => row.trip_place_id);
+      const addedIds = ordered.filter((id) => !onDayIds.has(id));
+      if (addedIds.length > 0) {
+        const places = await transaction.selectFrom("trip_places").select(["id", "legacy_place_id", "latitude", "longitude"])
+          .where("trip_id", "=", tripId).where("id", "in", addedIds).where("archived_at", "is", null)
+          .orderBy("id").forUpdate().execute();
+        if (places.length !== addedIds.length) throw new AppError("trip_place_not_found", "Trip place not found", 404);
+        if (places.some((place) => place.latitude === null || place.longitude === null)) {
+          throw new AppError("validation_error", "A place without a location cannot be arranged on a day");
+        }
+        const elsewhere = await transaction.selectFrom("trip_place_day_assignments").select("trip_place_id")
+          .where("trip_place_id", "in", addedIds).executeTakeFirst();
+        const scheduled = await transaction.selectFrom("itinerary_endpoints").select("place_id")
+          .where("trip_id", "=", tripId).where("place_id", "in", places.map((place) => place.legacy_place_id))
+          .executeTakeFirst();
+        if (elsewhere || scheduled) throw new AppError("conflict", "A place was arranged elsewhere meanwhile; plan the day again", 409);
+      }
+      const updatedAt = this.now();
+      for (const id of removed) await this.writeDayAssignment(transaction, userId, tripId, id, null, updatedAt);
+      for (const id of addedIds) await this.writeDayAssignment(transaction, userId, tripId, id, dayId, updatedAt);
+      await transaction.updateTable("trip_place_day_assignments").set({ day_position: null })
+        .where("trip_id", "=", tripId).where("trip_day_id", "=", dayId).execute();
+      // Each listed place keeps the way to reach it chosen in the draft; unlisted ones follow the day.
+      const modes = input.legModes ?? {};
+      for (const [position, id] of ordered.entries()) {
+        const mode = modes[id] ?? null;
+        if (mode !== null && mode !== "transit" && mode !== "taxi" && mode !== "walk") {
+          throw new AppError("validation_error", "legModes values must be transit, taxi or walk");
+        }
+        await transaction.updateTable("trip_place_day_assignments").set({ day_position: position, arrival_mode: mode })
+          .where("trip_place_id", "=", id).execute();
+      }
+      // Order and ways of arrival can change with no place added or removed; members still need
+      // to hear about it, and history to show it.
+      await recordEvent(transaction, {
+        tripId,
+        actorId: userId,
+        eventType: "trip_day.places_ordered",
+        targetType: "trip_day",
+        targetId: dayId,
+        summary: `Arranged ${ordered.length} planned places for a day`,
+      });
+      const response = await this.readList(transaction, userId, tripId);
+      await remember(transaction, userId, operation, key, { tripPlaces: response });
+      return response;
+    });
+  }
+
   /** Puts one place on a day, or takes it off its day when `tripDayId` is null. */
   private async writeDayAssignment(
     transaction: Transaction<AlongTheWayDatabase>,

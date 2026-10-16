@@ -946,7 +946,7 @@ export function TripPlaceWorkspace({
     typeLabel: placeTypeFilterLabel(place.type),
     area: placeArea(place.address),
     mine: place.ownVote,
-  })));
+  })), `along-the-way:place-filters:${trip.id}:wishlist`);
   const filteredPlaces = listedPlaces.filter((place) => filters.visibleIds.has(place.id));
   const placeNameCounts = new Map<string, number>();
   for (const place of listedPlaces) {

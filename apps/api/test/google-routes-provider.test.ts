@@ -4,8 +4,8 @@ import { GoogleRoutesProvider } from "../src/planning/google-routes-provider";
 
 const NOW = new Date("2026-10-01T00:00:00Z");
 const query: RouteObservationQuery = {
-  origin: { placeId: "origin", latitude: 34.9858, longitude: 135.7588 },
-  destination: { placeId: "destination", latitude: 34.9671, longitude: 135.7727 },
+  origin: { placeId: "origin", latitude: 25.04, longitude: 121.56 },
+  destination: { placeId: "destination", latitude: 25.033, longitude: 121.565 },
   departureTime: "2026-10-02T09:00:00+09:00",
 };
 const transitRoute = {
@@ -46,6 +46,100 @@ describe("Google Routes observation adapter", () => {
         durationMinutes: 31, distanceMeters: 2500, walkingLegMinutes: [17, 2], manualChecks: [],
         warnings: ["Service schedules may change"],
       },
+    ]);
+  });
+
+  it("skips billed Google transit requests for a leg wholly inside Japan", async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({ routes: [transitRoute] }));
+    const provider = new GoogleRoutesProvider({
+      apiKey: "test-only-key", now: () => NOW, fetch,
+    });
+    const observations = await provider.observe({
+      ...query,
+      origin: { ...query.origin, latitude: 34.9858, longitude: 135.7588 },
+      destination: { ...query.destination, latitude: 34.9671, longitude: 135.7727 },
+    });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toMatchObject({ travelMode: "WALK" });
+    expect(observations[0]).toMatchObject({ mode: "walking", status: "available" });
+    expect(observations[1]).toMatchObject({
+      mode: "transit", status: "unavailable", reason: "unsupported_mode",
+    });
+  });
+
+  it.each([
+    ["Seoul", 37.5665, 126.978, true],
+    ["Busan", 35.1796, 129.0756, true],
+    ["Jeju", 33.4996, 126.5312, true],
+    ["Vladivostok", 43.1155, 131.8855, true],
+    ["Fukuoka", 33.5902, 130.4017, false],
+    ["Tsushima", 34.2, 129.29, false],
+    ["Sapporo", 43.0618, 141.3545, false],
+    ["Naha", 26.2124, 127.6809, false],
+  ])("asks Google for transit in %s only when it is outside Japan", async (_city, latitude, longitude, asks) => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ routes: [transitRoute] }));
+    const provider = new GoogleRoutesProvider({ apiKey: "test-only-key", now: () => NOW, fetch });
+    const near = { latitude: latitude + 0.01, longitude: longitude + 0.01 };
+    const observations = await provider.observe({
+      ...query,
+      origin: { ...query.origin, latitude, longitude },
+      destination: { ...query.destination, ...near },
+    });
+    expect(fetch).toHaveBeenCalledTimes(asks ? 2 : 1);
+    expect(observations[1]).toMatchObject(asks ? { mode: "transit", status: "available" } : { mode: "transit", reason: "unsupported_mode" });
+  });
+
+  it("requests driving without a departure time and maps its duration", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const provider = new GoogleRoutesProvider({
+      apiKey: "test-only-key",
+      now: () => NOW,
+      fetch: async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return Response.json({ routes: [{ duration: "301s", distanceMeters: 3200 }] });
+      },
+    });
+
+    const observations = await provider.observe({ ...query, modes: ["drive"] });
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toMatchObject({ travelMode: "DRIVE" });
+    expect(bodies[0]).not.toHaveProperty("departureTime");
+    expect(observations).toHaveLength(1);
+    expect(observations[0]).toMatchObject({
+      mode: "drive",
+      status: "available",
+      durationMinutes: 6,
+      distanceMeters: 3200,
+      walkingLegMinutes: [],
+    });
+  });
+
+  it("returns requested modes in the caller's order", async () => {
+    const requested: string[] = [];
+    const durations: Record<string, string> = { WALK: "60s", TRANSIT: "120s", DRIVE: "180s" };
+    const provider = new GoogleRoutesProvider({
+      apiKey: "test-only-key",
+      now: () => NOW,
+      fetch: async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as { travelMode: string };
+        requested.push(body.travelMode);
+        return Response.json({ routes: [{ duration: durations[body.travelMode], distanceMeters: 100 }] });
+      },
+    });
+
+    const observations = await provider.observe({
+      ...query,
+      modes: ["drive", "walking", "transit"],
+    });
+
+    expect(requested).toEqual(["DRIVE", "WALK", "TRANSIT"]);
+    expect(observations.map(({ mode, durationMinutes }) => [mode, durationMinutes])).toEqual([
+      ["drive", 3],
+      ["walking", 1],
+      ["transit", 2],
     ]);
   });
 

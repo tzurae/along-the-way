@@ -27,13 +27,22 @@ export interface PlaceHoursLookup {
   openingHours(providerPlaceId: string): Promise<PlaceOpeningHours>;
 }
 
+/**
+ * Why hours are unknown: `none` the provider has no hours for the place, `failed` the lookup
+ * failed (it may work on retry), `manual` the place did not come from the provider.
+ */
+export type UnknownHoursCause = "none" | "failed" | "manual";
+
+/** What a lookup produced: the provider's hours, or why there are none to read. */
+export type LookedUpHours = PlaceOpeningHours | { missing: "failed" | "manual" };
+
 export type ClosedReason = "closed_that_day" | "temporarily_closed" | "permanently_closed";
 
 /** Opening on one local date, in minutes from midnight. */
 export type DayHours =
   | { status: "open"; intervals: Array<[number, number]> }
   | { status: "closed"; reason: ClosedReason }
-  | { status: "unknown" };
+  | { status: "unknown"; cause: UnknownHoursCause };
 
 const DAY_MINUTES = 24 * 60;
 const WEEK_MINUTES = 7 * DAY_MINUTES;
@@ -104,8 +113,8 @@ function dayHours(open: Array<[number, number]>): DayHours {
  * When the place is open on a local date (YYYY-MM-DD). `today` is the place's current
  * date: the seven days from it use the dated hours, which include holidays.
  */
-export function hoursOn(hours: PlaceOpeningHours | null, date: string, today: string): DayHours {
-  if (!hours) return { status: "unknown" };
+export function hoursOn(hours: LookedUpHours, date: string, today: string): DayHours {
+  if ("missing" in hours) return { status: "unknown", cause: hours.missing };
   if (hours.businessStatus === "closed_permanently") return { status: "closed", reason: "permanently_closed" };
   if (hours.businessStatus === "closed_temporarily") return { status: "closed", reason: "temporarily_closed" };
   const ahead = daysBetween(today, date);
@@ -116,7 +125,7 @@ export function hoursOn(hours: PlaceOpeningHours | null, date: string, today: st
     const dated = current.every((period) => period.open.date !== null && (period.close === null || period.close.date !== null));
     if (dated) return dayHours(datedRanges(current, date));
   }
-  if (hours.regular === null) return { status: "unknown" };
+  if (hours.regular === null) return { status: "unknown", cause: "none" };
   if (hours.regular.length === 0) return { status: "closed", reason: "temporarily_closed" };
   return dayHours(weeklyRanges(hours.regular, date));
 }

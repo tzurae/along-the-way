@@ -4,6 +4,7 @@ import type {
   DayTimetableRowDto,
   TripPlanReason,
 } from "@along-the-way/contracts/day-plans";
+import type { ReactNode } from "react";
 import { Clock3, Lock, MapPin, Route } from "lucide-react";
 
 import { useI18n, type Messages } from "./i18n";
@@ -68,20 +69,16 @@ function legSummary(leg: DayLegDto, t: Messages["timetable"]) {
   if (leg.durationMinutes === null) return t.travelTimeUnavailable;
   // A fixed item without a map location gets an assumed allowance instead of a route.
   if (leg.mode === null) return t.estimatedTravelWithoutLocation(leg.durationMinutes);
-  if (leg.mode === "walking") {
-    // Walking is only chosen past 15 minutes when no train time is known.
-    const unavailable = leg.transitMinutes === null && leg.durationMinutes > 15
-      ? `・${t.trainTimeUnavailable}`
-      : "";
-    return `${t.walk(leg.durationMinutes)}${unavailable}`;
-  }
+  if (leg.mode === "walking") return t.walk(leg.durationMinutes);
+  if (leg.mode === "taxi") return t.taxi(leg.durationMinutes);
   const walk = leg.walkingMinutes === null ? "" : `・${t.walkingTime(leg.walkingMinutes)}`;
   const average = leg.estimated ? `（${t.average}）` : "";
   return `${t.train(leg.durationMinutes)}${average}${walk}`;
 }
 
 
-export function TimetableRow({ row }: { row: DayTimetableRowDto }) {
+/** `drag`: a visit row the member can rearrange; `handle` sits before the name, `actions` after it, `className` marks drag state. */
+export function TimetableRow({ row, drag }: { row: DayTimetableRowDto; drag?: { handle: ReactNode; className: string; actions?: ReactNode } }) {
   const { t } = useI18n();
   const travel = row.kind !== "start" ? row.travel : null;
   const travelLabel = travel ? legSummary(travel, t.timetable) : null;
@@ -104,17 +101,19 @@ export function TimetableRow({ row }: { row: DayTimetableRowDto }) {
     case "visit":
       return (
         <li
-          className={`route-stop${travelUnavailable ? " route-stop-unknown" : ""}`}
+          className={`route-stop${travelUnavailable ? " route-stop-unknown" : ""}${drag ? ` route-stop-draggable${drag.className}` : ""}`}
           data-trip-place-id={row.tripPlaceId}
         >
           <time className="route-stop-time">{clock(row.startMinute)}</time>
           <span className="route-stop-track" aria-hidden="true" />
           <div className="route-stop-content">
             <div className="route-stop-title">
+              {drag?.handle}
               <strong>{row.name}</strong>
               {row.hours === "listed" ? (
                 <span className="route-fixed-note"><Clock3 /> {t.timetable.confirmed}</span>
               ) : null}
+              {drag?.actions}
             </div>
             <div className="route-stop-meta">
               <span>{clock(row.startMinute)}–{clock(row.endMinute)}</span>
@@ -130,8 +129,12 @@ export function TimetableRow({ row }: { row: DayTimetableRowDto }) {
                 {t.timetable.arriveAndWaitForOpening(clock(row.arriveMinute), row.waitMinutes)}
               </p>
             ) : null}
-            {row.hours === "unknown" ? (
-              <p className="route-stop-evidence">{t.timetable.openingHoursUnknown}</p>
+            {row.hours !== "listed" ? (
+              <p className="route-stop-evidence">
+                {row.hours === "none"
+                  ? t.timetable.openingHoursNone
+                  : row.hours === "failed" ? t.timetable.openingHoursFailed : t.timetable.openingHoursManual}
+              </p>
             ) : null}
           </div>
         </li>
