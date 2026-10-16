@@ -117,6 +117,7 @@ services:
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENAI_MODEL: "${OPENAI_MODEL:-gpt-5.5}"
       RAPIDAPI_KEY: "${RAPIDAPI_KEY:-}"
+      FAKE_EXTERNAL_DATA: "${FAKE_EXTERNAL_DATA:-}"
     depends_on:
       provision-app-role:
         condition: service_completed_successfully

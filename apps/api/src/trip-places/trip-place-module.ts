@@ -78,6 +78,14 @@ export interface TripPlaceModule {
     idempotencyKey: string,
     input: ApplyTripPlanInput,
   ): Promise<TripPlaceDto[]>;
+  /** Saves a day arranged in the route dialog: drops, adds and orders its located places atomically. */
+  arrangeDay(
+    userId: string,
+    tripId: string,
+    dayId: string,
+    idempotencyKey: string,
+    input: { expectedVersion: number; orderedTripPlaceIds: string[]; legModes?: Record<string, "transit" | "taxi" | "walk"> },
+  ): Promise<TripPlaceDto[]>;
   setOwnVote(
     userId: string,
     tripId: string,

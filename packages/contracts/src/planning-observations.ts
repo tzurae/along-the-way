@@ -1,4 +1,4 @@
-export type RouteMode = "walking" | "transit";
+export type RouteMode = "walking" | "transit" | "drive";
 
 export interface RouteLocation {
   placeId: string;
@@ -11,6 +11,8 @@ export interface RouteObservationQuery {
   destination: RouteLocation;
   /** An offset-bearing instant, not a Trip-local wall-clock string. */
   departureTime: string;
+  /** Modes to observe, in this order; defaults to walking then transit. Each mode is one provider request. */
+  modes?: RouteMode[];
 }
 
 export type RouteUnavailableReason =

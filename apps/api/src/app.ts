@@ -27,7 +27,7 @@ import type {
   UpdateTripPlaceDayAssignmentsInput,
   UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
-import type { CreateDayTimetableInput } from "@along-the-way/contracts/day-plans";
+import type { CreateDayTimetableInput, UpdateDayWindowInput } from "@along-the-way/contracts/day-plans";
 import type { DiscoveryModule } from "./discovery/discovery-module";
 import type { DayPlanModule } from "./planning/postgres-day-plan-module";
 
@@ -859,6 +859,21 @@ export function createApp({
     });
   });
 
+  app.post("/api/trips/:tripId/discovery/proposals/:proposalId/restore", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json({
+      discovery: await discovery.restoreProposal(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "proposalId"),
+        idempotencyKey(context),
+        { expectedVersion: numberField(body, "expectedVersion") },
+      ),
+    });
+  });
+
 
   app.post("/api/trips/:tripId/trip-places/search", async (context) => {
     const { user } = await authenticated(context);
@@ -1044,11 +1059,36 @@ export function createApp({
         user.id,
         uuidParam(context, "tripId"),
         uuidParam(context, "dayId"),
-        { order: stringField(body, "order") as CreateDayTimetableInput["order"] },
+        {
+          order: stringField(body, "order") as CreateDayTimetableInput["order"],
+          ...(body.orderedTripPlaceIds === undefined ? {} : { orderedTripPlaceIds: stringArrayField(body, "orderedTripPlaceIds") }),
+          ...(body.insertTripPlaceId === undefined ? {} : { insertTripPlaceId: stringField(body, "insertTripPlaceId") }),
+          ...(body.legModes === undefined ? {} : { legModes: objectBody(body.legModes) as CreateDayTimetableInput["legModes"] }),
+          ...(body.taxiFallbackFor === undefined ? {} : { taxiFallbackFor: stringField(body, "taxiFallbackFor") }),
+        },
       );
       return context.json({ timetable });
     },
   );
+
+  app.put("/api/trips/:tripId/days/:dayId/arrangement", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json({
+      tripPlaces: await tripPlaces.arrangeDay(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "dayId"),
+        idempotencyKey(context),
+        {
+          expectedVersion: numberField(body, "expectedVersion"),
+          orderedTripPlaceIds: stringArrayField(body, "orderedTripPlaceIds"),
+          ...(body.legModes === undefined ? {} : { legModes: objectBody(body.legModes) as Record<string, "transit" | "taxi" | "walk"> }),
+        },
+      ),
+    });
+  });
 
   app.get("/api/trips/:tripId/days/:dayId/window", async (context) => {
     const { user } = await authenticated(context);
@@ -1067,7 +1107,13 @@ export function createApp({
         uuidParam(context, "tripId"),
         uuidParam(context, "dayId"),
         idempotencyKey(context),
-        { startMinute: numberField(body, "startMinute"), endMinute: numberField(body, "endMinute"), expectedVersion: numberField(body, "expectedVersion") },
+        {
+          startMinute: numberField(body, "startMinute"),
+          endMinute: numberField(body, "endMinute"),
+          expectedVersion: numberField(body, "expectedVersion"),
+          ...(body.travelMode === undefined ? {} : { travelMode: stringField(body, "travelMode") as UpdateDayWindowInput["travelMode"] }),
+          ...(body.walkLimitMinutes === undefined ? {} : { walkLimitMinutes: numberField(body, "walkLimitMinutes") }),
+        },
       );
       return context.json({ window });
     },

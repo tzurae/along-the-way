@@ -70,7 +70,7 @@ function shouldStartFreshRequest(error: unknown) {
 
 
 // Where an outcome is reported: next to the control that caused it, or at the top.
-type NoticeArea = "general" | "find" | "again" | "questions";
+type NoticeArea = "general" | "find" | "again" | "questions" | "decided";
 type DetailFocusSection = "cautions";
 
 function missingServices(
@@ -536,6 +536,14 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       "general",
     );
   }
+  async function restoreProposal(decision: { proposalId: string; version: number }) {
+    return mutate(
+      `reject:restore:${decision.proposalId}`,
+      `/api/trips/${trip.id}/discovery/proposals/${decision.proposalId}/restore`,
+      { expectedVersion: decision.version },
+      "decided",
+    );
+  }
   /**
    * Once an AI place is in the itinerary its votes live on that trip place, so the like on its
    * AI row reads and writes the trip place's vote (the proposal itself no longer takes votes).
@@ -699,8 +707,14 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
     );
   }
   const tripPlacesById = new Map(tripPlaces.map((place) => [place.id, place]));
-  // 「不要再推薦」 removes the proposal from the shortlist; it is never shown there again.
+  // 「不要再推薦」 removes the proposal from the shortlist until the owner restores it under 「之前的決定」.
   const listedProposals = workspace?.proposals.filter((proposal) => proposal.status !== "rejected") ?? [];
+  // Rejections from the latest run are hidden from the shortlist, so list them with earlier runs' decisions to undo.
+  const decisions: { proposalId: string; name: string; status: "accepted" | "rejected"; decidedAt: string | null; version: number }[] = [
+    ...(workspace?.proposals ?? []).filter((proposal) => proposal.status === "rejected")
+      .map((proposal) => ({ proposalId: proposal.id, name: proposal.name, status: "rejected" as const, decidedAt: null, version: proposal.version })),
+    ...(workspace?.decided ?? []),
+  ];
   const acceptedPlaceFor = (proposal: CandidateProposalDto) =>
     proposal.acceptedTripPlaceId ? tripPlacesById.get(proposal.acceptedTripPlaceId) ?? null : null;
   // Filter by the coarse place type (景點、餐廳…): AI categories are free text and too varied for chips.
@@ -714,7 +728,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       area: placeArea(proposal.address),
       mine: proposal.status === "pending" ? proposal.ownVote : Boolean(place?.ownVote),
     };
-  }));
+  }), `along-the-way:place-filters:${trip.id}:discovery`);
   const filteredProposals = listedProposals.filter((proposal) => proposalFilters.visibleIds.has(proposal.id));
   /** Status label; an accepted proposal whose wishlist place is scheduled reads 「已加入行程」. */
   const proposalStatusLabel = (proposal: CandidateProposalDto, status: CandidateProposalDto["status"] = proposal.status) => {
@@ -1269,11 +1283,12 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
           ) : null}
 
 
-          {workspace?.decided.length ? (
+          {decisions.length ? (
             <section className="order-4 rounded-panel border border-ink/10 p-4" aria-label={t.decided.areaLabel}>
               <h3 className="font-display text-2xl">{t.decided.title}</h3>
               <p className="mt-1 text-sm text-muted-foreground">{t.decided.description}</p>
-              <ul className="mt-3 grid gap-2">{workspace.decided.map((decision) => <li key={decision.proposalId} className="flex flex-wrap items-baseline justify-between gap-2 rounded-lg bg-surface-subtle p-3"><strong>{decision.name}</strong><span className="text-sm">{decision.status === "accepted" ? t.decided.accepted : t.decided.rejected}・{t.decided.decidedAt(new Date(decision.decidedAt).toLocaleDateString(locale))}</span></li>)}</ul>
+              <ul className="mt-3 grid gap-2">{decisions.map((decision) => <li key={decision.proposalId} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-surface-subtle p-3"><strong>{decision.name}</strong><span className="flex items-center gap-2 text-sm">{decision.status === "accepted" ? t.decided.accepted : t.decided.rejected}{decision.decidedAt ? `・${t.decided.decidedAt(new Date(decision.decidedAt).toLocaleDateString(locale))}` : null}{decision.status === "rejected" && trip.role === "owner" ? <button type="button" className="pd-secondary" disabled={pending !== null} aria-label={t.decided.restoreLabel(decision.name)} onClick={() => void restoreProposal(decision)}>{t.decided.restore}</button> : null}</span></li>)}</ul>
+              {notice?.area === "decided" ? <p className="mt-2 text-sm" role="alert">{notice.text}</p> : null}
             </section>
           ) : null}
 

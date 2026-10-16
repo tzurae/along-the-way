@@ -1,8 +1,10 @@
 /* Search + quick chips above a place list. */
 .place-filters {
   display: grid;
+  min-width: 0;
   gap: 10px;
   margin: 0 0 14px;
+  container-type: inline-size;
 }
 
 .place-filters__search {
@@ -44,36 +46,59 @@
   border-radius: 999px;
 }
 
+/* One row per group: the caption sits in a fixed column and the chips stay inside the row. */
 .place-filters__chips {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
+.place-filters__row {
+  display: grid;
+  grid-template-columns: 2.5rem minmax(0, 1fr);
+  align-items: start;
+  gap: 6px;
+}
+
+.place-filters__row-chips {
   display: flex;
-  align-items: center;
+  min-width: 0;
+  flex-wrap: wrap;
   gap: 6px;
-  overflow-x: auto;
-  padding-bottom: 2px;
-  scrollbar-width: none;
-}
-
-.place-filters__chips::-webkit-scrollbar {
-  display: none;
-}
-
-.place-filters__chip-slot {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  gap: 6px;
+  grid-column: 2;
 }
 
 .place-filters__group {
-  margin-left: 6px;
+  min-height: 34px;
+  align-content: center;
+  display: grid;
   color: var(--muted-foreground);
   font-size: 12px;
   font-weight: 600;
 }
 
-.place-filters__chip {
+/* Phone width: each group swipes sideways instead of wrapping into a tall block of chips. */
+@container (max-width: 560px) {
+  .place-filters__row-chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    padding-right: 24px;
+    scrollbar-width: none;
+    mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  }
+
+  .place-filters__row-chips::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.place-filters__chip,
+.place-filters__more {
   display: inline-flex;
   min-height: 34px;
+  max-width: 14rem;
+  flex: none;
   align-items: center;
   gap: 6px;
   padding: 0 12px;
@@ -86,6 +111,23 @@
   white-space: nowrap;
 }
 
+.place-filters__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.place-filters__more {
+  border-style: dashed;
+  color: var(--muted-foreground);
+}
+
+.place-filters__chip:focus-visible,
+.place-filters__more:focus-visible {
+  outline: 2px solid var(--color-focus, var(--ring));
+  outline-offset: 2px;
+}
+
 .place-filters__chip[aria-pressed="true"] {
   border-color: var(--color-ink-strong);
   background: var(--color-ink-strong);
@@ -93,9 +135,11 @@
 }
 
 .place-filters__count {
+  flex: none;
   color: inherit;
   font-size: 12px;
   font-weight: 500;
+  font-variant-numeric: tabular-nums;
   opacity: 0.7;
 }
 
