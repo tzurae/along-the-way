@@ -29,8 +29,6 @@ import type { EmailSender } from "../src/private-trips/email-sender";
 import { PostgresEmailWorker } from "../src/private-trips/postgres-email-worker";
 import { PostgresIdentityAccessModule } from "../src/private-trips/postgres-identity-access-module";
 import { PostgresRateLimiter } from "../src/private-trips/postgres-rate-limiter";
-import { PostgresRapidApiKeysModule } from "../src/private-trips/postgres-rapidapi-keys-module";
-import { RapidApiKeyCipher } from "../src/private-trips/rapidapi-key-cipher";
 import { PostgresReadinessProbe } from "../src/private-trips/postgres-readiness-probe";
 import { PostgresTripWorkspaceModule } from "../src/private-trips/postgres-trip-workspace-module";
 import { TokenIssuer } from "../src/private-trips/token-issuer";
@@ -393,7 +391,6 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       policyVersion: "discovery-test-v2",
     });
     app = createApp({
-      rapidApiKeys: new PostgresRapidApiKeysModule(database, new RapidApiKeyCipher(Buffer.alloc(32, 7).toString("base64"))),
       placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
       collaboration: new PostgresCollaborationModule(database),
       dayPlans: unrelatedDayPlanModule,

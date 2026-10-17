@@ -20,13 +20,6 @@ export interface UserTable {
   updated_at: Timestamp;
 }
 
-export interface UserRapidApiKeysTable {
-  user_id: string;
-  ciphertext: Buffer;
-  nonce: Buffer;
-  encryption_key_version: number;
-  updated_at: Timestamp;
-}
 
 export interface MagicLinkTokenTable {
   id: Generated<string>;
@@ -88,13 +81,6 @@ export interface TripDayTable {
   trip_id: string;
   date: DateOnly;
   title: string | null;
-  /** Planned day window in minutes from local midnight; defaults to 09:00–19:00. */
-  day_start_minute: Generated<number>;
-  day_end_minute: Generated<number>;
-  /** How the day's legs are travelled unless a leg says otherwise. */
-  travel_mode: Generated<"transit" | "taxi" | "walk">;
-  /** Longest walk taken instead of transit, in minutes. */
-  walk_limit_minutes: Generated<number>;
   version: Generated<number>;
 }
 
@@ -216,8 +202,6 @@ export interface TripPlaceDayAssignmentTable {
   assigned_at: Timestamp;
   /** Applied order within the day; null until a route order is applied. */
   day_position: number | null;
-  /** The way to reach this place on its day; null follows the day's travel mode. */
-  arrival_mode: "transit" | "taxi" | "walk" | null;
 }
 
 export interface TripPlaceDuplicateSuggestionTable {
@@ -497,7 +481,6 @@ export interface CommonsPlacePhotoTable {
 
 export interface AlongTheWayDatabase {
   users: UserTable;
-  user_rapidapi_keys: UserRapidApiKeysTable;
   magic_link_tokens: MagicLinkTokenTable;
   sessions: SessionTable;
   trips: TripTable;

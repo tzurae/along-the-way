@@ -25,7 +25,6 @@ describe("trip skeleton contract", () => {
         ],
         items: [],
         days: [],
-        tripInformationItemIds: [],
       },
     });
 
@@ -138,7 +137,6 @@ describe("trip skeleton contract", () => {
             ],
           },
         ],
-        tripInformationItemIds: [typedItems[0]!.id, typedItems[1]!.id],
       },
     });
 
@@ -229,7 +227,6 @@ describe("trip skeleton contract", () => {
             },
           ],
           days: [],
-          tripInformationItemIds: [],
         },
       }),
     ).toThrow("Invalid trip skeleton response");

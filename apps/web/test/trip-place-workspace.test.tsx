@@ -7,6 +7,7 @@ import type { GooglePlacePhotoDto, PlacePhotoDto } from "@along-the-way/contract
 import type { ProviderCandidatesResponse, TripPlaceDto } from "@along-the-way/contracts/trip-places";
 import { ApiRequestError } from "../src/api-error";
 import { TripPlaceWorkspace } from "../src/TripPlaceWorkspace";
+import { AppToaster } from "../src/AppToaster";
 import type { PlaceDetailRequestOptions } from "../src/PlaceThumbnail";
 
 const tripId = "11111111-1111-4111-8111-111111111111";
@@ -112,6 +113,7 @@ beforeEach(() => {
     unobserve() {}
     disconnect() {}
   });
+  render(<AppToaster />);
 });
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -191,7 +193,7 @@ it("shows a zh-TW provider error instead of leaking the server's English message
   fireEvent.change(within(dialog).getByLabelText("搜尋 Google Maps"), { target: { value: "東福寺" } });
   fireEvent.click(within(dialog).getByRole("button", { name: /^搜尋地點$/ }));
 
-  const alert = await within(dialog).findByRole("alert");
+  const alert = await screen.findByRole("alert");
   expect(alert).toHaveTextContent("Google 地點服務暫時無法使用，請稍後再試或改用手動輸入。");
   expect(alert).not.toHaveTextContent("temporarily unavailable");
 });
@@ -220,7 +222,7 @@ it("preserves search and note drafts when confirmation returns already_in_wishli
   fireEvent.change(note, { target: { value: "家人想看夜間點燈" } });
   fireEvent.click(within(dialog).getByRole("button", { name: /^搜尋地點$/ }));
   fireEvent.click(await within(dialog).findByRole("button", { name: /^新增這個地點：清水寺・佛寺$/ }));
-  expect(await within(dialog).findByRole("alert")).toHaveTextContent("這個地點已在口袋名單。");
+  expect(await screen.findByRole("alert")).toHaveTextContent("這個地點已在口袋名單。");
   expect(query).toHaveValue("清水寺");
   expect(note).toHaveValue("家人想看夜間點燈");
 });
@@ -570,4 +572,37 @@ it("restores a failed wishlist vote, announces the exact error, and reuses its i
   expect(voteRequests).toBe(2);
   expect(idempotencyKeys[0]).toBeTruthy();
   expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
+});
+
+it("links an unlocated wishlist place to the working overview repair editor", async () => {
+  const current = {
+    ...place(unscheduledId, "待補位置地點", false),
+    latitude: null,
+    longitude: null,
+    legacyPlaceId: "88888888-8888-4888-8888-888888888888",
+  };
+  const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
+    if (path.endsWith("/trip-places") && !init?.method) return applyParser({ tripPlaces: [current] }, init);
+    if (path.includes("/place-previews?")) return applyParser({ previews: [] }, init);
+    if (path.includes("/place-details?")) return applyParser({
+      detail: {
+        reference: { kind: "trip-place", id: current.id },
+        canonicalPlaceId: current.placeId,
+        name: current.name,
+        asOfDate: null,
+        sections: [],
+        sources: [],
+        photos: [],
+        googlePhotos: [],
+      },
+    }, init);
+    throw new Error(`Unexpected request: ${path}`);
+  };
+  render(<TripPlaceWorkspace accountId="account" trip={trip("owner")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  fireEvent.click((await screen.findAllByRole("button", { name: `查看 ${current.name} 的詳情` }))[0]!);
+  const dialog = await screen.findByRole("dialog", { name: current.name });
+
+  const repair = within(dialog).getByRole("link", { name: "補上位置" });
+  expect(repair).toHaveAttribute("href", expect.stringContaining(`repair=${current.id}`));
+  expect(repair).not.toHaveAttribute("href", expect.stringContaining("manage=places"));
 });

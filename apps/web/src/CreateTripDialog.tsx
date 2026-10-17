@@ -32,6 +32,7 @@ import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useI18n } from "./i18n";
+import { notify } from "./AppToaster";
 import { emptyFlight, FlightFields, flightComplete } from "./FlightFields";
 import { sameAirport } from "./airport-data";
 
@@ -215,7 +216,7 @@ export function CreateTripDialog({ open, onOpenChange, createTrip }: CreateTripD
       reset();
       onOpenChange(false);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : t.createTrip.couldNotCreate);
+      notify("error", caught instanceof Error ? caught.message : t.createTrip.couldNotCreate);
     } finally {
       setSubmitting(false);
     }

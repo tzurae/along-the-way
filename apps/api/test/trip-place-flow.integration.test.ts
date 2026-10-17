@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { sql, type Kysely } from "kysely";
 import { Pool } from "pg";
 import type { Hono } from "hono";
+import { parseDayRouteResponse } from "@along-the-way/contracts/day-plans";
 import {
   parseProviderCandidatesResponse,
   parseTripPlaceListResponse,
@@ -10,17 +11,6 @@ import {
   type ProviderPlaceCandidateDto,
   type TripPlaceDto,
 } from "@along-the-way/contracts/trip-places";
-import {
-  parseDayTimetableResponse,
-  parseDayWindowResponse,
-  parseTripPlanResponse,
-} from "@along-the-way/contracts/day-plans";
-import type {
-  RouteMode,
-  RouteObservation,
-  RouteObservationProvider,
-  RouteObservationQuery,
-} from "@along-the-way/contracts/planning-observations";
 import { parseTripResponse } from "@along-the-way/contracts/private-trips";
 import { parseTripHistoryResponse, parseTripChangeNotification, type TripChangeNotification } from "@along-the-way/contracts/private-trips";
 import {
@@ -30,8 +20,6 @@ import {
 } from "@along-the-way/contracts/trip-skeleton";
 
 import { createApp } from "../src/app";
-import { PostgresRapidApiKeysModule } from "../src/private-trips/postgres-rapidapi-keys-module";
-import { RapidApiKeyCipher } from "../src/private-trips/rapidapi-key-cipher";
 import { PostgresPlaceDetailModule } from "../src/place-details/postgres-place-detail-module";
 import { packagedPhotoRoot } from "../src/place-details/photo-assets";
 import { PostgresCollaborationModule } from "../src/private-trips/postgres-collaboration-module";
@@ -49,12 +37,7 @@ import {
   down as removeDayVersionMigration,
   up as applyDayVersionMigration,
 } from "../src/database/migrations/020_trip_day_versions";
-import {
-  down as removeTravelModeMigration,
-  up as applyTravelModeMigration,
-} from "../src/database/migrations/028_day_travel_modes";
 import { seedDatabase } from "../src/database/seed";
-import type { PlaceHoursLookup, PlaceOpeningHours } from "../src/planning/opening-hours";
 import { PostgresDayPlanModule } from "../src/planning/postgres-day-plan-module";
 import type { EmailSender } from "../src/private-trips/email-sender";
 import { PostgresEmailWorker } from "../src/private-trips/postgres-email-worker";
@@ -154,85 +137,6 @@ class ControlledProvider implements PlaceProvider {
   }
 }
 
-/** Answers by unordered place pair; unlisted pairs walk 10 minutes and have no transit. */
-class ControlledRouteProvider implements RouteObservationProvider {
-  readonly queries: RouteObservationQuery[] = [];
-  readonly walking = new Map<string, number | null>();
-  readonly transit = new Map<string, number>();
-  consumeBudget: (() => Promise<boolean>) | null = null;
-
-  static pair(left: string, right: string) {
-    return [left, right].sort().join("|");
-  }
-
-  async observe(query: RouteObservationQuery): Promise<RouteObservation[]> {
-    if (this.consumeBudget && !(await this.consumeBudget())) {
-      return (query.modes ?? ["walking", "transit"]).map((mode) => ({
-        originPlaceId: query.origin.placeId,
-        destinationPlaceId: query.destination.placeId,
-        requestedDepartureTime: query.departureTime,
-        mode,
-        provider: "controlled",
-        attribution: "Controlled routes",
-        observedAt: "2026-09-28T12:00:00.000Z",
-        expiresAt: "2026-09-28T12:05:00.000Z",
-        status: "unavailable" as const,
-        reason: "quota" as const,
-        durationMinutes: null,
-        distanceMeters: null,
-        walkingLegMinutes: null,
-      }));
-    }
-    this.queries.push(query);
-    const pair = ControlledRouteProvider.pair(query.origin.placeId, query.destination.placeId);
-    const walking = this.walking.has(pair) ? this.walking.get(pair)! : 10;
-    return [
-      this.observation(query, "walking", walking),
-      this.observation(query, "transit", this.transit.get(pair) ?? null),
-    ];
-  }
-
-  private observation(query: RouteObservationQuery, mode: RouteMode, minutes: number | null): RouteObservation {
-    const source = {
-      originPlaceId: query.origin.placeId,
-      destinationPlaceId: query.destination.placeId,
-      requestedDepartureTime: query.departureTime,
-      mode,
-      provider: "controlled",
-      attribution: "Controlled routes",
-      observedAt: "2026-09-28T12:00:00.000Z",
-      expiresAt: "2026-09-28T12:05:00.000Z",
-    };
-    return minutes === null
-      ? { ...source, status: "unavailable", reason: "no_route", durationMinutes: null, distanceMeters: null, walkingLegMinutes: null }
-      : {
-          ...source,
-          status: "available",
-          durationMinutes: minutes,
-          distanceMeters: minutes * 80,
-          walkingLegMinutes: null,
-          manualChecks: mode === "transit" ? ["transit_duration_estimated"] : [],
-          warnings: [],
-        };
-  }
-}
-
-/** Answers opening hours by Google place ID; unlisted places fail like an unavailable provider. */
-class ControlledHoursLookup implements PlaceHoursLookup {
-  readonly calls: string[] = [];
-  readonly hours = new Map<string, PlaceOpeningHours>();
-  readonly quota = new Set<string>();
-  consumeBudget: (() => Promise<boolean>) | null = null;
-
-  async openingHours(providerPlaceId: string) {
-    if (this.consumeBudget && !(await this.consumeBudget())) throw new ProviderQuotaError();
-    this.calls.push(providerPlaceId);
-    if (this.quota.has(providerPlaceId)) throw new ProviderQuotaError();
-    const hours = this.hours.get(providerPlaceId);
-    if (!hours) throw new ProviderUnavailableError();
-    return hours;
-  }
-}
 
 function json(value: unknown) {
   return JSON.stringify(value);
@@ -274,14 +178,13 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
   let email: CapturingEmailSender;
   let worker: PostgresEmailWorker;
   let provider: ControlledProvider;
-  let routes: ControlledRouteProvider;
-  let hours: ControlledHoursLookup;
   let rateLimiter: PostgresRateLimiter;
   let tripPlaces: PostgresTripPlaceModule;
   let collaboration: PostgresCollaborationModule;
   let identityAuthenticateCalls = 0;
   let afterReadObserver: (() => void) | null = null;
-  const now = () => new Date("2026-09-28T12:00:00.000Z");
+  let currentNow = new Date("2026-09-28T12:00:00.000Z");
+  const now = () => new Date(currentNow.valueOf());
 
   beforeAll(async () => {
     database = createDatabase(databaseUrl);
@@ -289,6 +192,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
   });
 
   beforeEach(async () => {
+    currentNow = new Date("2026-09-28T12:00:00.000Z");
     await sql`
       truncate table
         trip_place_duplicate_suggestions,
@@ -324,8 +228,6 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     await seedDatabase(database, "owner@example.test");
     email = new CapturingEmailSender();
     provider = new ControlledProvider();
-    routes = new ControlledRouteProvider();
-    hours = new ControlledHoursLookup();
     let sessionNumber = 0;
     const tokenIssuer = new TokenIssuer("trip-place-integration-secret-at-least-32-bytes");
     const identityAccess = new PostgresIdentityAccessModule({
@@ -377,22 +279,17 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       now,
     );
     provider.consumeBudget = () => rateLimiter.tryConsumePaidProvider("google_places");
-    hours.consumeBudget = () => rateLimiter.tryConsumePaidProvider("google_places");
-    routes.consumeBudget = () => rateLimiter.tryConsumePaidProvider("google_routes");
     app = createApp({
-      rapidApiKeys: new PostgresRapidApiKeysModule(database, new RapidApiKeyCipher(Buffer.alloc(32, 7).toString("base64"))),
       placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
       collaboration,
       dayPlans: new PostgresDayPlanModule({
         database,
         tripSkeleton,
         tripPlaces,
-        routeProviders: [routes],
-        placeHours: hours,
-        now,
       }),
       discovery: unrelatedDiscoveryModule,
       identityAccess,
+      mapsConfig: { browserKey: "  browser-key  ", mapId: " \t " },
       rateLimiter,
       readiness: new PostgresReadinessProbe(database, now),
       siteAddress: "https://app.example.test",
@@ -526,6 +423,86 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     });
   }
 
+  async function addManualPlace(
+    cookie: string,
+    tripId: string,
+    key: string,
+    name: string,
+  ) {
+    const response = await addManual(cookie, tripId, key, name, `${name} address`);
+    expect(response.status, await response.clone().text()).toBe(201);
+    return parseTripPlaceResponse(await response.json()).tripPlace;
+  }
+
+  async function assignToDay(
+    cookie: string,
+    tripId: string,
+    dayId: string,
+    places: TripPlaceDto[],
+    key: string,
+  ) {
+    const response = await app.request(`/api/trips/${tripId}/trip-place-day-assignments`, {
+      method: "PUT",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        "idempotency-key": key,
+        origin: "https://app.example.test",
+      },
+      body: json({
+        assignments: places.map((place) => ({
+          tripPlaceId: place.id,
+          tripDayId: dayId,
+          expectedVersion: place.version,
+        })),
+      }),
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    return parseTripPlaceListResponse(await response.json()).tripPlaces;
+  }
+
+  function dayRoute(
+    cookie: string,
+    tripId: string,
+    dayId: string,
+    order: "current" | "suggested" | "custom",
+    orderedTripPlaceIds?: string[],
+  ) {
+    return app.request(`/api/trips/${tripId}/days/${dayId}/route`, {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        origin: "https://app.example.test",
+      },
+      body: json({
+        order,
+        ...(orderedTripPlaceIds === undefined ? {} : { orderedTripPlaceIds }),
+      }),
+    });
+  }
+
+  function saveDay(
+    cookie: string,
+    tripId: string,
+    dayId: string,
+    endpoint: "place-order" | "arrangement",
+    key: string,
+    expectedVersion: number,
+    orderedTripPlaceIds: string[],
+  ) {
+    return app.request(`/api/trips/${tripId}/days/${dayId}/${endpoint}`, {
+      method: "PUT",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        "idempotency-key": key,
+        origin: "https://app.example.test",
+      },
+      body: json({ expectedVersion, orderedTripPlaceIds }),
+    });
+  }
+
   it("paginates authorised change history without losing tied timestamps", async () => {
     const owner = await login("history@example.test");
     const outsider = await login("outsider@example.test");
@@ -655,6 +632,19 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect((await planning(member.cookie, trip.id, place.id, place.version + 1, "removed-actor-read", "Denied")).status).toBe(404);
   });
 
+
+
+
+
+  function planning(cookie: string, tripId: string, placeId: string, expectedVersion: number, key: string, notes: string, conflictBase?: number) {
+    return app.request(`/api/trips/${tripId}/trip-places/${placeId}/planning`, {
+      method: "PATCH",
+      headers: { cookie, "content-type": "application/json", origin: "https://app.example.test", "idempotency-key": key,
+        ...(conflictBase ? { "Conflict-Base-Version": String(conflictBase) } : {}) },
+      body: json({ expectedVersion, notes, durationMinutes: 90, budgetAmountMinor: 1000, budgetCurrency: "JPY" }),
+    });
+  }
+
   it("resolves history targets to names and dates without revealing deleted or foreign targets", async () => {
     const owner = await login("target-owner@example.test");
     const trip = await createTrip(owner.cookie, "Named history targets");
@@ -666,27 +656,43 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       return (await response.json()).events as Array<Record<string, unknown>>;
     };
     const wishlist = parseTripPlaceResponse(await (await addManual(owner.cookie, trip.id, "target-wishlist", "Named wishlist target", "Kyoto")).json()).tripPlace;
-    const createdPlace = await app.request(`/api/trips/${trip.id}/places`, {
-      method: "POST", headers: headers("target-place"),
-      body: json({ name: "Named map target", type: "activity", timeZone: "Asia/Tokyo", expectedTripVersion: (await skeleton()).tripVersion }),
+    const inserted = await database.insertInto("places").values({
+      trip_id: trip.id,
+      name: "Named map target",
+      place_type: "activity",
+      address: null,
+      latitude: null,
+      longitude: null,
+      time_zone: "Asia/Tokyo",
+      source_url: null,
+      notes: null,
+      created_by: owner.user.id,
+    }).returning("id").executeTakeFirstOrThrow();
+    const seededPlace = (await skeleton()).places.find((entry) => entry.id === inserted.id)!;
+    const updatedPlace = await app.request(`/api/trips/${trip.id}/places/${inserted.id}`, {
+      method: "PATCH", headers: headers("target-place"),
+      body: json({ ...seededPlace, expectedVersion: seededPlace.version }),
     });
-    expect(createdPlace.status).toBe(201);
-    const place = parsePlaceResponse(await createdPlace.json()).place;
-    const createdItem = await app.request(`/api/trips/${trip.id}/items`, {
-      method: "POST", headers: headers("target-item"),
+    expect(updatedPlace.status).toBe(200);
+    const place = parsePlaceResponse(await updatedPlace.json()).place;
+    const fixture = (await skeleton()).items.find((entry) => entry.title === "FIXTURE-OUT")!;
+    const createdItem = await app.request(`/api/trips/${trip.id}/items/${fixture.id}`, {
+      method: "PATCH", headers: headers("target-item"),
       body: json({
         type: "free-time", title: "Named morning walk", participantMemberIds: null,
-        endpoints: [{ role: "start", countryStopId: trip.countryStops[0]!.id, placeId: place.id, localDateTime: "2026-10-22T09:00", timeZone: "Asia/Tokyo" }],
-        details: { durationMinutes: 60 }, expectedTripVersion: (await skeleton()).tripVersion,
+        endpoints: [{ role: "start", countryStopId: trip.countryStops[0]!.id, placeId: place.id,
+          localDateTime: "2026-10-22T09:00", timeZone: "Asia/Tokyo" }],
+        details: { durationMinutes: 60 }, expectedVersion: fixture.version,
       }),
     });
-    expect(createdItem.status).toBe(201);
+    expect(createdItem.status).toBe(200);
     const item = parseItineraryItemResponse(await createdItem.json()).item;
     const day = trip.days[1]!;
-    const window = parseDayWindowResponse(await (await app.request(`/api/trips/${trip.id}/days/${day.id}/window`, { headers: { cookie: owner.cookie } })).json()).window;
-    expect((await app.request(`/api/trips/${trip.id}/days/${day.id}/window`, {
-      method: "PUT", headers: headers("target-day"), body: json({ startMinute: 480, endMinute: 1140, expectedVersion: window.version }),
-    })).status).toBe(200);
+    const assigned = await assignToDay(owner.cookie, trip.id, day.id, [wishlist], "target-day-assignment");
+    const assignedPlace = assigned.find((entry) => entry.id === wishlist.id)!;
+    const dayVersion = (await database.selectFrom("trip_days").select("version")
+      .where("id", "=", day.id).executeTakeFirstOrThrow()).version;
+    expect((await saveDay(owner.cookie, trip.id, day.id, "arrangement", "target-day", dayVersion, [assignedPlace.id])).status).toBe(200);
     const named = await readTargets();
     for (const [targetType, targetId, targetName] of [
       ["trip", trip.id, "Named history targets"],
@@ -697,7 +703,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     ]) {
       expect(named.find((event) => event.targetType === targetType && event.targetId === targetId)).toMatchObject({ targetName });
     }
-    expect((await removePlace(owner.cookie, trip.id, wishlist, "target-remove-wishlist")).status).toBe(204);
+    const currentWishlist = (await list(owner.cookie, trip.id)).find((entry) => entry.id === wishlist.id)!;
+    expect((await removePlace(owner.cookie, trip.id, currentWishlist, "target-remove-wishlist")).status).toBe(204);
     expect((await app.request(`/api/trips/${trip.id}/items/${item.id}`, {
       method: "DELETE", headers: headers("target-delete-item"), body: json({ expectedVersion: item.version }),
     })).status).toBe(204);
@@ -719,469 +726,6 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     }).returning("id").executeTakeFirstOrThrow();
     expect((await readTargets()).find((event) => event.id === legacy.id)).toMatchObject({ targetName: null });
   });
-
-  it("refuses a stale TripDay window rather than silently overwriting another member", async () => {
-    const owner = await login("day-owner@example.test");
-    const editor = await login("day-editor@example.test");
-    const trip = await createTrip(owner.cookie, "Day optimistic version");
-    await addMember(trip.id, editor.user.id);
-    expect((await app.request(`/api/trips/${trip.id}/editors-can-schedule`, {
-      method: "PUT",
-      headers: {
-        cookie: owner.cookie,
-        origin: "https://app.example.test",
-        "content-type": "application/json",
-        "idempotency-key": "allow-day-editor",
-      },
-      body: json({ enabled: true }),
-    })).status).toBe(204);
-    const day = trip.days[0]!;
-    const update = (cookie: string, key: string, expectedVersion: number, startMinute: number) =>
-      app.request(`/api/trips/${trip.id}/days/${day.id}/window`, {
-        method: "PUT", headers: { cookie, origin: "https://app.example.test", "content-type": "application/json", "idempotency-key": key },
-        body: json({ expectedVersion, startMinute, endMinute: 1140 }),
-      });
-    expect((await update(owner.cookie, "day-first", 1, 480)).status).toBe(200);
-    const before = await history(owner.cookie, trip.id);
-    const stale = await update(editor.cookie, "day-stale", 1, 600);
-    expect(stale.status).toBe(409);
-    expect(await stale.json()).toMatchObject({ error: { code: "conflict", currentVersion: 2, latestChange: { actorId: owner.user.id } } });
-    expect(await history(owner.cookie, trip.id)).toEqual(before);
-    const current = await app.request(`/api/trips/${trip.id}/days/${day.id}/window`, { headers: { cookie: editor.cookie } });
-    expect(parseDayWindowResponse(await current.json()).window).toEqual({ version: 2, startMinute: 480, endMinute: 1140, travelMode: "transit", walkLimitMinutes: 15 });
-    const saved = await update(editor.cookie, "day-reapplied", 2, 600);
-    expect(saved.status).toBe(200);
-    expect(parseDayWindowResponse(await saved.json()).window).toEqual({ version: 3, startMinute: 600, endMinute: 1140, travelMode: "transit", walkLimitMinutes: 15 });
-  });
-
-  it("keeps day ordering owner-only and invalidates a draft when the owner changes an assignment", async () => {
-    const owner = await login("order-owner@example.test");
-    const editor = await login("order-editor@example.test");
-    const trip = await createTrip(owner.cookie, "Order optimistic version");
-    await addMember(trip.id, editor.user.id);
-    const a = parseTripPlaceResponse(await (await addManual(owner.cookie, trip.id, "order-a", "A", "A")).json()).tripPlace;
-    const b = parseTripPlaceResponse(await (await addManual(owner.cookie, trip.id, "order-b", "B", "B")).json()).tripPlace;
-    const dayId = trip.days[1]!.id;
-    const send = (cookie: string, path: string, key: string, input: unknown) => app.request(`/api/trips/${trip.id}/${path}`, {
-      method: "PUT", headers: { cookie, origin: "https://app.example.test", "content-type": "application/json", "idempotency-key": key }, body: json(input),
-    });
-    const window = async () => parseDayWindowResponse(await (await app.request(`/api/trips/${trip.id}/days/${dayId}/window`, { headers: { cookie: owner.cookie } })).json()).window;
-    expect((await send(owner.cookie, "trip-place-day-assignments", "order-assign", {
-      assignments: [a, b].map((place) => ({ tripPlaceId: place.id, tripDayId: dayId, expectedVersion: place.version })),
-    })).status).toBe(200);
-    const base = await window();
-    const beforeEditorOrder = await history(owner.cookie, trip.id);
-    const editorOrder = await send(editor.cookie, `days/${dayId}/place-order`, "editor-order", {
-      expectedVersion: base.version,
-      orderedTripPlaceIds: [b.id, a.id],
-    });
-    expect(editorOrder.status).toBe(403);
-    expect(await editorOrder.json()).toEqual({
-      error: { code: "forbidden", message: "Only the trip owner can do that" },
-    });
-    expect(await window()).toEqual(base);
-    expect(await history(owner.cookie, trip.id)).toEqual(beforeEditorOrder);
-
-    const ownerOrder = await send(owner.cookie, `days/${dayId}/place-order`, "owner-order", {
-      expectedVersion: base.version,
-      orderedTripPlaceIds: [b.id, a.id],
-    });
-    expect(ownerOrder.status).toBe(200);
-    const saved = await window();
-    const placed = (await list(owner.cookie, trip.id))
-      .filter((place) => place.assignedDayId === dayId)
-      .sort((left, right) => left.dayPosition! - right.dayPosition!);
-    expect(placed.map((place) => place.id)).toEqual([b.id, a.id]);
-    expect((await history(owner.cookie, trip.id))
-      .filter((event) => event.eventType === "trip_day.places_ordered")).toHaveLength(1);
-
-    const beforeEditorUnassign = await history(owner.cookie, trip.id);
-    const beforeEditorUnassignPlaces = await list(owner.cookie, trip.id);
-    const editorUnassign = await send(editor.cookie, "trip-place-day-assignments", "editor-unassign", {
-      assignments: [{ tripPlaceId: placed[0]!.id, tripDayId: null, expectedVersion: placed[0]!.version }],
-    });
-    expect(editorUnassign.status).toBe(403);
-    expect(await editorUnassign.json()).toEqual({
-      error: { code: "forbidden", message: "Only the trip owner can do that" },
-    });
-    expect(await history(owner.cookie, trip.id)).toEqual(beforeEditorUnassign);
-    expect(await list(owner.cookie, trip.id)).toEqual(beforeEditorUnassignPlaces);
-
-    expect((await send(owner.cookie, "trip-place-day-assignments", "owner-unassign", {
-      assignments: [{ tripPlaceId: placed[0]!.id, tripDayId: null, expectedVersion: placed[0]!.version }],
-    })).status).toBe(200);
-    const beforeStaleOrder = await history(owner.cookie, trip.id);
-    const stale = await send(owner.cookie, `days/${dayId}/place-order`, "order-after-unassign", {
-      expectedVersion: saved.version,
-      orderedTripPlaceIds: [b.id, a.id],
-    });
-    expect(stale.status).toBe(409);
-    expect(await stale.json()).toMatchObject({
-      error: {
-        currentVersion: (await window()).version,
-        latestChange: { actorId: owner.user.id, eventId: beforeStaleOrder[0]!.id },
-      },
-    });
-    expect(await history(owner.cookie, trip.id)).toEqual(beforeStaleOrder);
-    expect((await list(owner.cookie, trip.id))
-      .find((place) => place.id === placed[0]!.id)?.assignedDayId).toBeNull();
-  });
-
-  it("enforces the owner-only scheduling matrix without narrowing editor wishlist capabilities", async () => {
-    const owner = await login("schedule-matrix-owner@example.test");
-    const editor = await login("schedule-matrix-editor@example.test");
-    const trip = await createTrip(owner.cookie, "Owner scheduling matrix");
-    await addMember(trip.id, editor.user.id);
-    const dayOne = trip.days[0]!.id;
-    const dayTwo = trip.days[1]!.id;
-    const add = async (key: string, name: string) =>
-      parseTripPlaceResponse(await (await addManual(owner.cookie, trip.id, key, name, "Kyoto")).json()).tripPlace;
-    const assignTarget = await add("matrix-assign", "Assign target");
-    const unassignTarget = await add("matrix-unassign", "Unassign target");
-    const crossTarget = await add("matrix-cross", "Cross-day target");
-    const crossAssignTarget = await add("matrix-cross-assign", "Cross-day second leg");
-    const removeTarget = await add("matrix-remove", "Remove scheduled target");
-    const acceptedResponse = await addProvider(owner.cookie, trip.id, "matrix-accepted", "Accepted by owner");
-    expect(acceptedResponse.status).toBe(201);
-    const acceptedTarget = parseTripPlaceResponse(await acceptedResponse.json()).tripPlace;
-    const mutate = (
-      cookie: string,
-      method: "POST" | "PUT",
-      path: string,
-      key: string,
-      body: unknown,
-    ) => app.request(path, {
-      method,
-      headers: {
-        cookie,
-        origin: "https://app.example.test",
-        "content-type": "application/json",
-        "idempotency-key": key,
-      },
-      body: json(body),
-    });
-    const assignments = (
-      cookie: string,
-      key: string,
-      entries: Array<{ id: string; dayId: string | null; version: number }>,
-    ) => mutate(cookie, "PUT", `/api/trips/${trip.id}/trip-place-day-assignments`, key, {
-      assignments: entries.map((entry) => ({
-        tripPlaceId: entry.id,
-        tripDayId: entry.dayId,
-        expectedVersion: entry.version,
-      })),
-    });
-    const initiallyAssigned = [unassignTarget, crossTarget, crossAssignTarget, removeTarget];
-    expect((await assignments(owner.cookie, "matrix-setup-assign", initiallyAssigned.map((place) => ({
-      id: place.id,
-      dayId: dayOne,
-      version: place.version,
-    })))).status).toBe(200);
-    const crossAssigned = (await list(owner.cookie, trip.id))
-      .find((place) => place.id === crossAssignTarget.id)!;
-    expect((await assignments(owner.cookie, "matrix-setup-unassign", [{
-      id: crossAssigned.id,
-      dayId: null,
-      version: crossAssigned.version,
-    }])).status).toBe(200);
-
-    // Model the result of an owner accepting this provider proposal. The generic assignment
-    // endpoint must still authorize the editor instead of treating acceptance as a bypass.
-    await database.insertInto("discovery_briefs").values({
-      trip_id: trip.id,
-      original_text: "Owner-selected temple",
-      structured_brief: null,
-      unresolved_questions: [],
-      updated_by: owner.user.id,
-      created_at: now(),
-      updated_at: now(),
-    }).execute();
-    const run = await database.insertInto("discovery_runs").values({
-      trip_id: trip.id,
-      brief_version: 1,
-      policy_version: "test-policy",
-      model_id: "test-model",
-      status: "completed",
-      search_plan: {},
-      error_code: null,
-      created_by: owner.user.id,
-      created_at: now(),
-      completed_at: now(),
-    }).returning("id").executeTakeFirstOrThrow();
-    await database.insertInto("candidate_proposals").values({
-      trip_id: trip.id,
-      run_id: run.id,
-      provider_place_id: provider.kyoto.providerPlaceId,
-      name: acceptedTarget.name,
-      place_type: acceptedTarget.type,
-      address: acceptedTarget.address,
-      latitude: acceptedTarget.latitude,
-      longitude: acceptedTarget.longitude,
-      source_url: acceptedTarget.sourceUrl,
-      recommendation: "Owner accepted recommendation",
-      matched_needs: [],
-      tradeoffs: [],
-      unknowns: [],
-      status: "accepted",
-      accepted_trip_place_id: acceptedTarget.id,
-      decided_by: owner.user.id,
-      decided_at: now(),
-      reopened_at: null,
-      created_at: now(),
-      updated_at: now(),
-      category: null,
-    }).execute();
-
-    const planResponse = await app.request(`/api/trips/${trip.id}/trip-plan`, {
-      method: "POST",
-      headers: { cookie: editor.cookie, origin: "https://app.example.test" },
-    });
-    expect(planResponse.status).toBe(200);
-    const plan = parseTripPlanResponse(await planResponse.json()).plan;
-    expect(plan.days.length).toBeGreaterThan(0);
-    const planInput = {
-      basis: plan.basis,
-      days: plan.days.map((day) => ({
-        tripDayId: day.timetable.dayId,
-        orderedTripPlaceIds: day.orderedTripPlaceIds,
-        expectedVersion: day.timetable.window.version,
-      })),
-    };
-    const current = await list(owner.cookie, trip.id);
-    const byId = new Map(current.map((place) => [place.id, place]));
-    expect(byId.get(crossAssignTarget.id)).toMatchObject({
-      assignedDayId: null,
-      selectedForItinerary: true,
-    });
-    const dayOneWindow = parseDayWindowResponse(await (await app.request(
-      `/api/trips/${trip.id}/days/${dayOne}/window`,
-      { headers: { cookie: owner.cookie } },
-    )).json()).window;
-    const snapshot = async () => ({
-      places: (await list(owner.cookie, trip.id))
-        .map((place) => ({
-          id: place.id,
-          version: place.version,
-          assignedDayId: place.assignedDayId,
-          dayPosition: place.dayPosition,
-        }))
-        .sort((left, right) => left.id.localeCompare(right.id)),
-      dayVersions: await Promise.all([dayOne, dayTwo].map(async (dayId) =>
-        parseDayWindowResponse(await (await app.request(
-          `/api/trips/${trip.id}/days/${dayId}/window`,
-          { headers: { cookie: owner.cookie } },
-        )).json()).window.version)),
-      events: await history(owner.cookie, trip.id),
-    });
-    await database.insertInto("mutation_requests").values([
-      {
-        actor_id: editor.user.id,
-        operation: `tp:day-assignments:${trip.id}`,
-        idempotency_key: "matrix-editor-replayed-assignment",
-        response: { tripPlaces: current },
-      },
-      {
-        actor_id: editor.user.id,
-        operation: `tpr:${trip.id}:${removeTarget.id}`,
-        idempotency_key: "matrix-editor-replayed-remove",
-        response: { removed: true },
-      },
-    ]).execute();
-    const forbiddenCases: Array<{ name: string; request: () => Response | Promise<Response> }> = [
-      {
-        name: "assign",
-        request: () => assignments(editor.cookie, "matrix-editor-assign", [{
-          id: assignTarget.id,
-          dayId: dayTwo,
-          version: byId.get(assignTarget.id)!.version,
-        }]),
-      },
-      {
-        name: "historical editor assignment replay",
-        request: () => assignments(editor.cookie, "matrix-editor-replayed-assignment", [{
-          id: assignTarget.id,
-          dayId: dayTwo,
-          version: byId.get(assignTarget.id)!.version,
-        }]),
-      },
-      {
-        name: "unassign",
-        request: () => assignments(editor.cookie, "matrix-editor-unassign", [{
-          id: unassignTarget.id,
-          dayId: null,
-          version: byId.get(unassignTarget.id)!.version,
-        }]),
-      },
-      {
-        name: "cross-day removal leg",
-        request: () => assignments(editor.cookie, "matrix-editor-cross-remove", [{
-          id: crossTarget.id,
-          dayId: null,
-          version: byId.get(crossTarget.id)!.version,
-        }]),
-      },
-      {
-        name: "cross-day assignment leg",
-        request: () => assignments(editor.cookie, "matrix-editor-cross-add", [{
-          id: crossAssignTarget.id,
-          dayId: dayTwo,
-          version: byId.get(crossAssignTarget.id)!.version,
-        }]),
-      },
-      {
-        name: "whole-trip plan apply",
-        request: () => mutate(
-          editor.cookie,
-          "POST",
-          `/api/trips/${trip.id}/trip-plan/apply`,
-          "matrix-editor-plan",
-          planInput,
-        ),
-      },
-      {
-        name: "day order",
-        request: () => mutate(
-          editor.cookie,
-          "PUT",
-          `/api/trips/${trip.id}/days/${dayOne}/place-order`,
-          "matrix-editor-order",
-          {
-            expectedVersion: dayOneWindow.version,
-            orderedTripPlaceIds: [removeTarget.id, crossTarget.id, unassignTarget.id],
-          },
-        ),
-      },
-      {
-        name: "remove scheduled",
-        request: () => removePlace(
-          editor.cookie,
-          trip.id,
-          byId.get(removeTarget.id)!,
-          "matrix-editor-remove",
-        ),
-      },
-      {
-        name: "historical editor scheduled-removal replay",
-        request: () => removePlace(
-          editor.cookie,
-          trip.id,
-          byId.get(removeTarget.id)!,
-          "matrix-editor-replayed-remove",
-        ),
-      },
-      {
-        name: "remove selected but currently unassigned",
-        request: () => removePlace(
-          editor.cookie,
-          trip.id,
-          byId.get(crossAssignTarget.id)!,
-          "matrix-editor-remove-selected",
-        ),
-      },
-      {
-        name: "assign accepted AI place",
-        request: () => assignments(editor.cookie, "matrix-editor-accepted", [{
-          id: acceptedTarget.id,
-          dayId: dayTwo,
-          version: byId.get(acceptedTarget.id)!.version,
-        }]),
-      },
-    ];
-    const unchanged = await snapshot();
-    for (const testCase of forbiddenCases) {
-      const response = await testCase.request();
-      expect(response.status, testCase.name).toBe(403);
-      expect(await response.json(), testCase.name).toEqual({
-        error: { code: "forbidden", message: "Only the trip owner can do that" },
-      });
-      expect(await snapshot(), testCase.name).toEqual(unchanged);
-    }
-
-    // Every owner path denied above remains usable.
-    expect((await mutate(
-      owner.cookie,
-      "POST",
-      `/api/trips/${trip.id}/trip-plan/apply`,
-      "matrix-owner-plan",
-      planInput,
-    )).status).toBe(200);
-    let ownerPlaces = new Map((await list(owner.cookie, trip.id)).map((place) => [place.id, place]));
-    expect((await assignments(owner.cookie, "matrix-owner-assign", [{
-      id: assignTarget.id,
-      dayId: dayTwo,
-      version: ownerPlaces.get(assignTarget.id)!.version,
-    }])).status).toBe(200);
-    ownerPlaces = new Map((await list(owner.cookie, trip.id)).map((place) => [place.id, place]));
-    expect((await assignments(owner.cookie, "matrix-owner-unassign", [{
-      id: unassignTarget.id,
-      dayId: null,
-      version: ownerPlaces.get(unassignTarget.id)!.version,
-    }])).status).toBe(200);
-    ownerPlaces = new Map((await list(owner.cookie, trip.id)).map((place) => [place.id, place]));
-    expect((await assignments(owner.cookie, "matrix-owner-cross-remove", [{
-      id: crossTarget.id,
-      dayId: null,
-      version: ownerPlaces.get(crossTarget.id)!.version,
-    }])).status).toBe(200);
-    ownerPlaces = new Map((await list(owner.cookie, trip.id)).map((place) => [place.id, place]));
-    expect((await assignments(owner.cookie, "matrix-owner-cross-add", [{
-      id: crossTarget.id,
-      dayId: dayTwo,
-      version: ownerPlaces.get(crossTarget.id)!.version,
-    }])).status).toBe(200);
-    const ownerDayOnePlaces = (await list(owner.cookie, trip.id))
-      .filter((place) => place.assignedDayId === dayOne)
-      .map((place) => place.id);
-    const ownerDayOneWindow = parseDayWindowResponse(await (await app.request(
-      `/api/trips/${trip.id}/days/${dayOne}/window`,
-      { headers: { cookie: owner.cookie } },
-    )).json()).window;
-    expect((await mutate(
-      owner.cookie,
-      "PUT",
-      `/api/trips/${trip.id}/days/${dayOne}/place-order`,
-      "matrix-owner-order",
-      {
-        expectedVersion: ownerDayOneWindow.version,
-        orderedTripPlaceIds: ownerDayOnePlaces.reverse(),
-      },
-    )).status).toBe(200);
-    ownerPlaces = new Map((await list(owner.cookie, trip.id)).map((place) => [place.id, place]));
-    expect((await removePlace(
-      owner.cookie,
-      trip.id,
-      ownerPlaces.get(removeTarget.id)!,
-      "matrix-owner-remove",
-    )).status).toBe(204);
-
-    // Editors still own wishlist intake, voting, planning notes and unscheduled removal.
-    const editorAdd = await addManual(editor.cookie, trip.id, "matrix-editor-add", "Editor's cafe", "Kyoto");
-    expect(editorAdd.status).toBe(201);
-    let editorPlace = parseTripPlaceResponse(await editorAdd.json()).tripPlace;
-    expect((await setVote(editor.cookie, trip.id, editorPlace.id, true, "matrix-editor-vote")).status).toBe(200);
-    editorPlace = (await list(owner.cookie, trip.id)).find((place) => place.id === editorPlace.id)!;
-    const editorPlanning = await planning(
-      editor.cookie,
-      trip.id,
-      editorPlace.id,
-      editorPlace.version,
-      "matrix-editor-planning",
-      "Editor planning note",
-    );
-    expect(editorPlanning.status).toBe(200);
-    editorPlace = parseTripPlaceResponse(await editorPlanning.json()).tripPlace;
-    expect((await removePlace(editor.cookie, trip.id, editorPlace, "matrix-editor-remove-unscheduled")).status).toBe(204);
-  });
-
-  function planning(cookie: string, tripId: string, placeId: string, expectedVersion: number, key: string, notes: string, conflictBase?: number) {
-    return app.request(`/api/trips/${tripId}/trip-places/${placeId}/planning`, {
-      method: "PATCH",
-      headers: { cookie, "content-type": "application/json", origin: "https://app.example.test", "idempotency-key": key,
-        ...(conflictBase ? { "Conflict-Base-Version": String(conflictBase) } : {}) },
-      body: json({ expectedVersion, notes, durationMinutes: 90, budgetAmountMinor: 1000, budgetCurrency: "JPY" }),
-    });
-  }
-
   it("returns 404 instead of replaying a trip-place response through another trip", async () => {
     const owner = await login("replay-owner@example.test");
     const sourceTrip = await createTrip(owner.cookie, "Replay source trip");
@@ -1193,7 +737,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       "Source-only place",
       "Kyoto",
     )).json()).tripPlace;
-    const key = "cross-trip-planning-replay";
+    const key = "cross-trip-notes-replay";
     expect((await planning(
       owner.cookie,
       sourceTrip.id,
@@ -1261,226 +805,9 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     };
   }
 
-  it("commits concurrent invite revocation and a day write without an event lock deadlock", async () => {
-    const owner = await login("event-lock-owner@example.test");
-    const trip = await createTrip(owner.cookie, "Event lock order");
-    const headers = { cookie: owner.cookie, origin: "https://app.example.test", "content-type": "application/json" };
-    const invited = await app.request(`/api/trips/${trip.id}/invites`, {
-      method: "POST", headers: { ...headers, "idempotency-key": "event-lock-invite" }, body: json({ email: "event-lock-invitee@example.test" }),
-    });
-    expect(invited.status).toBe(201);
-    const invite = (await invited.json()).invite;
-    const pool = new Pool({ connectionString: databaseUrl });
-    const gate = await pool.connect();
-    let window: Promise<Response> | undefined;
-    let revoke: Promise<Response> | undefined;
-    try {
-      await gate.query("begin");
-      await gate.query("select id from trips where id = $1 for update", [trip.id]);
-      window = Promise.resolve(app.request(`/api/trips/${trip.id}/days/${trip.days[0]!.id}/window`, {
-        method: "PUT", headers: { ...headers, "idempotency-key": "event-lock-window" },
-        body: json({ expectedVersion: 1, startMinute: 480, endMinute: 1140 }),
-      }));
-      await waitForDatabaseLock(pool, "row");
-      revoke = Promise.resolve(app.request(`/api/trips/${trip.id}/invites/${invite.id}`, {
-        method: "DELETE", headers: { ...headers, "idempotency-key": "event-lock-revoke" },
-      }));
-      // Release only once both real HTTP transactions reach the lock barrier.
-      await vi.waitFor(async () => {
-        const waiting = await pool.query<{ count: number }>("select count(*)::int as count from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'");
-        expect(waiting.rows[0]?.count).toBe(2);
-      }, { timeout: 5_000 });
-      await gate.query("commit");
-      expect((await window).status).toBe(200);
-      expect((await revoke).status).toBe(204);
-      const events = await history(owner.cookie, trip.id);
-      expect(events.filter((event) => event.targetId === invite.id && event.eventType === "invite.revoked")).toHaveLength(1);
-      expect(events.filter((event) => event.eventType === "trip_day.window_changed")).toHaveLength(1);
-    } finally {
-      await gate.query("rollback");
-      gate.release();
-      await Promise.allSettled([window, revoke].filter((value) => value !== undefined));
-      await pool.end();
-    }
-  }, 15_000);
 
-  it("rejects a day draft whose order changes during its read", async () => {
-    const owner = await login("day-snapshot@example.test");
-    const trip = await createTrip(owner.cookie, "Day snapshot consistency");
-    const headers = { cookie: owner.cookie, origin: "https://app.example.test", "content-type": "application/json" };
-    const places: TripPlaceDto[] = [];
-    for (const name of ["A", "B"]) {
-      const added = await app.request(`/api/trips/${trip.id}/trip-places`, {
-        method: "POST", headers: { ...headers, "idempotency-key": `snapshot-${name}` },
-        body: json({ method: "manual", name, type: "activity", address: name, latitude: 35, longitude: 135, timeZone: "Asia/Tokyo", sourceUrl: null, originalNote: null }),
-      });
-      expect(added.status).toBe(201);
-      places.push(parseTripPlaceResponse(await added.json()).tripPlace);
-    }
-    const dayId = trip.days[1]!.id;
-    expect((await app.request(`/api/trips/${trip.id}/trip-place-day-assignments`, {
-      method: "PUT", headers: { ...headers, "idempotency-key": "snapshot-assign" },
-      body: json({ assignments: places.map((place) => ({ tripPlaceId: place.id, tripDayId: dayId, expectedVersion: place.version })) }),
-    })).status).toBe(200);
-    const readWindow = async () => parseDayWindowResponse(await (await app.request(`/api/trips/${trip.id}/days/${dayId}/window`, { headers })).json()).window;
-    const before = await readWindow();
-    const originalList = tripPlaces.list.bind(tripPlaces);
-    const read = vi.spyOn(tripPlaces, "list").mockImplementationOnce(async (...args) => {
-      const old = await originalList(...args);
-      expect((await app.request(`/api/trips/${trip.id}/days/${dayId}/place-order`, {
-        method: "PUT", headers: { ...headers, "idempotency-key": "snapshot-reorder" },
-        body: json({ orderedTripPlaceIds: places.map((place) => place.id).reverse(), expectedVersion: before.version }),
-      })).status).toBe(200);
-      expect((await readWindow()).version).toBeGreaterThan(before.version);
-      return old;
-    });
-    try {
-      const draft = await app.request(`/api/trips/${trip.id}/days/${dayId}/timetable`, {
-        method: "POST", headers, body: json({ order: "current" }),
-      });
-      expect(draft.status, await draft.clone().text()).toBe(409);
-      expect(await draft.json()).toMatchObject({ error: { code: "conflict", currentVersion: (await readWindow()).version } });
-      expect((await list(owner.cookie, trip.id)).filter((place) => place.assignedDayId === dayId)
-        .sort((a, b) => a.dayPosition! - b.dayPosition!).map((place) => place.id)).toEqual(places.map((place) => place.id).reverse());
-    } finally { read.mockRestore(); }
-  });
 
-  it("caps custom planning at 100 stops and charges route planning by actual candidate work", async () => {
-    const owner = await login("planning-budget@example.test");
-    const trip = await createTrip(owner.cookie, "Planning work budget");
-    const dayId = trip.days[1]!.id;
-    const headers = {
-      cookie: owner.cookie,
-      origin: "https://app.example.test",
-      "content-type": "application/json",
-      "x-forwarded-for": "198.51.100.33",
-    };
-    const oversized = await app.request(`/api/trips/${trip.id}/days/${dayId}/timetable`, {
-      method: "POST",
-      headers,
-      body: json({ order: "custom", orderedTripPlaceIds: Array.from({ length: 101 }, () => randomUUID()) }),
-    });
-    expect(oversized.status).toBe(400);
-    expect(await oversized.json()).toMatchObject({
-      error: { code: "validation_error", message: "A timetable may plan at most 100 stops" },
-    });
 
-    const places: TripPlaceDto[] = [];
-    for (const [index, name] of ["Planning A", "Planning B"].entries()) {
-      const added = await app.request(`/api/trips/${trip.id}/trip-places`, {
-        method: "POST",
-        headers: { ...headers, "idempotency-key": `planning-budget-${index}` },
-        body: json({
-          method: "manual", name, type: "activity", address: null,
-          latitude: 35 + index / 100, longitude: 135, timeZone: "Asia/Tokyo",
-          sourceUrl: null, originalNote: null,
-        }),
-      });
-      expect(added.status).toBe(201);
-      places.push(parseTripPlaceResponse(await added.json()).tripPlace);
-    }
-    const secret = "trip-place-rate-secret-at-least-32-bytes";
-    const scope = "route_planning:account";
-    await database.insertInto("rate_limit_windows").values({
-      scope,
-      key_hash: createHmac("sha256", Buffer.from(secret)).update(`${scope}:${owner.user.id}`).digest("hex"),
-      window_start: now(),
-      request_count: 299,
-    }).execute();
-    const limited = await app.request(`/api/trips/${trip.id}/days/${dayId}/timetable`, {
-      method: "POST",
-      headers,
-      body: json({ order: "custom", orderedTripPlaceIds: places.map((place) => place.id) }),
-    });
-    expect(limited.status).toBe(429);
-    expect(await limited.json()).toMatchObject({ error: { code: "rate_limited" } });
-    expect(routes.queries).toHaveLength(0);
-
-    await database.deleteFrom("rate_limit_windows").execute();
-    const plan = await app.request(`/api/trips/${trip.id}/trip-plan`, { method: "POST", headers });
-    expect(plan.status).toBe(200);
-    expect(await database.selectFrom("rate_limit_windows").select("request_count")
-      .where("scope", "=", scope).executeTakeFirstOrThrow()).toEqual({ request_count: 2 });
-    const paidScope = "paid_provider:google_routes:global";
-    await database.insertInto("rate_limit_windows").values({
-      scope: paidScope,
-      key_hash: createHmac("sha256", Buffer.from(secret)).update(`${paidScope}:global`).digest("hex"),
-      window_start: new Date("2026-09-28T00:00:00.000Z"),
-      request_count: 900,
-    }).onConflict((conflict) => conflict
-      .columns(["scope", "key_hash", "window_start"])
-      .doUpdateSet({ request_count: 900 }))
-      .execute();
-    expect(await rateLimiter.withPaidProviderIdentity(
-      "198.51.100.33",
-      owner.user.id,
-      () => rateLimiter.tryConsumePaidProvider("google_routes"),
-    )).toBe(false);
-  });
-
-  it("keeps a saved day with more than 40 places reorderable through a custom draft", async () => {
-    const owner = await login("large-saved-day@example.test");
-    const trip = await createTrip(owner.cookie, "Large saved day");
-    const dayId = trip.days[1]!.id;
-    const headers = {
-      cookie: owner.cookie,
-      origin: "https://app.example.test",
-      "content-type": "application/json",
-      "x-forwarded-for": "198.51.100.45",
-    };
-    const places: TripPlaceDto[] = [];
-    for (let index = 0; index < 42; index += 1) {
-      const response = await app.request(`/api/trips/${trip.id}/trip-places`, {
-        method: "POST",
-        headers: { ...headers, "idempotency-key": `large-day-place-${index}` },
-        body: json({
-          method: "manual",
-          name: `Large day ${index}`,
-          type: "activity",
-          address: null,
-          latitude: 35 + index / 10_000,
-          longitude: 135,
-          timeZone: "Asia/Tokyo",
-          sourceUrl: null,
-          originalNote: null,
-        }),
-      });
-      expect(response.status).toBe(201);
-      places.push(parseTripPlaceResponse(await response.json()).tripPlace);
-    }
-    const assigned = await app.request(`/api/trips/${trip.id}/trip-place-day-assignments`, {
-      method: "PUT",
-      headers: { ...headers, "idempotency-key": "large-day-assign" },
-      body: json({
-        assignments: places.map((place) => ({
-          tripPlaceId: place.id,
-          tripDayId: dayId,
-          expectedVersion: place.version,
-        })),
-      }),
-    });
-    expect(assigned.status, await assigned.clone().text()).toBe(200);
-    const window = parseDayWindowResponse(await (await app.request(
-      `/api/trips/${trip.id}/days/${dayId}/window`,
-      { headers },
-    )).json()).window;
-    const reversed = places.map((place) => place.id).reverse();
-    const arranged = await app.request(`/api/trips/${trip.id}/days/${dayId}/arrangement`, {
-      method: "PUT",
-      headers: { ...headers, "idempotency-key": "large-day-arrange" },
-      body: json({ expectedVersion: window.version, orderedTripPlaceIds: reversed }),
-    });
-    expect(arranged.status, await arranged.clone().text()).toBe(200);
-
-    const draft = await app.request(`/api/trips/${trip.id}/days/${dayId}/timetable`, {
-      method: "POST",
-      headers,
-      body: json({ order: "custom", orderedTripPlaceIds: reversed }),
-    });
-    expect(draft.status, await draft.clone().text()).toBe(200);
-    expect(parseDayTimetableResponse(await draft.json()).timetable.orderedTripPlaceIds)
-      .toEqual(reversed);
-  }, 30_000);
 
   it("charges actual Google Places calls to daily account and IP budgets without marking quota as an outage", async () => {
     const owner = await login("provider-account-budget@example.test");
@@ -1488,11 +815,11 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     const ip = "198.51.100.44";
     const secret = "trip-place-rate-secret-at-least-32-bytes";
     const day = new Date("2026-09-28T00:00:00.000Z");
-    // Only this account's window is one call below its limit; the global and IP windows have room,
-    // so the refusal below can only come from the account budget.
+    // Only this account's window is one call below its 2,000-call limit; the global and IP
+    // windows have room, so the refusal below can only come from the account budget.
     const windows = [
       { scope: "paid_provider:google_places:global", key: "global", seeded: 10 },
-      { scope: "paid_provider:google_places:account", key: owner.user.id, seeded: 449 },
+      { scope: "paid_provider:google_places:account", key: owner.user.id, seeded: 1_999 },
       { scope: "paid_provider:google_places:ip", key: ip, seeded: 10 },
     ];
     await database.insertInto("rate_limit_windows").values(windows.map((window) => ({
@@ -1542,32 +869,103 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       .executeTakeFirstOrThrow()).toEqual({ provider_unavailable: false });
   });
 
-  it("keeps Google opening-hours quota distinct in the HTTP timetable response", async () => {
-    const owner = await login("hours-quota@example.test");
-    const trip = await createTrip(owner.cookie, "Quota hours");
-    const place = parseTripPlaceResponse(await (await addProvider(
-      owner.cookie, trip.id, "quota-place", "Blue Bottle",
-    )).json()).tripPlace;
-    hours.quota.add(provider.kyoto.providerPlaceId);
+  it("requires authentication for map settings and rejects map reservations before consuming a counter", async () => {
+    expect((await app.request("/api/maps/config")).status).toBe(401);
+    const owner = await login("maps-security@example.test");
+    const configured = await app.request("/api/maps/config", {
+      headers: { cookie: owner.cookie },
+    });
+    expect(configured.status).toBe(200);
+    const config = await configured.json();
+    expect(Object.keys(config).sort()).toEqual(["browserKey", "mapId"]);
+    expect(config).toEqual({ browserKey: "browser-key", mapId: null });
 
-    const response = await app.request(`/api/trips/${trip.id}/days/${trip.days[1]!.id}/timetable`, {
+    const unauthenticated = await app.request("/api/maps/load", {
+      method: "POST",
+      headers: { origin: "https://app.example.test", "x-forwarded-for": "198.51.100.90" },
+    });
+    expect(unauthenticated.status).toBe(401);
+    const foreignOrigin = await app.request("/api/maps/load", {
       method: "POST",
       headers: {
         cookie: owner.cookie,
-        origin: "https://app.example.test",
-        "content-type": "application/json",
+        origin: "https://evil.example.test",
+        "x-forwarded-for": "198.51.100.91",
       },
-      body: json({ order: "custom", orderedTripPlaceIds: [place.id] }),
+    });
+    expect(foreignOrigin.status).toBe(403);
+    expect(await database.selectFrom("rate_limit_windows").select("scope")
+      .where("scope", "like", "paid_provider:google_maps_js:%").execute()).toEqual([]);
+  });
+
+  it("caps browser map loads globally at 310 across accounts and IPs and starts a new window at Los Angeles midnight", async () => {
+    currentNow = new Date("2026-09-28T06:59:00.000Z");
+    const owner = await login("maps-load-budget@example.test");
+    const second = await login("maps-load-budget-second@example.test");
+    const headers = [
+      {
+        cookie: owner.cookie,
+        origin: "https://app.example.test",
+        "x-forwarded-for": "198.51.100.45",
+      },
+      {
+        cookie: second.cookie,
+        origin: "https://app.example.test",
+        "x-forwarded-for": "198.51.100.46",
+      },
+    ];
+    const reserveMap = (reservation: number) => app.request("/api/maps/load", {
+      method: "POST",
+      headers: headers[reservation % headers.length]!,
     });
 
-    expect(response.status).toBe(200);
-    const timetable = parseDayTimetableResponse(await response.json()).timetable;
-    expect(timetable.rows.find((row) => row.kind === "visit")).toMatchObject({
-      kind: "visit",
-      tripPlaceId: place.id,
-      hours: "quota",
+    for (let reservation = 1; reservation < 310; reservation += 1) {
+      const response = await reserveMap(reservation);
+      expect(response.status, `reservation ${reservation}`).toBe(204);
+    }
+    const threeHundredTenth = await reserveMap(310);
+    expect(threeHundredTenth.status).toBe(204);
+    const threeHundredEleventh = await reserveMap(311);
+    expect(threeHundredEleventh.status).toBe(429);
+    expect(await threeHundredEleventh.json()).toMatchObject({
+      error: { code: "maps_daily_limit" },
     });
+
+    expect(await database.selectFrom("rate_limit_windows")
+      .select(["window_start", "request_count"])
+      .where("scope", "=", "paid_provider:google_maps_js:global")
+      .execute()).toEqual([{
+      window_start: new Date("2026-09-27T07:00:00.000Z"),
+      request_count: 310,
+    }]);
+    expect(await database.selectFrom("rate_limit_windows")
+      .select(["scope", "request_count"])
+      .where("scope", "in", [
+        "paid_provider:google_maps_js:account",
+        "paid_provider:google_maps_js:ip",
+      ])
+      .orderBy("scope")
+      .orderBy("key_hash")
+      .execute()).toEqual([
+      { scope: "paid_provider:google_maps_js:account", request_count: 155 },
+      { scope: "paid_provider:google_maps_js:account", request_count: 155 },
+      { scope: "paid_provider:google_maps_js:ip", request_count: 155 },
+      { scope: "paid_provider:google_maps_js:ip", request_count: 155 },
+    ]);
+
+    // Both instants are on September 28 in UTC, but only the latter is on a new LA calendar day.
+    currentNow = new Date("2026-09-28T07:00:00.000Z");
+    expect((await reserveMap(312)).status).toBe(204);
+    expect(await database.selectFrom("rate_limit_windows")
+      .select(["window_start", "request_count"])
+      .where("scope", "=", "paid_provider:google_maps_js:global")
+      .orderBy("window_start")
+      .execute()).toEqual([
+      { window_start: new Date("2026-09-27T07:00:00.000Z"), request_count: 310 },
+      { window_start: new Date("2026-09-28T07:00:00.000Z"), request_count: 1 },
+    ]);
   });
+
 
   it("purges expired idempotency replays and rate windows at most once per hour", async () => {
     const owner = await login("retention-owner@example.test");
@@ -1594,6 +992,19 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         window_start: now(),
         request_count: 1,
       },
+      ...[
+        ["paid_provider:google_routes:global", "c", 25 * 60 * 60],
+        ["paid_provider:google_routes:account", "d", 23 * 60 * 60],
+        ["paid_provider:navitime:global", "e", 25 * 60 * 60],
+        ["paid_provider:navitime:ip", "f", 23 * 60 * 60],
+        ["route_planning:account", "1", 2 * 60 * 60],
+        ["route_planning:ip", "2", 30 * 60],
+      ].map(([scope, hash, ageSeconds]) => ({
+        scope: String(scope),
+        key_hash: String(hash).repeat(64),
+        window_start: new Date(now().valueOf() - Number(ageSeconds) * 1_000),
+        request_count: 1,
+      })),
     ]).execute();
 
     const retention = new PostgresRetention(database, now);
@@ -1611,6 +1022,19 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       .where("scope", "=", "trip_content:account").execute()).map((row) => row.key_hash);
     expect(rateHashes).toContain("b".repeat(64));
     expect(rateHashes).not.toContain("a".repeat(64));
+    expect(await database.selectFrom("rate_limit_windows")
+      .select(["scope", "key_hash"])
+      .where((expression) => expression.or([
+        expression("scope", "like", "paid_provider:google_routes:%"),
+        expression("scope", "like", "paid_provider:navitime:%"),
+        expression("scope", "like", "route_planning:%"),
+      ]))
+      .orderBy("scope")
+      .execute()).toEqual([
+      { scope: "paid_provider:google_routes:account", key_hash: "d".repeat(64) },
+      { scope: "paid_provider:navitime:ip", key_hash: "f".repeat(64) },
+      { scope: "route_planning:ip", key_hash: "2".repeat(64) },
+    ]);
 
     await database.updateTable("mutation_requests").set({ created_at: eightDaysAgo })
       .where("idempotency_key", "=", "expired-replay").execute();
@@ -2007,21 +1431,21 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       unplaced_from_date: "2026-10-22",
     }).where("id", "=", first.id).execute();
     expect((await removePlace(owner.cookie, trip.id, read, "remove-duplicate")).status).toBe(204);
-    const readded = await addProvider(second.cookie, trip.id, "readd-kiyomizu", "Easy taxi drop-off", method);
+    const readded = await addProvider(second.cookie, trip.id, "readd-kiyomizu", "Easy drop-off", method);
     expect(readded.status).toBe(201);
     const restored = parseTripPlaceResponse(await readded.json()).tripPlace;
     expect(restored).toMatchObject({
       id: first.id,
-      notes: "Easy taxi drop-off",
+      notes: "Easy drop-off",
       voteCount: 0,
       assignedDayId: null,
       selectedForItinerary: false,
       unplacedFromDate: null,
     });
-    expect((await list(owner.cookie, trip.id))[0]?.notes).toBe("Easy taxi drop-off");
+    expect((await list(owner.cookie, trip.id))[0]?.notes).toBe("Easy drop-off");
     const skeleton = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
     expect(parseTripSkeletonResponse(await skeleton.json()).skeleton.places.find((place) => place.name === first.name)?.notes)
-      .toBe("Easy taxi drop-off");
+      .toBe("Easy drop-off");
   });
 
   it("serializes competing provider additions into one wishlist row and contribution", async () => {
@@ -2415,7 +1839,6 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     ).tripPlace;
 
     // Later migrations that change these tables come off first and go back on last.
-    await removeTravelModeMigration(database as Kysely<unknown>);
     await removeDayVersionMigration(database as Kysely<unknown>);
     await removeDayOrderMigration(database as Kysely<unknown>);
     await removeDayAssignmentMigration(database as Kysely<unknown>);
@@ -2445,7 +1868,6 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     await applyDayAssignmentMigration(database as Kysely<unknown>);
     await applyDayOrderMigration(database as Kysely<unknown>);
     await applyDayVersionMigration(database as Kysely<unknown>);
-    await applyTravelModeMigration(database as Kysely<unknown>);
 
     expect(await database.selectFrom("trip_place_desired_days").selectAll()
       .where("trip_id", "=", trip.id).execute()).toHaveLength(3);
@@ -2827,731 +2249,9 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       .toBe("Target planning note\n\nSource planning note");
   });
 
-  it("drafts a day around fixed items, opening hours and the night's lodging without changing the itinerary", async () => {
-    const owner = await login("owner@example.test");
-    const trip = await createTrip(owner.cookie, "Day plan trip");
-    const otherTrip = await createTrip(owner.cookie, "Other day plan trip");
-    const send = (method: string, path: string, key: string | null, payload?: unknown, cookie = owner.cookie) =>
-      app.request(path, {
-        method,
-        headers: {
-          cookie,
-          "content-type": "application/json",
-          origin: "https://app.example.test",
-          ...(key ? { "idempotency-key": key } : {}),
-        },
-        body: payload === undefined ? undefined : json(payload),
-      });
-    const skeleton = async () => {
-      const response = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
-      return parseTripSkeletonResponse(await response.json()).skeleton;
-    };
-    const skeletonPlace = async (key: string, name: string, type: string, latitude: number, longitude: number) => {
-      const response = await send("POST", `/api/trips/${trip.id}/places`, key, {
-        name,
-        type,
-        address: null,
-        latitude,
-        longitude,
-        timeZone: "Asia/Tokyo",
-        sourceUrl: null,
-        notes: null,
-        expectedTripVersion: (await skeleton()).tripVersion,
-      });
-      expect(response.status).toBe(201);
-      return parsePlaceResponse(await response.json()).place;
-    };
-    const hotel = await skeletonPlace("day-hotel", "Kyoto Station Hotel", "lodging", 34.9858, 135.7588);
-    const gion = await skeletonPlace("day-gion", "Gion Kappo", "restaurant", 35.0037, 135.7788);
-    const at = (placeId: string, role: "start" | "end", localDateTime: string) => ({
-      role,
-      countryStopId: trip.countryStops[0]!.id,
-      placeId,
-      localDateTime,
-      timeZone: "Asia/Tokyo",
-    });
-    const item = async (key: string, payload: Record<string, unknown>) => {
-      const response = await send("POST", `/api/trips/${trip.id}/items`, key, {
-        expectedTripVersion: (await skeleton()).tripVersion,
-        participantMemberIds: null,
-        notes: null,
-        sourceUrl: null,
-        money: null,
-        constraints: [],
-        ...payload,
-      });
-      expect(response.status).toBe(201);
-      return parseItineraryItemResponse(await response.json()).item;
-    };
-    // The hotel covers the night of day two; lunch must be reached 15 minutes early.
-    await item("day-stay", {
-      type: "lodging",
-      title: "Kyoto stay",
-      endpoints: [at(hotel.id, "start", "2026-10-21T15:00"), at(hotel.id, "end", "2026-10-23T10:00")],
-      details: { bookedBy: null, confirmationCode: null },
-    });
-    const lunch = await item("day-lunch", {
-      type: "reservation",
-      title: "Lunch at Gion Kappo",
-      endpoints: [at(gion.id, "start", "2026-10-22T12:00")],
-      details: { durationMinutes: 60, bookedBy: null, confirmationStatus: null },
-      constraints: [{ type: "minimum_buffer", status: "confirmed", minimumBufferMinutes: 15 }],
-    });
 
-    const searched = async (key: string, candidate: ProviderPlaceCandidateDto) => {
-      const response = await send("POST", `/api/trips/${trip.id}/trip-places`, key, {
-        method: "search",
-        providerPlaceId: candidate.providerPlaceId,
-        sourceUrl: candidate.sourceUrl,
-        originalNote: null,
-      });
-      expect(response.status).toBe(201);
-      return parseTripPlaceResponse(await response.json()).tripPlace;
-    };
-    const manual = async (key: string, name: string, latitude: number | null, longitude: number | null) => {
-      const response = await send("POST", `/api/trips/${trip.id}/trip-places`, key, {
-        method: "manual",
-        name,
-        type: "activity",
-        address: null,
-        latitude,
-        longitude,
-        timeZone: latitude === null ? null : "Asia/Tokyo",
-        sourceUrl: null,
-        originalNote: null,
-      });
-      expect(response.status).toBe(201);
-      return parseTripPlaceResponse(await response.json()).tripPlace;
-    };
-    const kiyomizu = await searched("day-kiyomizu", provider.kyoto);
-    const cafe = await searched("day-cafe", provider.branch);
-    const unsizedTofukuji = await manual("day-tofukuji", "Tofuku-ji", 34.9767, 135.7738);
-    const fushimi = await manual("day-fushimi", "Fushimi Inari", 34.9671, 135.7727);
-    const hidden = await manual("day-hidden", "Hidden cafe", null, null);
-    const arashiyama = await manual("day-arashiyama", "Arashiyama", 35.0094, 135.6668);
-    const sized = await send(
-      "PATCH",
-      `/api/trips/${trip.id}/trip-places/${unsizedTofukuji.id}/planning`,
-      "day-tofukuji-stay",
-      { expectedVersion: unsizedTofukuji.version, durationMinutes: 45, budgetAmountMinor: null, budgetCurrency: null, notes: null },
-    );
-    expect(sized.status).toBe(200);
-    const tofukuji = parseTripPlaceResponse(await sized.json()).tripPlace;
-    const dayTwo = trip.days[1]!.id;
-    const assign = (key: string, entries: Array<{ id: string; version: number; day: string | null }>) =>
-      send("PUT", `/api/trips/${trip.id}/trip-place-day-assignments`, key, {
-        assignments: entries.map((entry) => ({
-          tripPlaceId: entry.id,
-          tripDayId: entry.day,
-          expectedVersion: entry.version,
-        })),
-      });
-    expect((await assign("day-assign", [
-      ...[kiyomizu, cafe, tofukuji, fushimi, hidden].map((entry) => ({ ...entry, day: dayTwo })),
-      { ...arashiyama, day: trip.days[2]!.id },
-    ])).status).toBe(200);
-    const orderPath = `/api/trips/${trip.id}/days/${dayTwo}/place-order`;
-    const currentOrder = [kiyomizu.id, cafe.id, tofukuji.id, fushimi.id];
-    const dayVersion = async () => parseDayWindowResponse(await (await app.request(`/api/trips/${trip.id}/days/${dayTwo}/window`, { headers: { cookie: owner.cookie } })).json()).window.version;
-    expect((await send("PUT", orderPath, "day-order", { orderedTripPlaceIds: currentOrder, expectedVersion: await dayVersion() })).status).toBe(200);
 
-    // Hotel ↔ Kiyomizu takes the train; Fushimi has no known route to anywhere; others walk 10 minutes.
-    routes.walking.set(ControlledRouteProvider.pair(hotel.id, kiyomizu.id), 40);
-    routes.transit.set(ControlledRouteProvider.pair(hotel.id, kiyomizu.id), 18);
-    for (const other of [hotel.id, gion.id, kiyomizu.id, cafe.id, tofukuji.id]) {
-      routes.walking.set(ControlledRouteProvider.pair(fushimi.id, other), null);
-    }
-    const daily = (open: number, close: number) => Array.from({ length: 7 }, (_, day) => ({
-      open: { day, hour: Math.floor(open / 60), minute: open % 60, date: null },
-      close: { day, hour: Math.floor(close / 60), minute: close % 60, date: null },
-    }));
-    hours.hours.set(provider.kyoto.providerPlaceId, {
-      businessStatus: "operational",
-      regular: daily(9 * 60 + 30, 17 * 60),
-      current: null,
-    });
-    // 2026-10-22 is a Thursday; the cafe opens only on Mondays.
-    hours.hours.set(provider.branch.providerPlaceId, {
-      businessStatus: "operational",
-      regular: daily(11 * 60, 20 * 60).filter((period) => period.open.day === 1),
-      current: null,
-    });
 
-    const timetablePath = `/api/trips/${trip.id}/days/${dayTwo}/timetable`;
-    const draft = async (order: "current" | "suggested", cookie = owner.cookie) => {
-      const response = await send("POST", timetablePath, null, { order }, cookie);
-      expect(response.status).toBe(200);
-      return parseDayTimetableResponse(await response.json()).timetable;
-    };
-    expect((await send("POST", `/api/trips/${trip.id}/days/${otherTrip.days[1]!.id}/timetable`, null, {
-      order: "current",
-    })).status).toBe(404);
-    expect((await send("POST", timetablePath, null, { order: "fastest" })).status).toBe(400);
-    const before = await skeleton();
-
-    const first = await draft("current");
-    expect(first.window).toEqual({ startMinute: 9 * 60, endMinute: 19 * 60, version: await dayVersion(), travelMode: "transit", walkLimitMinutes: 15 });
-    expect(first.startsAt).toEqual({ placeId: hotel.id, name: "Kyoto Station Hotel" });
-    expect(first.endsAt).toEqual({ placeId: hotel.id, name: "Kyoto Station Hotel" });
-    expect(first.orderedTripPlaceIds).toEqual(currentOrder);
-    expect(first.rows).toEqual([
-      { kind: "start", name: "Kyoto Station Hotel", departMinute: 540 },
-      // Arrives 09:18 by train and waits for the 09:30 opening; the stay is the activity default.
-      {
-        kind: "visit",
-        tripPlaceId: kiyomizu.id,
-        name: "Kiyomizu-dera",
-        travel: expect.objectContaining({ mode: "transit", durationMinutes: 18, walkingMinutes: 40 }),
-        arriveMinute: 558,
-        waitMinutes: 12,
-        startMinute: 570,
-        endMinute: 660,
-        stayMinutes: 90,
-        stayEstimated: true,
-        hours: "listed",
-      },
-      {
-        kind: "fixed",
-        itemId: lunch.id,
-        title: "Lunch at Gion Kappo",
-        itemType: "reservation",
-        travel: expect.objectContaining({ fromName: "Kiyomizu-dera", toName: "Gion Kappo", durationMinutes: 10 }),
-        startMinute: 720,
-        endMinute: 780,
-        startsBeforeDay: false,
-        endsAfterDay: false,
-        bufferMinutes: 15,
-        bufferEstimated: false,
-        afterBufferMinutes: 0,
-      },
-      // Tofuku-ji would end at 11:55, past the 11:45 lunch buffer, so it moves after lunch.
-      {
-        kind: "visit",
-        tripPlaceId: tofukuji.id,
-        name: "Tofuku-ji",
-        travel: expect.objectContaining({ fromName: "Gion Kappo", durationMinutes: 10 }),
-        arriveMinute: 790,
-        waitMinutes: 0,
-        startMinute: 790,
-        endMinute: 835,
-        stayMinutes: 45,
-        stayEstimated: false,
-        hours: "manual",
-      },
-      {
-        kind: "return",
-        name: "Kyoto Station Hotel",
-        travel: expect.objectContaining({ fromName: "Tofuku-ji", durationMinutes: 10 }),
-        arriveMinute: 845,
-      },
-    ]);
-    // An unknown route is never treated as zero minutes: Fushimi stays out of the day.
-    expect(first.unscheduled).toEqual([
-      { tripPlaceId: cafe.id, name: "Kiyomizu Cafe", reason: "closed_that_day" },
-      { tripPlaceId: fushimi.id, name: "Fushimi Inari", reason: "travel_unknown" },
-      { tripPlaceId: hidden.id, name: "Hidden cafe", reason: "no_location" },
-    ]);
-    // The 15 confirmed minutes before lunch are spent waiting there, so they count as busy.
-    expect(first.load).toEqual({ busyMinutes: 90 + 18 + 15 + 60 + 10 + 45 + 10 + 10, windowMinutes: 600, level: "relaxed" });
-    // One opening-hours lookup per Google place; every route as if leaving at the day's start.
-    expect([...hours.calls].sort()).toEqual([provider.branch.providerPlaceId, provider.kyoto.providerPlaceId].sort());
-    expect(new Set(routes.queries.map((query) => query.departureTime))).toEqual(new Set(["2026-10-22T09:00:00+09:00"]));
-
-    expect(await draft("current")).toEqual(first);
-    expect(await skeleton()).toMatchObject({ tripVersion: before.tripVersion, items: before.items });
-
-    // Editors can read the window, but only schedulers can change it.
-    const second = await login("second@example.test");
-    await addMember(trip.id, second.user.id);
-    const windowPath = `/api/trips/${trip.id}/days/${dayTwo}/window`;
-    expect((await send("PUT", windowPath, "day-window-empty", { startMinute: 600, endMinute: 600, expectedVersion: first.window.version })).status).toBe(400);
-    expect((await send("PUT", windowPath, "day-window-denied", {
-      startMinute: 540, endMinute: 810, expectedVersion: first.window.version,
-    }, second.cookie)).status).toBe(403);
-    expect((await send("PUT", `/api/trips/${trip.id}/editors-can-schedule`, "allow-editor-window", { enabled: true })).status).toBe(204);
-    const changed = await send("PUT", windowPath, "day-window", { startMinute: 540, endMinute: 810, expectedVersion: first.window.version }, second.cookie);
-    expect(changed.status).toBe(200);
-    const changedWindow = parseDayWindowResponse(await changed.json()).window;
-    expect(changedWindow).toEqual({ startMinute: 540, endMinute: 810, version: first.window.version + 1, travelMode: "transit", walkLimitMinutes: 15 });
-    const shortened = await draft("current");
-    expect(shortened.window).toEqual(changedWindow);
-    expect(shortened.rows.map((row) => row.kind)).toEqual(["start", "visit", "fixed"]);
-    expect(shortened.unscheduled).toContainEqual({ tripPlaceId: tofukuji.id, name: "Tofuku-ji", reason: "not_enough_time" });
-    expect((await draft("current", second.cookie)).window).toEqual(changedWindow);
-
-    // The suggested order is drafted in that order and, once used, becomes the day's order.
-    const suggested = await draft("suggested");
-    expect(suggested.order).toBe("suggested");
-    expect([...suggested.orderedTripPlaceIds].sort()).toEqual([...currentOrder].sort());
-    const visited = suggested.rows.flatMap((row) => row.kind === "visit" ? [row.tripPlaceId] : []);
-    expect(visited).toEqual(suggested.orderedTripPlaceIds.filter((id) => visited.includes(id)));
-    const applied = await send("PUT", orderPath, "day-order-suggested", {
-      orderedTripPlaceIds: suggested.orderedTripPlaceIds,
-      expectedVersion: suggested.window.version,
-    });
-    expect(applied.status).toBe(200);
-    expect((await draft("current")).orderedTripPlaceIds).toEqual(suggested.orderedTripPlaceIds);
-    const positions = async () => new Map(
-      (await list(owner.cookie, trip.id)).map((entry) => [entry.id, entry.dayPosition]),
-    );
-    const afterApply = await positions();
-    suggested.orderedTripPlaceIds.forEach((id, index) => expect(afterApply.get(id)).toBe(index));
-    expect(afterApply.get(hidden.id)).toBeNull();
-
-    // A retried request returns the first answer and does not apply a second order.
-    const replay = await send("PUT", orderPath, "day-order-suggested", {
-      orderedTripPlaceIds: [...suggested.orderedTripPlaceIds].reverse(),
-      expectedVersion: suggested.window.version,
-    });
-    expect(replay.status).toBe(200);
-    expect(await positions()).toEqual(afterApply);
-    // An order naming a place planned for another day is stale and changes nothing.
-    const stale = await send("PUT", orderPath, "day-order-stale", {
-      orderedTripPlaceIds: [arashiyama.id, ...suggested.orderedTripPlaceIds],
-      expectedVersion: await dayVersion(),
-    });
-    expect(stale.status).toBe(409);
-    expect(await positions()).toEqual(afterApply);
-
-    // Moving a place off the day drops its position, so it never sorts ahead on its next day.
-    const current = (await list(owner.cookie, trip.id)).find((entry) => entry.id === tofukuji.id)!;
-    expect((await assign("day-unassign", [{ ...current, day: null }])).status).toBe(200);
-    const moved = (await list(owner.cookie, trip.id)).find((entry) => entry.id === tofukuji.id)!;
-    expect((await assign("day-reassign", [{ ...moved, day: trip.days[2]!.id }])).status).toBe(200);
-    expect((await positions()).get(tofukuji.id)).toBeNull();
-
-  });
-
-  it("adds unplanned wishlist places to nearby days around kept places and a friend's dinner", async () => {
-    const owner = await login("owner@example.test");
-    const trip = await createTrip(owner.cookie, "Trip plan trip");
-    const send = (method: string, path: string, key: string | null, payload?: unknown) =>
-      app.request(path, {
-        method,
-        headers: {
-          cookie: owner.cookie,
-          "content-type": "application/json",
-          origin: "https://app.example.test",
-          ...(key ? { "idempotency-key": key } : {}),
-        },
-        body: payload === undefined ? undefined : json(payload),
-      });
-    const skeleton = async () => {
-      const response = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
-      return parseTripSkeletonResponse(await response.json()).skeleton;
-    };
-    const skeletonPlace = async (key: string, name: string, type: string, latitude: number | null, longitude: number | null) => {
-      const response = await send("POST", `/api/trips/${trip.id}/places`, key, {
-        name,
-        type,
-        address: null,
-        latitude,
-        longitude,
-        timeZone: "Asia/Tokyo",
-        sourceUrl: null,
-        notes: null,
-        expectedTripVersion: (await skeleton()).tripVersion,
-      });
-      expect(response.status).toBe(201);
-      return parsePlaceResponse(await response.json()).place;
-    };
-    const at = (placeId: string, role: "start" | "end", localDateTime: string) => ({
-      role,
-      countryStopId: trip.countryStops[0]!.id,
-      placeId,
-      localDateTime,
-      timeZone: "Asia/Tokyo",
-    });
-    const item = async (key: string, payload: Record<string, unknown>) => {
-      const response = await send("POST", `/api/trips/${trip.id}/items`, key, {
-        expectedTripVersion: (await skeleton()).tripVersion,
-        participantMemberIds: null,
-        notes: null,
-        sourceUrl: null,
-        money: null,
-        constraints: [],
-        ...payload,
-      });
-      expect(response.status).toBe(201);
-      return parseItineraryItemResponse(await response.json()).item;
-    };
-    // The hotel covers the nights of the 21st and 22nd; on the 22nd a friend picks a restaurant
-    // that has no map location yet.
-    const hotel = await skeletonPlace("plan-hotel", "Kyoto Station Hotel", "lodging", 34.9858, 135.7588);
-    const friendsPick = await skeletonPlace("plan-friend", "Friend's pick", "restaurant", null, null);
-    await item("plan-stay", {
-      type: "lodging",
-      title: "Kyoto stay",
-      endpoints: [at(hotel.id, "start", "2026-10-21T15:00"), at(hotel.id, "end", "2026-10-23T10:00")],
-      details: { bookedBy: null, confirmationCode: null },
-    });
-    const dinner = await item("plan-dinner", {
-      type: "meal",
-      title: "Dinner with Ken",
-      endpoints: [at(friendsPick.id, "start", "2026-10-22T18:00")],
-      details: { durationMinutes: 120, bookedBy: null, confirmationStatus: null },
-    });
-
-    const manual = async (key: string, name: string, latitude: number | null, longitude: number | null) => {
-      const response = await send("POST", `/api/trips/${trip.id}/trip-places`, key, {
-        method: "manual",
-        name,
-        type: "activity",
-        address: null,
-        latitude,
-        longitude,
-        timeZone: latitude === null ? null : "Asia/Tokyo",
-        sourceUrl: null,
-        originalNote: null,
-      });
-      expect(response.status).toBe(201);
-      return parseTripPlaceResponse(await response.json()).tripPlace;
-    };
-    const tofukuji = await manual("plan-tofukuji", "Tofuku-ji", 34.976, 135.7738);
-    const kiyomizuResponse = await send("POST", `/api/trips/${trip.id}/trip-places`, "plan-kiyomizu", {
-      method: "search",
-      providerPlaceId: provider.kyoto.providerPlaceId,
-      sourceUrl: provider.kyoto.sourceUrl,
-      originalNote: null,
-    });
-    expect(kiyomizuResponse.status).toBe(201);
-    const kiyomizu = parseTripPlaceResponse(await kiyomizuResponse.json()).tripPlace;
-    const komyoin = await manual("plan-komyoin", "Komyo-in", 34.9746, 135.7727);
-    const ine = await manual("plan-ine", "Ine Funaya", 35.6757, 135.2875);
-    const hidden = await manual("plan-hidden", "Hidden cafe", null, null);
-    // Tofuku-ji was put on the 23rd by hand and must stay there, first.
-    const dayOf = (date: string) => trip.days.find((day) => day.date === date)!.id;
-    expect((await send("PUT", `/api/trips/${trip.id}/trip-place-day-assignments`, "plan-assign", {
-      assignments: [{ tripPlaceId: tofukuji.id, tripDayId: dayOf("2026-10-23"), expectedVersion: tofukuji.version }],
-    })).status).toBe(200);
-    // Kiyomizu-dera is closed on Wednesdays (the 21st) and Fridays (the 23rd).
-    hours.hours.set(provider.kyoto.providerPlaceId, {
-      businessStatus: "operational",
-      regular: [0, 1, 2, 4, 6].map((day) => ({
-        open: { day, hour: 9, minute: 0, date: null },
-        close: { day, hour: 17, minute: 0, date: null },
-      })),
-      current: null,
-    });
-
-    const draft = async () => {
-      const response = await send("POST", `/api/trips/${trip.id}/trip-plan`, null);
-      expect(response.status).toBe(200);
-      return parseTripPlanResponse(await response.json()).plan;
-    };
-    // Active members' votes prioritize Kiyomizu; fixed items and day placement stay unchanged.
-    const second = await login("second@example.test");
-    await addMember(trip.id, second.user.id);
-    for (const [cookie, place, key] of [
-      [owner.cookie, kiyomizu, "plan-owner-kiyomizu"],
-      [second.cookie, kiyomizu, "plan-second-kiyomizu"],
-      [owner.cookie, hidden, "plan-owner-hidden"],
-    ] as const) {
-      expect((await setVote(cookie, trip.id, place.id, true, key)).status).toBe(200);
-    }
-    const before = await skeleton();
-    const plan = await draft();
-    const byDate = new Map(plan.days.map((day) => [day.timetable.date, day]));
-
-    expect([...byDate.keys()]).toEqual(["2026-10-22", "2026-10-23", "2026-10-24"]);
-    // Kiyomizu goes to the nearest open day; the dinner keeps its time, reached in an estimated 30 minutes.
-    expect(byDate.get("2026-10-22")).toMatchObject({
-      addedTripPlaceIds: [kiyomizu.id],
-      orderedTripPlaceIds: [kiyomizu.id],
-    });
-    expect(byDate.get("2026-10-22")!.timetable.rows).toEqual([
-      { kind: "start", name: "Kyoto Station Hotel", departMinute: 540 },
-      expect.objectContaining({ kind: "visit", tripPlaceId: kiyomizu.id, startMinute: 550, endMinute: 640 }),
-      expect.objectContaining({
-        kind: "fixed",
-        itemId: dinner.id,
-        startMinute: 18 * 60,
-        endMinute: 20 * 60,
-        travel: expect.objectContaining({ fromName: "Kiyomizu-dera", durationMinutes: 30, estimated: true, mode: null }),
-      }),
-    ]);
-    // Komyo-in joins Tofuku-ji, which stays first; Ine, 90 km away, gets the first day without places it fits.
-    expect(byDate.get("2026-10-23")).toMatchObject({
-      addedTripPlaceIds: [komyoin.id],
-      orderedTripPlaceIds: [tofukuji.id, komyoin.id],
-    });
-    expect(byDate.get("2026-10-24")).toMatchObject({ addedTripPlaceIds: [ine.id] });
-    expect(plan.unplaced).toEqual([{ tripPlaceId: hidden.id, name: "Hidden cafe", reason: "no_location", date: null }]);
-    expect(await draft()).toEqual(plan);
-    expect(await skeleton()).toMatchObject({ tripVersion: before.tripVersion, items: before.items });
-
-    const apply = (key: string, chosen: typeof plan) => send("POST", `/api/trips/${trip.id}/trip-plan/apply`, key, {
-      basis: chosen.basis,
-      days: chosen.days.map((day) => ({ tripDayId: day.timetable.dayId, orderedTripPlaceIds: day.orderedTripPlaceIds, expectedVersion: day.timetable.window.version })),
-    });
-    const placement = async () => new Map((await list(owner.cookie, trip.id))
-      .map((entry) => [entry.id, [entry.assignedDayId, entry.dayPosition]]));
-
-    // A change after the draft makes the plan stale; nothing is written.
-    const beforeChange = await placement();
-    const edited = await send("PATCH", `/api/trips/${trip.id}/trip-places/${ine.id}/planning`, "plan-ine-stay", {
-      expectedVersion: ine.version,
-      durationMinutes: 120,
-      budgetAmountMinor: null,
-      budgetCurrency: null,
-      notes: null,
-    });
-    expect(edited.status).toBe(200);
-    expect((await apply("plan-stale", plan)).status).toBe(409);
-    expect(await placement()).toEqual(beforeChange);
-
-    // Moving the dinner changes a day the plan checked, without touching the trip version.
-    const beforeMove = await draft();
-    const moved = await send("PATCH", `/api/trips/${trip.id}/items/${dinner.id}`, "plan-move-dinner", {
-      type: "meal",
-      title: "Dinner with Ken",
-      participantMemberIds: null,
-      notes: null,
-      sourceUrl: null,
-      money: null,
-      endpoints: [at(friendsPick.id, "start", "2026-10-22T10:00")],
-      details: { durationMinutes: 120, bookedBy: null, confirmationStatus: null },
-      expectedVersion: dinner.version,
-    });
-    expect(moved.status).toBe(200);
-    expect((await skeleton()).tripVersion).toBe(before.tripVersion);
-    expect((await apply("plan-stale-dinner", beforeMove)).status).toBe(409);
-    expect(await placement()).toEqual(beforeChange);
-
-    // How another day travels is part of what a plan is built on, even a day the plan leaves alone.
-    const beforeMode = await draft();
-    const otherDay = dayOf("2026-10-25");
-    expect(beforeMode.days.map((day) => day.timetable.dayId)).not.toContain(otherDay);
-    const otherWindow = parseDayWindowResponse(await (await send("GET", `/api/trips/${trip.id}/days/${otherDay}/window`, null)).json()).window;
-    expect((await send("PUT", `/api/trips/${trip.id}/days/${otherDay}/window`, "plan-other-mode", {
-      startMinute: otherWindow.startMinute, endMinute: otherWindow.endMinute, travelMode: "taxi", walkLimitMinutes: 15,
-      expectedVersion: otherWindow.version,
-    })).status).toBe(200);
-    expect((await apply("plan-stale-mode", beforeMode)).status).toBe(409);
-    expect(await placement()).toEqual(beforeChange);
-
-    const fresh = await draft();
-    expect(fresh.basis).not.toBe(beforeMove.basis);
-    const used = await apply("plan-use", fresh);
-    expect(used.status).toBe(200);
-    const afterUse = await placement();
-    expect(afterUse.get(tofukuji.id)).toEqual([dayOf("2026-10-23"), 0]);
-    expect(afterUse.get(komyoin.id)).toEqual([dayOf("2026-10-23"), 1]);
-    expect(afterUse.get(kiyomizu.id)).toEqual([dayOf("2026-10-22"), 0]);
-    expect(afterUse.get(ine.id)).toEqual([dayOf("2026-10-24"), 0]);
-    expect(afterUse.get(hidden.id)).toEqual([null, null]);
-    expect((await skeleton()).tripVersion).toBe(before.tripVersion);
-    // A retry with the same key answers again without writing twice.
-    expect((await apply("plan-use", fresh)).status).toBe(200);
-    expect(await placement()).toEqual(afterUse);
-    // The day plan retains its places and formal itinerary items.
-    const dayDraft = await send("POST", `/api/trips/${trip.id}/days/${dayOf("2026-10-22")}/timetable`, null, {
-      order: "current",
-    });
-    expect(parseDayTimetableResponse(await dayDraft.json()).timetable.orderedTripPlaceIds).toEqual([kiyomizu.id]);
-    // Nothing is left to add except the place without a location.
-    expect(await draft()).toMatchObject({ days: [], unplaced: [{ tripPlaceId: hidden.id, reason: "no_location" }] });
-  });
-
-  it("starts arrival, moving and departure days where the traveller really is", async () => {
-    const owner = await login("owner@example.test");
-    const trip = await createTrip(owner.cookie, "Travel days trip");
-    const send = (method: string, path: string, key: string | null, payload?: unknown) =>
-      app.request(path, {
-        method,
-        headers: {
-          cookie: owner.cookie,
-          "content-type": "application/json",
-          origin: "https://app.example.test",
-          ...(key ? { "idempotency-key": key } : {}),
-        },
-        body: payload === undefined ? undefined : json(payload),
-      });
-    // This scenario supplies its own arrival/departure pair and measured airport routes;
-    // do not leave the general creation fixture as extra fixed blocks on its arrival day.
-    const initial = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
-    for (const flight of parseTripSkeletonResponse(await initial.json()).skeleton.items) {
-      expect((await send("DELETE", `/api/trips/${trip.id}/items/${flight.id}`, `remove-${flight.id}`,
-        { expectedVersion: flight.version })).status).toBe(204);
-    }
-    const tripVersion = async () => {
-      const response = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
-      return parseTripSkeletonResponse(await response.json()).skeleton.tripVersion;
-    };
-    const skeletonPlace = async (key: string, name: string, type: string, latitude: number, longitude: number, timeZone: string) => {
-      const response = await send("POST", `/api/trips/${trip.id}/places`, key, {
-        name, type, address: null, latitude, longitude, timeZone, sourceUrl: null, notes: null,
-        expectedTripVersion: await tripVersion(),
-      });
-      expect(response.status).toBe(201);
-      return parsePlaceResponse(await response.json()).place;
-    };
-    const at = (placeId: string, role: "start" | "end", localDateTime: string, timeZone = "Asia/Tokyo") => ({
-      role, countryStopId: trip.countryStops[0]!.id, placeId, localDateTime, timeZone,
-    });
-    const item = async (key: string, payload: Record<string, unknown>) => {
-      const response = await send("POST", `/api/trips/${trip.id}/items`, key, {
-        expectedTripVersion: await tripVersion(),
-        participantMemberIds: null, notes: null, sourceUrl: null, money: null, constraints: [],
-        ...payload,
-      });
-      expect(response.status).toBe(201);
-      return parseItineraryItemResponse(await response.json()).item;
-    };
-    const kyotoHotel = await skeletonPlace("days-kyoto", "Kyoto Station Hotel", "lodging", 34.9858, 135.7588, "Asia/Tokyo");
-    const osakaHotel = await skeletonPlace("days-osaka", "Namba Hotel", "lodging", 34.6665, 135.5013, "Asia/Tokyo");
-    const tpeInput = {
-      name: "Taoyuan Airport", latitude: 25.0797, longitude: 121.2342, timeZone: "Asia/Taipei",
-    };
-    const kixInput = {
-      name: "Kansai Airport", latitude: 34.4347, longitude: 135.244, timeZone: "Asia/Tokyo",
-    };
-    const flight = async (
-      key: string,
-      serviceNumber: string,
-      departureAirport: typeof tpeInput,
-      departureLocalDateTime: string,
-      arrivalAirport: typeof tpeInput,
-      arrivalLocalDateTime: string,
-    ) => {
-      const response = await send("POST", `/api/trips/${trip.id}/flights`, key, {
-        serviceNumber,
-        carrier: null,
-        departureAirport,
-        arrivalAirport,
-        departureLocalDateTime,
-        arrivalLocalDateTime,
-        expectedTripVersion: await tripVersion(),
-      });
-      expect(response.status).toBe(201);
-      return parseItineraryItemResponse(await response.json()).item;
-    };
-    // In on the 21st (lands 12:30), Kyoto for two nights, Osaka for two, out on the 25th at 18:00.
-    const inbound = await flight("days-in", "CI 152", tpeInput, "2026-10-21T09:00", kixInput, "2026-10-21T12:30");
-    const outbound = await flight("days-out", "CI 153", kixInput, "2026-10-25T18:00", tpeInput, "2026-10-25T20:00");
-    const locatedAirportsResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
-    const locatedAirports = parseTripSkeletonResponse(await locatedAirportsResponse.json()).skeleton.places;
-    const tpe = locatedAirports.find((place) => place.name === tpeInput.name)!;
-    const kix = locatedAirports.find((place) => place.name === kixInput.name)!;
-    expect(tpe).toMatchObject({ latitude: 25.0797, longitude: 121.2342 });
-    expect(kix).toMatchObject({ latitude: 34.4347, longitude: 135.244 });
-    for (const [key, hotel, from, to] of [
-      ["days-stay-kyoto", kyotoHotel, "2026-10-21T15:00", "2026-10-23T10:00"],
-      ["days-stay-osaka", osakaHotel, "2026-10-23T15:00", "2026-10-25T11:00"],
-    ] as const) {
-      await item(key, {
-        type: "lodging",
-        title: hotel.name,
-        endpoints: [at(hotel.id, "start", from), at(hotel.id, "end", to)],
-        details: { bookedBy: null, confirmationCode: null },
-      });
-    }
-    const manual = async (key: string, name: string, latitude: number, longitude: number) => {
-      const response = await send("POST", `/api/trips/${trip.id}/trip-places`, key, {
-        method: "manual", name, type: "activity", address: null, latitude, longitude,
-        timeZone: "Asia/Tokyo", sourceUrl: null, originalNote: null,
-      });
-      expect(response.status).toBe(201);
-      return parseTripPlaceResponse(await response.json()).tripPlace;
-    };
-    const dayOf = (date: string) => trip.days.find((day) => day.date === date)!.id;
-    const kiyomizu = await manual("days-kiyomizu", "Kiyomizu-dera", 34.9949, 135.785);
-    const castle = await manual("days-castle", "Osaka Castle", 34.6873, 135.5262);
-    const dotonbori = await manual("days-dotonbori", "Dotonbori", 34.6687, 135.5013);
-    expect((await send("PUT", `/api/trips/${trip.id}/trip-place-day-assignments`, "days-assign", {
-      assignments: [
-        { tripPlaceId: kiyomizu.id, tripDayId: dayOf("2026-10-21"), expectedVersion: kiyomizu.version },
-        { tripPlaceId: castle.id, tripDayId: dayOf("2026-10-23"), expectedVersion: castle.version },
-        { tripPlaceId: dotonbori.id, tripDayId: dayOf("2026-10-25"), expectedVersion: dotonbori.version },
-      ],
-    })).status).toBe(200);
-    // Airport and hotel transfers take the train; everything else is a 10-minute walk.
-    for (const [left, right, minutes] of [
-      [kix.id, kyotoHotel.id, 75],
-      [kyotoHotel.id, osakaHotel.id, 50],
-      [osakaHotel.id, kix.id, 60],
-    ] as const) {
-      routes.walking.set(ControlledRouteProvider.pair(left, right), null);
-      routes.transit.set(ControlledRouteProvider.pair(left, right), minutes);
-    }
-    const draft = async (date: string) => {
-      const response = await send("POST", `/api/trips/${trip.id}/days/${dayOf(date)}/timetable`, null, { order: "current" });
-      expect(response.status).toBe(200);
-      return parseDayTimetableResponse(await response.json()).timetable;
-    };
-    const kinds = (rows: Awaited<ReturnType<typeof draft>>["rows"]) => rows.map((row) =>
-      row.kind === "luggage" ? `${row.action}-luggage` : row.kind === "fixed" ? row.title : row.kind === "visit" ? row.name : row.kind);
-
-    // Arrival: lands 12:30, an estimated hour for entry and luggage, 75 minutes to the hotel.
-    const arrival = await draft("2026-10-21");
-    expect(arrival).toMatchObject({ startsAt: null, endsAt: { placeId: kyotoHotel.id } });
-    expect(kinds(arrival.rows)).toEqual(["CI 152", "drop-luggage", "Kiyomizu-dera", "return"]);
-    // Check-in for this flight happened in Taipei, so no airport buffer is shown for it here.
-    expect(arrival.rows[0]).toMatchObject({ itemId: inbound.id, endMinute: 750, afterBufferMinutes: 60, bufferMinutes: 0 });
-    expect(arrival.rows[1]).toMatchObject({ arriveMinute: 885, leaveMinute: 900, travel: { fromName: "Kansai Airport", durationMinutes: 75 } });
-    expect(arrival.rows[2]).toMatchObject({ startMinute: 910, endMinute: 1000 });
-    expect(routes.queries.some((query) =>
-      ControlledRouteProvider.pair(query.origin.placeId, query.destination.placeId)
-        === ControlledRouteProvider.pair(kix.id, kyotoHotel.id))).toBe(true);
-
-    // Moving day: from Kyoto, luggage to Osaka first, back to Osaka at the end.
-    const moving = await draft("2026-10-23");
-    expect(moving).toMatchObject({ startsAt: { placeId: kyotoHotel.id }, endsAt: { placeId: osakaHotel.id } });
-    expect(kinds(moving.rows)).toEqual(["start", "drop-luggage", "Osaka Castle", "return"]);
-    expect(moving.rows[1]).toMatchObject({ name: "Namba Hotel", arriveMinute: 590, leaveMinute: 605 });
-    expect(moving.rows[3]).toMatchObject({ name: "Namba Hotel", arriveMinute: 715 });
-
-    // Departure: from Osaka, back for the luggage, at the airport two hours before 18:00.
-    const departure = await draft("2026-10-25");
-    expect(departure).toMatchObject({ startsAt: { placeId: osakaHotel.id }, endsAt: null });
-    expect(kinds(departure.rows)).toEqual(["start", "Dotonbori", "collect-luggage", "CI 153"]);
-    expect(departure.rows[2]).toMatchObject({ name: "Namba Hotel", arriveMinute: 650, leaveMinute: 665 });
-    expect(departure.rows[3]).toMatchObject({
-      itemId: outbound.id,
-      startMinute: 1080,
-      bufferMinutes: 120,
-      bufferEstimated: true,
-      afterBufferMinutes: 0,
-      travel: { fromName: "Namba Hotel", durationMinutes: 60 },
-    });
-    expect(routes.queries.some((query) =>
-      ControlledRouteProvider.pair(query.origin.placeId, query.destination.placeId)
-        === ControlledRouteProvider.pair(osakaHotel.id, kix.id))).toBe(true);
-
-    // A confirmed buffer replaces the default.
-    expect((await send("POST", `/api/trips/${trip.id}/items/${outbound.id}/constraints`, "days-buffer", {
-      type: "minimum_buffer", status: "confirmed", minimumBufferMinutes: 90, expectedItemVersion: outbound.version,
-    })).status).toBe(201);
-    expect((await draft("2026-10-25")).rows.at(-1)).toMatchObject({ bufferMinutes: 90, bufferEstimated: false });
-
-    // With a train to the airport, luggage is collected before the train, not before the flight.
-    const station = await skeletonPlace("days-namba-station", "Namba Station", "station", 34.6627, 135.5021, "Asia/Tokyo");
-    const rapit = await item("days-rapit", {
-      type: "transport",
-      title: "Rapi:t",
-      endpoints: [at(station.id, "start", "2026-10-25T15:00"), at(kix.id, "end", "2026-10-25T15:40")],
-      details: { mode: "train", ticketInfo: null },
-    });
-    const withTrain = await draft("2026-10-25");
-    expect(kinds(withTrain.rows)).toEqual(["start", "Dotonbori", "collect-luggage", "Rapi:t", "CI 153"]);
-    expect(withTrain.rows[2]).toMatchObject({ arriveMinute: 650, leaveMinute: 665 });
-    expect(withTrain.rows[3]).toMatchObject({ itemId: rapit.id, travel: { fromName: "Namba Hotel", toName: "Namba Station" } });
-
-    // A day without any lodging is not an arrival day: a midday train leaves the morning free.
-    const aquarium = await manual("days-aquarium", "Kaiyukan", 34.6545, 135.429);
-    expect((await send("PUT", `/api/trips/${trip.id}/trip-place-day-assignments`, "days-assign-aquarium", {
-      assignments: [{ tripPlaceId: aquarium.id, tripDayId: dayOf("2026-10-26"), expectedVersion: aquarium.version }],
-    })).status).toBe(200);
-    await item("days-jr", {
-      type: "transport",
-      title: "JR to Kyoto",
-      endpoints: [at(station.id, "start", "2026-10-26T13:00"), at(kyotoHotel.id, "end", "2026-10-26T13:30")],
-      details: { mode: "train", ticketInfo: null },
-    });
-    const afterTrip = await draft("2026-10-26");
-    expect(kinds(afterTrip.rows)).toEqual(["Kaiyukan", "JR to Kyoto"]);
-    expect(afterTrip.rows[0]).toMatchObject({ startMinute: 540 });
-  });
 
   it("rejects merging an unscheduled day assignment into a scheduled place", async () => {
     const owner = await login("owner@example.test");
@@ -3634,8 +2334,9 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     });
     const skeleton = parseTripSkeletonResponse(await skeletonResponse.json()).skeleton;
     const targetPlace = skeleton.places.find((place) => place.address === "Timed target")!;
-    const timedItem = await app.request(`/api/trips/${trip.id}/items`, {
-      method: "POST",
+    const fixture = skeleton.items.find((item) => item.title === "FIXTURE-OUT")!;
+    const timedItem = await app.request(`/api/trips/${trip.id}/items/${fixture.id}`, {
+      method: "PATCH",
       headers: {
         cookie: owner.cookie,
         "content-type": "application/json",
@@ -3643,7 +2344,6 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         origin: "https://app.example.test",
       },
       body: json({
-        expectedTripVersion: skeleton.tripVersion,
         type: "activity",
         title: "Timed target activity",
         notes: null,
@@ -3657,15 +2357,11 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
           localDateTime: "2026-10-21T10:00",
           timeZone: "Asia/Tokyo",
         }],
-        details: {
-          durationMinutes: 60,
-          bookedBy: null,
-          confirmationStatus: "unknown",
-        },
-        constraints: [],
+        details: { durationMinutes: 60, bookedBy: null, confirmationStatus: "unknown" },
+        expectedVersion: fixture.version,
       }),
     });
-    expect(timedItem.status).toBe(201);
+    expect(timedItem.status).toBe(200);
     const currentTarget = (await list(owner.cookie, trip.id))
       .find((place) => place.id === target.id)!;
     expect(currentTarget.scheduled).toBe(true);
@@ -3726,6 +2422,109 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       .find((place) => place.id === source.id)?.assignedDayId).toBe(trip.days[0]!.id);
   });
 
+  it("lets only the owner remove a scheduled wishlist place without changing formal itinerary content", async () => {
+    const owner = await login("owner@example.test");
+    const second = await login("second@example.test");
+    const outsider = await login("outsider@example.test");
+    const trip = await createTrip(owner.cookie, "Remove scheduled wishlist place");
+    await addMember(trip.id, second.user.id);
+    const place = parseTripPlaceResponse(
+      await (await addManual(owner.cookie, trip.id, "remove-place", "Voted cafe", "Kyoto")).json(),
+    ).tripPlace;
+    expect((await setVote(owner.cookie, trip.id, place.id, true, "owner-vote-before-remove")).status).toBe(200);
+    expect((await setVote(second.cookie, trip.id, place.id, true, "second-vote-before-remove")).status).toBe(200);
+    const skeletonResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    const skeleton = parseTripSkeletonResponse(await skeletonResponse.json()).skeleton;
+    const legacy = skeleton.places.find((entry) => entry.name === place.name)!;
+    const fixture = skeleton.items.find((item) => item.title === "FIXTURE-OUT")!;
+    const activity = await app.request(`/api/trips/${trip.id}/items/${fixture.id}`, {
+      method: "PATCH",
+      headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": "activity-before-remove", origin: "https://app.example.test" },
+      body: json({
+        type: "activity", title: "Keep my booking", notes: "Booking stays", sourceUrl: null,
+        money: null, participantMemberIds: null,
+        endpoints: [{ role: "start", countryStopId: trip.countryStops[0]!.id, placeId: legacy.id,
+          localDateTime: "2026-10-21T10:00", timeZone: "Asia/Tokyo" }],
+        details: { durationMinutes: 60, bookedBy: null, confirmationStatus: "unknown" },
+        expectedVersion: fixture.version,
+      }),
+    });
+    expect(activity.status).toBe(200);
+    // A timed place cannot be assigned through the API, so seed legacy day rows directly
+    // (migration 007's trigger derives an assignment) to prove removal clears all of them.
+    await database.insertInto("trip_place_desired_days").values({
+      trip_id: trip.id, trip_place_id: place.id, trip_day_id: trip.days[0]!.id,
+    }).execute();
+    await database.insertInto("trip_place_excluded_days").values({
+      trip_id: trip.id, trip_place_id: place.id, trip_day_id: trip.days[1]!.id,
+    }).execute();
+    const beforeResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    const before = parseTripSkeletonResponse(await beforeResponse.json()).skeleton;
+    const current = (await list(owner.cookie, trip.id))[0]!;
+    expect(current.scheduled).toBe(true);
+    const missingKey = await app.request(`/api/trips/${trip.id}/trip-places/${place.id}/remove`, {
+      method: "POST",
+      headers: { cookie: second.cookie, "content-type": "application/json", origin: "https://app.example.test" },
+      body: json({ expectedVersion: current.version }),
+    });
+    expect(missingKey.status).toBe(400);
+    expect((await removePlace(outsider.cookie, trip.id, current, "outsider-remove")).status).toBe(404);
+    const stale = await removePlace(second.cookie, trip.id, place, "stale-remove");
+    expect(stale.status).toBe(403);
+    expect(await stale.json()).toEqual({
+      error: { code: "forbidden", message: "Only the trip owner can do that" },
+    });
+    const endpointRefused = await app.request(`/api/trips/${trip.id}/places/${legacy.id}`, {
+      method: "DELETE",
+      headers: { cookie: second.cookie, "content-type": "application/json", "idempotency-key": "delete-in-use", origin: "https://app.example.test" },
+      body: json({ expectedVersion: legacy.version }),
+    });
+    expect(endpointRefused.status).toBe(403);
+    expect(await endpointRefused.json()).toEqual({
+      error: { code: "forbidden", message: "Only the trip owner can do that" },
+    });
+    const ownerEndpointRefused = await app.request(`/api/trips/${trip.id}/places/${legacy.id}`, {
+      method: "DELETE",
+      headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": "owner-delete-in-use", origin: "https://app.example.test" },
+      body: json({ expectedVersion: legacy.version }),
+    });
+    expect(ownerEndpointRefused.status).toBe(409);
+    expect(await ownerEndpointRefused.json()).toMatchObject({ error: { code: "place_in_use" } });
+    const beforeEditorRemoval = await history(owner.cookie, trip.id);
+    const editorRemoval = await removePlace(second.cookie, trip.id, current, "remove-scheduled");
+    expect(editorRemoval.status).toBe(403);
+    expect(await editorRemoval.json()).toEqual({
+      error: { code: "forbidden", message: "Only the trip owner can do that" },
+    });
+    const editorReplay = await removePlace(second.cookie, trip.id, current, "remove-scheduled");
+    expect(editorReplay.status).toBe(403);
+    expect(await editorReplay.json()).toEqual({
+      error: { code: "forbidden", message: "Only the trip owner can do that" },
+    });
+    expect(await history(owner.cookie, trip.id)).toEqual(beforeEditorRemoval);
+    expect(await list(owner.cookie, trip.id)).toEqual([current]);
+    expect((await removePlace(owner.cookie, trip.id, current, "remove-scheduled")).status).toBe(204);
+    const crossActorReplay = await removePlace(second.cookie, trip.id, current, "remove-scheduled");
+    expect(crossActorReplay.status).toBe(403);
+    expect(await crossActorReplay.json()).toEqual({
+      error: { code: "forbidden", message: "Only the trip owner can do that" },
+    });
+    expect((await removePlace(owner.cookie, trip.id, current, "remove-scheduled")).status).toBe(204);
+    expect(await list(owner.cookie, trip.id)).toEqual([]);
+    for (const table of ["trip_place_votes", "trip_place_day_assignments", "trip_place_desired_days", "trip_place_excluded_days"] as const) {
+      expect(await database.selectFrom(table).selectAll().where("trip_place_id", "=", place.id).execute()).toEqual([]);
+    }
+    const archived = await database.selectFrom("trip_places").select("archived_at").where("id", "=", place.id).executeTakeFirstOrThrow();
+    expect(archived.archived_at).not.toBeNull();
+    const afterResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
+    const after = parseTripSkeletonResponse(await afterResponse.json()).skeleton;
+    expect(after.places).toEqual(before.places);
+    expect(after.items).toEqual(before.items);
+    expect(after.days).toEqual(before.days);
+    expect(await database.selectFrom("change_events").select("actor_id")
+      .where("target_id", "=", place.id).where("event_type", "=", "trip_place.removed").execute())
+      .toEqual([{ actor_id: owner.user.id }]);
+  });
   it("rejects a merge that would make planning notes impossible to edit", async () => {
     const owner = await login("owner@example.test");
     const trip = await createTrip(owner.cookie, "Planning note boundary trip");
@@ -4355,180 +3154,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       .selectAll().where("trip_place_id", "=", place.id).execute()).toEqual([]);
   });
 
-  it("flags possible duplicates added through the retained skeleton Place surface", async () => {
-    const owner = await login("owner@example.test");
-    const trip = await createTrip(owner.cookie, "Legacy Place duplicate trip");
-    const first = await app.request(`/api/trips/${trip.id}/trip-places`, {
-      method: "POST",
-      headers: {
-        cookie: owner.cookie,
-        "content-type": "application/json",
-        "idempotency-key": "wishlist-duplicate-first",
-        origin: "https://app.example.test",
-      },
-      body: json({
-        method: "manual",
-        name: "Shared Cafe",
-        type: "restaurant",
-        address: "Kyoto north entrance",
-        latitude: null,
-        longitude: null,
-        timeZone: null,
-        sourceUrl: null,
-        originalNote: "Wishlist path",
-      }),
-    });
-    expect(first.status).toBe(201);
-
-    const second = await app.request(`/api/trips/${trip.id}/places`, {
-      method: "POST",
-      headers: {
-        cookie: owner.cookie,
-        "content-type": "application/json",
-        "idempotency-key": "skeleton-duplicate-second",
-        origin: "https://app.example.test",
-      },
-      body: json({
-        expectedTripVersion: trip.version,
-        name: "Shared Cafe",
-        type: "restaurant",
-        address: "Kyoto south entrance",
-        latitude: null,
-        longitude: null,
-        timeZone: null,
-        sourceUrl: null,
-        notes: "Skeleton path",
-      }),
-    });
-    expect(second.status).toBe(201);
-    const duplicates = await list(owner.cookie, trip.id);
-    expect(duplicates).toHaveLength(2);
-    expect(duplicates.every((entry) => entry.status === "possible-duplicate")).toBe(true);
-    const archivedCandidate = [...duplicates].sort((left, right) => left.id.localeCompare(right.id))[0]!;
-    const archived = await app.request(
-      `/api/trips/${trip.id}/trip-places/${archivedCandidate.id}/remove`,
-      {
-        method: "POST",
-        headers: {
-          cookie: owner.cookie,
-          "content-type": "application/json",
-          "idempotency-key": "archive-lower-duplicate",
-          origin: "https://app.example.test",
-        },
-        body: json({ expectedVersion: archivedCandidate.version }),
-      },
-    );
-    expect(archived.status).toBe(204);
-    const survivor = await list(owner.cookie, trip.id);
-    expect(survivor).toHaveLength(1);
-    expect(survivor[0]).toMatchObject({
-      status: "needs-location",
-      duplicateSuggestions: [],
-    });
-  });
 
 
-  it("lets only the owner remove a scheduled wishlist place without changing formal itinerary content", async () => {
-    const owner = await login("owner@example.test");
-    const second = await login("second@example.test");
-    const outsider = await login("outsider@example.test");
-    const trip = await createTrip(owner.cookie, "Remove scheduled wishlist place");
-    await addMember(trip.id, second.user.id);
-    const place = parseTripPlaceResponse(
-      await (await addManual(owner.cookie, trip.id, "remove-place", "Voted cafe", "Kyoto")).json(),
-    ).tripPlace;
-    expect((await setVote(owner.cookie, trip.id, place.id, true, "owner-vote-before-remove")).status).toBe(200);
-    expect((await setVote(second.cookie, trip.id, place.id, true, "second-vote-before-remove")).status).toBe(200);
-    const skeletonResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
-    const skeleton = parseTripSkeletonResponse(await skeletonResponse.json()).skeleton;
-    const legacy = skeleton.places.find((entry) => entry.name === place.name)!;
-    const activity = await app.request(`/api/trips/${trip.id}/items`, {
-      method: "POST",
-      headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": "activity-before-remove", origin: "https://app.example.test" },
-      body: json({
-        expectedTripVersion: skeleton.tripVersion, type: "activity", title: "Keep my booking",
-        notes: "Booking stays", sourceUrl: null, money: null, participantMemberIds: null,
-        endpoints: [{ role: "start", countryStopId: trip.countryStops[0]!.id, placeId: legacy.id,
-          localDateTime: "2026-10-21T10:00", timeZone: "Asia/Tokyo" }],
-        details: { durationMinutes: 60, bookedBy: null, confirmationStatus: "unknown" }, constraints: [],
-      }),
-    });
-    expect(activity.status).toBe(201);
-    // A timed place cannot be assigned through the API, so seed legacy day rows directly
-    // (migration 007's trigger derives an assignment) to prove removal clears all of them.
-    await database.insertInto("trip_place_desired_days").values({
-      trip_id: trip.id, trip_place_id: place.id, trip_day_id: trip.days[0]!.id,
-    }).execute();
-    await database.insertInto("trip_place_excluded_days").values({
-      trip_id: trip.id, trip_place_id: place.id, trip_day_id: trip.days[1]!.id,
-    }).execute();
-    const beforeResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
-    const before = parseTripSkeletonResponse(await beforeResponse.json()).skeleton;
-    const current = (await list(owner.cookie, trip.id))[0]!;
-    expect(current.scheduled).toBe(true);
-    const missingKey = await app.request(`/api/trips/${trip.id}/trip-places/${place.id}/remove`, {
-      method: "POST",
-      headers: { cookie: second.cookie, "content-type": "application/json", origin: "https://app.example.test" },
-      body: json({ expectedVersion: current.version }),
-    });
-    expect(missingKey.status).toBe(400);
-    expect((await removePlace(outsider.cookie, trip.id, current, "outsider-remove")).status).toBe(404);
-    const stale = await removePlace(second.cookie, trip.id, place, "stale-remove");
-    expect(stale.status).toBe(403);
-    expect(await stale.json()).toEqual({
-      error: { code: "forbidden", message: "Only the trip owner can do that" },
-    });
-    const endpointRefused = await app.request(`/api/trips/${trip.id}/places/${legacy.id}`, {
-      method: "DELETE",
-      headers: { cookie: second.cookie, "content-type": "application/json", "idempotency-key": "delete-in-use", origin: "https://app.example.test" },
-      body: json({ expectedVersion: legacy.version }),
-    });
-    expect(endpointRefused.status).toBe(403);
-    expect(await endpointRefused.json()).toEqual({
-      error: { code: "forbidden", message: "Only the trip owner can do that" },
-    });
-    const ownerEndpointRefused = await app.request(`/api/trips/${trip.id}/places/${legacy.id}`, {
-      method: "DELETE",
-      headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": "owner-delete-in-use", origin: "https://app.example.test" },
-      body: json({ expectedVersion: legacy.version }),
-    });
-    expect(ownerEndpointRefused.status).toBe(409);
-    expect(await ownerEndpointRefused.json()).toMatchObject({ error: { code: "place_in_use" } });
-    const beforeEditorRemoval = await history(owner.cookie, trip.id);
-    const editorRemoval = await removePlace(second.cookie, trip.id, current, "remove-scheduled");
-    expect(editorRemoval.status).toBe(403);
-    expect(await editorRemoval.json()).toEqual({
-      error: { code: "forbidden", message: "Only the trip owner can do that" },
-    });
-    const editorReplay = await removePlace(second.cookie, trip.id, current, "remove-scheduled");
-    expect(editorReplay.status).toBe(403);
-    expect(await editorReplay.json()).toEqual({
-      error: { code: "forbidden", message: "Only the trip owner can do that" },
-    });
-    expect(await history(owner.cookie, trip.id)).toEqual(beforeEditorRemoval);
-    expect(await list(owner.cookie, trip.id)).toEqual([current]);
-    expect((await removePlace(owner.cookie, trip.id, current, "remove-scheduled")).status).toBe(204);
-    const crossActorReplay = await removePlace(second.cookie, trip.id, current, "remove-scheduled");
-    expect(crossActorReplay.status).toBe(403);
-    expect(await crossActorReplay.json()).toEqual({
-      error: { code: "forbidden", message: "Only the trip owner can do that" },
-    });
-    expect((await removePlace(owner.cookie, trip.id, current, "remove-scheduled")).status).toBe(204);
-    expect(await list(owner.cookie, trip.id)).toEqual([]);
-    for (const table of ["trip_place_votes", "trip_place_day_assignments", "trip_place_desired_days", "trip_place_excluded_days"] as const) {
-      expect(await database.selectFrom(table).selectAll().where("trip_place_id", "=", place.id).execute()).toEqual([]);
-    }
-    const archived = await database.selectFrom("trip_places").select("archived_at").where("id", "=", place.id).executeTakeFirstOrThrow();
-    expect(archived.archived_at).not.toBeNull();
-    const afterResponse = await app.request(`/api/trips/${trip.id}/skeleton`, { headers: { cookie: owner.cookie } });
-    const after = parseTripSkeletonResponse(await afterResponse.json()).skeleton;
-    expect(after.places).toEqual(before.places);
-    expect(after.items).toEqual(before.items);
-    expect(after.days).toEqual(before.days);
-    expect(await database.selectFrom("change_events").select("actor_id")
-      .where("target_id", "=", place.id).where("event_type", "=", "trip_place.removed").execute())
-      .toEqual([{ actor_id: owner.user.id }]);
-  });
   it("keeps manual intake and removal available during provider failure", async () => {
     const owner = await login("owner@example.test");
     const second = await login("second@example.test");
@@ -4604,5 +3231,379 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect((await removePlace(second.cookie, trip.id, manualPlace, "remove-manual")).status).toBe(204);
     expect((await removePlace(second.cookie, trip.id, manualPlace, "remove-manual")).status).toBe(204);
     expect(await list(owner.cookie, trip.id)).toEqual([]);
+  });
+
+  it("names booked lodging without coordinates in the day route while leaving its legs unknown", async () => {
+    const owner = await login("unlocated-lodging-route@example.test");
+    const trip = await createTrip(owner.cookie, "Unlocated lodging route");
+    const lodging = await app.request(`/api/trips/${trip.id}/lodgings`, {
+      method: "POST",
+      headers: {
+        cookie: owner.cookie,
+        "content-type": "application/json",
+        "idempotency-key": "unlocated-lodging",
+        origin: "https://app.example.test",
+      },
+      body: json({
+        hotel: {
+          name: "Hotel Without A Pin",
+          address: "Kyoto",
+          latitude: null,
+          longitude: null,
+          timeZone: "Asia/Tokyo",
+          sourceUrl: null,
+        },
+        countryStopId: trip.countryStops[0]!.id,
+        checkInLocalDateTime: "2026-10-21T15:00",
+        checkOutLocalDateTime: "2026-10-23T10:00",
+        expectedTripVersion: trip.version,
+      }),
+    });
+    expect(lodging.status, await lodging.clone().text()).toBe(201);
+
+    const response = await dayRoute(
+      owner.cookie,
+      trip.id,
+      trip.days[1]!.id,
+      "current",
+    );
+    expect(response.status, await response.clone().text()).toBe(200);
+    const route = parseDayRouteResponse(await response.json()).route;
+    expect(route.startsAt).toMatchObject({
+      name: "Hotel Without A Pin",
+      latitude: null,
+      longitude: null,
+    });
+    expect(route.endsAt).toMatchObject({
+      name: "Hotel Without A Pin",
+      latitude: null,
+      longitude: null,
+    });
+    expect(route.stops).toEqual([]);
+    expect(route.metersToEnd).toBeNull();
+    expect(route.totalMeters).toBe(0);
+  });
+
+  it("lets editors preview routes but hides every day and save mutation from non-schedulers", async () => {
+    const owner = await login("route-permission-owner@example.test");
+    const editor = await login("route-permission-editor@example.test");
+    const outsider = await login("route-permission-outsider@example.test");
+    const trip = await createTrip(owner.cookie, "Route permissions");
+    await addMember(trip.id, editor.user.id);
+    const first = await addManualPlace(owner.cookie, trip.id, "route-permission-first", "First");
+    const second = await addManualPlace(owner.cookie, trip.id, "route-permission-second", "Second");
+    const dayId = trip.days[0]!.id;
+    await assignToDay(owner.cookie, trip.id, dayId, [first, second], "route-permission-assign");
+    const currentResponse = await dayRoute(owner.cookie, trip.id, dayId, "current");
+    expect(currentResponse.status).toBe(200);
+    const current = parseDayRouteResponse(await currentResponse.json()).route;
+    const beforePlaces = await list(owner.cookie, trip.id);
+    const beforeEvents = await history(owner.cookie, trip.id);
+
+    const preview = await dayRoute(editor.cookie, trip.id, dayId, "suggested");
+    expect(preview.status, await preview.clone().text()).toBe(200);
+    expect(parseDayRouteResponse(await preview.json()).route.orderedTripPlaceIds)
+      .toEqual(current.orderedTripPlaceIds);
+    expect((await dayRoute(outsider.cookie, trip.id, dayId, "current")).status).toBe(404);
+
+    for (const endpoint of ["place-order", "arrangement"] as const) {
+      expect((await saveDay(
+        outsider.cookie,
+        trip.id,
+        dayId,
+        endpoint,
+        `route-outsider-${endpoint}`,
+        current.version,
+        current.orderedTripPlaceIds,
+      )).status).toBe(404);
+      const forbidden = await saveDay(
+        editor.cookie,
+        trip.id,
+        dayId,
+        endpoint,
+        `route-editor-${endpoint}`,
+        current.version,
+        current.orderedTripPlaceIds,
+      );
+      expect(forbidden.status).toBe(403);
+      expect(await forbidden.json()).toMatchObject({ error: { code: "forbidden" } });
+    }
+
+    expect(await list(owner.cookie, trip.id)).toEqual(beforePlaces);
+    expect(await history(owner.cookie, trip.id)).toEqual(beforeEvents);
+  });
+
+  it("rejects duplicate, case-duplicate, foreign and unassigned custom route IDs", async () => {
+    const owner = await login("route-custom-validation@example.test");
+    const trip = await createTrip(owner.cookie, "Custom route validation");
+    const otherTrip = await createTrip(owner.cookie, "Foreign custom route");
+    const assigned = await addManualPlace(owner.cookie, trip.id, "custom-assigned", "Assigned");
+    const unassigned = await addManualPlace(owner.cookie, trip.id, "custom-unassigned", "Unassigned");
+    const foreign = await addManualPlace(owner.cookie, otherTrip.id, "custom-foreign", "Foreign");
+    const dayId = trip.days[0]!.id;
+    await assignToDay(owner.cookie, trip.id, dayId, [assigned], "custom-validation-assign");
+
+    for (const [name, ids] of [
+      ["duplicate", [assigned.id, assigned.id]],
+      ["case duplicate", [assigned.id, assigned.id.toUpperCase()]],
+      ["foreign", [foreign.id]],
+      ["unassigned", [unassigned.id]],
+    ] as const) {
+      const response = await dayRoute(owner.cookie, trip.id, dayId, "custom", [...ids]);
+      expect(response.status, name).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code: "validation_error" } });
+    }
+  });
+
+  it("accepts 100 route places and rejects 101 at preview and both save boundaries", async () => {
+    const owner = await login("route-boundary@example.test");
+    const trip = await createTrip(owner.cookie, "Route boundary");
+    const dayId = trip.days[0]!.id;
+    const places: TripPlaceDto[] = [];
+    for (let index = 0; index < 101; index += 1) {
+      places.push(await addManualPlace(
+        owner.cookie,
+        trip.id,
+        `route-boundary-place-${index}`,
+        `Boundary ${String(index).padStart(3, "0")}`,
+      ));
+    }
+    await assignToDay(owner.cookie, trip.id, dayId, places.slice(0, 100), "route-boundary-first-100");
+    await assignToDay(owner.cookie, trip.id, dayId, places.slice(100), "route-boundary-last");
+    const ids = places.map((place) => place.id);
+
+    const hundred = await dayRoute(owner.cookie, trip.id, dayId, "custom", ids.slice(0, 100));
+    expect(hundred.status, await hundred.clone().text()).toBe(200);
+    const route = parseDayRouteResponse(await hundred.json()).route;
+    expect(route.orderedTripPlaceIds).toHaveLength(100);
+    expect((await dayRoute(owner.cookie, trip.id, dayId, "custom", ids)).status).toBe(400);
+
+    const ordered = await saveDay(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "place-order",
+      "route-boundary-order-100",
+      route.version,
+      ids.slice(0, 100),
+    );
+    expect(ordered.status, await ordered.clone().text()).toBe(200);
+    const orderedBody = await ordered.json() as { version: number };
+    expect((await saveDay(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "place-order",
+      "route-boundary-order-101",
+      orderedBody.version,
+      ids,
+    )).status).toBe(400);
+
+    const arranged = await saveDay(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "arrangement",
+      "route-boundary-arrange-100",
+      orderedBody.version,
+      ids.slice(0, 100),
+    );
+    expect(arranged.status, await arranged.clone().text()).toBe(200);
+    expect((await saveDay(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "arrangement",
+      "route-boundary-arrange-101",
+      orderedBody.version,
+      ids,
+    )).status).toBe(400);
+  });
+
+  it("returns a current-version conflict when a custom route snapshot races an unassignment", async () => {
+    const owner = await login("route-version-race@example.test");
+    const trip = await createTrip(owner.cookie, "Route version race");
+    const place = await addManualPlace(owner.cookie, trip.id, "route-race-place", "Racing place");
+    const dayId = trip.days[0]!.id;
+    await assignToDay(owner.cookie, trip.id, dayId, [place], "route-race-assign");
+    const eventsBefore = await database.selectFrom("change_events").select("id")
+      .where("trip_id", "=", trip.id).execute();
+    const originalList = tripPlaces.list;
+    let raced = false;
+    tripPlaces.list = async (userId, listedTripId) => {
+      if (!raced) {
+        raced = true;
+        await database.deleteFrom("trip_place_desired_days")
+          .where("trip_id", "=", trip.id)
+          .where("trip_place_id", "=", place.id)
+          .execute();
+      }
+      return originalList.call(tripPlaces, userId, listedTripId);
+    };
+    let response: Response;
+    try {
+      response = await dayRoute(owner.cookie, trip.id, dayId, "custom", [place.id]);
+    } finally {
+      tripPlaces.list = originalList;
+    }
+    const currentVersion = (await database.selectFrom("trip_days").select("version")
+      .where("id", "=", dayId).executeTakeFirstOrThrow()).version;
+    expect(response!.status).toBe(409);
+    expect(await response!.json()).toMatchObject({
+      error: { code: "conflict", currentVersion },
+    });
+    expect(await database.selectFrom("change_events").select("id")
+      .where("trip_id", "=", trip.id).execute()).toEqual(eventsBefore);
+  });
+
+  it("replays both day saves idempotently and applies arrangement subset and empty-list semantics", async () => {
+    const owner = await login("route-save-replay@example.test");
+    const trip = await createTrip(owner.cookie, "Route save replay");
+    const dayId = trip.days[0]!.id;
+    const first = await addManualPlace(owner.cookie, trip.id, "route-replay-first", "First replay");
+    const second = await addManualPlace(owner.cookie, trip.id, "route-replay-second", "Second replay");
+    const third = await addManualPlace(owner.cookie, trip.id, "route-replay-third", "Third replay");
+    await assignToDay(owner.cookie, trip.id, dayId, [first, second, third], "route-replay-assign");
+    const version = parseDayRouteResponse(
+      await (await dayRoute(owner.cookie, trip.id, dayId, "current")).json(),
+    ).route.version;
+    const orderedIds = [third.id, first.id, second.id];
+    const orderKey = "route-replay-order";
+    const firstOrder = await saveDay(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "place-order",
+      orderKey,
+      version,
+      orderedIds,
+    );
+    expect(firstOrder.status).toBe(200);
+    const firstOrderBody = await firstOrder.json();
+    const orderedEvents = await database.selectFrom("change_events").select("id")
+      .where("trip_id", "=", trip.id)
+      .where("event_type", "=", "trip_day.places_ordered")
+      .execute();
+    const replayedOrder = await saveDay(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "place-order",
+      orderKey,
+      version,
+      orderedIds,
+    );
+    expect(replayedOrder.status).toBe(200);
+    expect(await replayedOrder.json()).toEqual(firstOrderBody);
+    expect(await database.selectFrom("change_events").select("id")
+      .where("trip_id", "=", trip.id)
+      .where("event_type", "=", "trip_day.places_ordered")
+      .execute()).toEqual(orderedEvents);
+
+    const subsetVersion = parseDayRouteResponse(
+      await (await dayRoute(owner.cookie, trip.id, dayId, "current")).json(),
+    ).route.version;
+    const arrangementKey = "route-replay-subset";
+    const subset = await saveDay(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "arrangement",
+      arrangementKey,
+      subsetVersion,
+      [second.id],
+    );
+    expect(subset.status).toBe(200);
+    const subsetBody = await subset.json();
+    const subsetPlaces = parseTripPlaceListResponse(subsetBody).tripPlaces;
+    expect(subsetPlaces.find((place) => place.id === second.id)).toMatchObject({
+      assignedDayId: dayId,
+      dayPosition: 0,
+    });
+    for (const omitted of [first.id, third.id]) {
+      expect(subsetPlaces.find((place) => place.id === omitted)).toMatchObject({
+        assignedDayId: null,
+        dayPosition: null,
+      });
+    }
+    const subsetEvents = await database.selectFrom("change_events").select("id")
+      .where("trip_id", "=", trip.id)
+      .where("event_type", "=", "trip_day.places_ordered")
+      .execute();
+    const replayedSubset = await saveDay(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "arrangement",
+      arrangementKey,
+      subsetVersion,
+      [second.id],
+    );
+    expect(replayedSubset.status).toBe(200);
+    expect(await replayedSubset.json()).toEqual(subsetBody);
+    expect(await database.selectFrom("change_events").select("id")
+      .where("trip_id", "=", trip.id)
+      .where("event_type", "=", "trip_day.places_ordered")
+      .execute()).toEqual(subsetEvents);
+
+    const emptyVersion = parseDayRouteResponse(
+      await (await dayRoute(owner.cookie, trip.id, dayId, "current")).json(),
+    ).route.version;
+    const emptied = await saveDay(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "arrangement",
+      "route-replay-empty",
+      emptyVersion,
+      [],
+    );
+    expect(emptied.status).toBe(200);
+    expect(parseTripPlaceListResponse(await emptied.json()).tripPlaces
+      .every((place) => place.assignedDayId === null && place.dayPosition === null)).toBe(true);
+  });
+
+  it("keeps every retired planning mutation endpoint at 404 without recording a write", async () => {
+    const owner = await login("removed-planning-routes@example.test");
+    const trip = await createTrip(owner.cookie, "Removed planning routes");
+    const dayId = trip.days[0]!.id;
+    const before = {
+      events: await database.selectFrom("change_events").select("id").where("trip_id", "=", trip.id).execute(),
+      items: await database.selectFrom("itinerary_items").select("id").where("trip_id", "=", trip.id).execute(),
+      mutations: await database.selectFrom("mutation_requests")
+        .select(["actor_id", "operation", "idempotency_key"])
+        .where("actor_id", "=", owner.user.id).execute(),
+      places: await database.selectFrom("places").select("id").where("trip_id", "=", trip.id).execute(),
+    };
+    const retired = [
+      ["POST", `/api/trips/${trip.id}/places`],
+      ["POST", `/api/trips/${trip.id}/items`],
+      ["POST", `/api/trips/${trip.id}/days/${dayId}/timetable`],
+      ["PUT", `/api/trips/${trip.id}/days/${dayId}/window`],
+      ["PUT", `/api/trips/${trip.id}/day-defaults`],
+      ["POST", `/api/trips/${trip.id}/trip-plan`],
+      ["POST", "/api/session/rapidapi-keys"],
+    ] as const;
+    for (const [method, path] of retired) {
+      const response = await app.request(path, {
+        method,
+        headers: {
+          cookie: owner.cookie,
+          "content-type": "application/json",
+          "idempotency-key": `removed-${path}`,
+          origin: "https://app.example.test",
+        },
+        body: json({}),
+      });
+      expect(response.status, `${method} ${path}`).toBe(404);
+    }
+    expect({
+      events: await database.selectFrom("change_events").select("id").where("trip_id", "=", trip.id).execute(),
+      items: await database.selectFrom("itinerary_items").select("id").where("trip_id", "=", trip.id).execute(),
+      mutations: await database.selectFrom("mutation_requests")
+        .select(["actor_id", "operation", "idempotency_key"])
+        .where("actor_id", "=", owner.user.id).execute(),
+      places: await database.selectFrom("places").select("id").where("trip_id", "=", trip.id).execute(),
+    }).toEqual(before);
   });
 });

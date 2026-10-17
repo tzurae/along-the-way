@@ -7,10 +7,9 @@
     "./day-plans": "./src/day-plans.ts",
     "./day-time-zone": "./src/day-time-zone.ts",
     "./discovery": "./src/discovery.ts",
+    "./maps": "./src/maps.ts",
     "./place-details": "./src/place-details.ts",
-    "./planning-observations": "./src/planning-observations.ts",
     "./private-trips": "./src/private-trips.ts",
-    "./rapidapi-keys": "./src/rapidapi-keys.ts",
     "./trip-places": "./src/trip-places.ts",
     "./trip-skeleton": "./src/trip-skeleton.ts"
   }

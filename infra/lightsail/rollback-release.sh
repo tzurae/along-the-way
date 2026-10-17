@@ -50,11 +50,9 @@ compose_for_release() {
     -u SMTP_USERNAME \
     -u SMTP_PASSWORD \
     -u TOKEN_SECRET \
-    -u CREDENTIALS_ENCRYPTION_KEY \
     -u GOOGLE_MAPS_API_KEY \
     -u OPENAI_API_KEY \
     -u OPENAI_MODEL \
-    -u RAPIDAPI_KEY \
     -u RELEASE_IMAGE_TAG \
     docker compose \
       --env-file "$environment_file" \

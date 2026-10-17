@@ -233,7 +233,6 @@ Google API key 不得送到瀏覽器。圖片只經 authenticated、trip-member-
 ### 專案依據
 
 - 同一工作目錄的 [PRODUCT.md](../../../PRODUCT.md)：景點敘述原則、資料不猜測、來源追溯、照片範圍與既有無障礙基準。
-- [既有 MVP 規格](2026-08-17-hong-kong-shared-trip-planning-mvp-design.md)：Place／TripPlace 分工、Place Detail 責任、observed-at／可用期限、供應商保存限制、圖片不阻塞主要文字。舊文中的評論與 Google 照片不擴張本次範圍。
 - 本次會話的 B 版選擇、56px 資訊區、完整敘述認可與兩份文件寫入批准；本文件把這些決定記成可接續的內容。
 
 ### 外部依據（2026-10-09 查閱）

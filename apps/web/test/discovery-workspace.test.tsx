@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import type { GooglePlacePhotoDto, PlacePhotoDto } from "@along-the-way/contracts/place-details";
 import { DiscoveryWorkspace } from "../src/DiscoveryWorkspace";
+import { AppToaster } from "../src/AppToaster";
 import type { PlaceDetailRequestOptions } from "../src/PlaceThumbnail";
 
 function deferred<T>() {
@@ -82,6 +83,7 @@ beforeEach(() => {
     unobserve() {}
     disconnect() {}
   });
+  render(<AppToaster />);
 });
 
 afterEach(() => {

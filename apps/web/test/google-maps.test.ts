@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { googleMapsCoordinatesUrl } from "../src/google-maps";
+import { googleMapsCoordinatesUrl, googleMapsDirectionsUrl } from "../src/google-maps";
 
 describe("formal place navigation", () => {
   it("opens the reliable destination, including zero coordinates, without inventing another endpoint", () => {
@@ -18,5 +18,31 @@ describe("formal place navigation", () => {
     expect(googleMapsCoordinatesUrl({ latitude: 34.68, longitude: 135.5 }, { latitude: 34.4, longitude: null })).toBeNull();
     expect(googleMapsCoordinatesUrl({ latitude: Infinity, longitude: 135.5 })).toBeNull();
     expect(googleMapsCoordinatesUrl({ latitude: 91, longitude: 135.5 })).toBeNull();
+  });
+});
+
+describe("route-leg directions", () => {
+  it("sends both coordinate endpoints and their provider place IDs without choosing a travel mode", () => {
+    const result = googleMapsDirectionsUrl(
+      { latitude: 0, longitude: 0, providerPlaceId: "origin-google-id" },
+      { latitude: 34.9949, longitude: 135.785, providerPlaceId: "destination-google-id" },
+    );
+
+    const url = new URL(result!);
+    expect(url.pathname).toBe("/maps/dir/");
+    expect(url.searchParams.get("origin")).toBe("0,0");
+    expect(url.searchParams.get("origin_place_id")).toBe("origin-google-id");
+    expect(url.searchParams.get("destination")).toBe("34.9949,135.785");
+    expect(url.searchParams.get("destination_place_id")).toBe("destination-google-id");
+    expect(url.searchParams.has("travelmode")).toBe(false);
+  });
+
+  it.each([
+    [{ latitude: null, longitude: 0, providerPlaceId: null }, { latitude: 1, longitude: 1, providerPlaceId: null }],
+    [{ latitude: 0, longitude: Number.NaN, providerPlaceId: null }, { latitude: 1, longitude: 1, providerPlaceId: null }],
+    [{ latitude: -91, longitude: 0, providerPlaceId: null }, { latitude: 1, longitude: 1, providerPlaceId: null }],
+    [{ latitude: 0, longitude: 0, providerPlaceId: null }, { latitude: 1, longitude: 181, providerPlaceId: null }],
+  ])("rejects an invalid endpoint instead of asking Maps to guess", (origin, destination) => {
+    expect(googleMapsDirectionsUrl(origin, destination)).toBeNull();
   });
 });

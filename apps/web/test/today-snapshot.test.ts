@@ -9,13 +9,127 @@ import { todayActivity, todaySkeleton, todayTrip, todayUser, todayWishlist } fro
 const model: TodayModel = { tripId: "trip", tripName: "Private trip", tripVersion: 7, memberId: "member", items: [], days: [{ id: "day", date: "2026-10-21", timeZone: "Asia/Tokyo", itemIds: [], wishlist: [] }] };
 const key = "along-the-way:today:account:trip";
 
+const legacyV2 = {
+  schemaVersion: 2,
+  accountId: "account",
+  fetchedAt: "2026-10-21T02:30:00.000Z",
+  model: {
+    tripId: "trip",
+    tripName: "V2 trip",
+    tripVersion: 2,
+    memberId: "member",
+    days: [{
+      id: "day",
+      date: "2026-10-21",
+      timeZone: "Asia/Tokyo",
+      itemIds: ["legacy-v2"],
+      wishlist: [{ id: "wish-v2", name: "V2 wishlist place" }],
+    }],
+    items: [{
+      id: "legacy-v2",
+      title: "V2 transport",
+      type: "transport",
+      start: "2026-10-21T01:00:00Z",
+      end: "2026-10-21T02:00:00Z",
+      endpoints: [{
+        role: "start",
+        instant: "2026-10-21T01:00:00Z",
+        timeZone: "Asia/Tokyo",
+        place: { name: "V2 station", address: null, latitude: 35, longitude: 139 },
+      }],
+      participants: [{ id: "member", name: "V2 traveler" }],
+      locked: false,
+      constraints: [],
+      facts: [],
+      notes: null,
+      sourceUrl: null,
+    }],
+  },
+};
+
+const legacyV3 = {
+  schemaVersion: 3,
+  accountId: "account",
+  fetchedAt: "2026-10-21T02:30:00.000Z",
+  model: {
+    tripId: "trip",
+    tripName: "V3 trip",
+    tripVersion: 3,
+    memberId: "member",
+    days: [{
+      id: "day",
+      date: "2026-10-21",
+      timeZone: "Asia/Tokyo",
+      itemIds: ["legacy-v3"],
+      wishlist: [{ id: "wish-v3", name: "V3 wishlist place" }],
+    }],
+    items: [{
+      id: "legacy-v3",
+      title: "V3 transport",
+      type: "transport",
+      start: "2026-10-21T01:00:00Z",
+      end: "2026-10-21T02:00:00Z",
+      endpoints: [{
+        role: "start",
+        instant: "2026-10-21T01:00:00Z",
+        timeZone: "Asia/Tokyo",
+        place: { id: "station-v3", name: "V3 station", address: null, latitude: 35, longitude: 139 },
+      }],
+      participants: [{ id: "member", name: "V3 traveler" }],
+      locked: false,
+      constraints: [],
+      facts: [],
+      notes: null,
+      sourceUrl: null,
+    }],
+  },
+};
+
+const legacyV4 = {
+  schemaVersion: 4,
+  accountId: "account",
+  fetchedAt: "2026-10-21T02:30:00.000Z",
+  model: {
+    tripId: "trip",
+    tripName: "V4 trip",
+    tripVersion: 4,
+    memberId: "member",
+    days: [{
+      id: "day",
+      date: "2026-10-21",
+      timeZone: "Asia/Tokyo",
+      itemIds: ["legacy-v4"],
+      wishlist: [{ id: "wish-v4", name: "V4 wishlist place" }],
+    }],
+    items: [{
+      id: "legacy-v4",
+      title: "V4 transport",
+      type: "transport",
+      start: "2026-10-21T01:00:00Z",
+      end: "2026-10-21T02:00:00Z",
+      endpoints: [{
+        role: "start",
+        instant: "2026-10-21T01:00:00Z",
+        timeZone: "Asia/Tokyo",
+        place: { id: "station-v4", name: "V4 station", address: null, latitude: 35, longitude: 139 },
+      }],
+      participants: [{ id: "former-member", name: "V4 former traveler", removed: true }],
+      locked: false,
+      constraints: [],
+      facts: [],
+      notes: null,
+      sourceUrl: null,
+    }],
+  },
+};
+
 describe("account-scoped read-only Today snapshots", () => {
   beforeEach(() => localStorage.clear());
   it("reopens the last successful formal version through a fresh store while offline", () => {
     const store = new TodaySnapshotStore(localStorage);
     store.save("account", model, Date.parse("2026-10-21T02:30Z"));
     const reopened = new TodaySnapshotStore(localStorage);
-    expect(reopened.read("account", "trip")).toMatchObject({ schemaVersion: 4, fetchedAt: "2026-10-21T02:30:00.000Z", model: { tripVersion: 7, days: [{ timeZone: "Asia/Tokyo" }] } });
+    expect(reopened.read("account", "trip")).toMatchObject({ schemaVersion: 5, fetchedAt: "2026-10-21T02:30:00.000Z", model: { tripVersion: 7, days: [{ timeZone: "Asia/Tokyo" }] } });
     expect(reopened.read("other-account", "trip")).toBeNull();
     expect(reopened.lastAccount()).toBe("account");
     store.save("account", { ...model, tripVersion: 8 });
@@ -75,7 +189,7 @@ describe("account-scoped read-only Today snapshots", () => {
   });
   it("persists only the allowlisted Today read model, not private API metadata or drafts", () => {
     const trip: TripDto = { id: "trip", name: "Trip", startDate: "2026-10-21", endDate: "2026-10-21", defaultCurrency: "JPY", countryStops: [{ id: "stop", countryCode: "JP", position: 0, timeZone: "Asia/Tokyo" }], days: [{ id: "day", date: "2026-10-21", title: null }], members: [{ id: "member", userId: "account", email: "private@example.test", displayName: "甲", role: "owner" }], invites: [{ id: "invite", email: "invite@example.test", role: "editor", status: "pending", expiresAt: "2026-12-01" }], memberCount: 1, dayCount: 1, role: "owner", version: 7, editorsCanSchedule: false };
-    const skeleton: TripSkeletonDto = { tripVersion: 7, places: [], days: [{ id: "day", date: "2026-10-21", entries: [] }], items: [], tripInformationItemIds: [] };
+    const skeleton: TripSkeletonDto = { tripVersion: 7, places: [], days: [{ id: "day", date: "2026-10-21", entries: [] }], items: [] };
     const enriched = Object.assign(skeleton, { draft: "unaccepted suggestion", token: "session secret", providerKey: "key", healthNotes: "private health" });
     const readModel = createTodayModel(trip, enriched, [], "account");
     const store = new TodaySnapshotStore(localStorage);
@@ -111,43 +225,43 @@ describe("account-scoped read-only Today snapshots", () => {
     localStorage.setItem(`along-the-way:today:${todayUser.id}:${trip.id}`, JSON.stringify(incompatible));
     expect(store.read(todayUser.id, trip.id)).toBeNull();
   });
-  it("migrates an accepted schema 2 snapshot without guessing missing place identities", () => {
+  it("saves and reopens every fresh wishlist routing field", () => {
     const trip = todayTrip();
+    const wishlist = todayWishlist();
+    wishlist[0]!.providerPlaceId = "google-FIRST";
+    wishlist[1]!.latitude = null;
+    wishlist[1]!.longitude = null;
+    const readModel = createTodayModel(trip, todaySkeleton(trip), wishlist, todayUser.id);
     const store = new TodaySnapshotStore(localStorage);
-    const current = store.save(todayUser.id, createTodayModel(trip, todaySkeleton(trip, [todayActivity()]), todayWishlist(), todayUser.id))!;
-    const legacy = structuredClone(current) as unknown as {
-      schemaVersion: number;
-      model: {
-        days: Array<{ wishlist: Array<Record<string, unknown>> }>;
-        items: Array<{ title: string; endpoints: Array<{ place: Record<string, unknown> | null }>; participants: Array<Record<string, unknown>> | null }>;
-      };
-    };
-    legacy.schemaVersion = 2;
-    for (const item of legacy.model.items) for (const endpoint of item.endpoints) if (endpoint.place) delete endpoint.place.id;
-    for (const item of legacy.model.items) for (const person of item.participants ?? []) delete person.removed;
-    localStorage.setItem(`along-the-way:today:${todayUser.id}:${trip.id}`, JSON.stringify(legacy));
 
-    const migrated = store.read(todayUser.id, trip.id);
-    expect(migrated).toMatchObject({ schemaVersion: 4, model: { items: [{ title: "activity", participants: [{ removed: null }], endpoints: [{ place: { id: null, name: "Park" } }] }] } });
-    expect(migrated?.model.days[0]!.wishlist[0]).toEqual({ id: "FIRST", name: "FIRST" });
-    expect(JSON.parse(localStorage.getItem(`along-the-way:today:${todayUser.id}:${trip.id}`)!).schemaVersion).toBe(4);
+    const saved = store.save(todayUser.id, readModel);
+
+    expect(saved).not.toBeNull();
+    expect(saved?.schemaVersion).toBe(5);
+    expect(new TodaySnapshotStore(localStorage).read(todayUser.id, trip.id)?.model.days[0]!.wishlist).toEqual([
+      { id: "FIRST", name: "FIRST", latitude: 34, longitude: 135, providerPlaceId: "google-FIRST" },
+      { id: "SECOND", name: "SECOND", latitude: null, longitude: null, providerPlaceId: null },
+    ]);
   });
-  it("migrates a schema 3 participant with unknown historical membership status", () => {
-    const trip = todayTrip();
-    const store = new TodaySnapshotStore(localStorage);
-    const current = store.save(todayUser.id, createTodayModel(trip, todaySkeleton(trip, [todayActivity()]), [], todayUser.id))!;
-    const legacy = structuredClone(current) as unknown as {
-      schemaVersion: number;
-      model: { items: Array<{ participants: Array<Record<string, unknown>> | null }> };
-    };
-    legacy.schemaVersion = 3;
-    for (const item of legacy.model.items) for (const person of item.participants ?? []) delete person.removed;
-    const snapshotKey = `along-the-way:today:${todayUser.id}:${trip.id}`;
-    localStorage.setItem(snapshotKey, JSON.stringify(legacy));
+  it.each([
+    { version: 2, snapshot: legacyV2, endpointId: null, removed: null },
+    { version: 3, snapshot: legacyV3, endpointId: "station-v3", removed: null },
+    { version: 4, snapshot: legacyV4, endpointId: "station-v4", removed: true },
+  ])("migrates a genuine schema $version snapshot to schema 5 without inventing historical fields", ({ snapshot, endpointId, removed }) => {
+    localStorage.setItem(key, JSON.stringify(snapshot));
+    const migrated = new TodaySnapshotStore(localStorage).read("account", "trip");
 
-    expect(store.read(todayUser.id, trip.id)?.model.items[0]!.participants)
-      .toEqual([{ id: "member", name: todayUser.email, removed: null }]);
-    expect(JSON.parse(localStorage.getItem(snapshotKey)!).schemaVersion).toBe(4);
+    expect(migrated?.schemaVersion).toBe(5);
+    expect(migrated?.model.days[0]!.wishlist[0]).toEqual({
+      id: snapshot.model.days[0]!.wishlist[0]!.id,
+      name: snapshot.model.days[0]!.wishlist[0]!.name,
+      latitude: null,
+      longitude: null,
+      providerPlaceId: null,
+    });
+    expect(migrated?.model.items[0]!.endpoints[0]!.place?.id).toBe(endpointId);
+    expect(migrated?.model.items[0]!.participants?.[0]?.removed).toBe(removed);
+    expect(JSON.parse(localStorage.getItem(key)!).schemaVersion).toBe(5);
   });
   it("rejects a purported legacy snapshot carrying a place identity outside the legacy format", () => {
     const trip = todayTrip();
@@ -181,7 +295,7 @@ describe("account-scoped read-only Today snapshots", () => {
     expect(store.lastAccount()).toBe("other-account");
   });
   it("keeps a readable legacy itinerary when persisting its migration exceeds storage quota", () => {
-    const raw = JSON.stringify({ schemaVersion: 2, accountId: "account", fetchedAt: "2026-10-21T02:30:00.000Z", model });
+    const raw = JSON.stringify(legacyV2);
     localStorage.setItem(key, raw);
     const storage: Storage = {
       get length() { return localStorage.length; },
@@ -193,8 +307,8 @@ describe("account-scoped read-only Today snapshots", () => {
     };
 
     const reopened = new TodaySnapshotStore(storage);
-    expect(reopened.read("account", "trip")?.model.tripVersion).toBe(7);
+    expect(reopened.read("account", "trip")?.model.tripVersion).toBe(2);
     expect(localStorage.getItem(key)).toBe(raw);
-    expect(new TodaySnapshotStore(storage).read("account", "trip")?.model.tripName).toBe("Private trip");
+    expect(new TodaySnapshotStore(storage).read("account", "trip")?.model.tripName).toBe("V2 trip");
   });
 });

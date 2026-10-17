@@ -1,17 +1,128 @@
 // @vitest-environment jsdom
+import { type ReactNode } from "react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import type { DayTimetableDto, DayTimetableRowDto, TravelMode } from "@along-the-way/contracts/day-plans";
-import { DayPlanDialog } from "../src/DayPlanDialog";
+import type { DayRouteDto, DayRouteOrder } from "@along-the-way/contracts/day-plans";
+import { DayPlanDialog, type PlannedDay } from "../src/DayPlanDialog";
+
+vi.mock("@vis.gl/react-google-maps", () => ({
+  APIProvider: ({ apiKey, children }: { apiKey: string; children: ReactNode }) => (
+    <div data-testid="google-api-provider" data-api-key={apiKey}>{children}</div>
+  ),
+  Map: ({ children }: { children: ReactNode }) => <div data-testid="google-map">{children}</div>,
+  AdvancedMarker: ({ children }: { children: ReactNode }) => <>{children}</>,
+  Pin: () => <span />,
+  useMap: () => null,
+}));
+
+interface RequestCall {
+  url: string;
+  options?: RequestInit;
+}
+
+type RouteOptions = {
+  dayId?: string;
+  date?: string;
+  version?: number;
+  ids?: string[];
+  totalMeters?: number;
+  names?: Record<string, string>;
+};
+
+function route(order: DayRouteOrder, options: RouteOptions = {}): DayRouteDto {
+  const ids = options.ids ?? (order === "suggested" ? ["b", "a"] : ["a", "b"]);
+  return {
+    dayId: options.dayId ?? "day-1",
+    date: options.date ?? "2026-10-21",
+    version: options.version ?? 7,
+    order,
+    orderedTripPlaceIds: ids,
+    startsAt: null,
+    endsAt: null,
+    stops: ids.map((tripPlaceId, index) => ({
+      tripPlaceId,
+      name: options.names?.[tripPlaceId] ?? `地點 ${tripPlaceId}`,
+      latitude: 34.9 + index * 0.01,
+      longitude: 135.7 + index * 0.01,
+      providerPlaceId: `google-${tripPlaceId}`,
+      metersFromPrevious: index === 0 ? null : 1_000,
+    })),
+    metersToEnd: null,
+    totalMeters: options.totalMeters ?? Math.max(0, ids.length - 1) * 1_000,
+  };
+}
+
+function inputOf(options?: RequestInit) {
+  return options?.body
+    ? JSON.parse(String(options.body)) as { order: DayRouteOrder; orderedTripPlaceIds?: string[] }
+    : null;
+}
+
+function immediateRequest(overrides?: {
+  current?: DayRouteDto;
+  suggested?: DayRouteDto;
+  custom?(ids: string[]): DayRouteDto;
+  mutate?(call: RequestCall): Promise<unknown>;
+}) {
+  const calls: RequestCall[] = [];
+  const request = async <T,>(url: string, options?: RequestInit): Promise<T> => {
+    const call = { url, options };
+    calls.push(call);
+    if (url === "/api/maps/config") return { browserKey: null, mapId: null } as T;
+    if (url === "/api/maps/load") return undefined as T;
+    if (options?.method === "PUT") return await overrides?.mutate?.(call) as T;
+    if (url.endsWith("/route")) {
+      const input = inputOf(options)!;
+      if (input.order === "current") return { route: overrides?.current ?? route("current") } as T;
+      if (input.order === "suggested") return { route: overrides?.suggested ?? route("suggested") } as T;
+      const ids = input.orderedTripPlaceIds ?? [];
+      return { route: overrides?.custom?.(ids) ?? route("custom", { ids }) } as T;
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  return { request, calls };
+}
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(reason?: unknown): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+const day1: PlannedDay = { id: "day-1", date: "2026-10-21", label: "第 1 天" };
+const day2: PlannedDay = { id: "day-2", date: "2026-10-22", label: "第 2 天" };
+
+function dialog(request: <T>(url: string, options?: RequestInit) => Promise<T>, day: PlannedDay | null = day1) {
+  return (
+    <DayPlanDialog
+      tripId="trip-1"
+      day={day}
+      canArrange
+      request={request}
+      onClose={() => {}}
+      onOrderSaved={async () => {}}
+    />
+  );
+}
 
 beforeEach(() => {
-  localStorage.clear();
   vi.stubGlobal("ResizeObserver", class {
     observe() {}
     unobserve() {}
     disconnect() {}
   });
+  vi.stubGlobal("crypto", { randomUUID: vi.fn(() => `key-${Math.random()}`) });
 });
 
 afterEach(() => {
@@ -19,84 +130,232 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const names: Record<string, string> = { a: "清水寺", b: "八坂神社", c: "錦市場" };
+describe("day-plan view tabs", () => {
+  it("uses roving keyboard focus and uniquely wired tab and panel ids in both columns", async () => {
+    const { request } = immediateRequest();
+    render(dialog(request));
+    const regions = [
+      await screen.findByRole("region", { name: "已儲存的順序" }),
+      screen.getByRole("region", { name: "可以儲存的順序" }),
+    ];
 
-/** A day drafted from a list: each place an hour, ten minutes apart; `dropped` cannot be placed. */
-function draft(order: DayTimetableDto["order"], ids: string[], legModes: Record<string, TravelMode>, dropped: string[] = []): DayTimetableDto {
-  let minute = 540;
-  const rows: DayTimetableRowDto[] = [];
-  for (const id of ids.filter((entry) => !dropped.includes(entry))) {
-    const travel = rows.length === 0 ? null : {
-      fromName: "", toName: names[id]!, mode: legModes[id] === "taxi" ? "taxi" as const : "walking" as const, durationMinutes: 10,
-      walkingMinutes: 10, transitMinutes: null, estimated: false, attribution: "Test", unavailableReason: null,
-    };
-    if (travel) minute += 10;
-    rows.push({
-      kind: "visit", tripPlaceId: id, name: names[id]!, travel, arriveMinute: minute, waitMinutes: 0,
-      startMinute: minute, endMinute: minute + 60, stayMinutes: 60, stayEstimated: true, hours: "manual",
-    });
-    minute += 60;
-  }
-  return {
-    dayId: "day21", date: "2026-10-21", order,
-    window: { startMinute: 540, endMinute: 1140, version: 4, travelMode: "transit", walkLimitMinutes: 15 },
-    legModes, taxiAlternative: null, orderedTripPlaceIds: ids, startsAt: null, endsAt: null, rows,
-    unscheduled: dropped.map((id) => ({ tripPlaceId: id, name: names[id]!, reason: "travel_unknown" as const })),
-    load: { busyMinutes: 120, windowMinutes: 600, level: "relaxed" },
-    capacity: { arrival: null, departure: null, gaps: [{ startMinute: 540, endMinute: 1140 }] },
-  };
-}
+    const ids: string[] = [];
+    for (const region of regions) {
+      const routeTab = within(region).getByRole("tab", { name: "路線" });
+      const mapTab = within(region).getByRole("tab", { name: "Google Map" });
+      routeTab.focus();
+      fireEvent.keyDown(routeTab, { key: "ArrowRight" });
+      expect(mapTab).toHaveFocus();
+      expect(mapTab).toHaveAttribute("aria-selected", "true");
+      expect(within(region).getByRole("tabpanel", { name: "Google Map" })).not.toHaveAttribute("hidden");
 
-function renderDialog(saved: string[], answer: (body: { order: DayTimetableDto["order"]; orderedTripPlaceIds?: string[]; legModes?: Record<string, TravelMode> }) => DayTimetableDto) {
-  const arrangements: unknown[] = [];
-  const request = async <T,>(url: string, options?: RequestInit) => {
-    const body = options?.body ? JSON.parse(String(options.body)) : {};
-    if (url.endsWith("/arrangement")) {
-      arrangements.push(body);
-      return { tripPlaces: [] } as T;
+      fireEvent.keyDown(mapTab, { key: "ArrowLeft" });
+      expect(routeTab).toHaveFocus();
+      expect(routeTab).toHaveAttribute("aria-selected", "true");
+      expect(within(region).getByRole("tabpanel", { name: "路線" })).not.toHaveAttribute("hidden");
+
+      for (const tab of [routeTab, mapTab]) {
+        const panelId = tab.getAttribute("aria-controls")!;
+        const panel = document.getElementById(panelId)!;
+        ids.push(tab.id, panelId);
+        expect(panel).not.toBeNull();
+        expect(panel).toHaveAttribute("aria-labelledby", tab.id);
+      }
     }
-    return { timetable: body.order === "current" || body.order === "suggested" ? draft(body.order, saved, {}) : answer(body) } as T;
-  };
-  render(
-    <DayPlanDialog
-      tripId="A"
-      day={{ id: "day21", date: "2026-10-21", label: "第 1 天" }}
-      canArrange
-      request={request}
-      openRapidApiKeys={() => {}}
-      onClose={() => {}}
-      onOrderSaved={async () => {}}
-      addablePlaces={[]}
-      coordinates={new Map()}
-      stays={new Map()}
-    />,
-  );
-  return arrangements;
-}
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+});
 
-describe("the day dialog's candidate", () => {
-  it("can save a change to only how one place is reached", async () => {
-    const arrangements = renderDialog(["a", "b"], (body) => draft("custom", body.orderedTripPlaceIds!, body.legModes ?? {}));
-    const save = await screen.findByRole("button", { name: "儲存為第 1 天的安排" });
-    // Same places, same order as saved: nothing to save yet.
-    await waitFor(() => expect(save).toBeDisabled());
+describe("day-plan request ownership", () => {
+  it("never lets old route or maps-config responses overwrite a newer dialog", async () => {
+    const routeRequests = new Map<string, Deferred<{ route: DayRouteDto }>[]>();
+    const configRequests: Deferred<{ browserKey: string; mapId: string | null }>[] = [];
+    const request = <T,>(url: string, options?: RequestInit): Promise<T> => {
+      if (url === "/api/maps/config") {
+        const pending = deferred<{ browserKey: string; mapId: string | null }>();
+        configRequests.push(pending);
+        return pending.promise as Promise<T>;
+      }
+      if (url === "/api/maps/load") return Promise.resolve(undefined as T);
+      if (url.endsWith("/route")) {
+        const dayId = url.includes("day-2") ? "day-2" : "day-1";
+        const pending = deferred<{ route: DayRouteDto }>();
+        routeRequests.set(dayId, [...(routeRequests.get(dayId) ?? []), pending]);
+        return pending.promise as Promise<T>;
+      }
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    };
+    const { rerender } = render(dialog(request, day1));
+    await waitFor(() => expect(routeRequests.get("day-1")).toHaveLength(2));
 
-    fireEvent.change(await screen.findByRole("combobox", { name: "怎麼到「八坂神社」" }), { target: { value: "taxi" } });
-    await waitFor(() => expect(save).toBeEnabled());
-    fireEvent.click(save);
-    await waitFor(() => expect(arrangements).toEqual([{ orderedTripPlaceIds: ["a", "b"], expectedVersion: 4, legModes: { b: "taxi" } }]));
+    rerender(dialog(request, day2));
+    await waitFor(() => {
+      expect(routeRequests.get("day-2")).toHaveLength(2);
+      expect(configRequests).toHaveLength(2);
+    });
+
+    const day2RouteRequests = routeRequests.get("day-2")!;
+    act(() => {
+      day2RouteRequests[0]!.resolve({ route: route("current", { dayId: "day-2", date: day2.date, names: { a: "第二天 A", b: "第二天 B" } }) });
+      day2RouteRequests[1]!.resolve({ route: route("suggested", { dayId: "day-2", date: day2.date, names: { a: "第二天 A", b: "第二天 B" } }) });
+      configRequests[1]!.resolve({ browserKey: "new-key", mapId: "new-map" });
+    });
+    const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+    expect(within(candidate).getByText("第二天 B")).toBeInTheDocument();
+    fireEvent.click(within(candidate).getByRole("tab", { name: "Google Map" }));
+    expect(await screen.findByTestId("google-api-provider")).toHaveAttribute("data-api-key", "new-key");
+
+    const day1RouteRequests = routeRequests.get("day-1")!;
+    act(() => {
+      day1RouteRequests[0]!.resolve({ route: route("current", { names: { a: "過期 A", b: "過期 B" } }) });
+      day1RouteRequests[1]!.resolve({ route: route("suggested", { names: { a: "過期 A", b: "過期 B" } }) });
+      configRequests[0]!.resolve({ browserKey: "old-key", mapId: "old-map" });
+    });
+
+    await waitFor(() => expect(screen.queryByText("過期 B")).not.toBeInTheDocument());
+    expect(screen.getByTestId("google-api-provider")).toHaveAttribute("data-api-key", "new-key");
   });
 
-  it("refuses to take a place out when that would push another placed one out", async () => {
-    // Without 八坂神社, the leg from 清水寺 to 錦市場 has no known travel time.
-    renderDialog(["a", "b", "c"], (body) => draft("custom", body.orderedTripPlaceIds!, body.legModes ?? {},
-      body.orderedTripPlaceIds!.includes("b") ? [] : ["c"]));
-    await screen.findAllByRole("button", { name: "這天不去「八坂神社」" });
-    fireEvent.click(screen.getAllByRole("button", { name: "這天不去「八坂神社」" }).at(-1)!);
+  it("invalidates an old removal baseline across sessions until the new snapshot baseline settles", async () => {
+    let session = 1;
+    const baselineRequests: Deferred<{ route: DayRouteDto }>[] = [];
+    let customCount = 0;
+    const request = async <T,>(url: string, options?: RequestInit): Promise<T> => {
+      if (url === "/api/maps/config") return { browserKey: null, mapId: null } as T;
+      const input = inputOf(options)!;
+      if (input.order === "current") {
+        return { route: route("current", { totalMeters: session === 1 ? 12_000 : 22_000 }) } as T;
+      }
+      if (input.order === "suggested") {
+        return { route: route("suggested", { totalMeters: session === 1 ? 8_000 : 18_000 }) } as T;
+      }
+      customCount += 1;
+      if (customCount % 2 === 1) {
+        return { route: route("custom", { ids: input.orderedTripPlaceIds, totalMeters: session === 1 ? 4_000 : 14_000 }) } as T;
+      }
+      const pending = deferred<{ route: DayRouteDto }>();
+      baselineRequests.push(pending);
+      return await pending.promise as T;
+    };
+    const { rerender } = render(dialog(request));
+    let candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+    fireEvent.click(within(candidate).getByRole("button", { name: "這天不去「地點 b」" }));
+    await waitFor(() => expect(baselineRequests).toHaveLength(1));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("拿掉「八坂神社」後，「錦市場」會排不進去");
-    // The candidate keeps all three places.
-    expect(screen.getAllByRole("button", { name: "這天不去「八坂神社」" }).length).toBeGreaterThan(0);
-    expect(screen.queryByText("排不進去：錦市場", { exact: false })).not.toBeInTheDocument();
+    rerender(dialog(request, null));
+    session = 2;
+    rerender(dialog(request, day1));
+    candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+    fireEvent.click(within(candidate).getByRole("button", { name: "這天不去「地點 b」" }));
+    await waitFor(() => expect(baselineRequests).toHaveLength(2));
+    expect(within(candidate).getByText("正在計算比較基準…")).toBeInTheDocument();
+
+    act(() => baselineRequests[0]!.resolve({ route: route("custom", { ids: ["a"], totalMeters: 4_000 }) }));
+    expect(within(candidate).getByText("正在計算比較基準…")).toBeInTheDocument();
+
+    act(() => baselineRequests[1]!.resolve({ route: route("custom", { ids: ["a"], totalMeters: 19_000 }) }));
+    await waitFor(() => expect(within(candidate).queryByText("正在計算比較基準…")).not.toBeInTheDocument());
+    expect(within(candidate).getByText("↓ 少 5.0 公里")).toBeInTheDocument();
+  });
+});
+
+describe("day-plan draft and save behavior", () => {
+  it("requests a removal baseline in saved order minus removed ids, not candidate order", async () => {
+    const current = route("current", { ids: ["a", "b", "c"] });
+    const suggested = route("suggested", { ids: ["c", "b", "a"] });
+    const { request, calls } = immediateRequest({ current, suggested });
+    render(dialog(request));
+    const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+    fireEvent.click(within(candidate).getByRole("button", { name: "這天不去「地點 b」" }));
+
+    await waitFor(() => {
+      const customInputs = calls
+        .filter((call) => call.url.endsWith("/route"))
+        .map((call) => inputOf(call.options))
+        .filter((input) => input?.order === "custom");
+      expect(customInputs).toEqual([
+        { order: "custom", orderedTripPlaceIds: ["c", "a"] },
+        { order: "custom", orderedTripPlaceIds: ["a", "c"] },
+      ]);
+    });
+  });
+
+  it("does not PUT an unchanged order", async () => {
+    const same = route("current", { ids: ["a", "b"] });
+    const { request, calls } = immediateRequest({ current: same, suggested: { ...same, order: "suggested" } });
+    render(dialog(request));
+    const save = await screen.findByRole("button", { name: "儲存為第 1 天的安排" });
+    expect(save).toBeDisabled();
+    fireEvent.click(save);
+    expect(calls.filter((call) => call.options?.method === "PUT")).toHaveLength(0);
+  });
+
+  it("routes a reorder to place-order with displayed ids/version and reuses its idempotency key on retry", async () => {
+    let attempts = 0;
+    const mutationCalls: RequestCall[] = [];
+    const { request } = immediateRequest({
+      mutate: async (call) => {
+        mutationCalls.push(call);
+        attempts += 1;
+        if (attempts === 1) throw new Error("暫時失敗");
+        return { orderedTripPlaceIds: ["b", "a"], version: 8 };
+      },
+    });
+    render(dialog(request));
+    const save = await screen.findByRole("button", { name: "儲存為第 1 天的安排" });
+    fireEvent.click(save);
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.click(save);
+    await waitFor(() => expect(mutationCalls).toHaveLength(2));
+
+    for (const call of mutationCalls) {
+      expect(call.url).toBe("/api/trips/trip-1/days/day-1/place-order");
+      expect(JSON.parse(String(call.options?.body))).toEqual({
+        orderedTripPlaceIds: ["b", "a"],
+        expectedVersion: 7,
+      });
+    }
+    expect(new Headers(mutationCalls[0]!.options?.headers).get("Idempotency-Key")).toBe(
+      new Headers(mutationCalls[1]!.options?.headers).get("Idempotency-Key"),
+    );
+  });
+
+  it("routes a removal to arrangement with the displayed remaining ids and version", async () => {
+    const mutationCalls: RequestCall[] = [];
+    const { request } = immediateRequest({
+      mutate: async (call) => {
+        mutationCalls.push(call);
+        return { tripPlaces: [] };
+      },
+    });
+    render(dialog(request));
+    const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+    fireEvent.click(within(candidate).getByRole("button", { name: "這天不去「地點 b」" }));
+    const save = await screen.findByRole("button", { name: "儲存為第 1 天的安排" });
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.click(save);
+    await waitFor(() => expect(mutationCalls).toHaveLength(1));
+
+    expect(mutationCalls[0]!.url).toBe("/api/trips/trip-1/days/day-1/arrangement");
+    expect(JSON.parse(String(mutationCalls[0]!.options?.body))).toEqual({
+      orderedTripPlaceIds: ["a"],
+      expectedVersion: 7,
+    });
+  });
+
+  it("labels a custom route equal to the saved length without claiming it is shortest", async () => {
+    const current = route("current", { ids: ["a", "b"], totalMeters: 12_000 });
+    const suggested = route("suggested", { ids: ["b", "a"], totalMeters: 8_000 });
+    const { request } = immediateRequest({
+      current,
+      suggested,
+      custom: (ids) => route("custom", { ids, totalMeters: 12_000 }),
+    });
+    render(dialog(request));
+    const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+    fireEvent.keyDown(within(candidate).getByRole("button", { name: /拖曳「地點 b」/ }), { key: "ArrowDown" });
+
+    expect(await within(candidate).findByText("和原本順序一樣長")).toBeInTheDocument();
+    expect(within(candidate).queryByText("已是最短")).not.toBeInTheDocument();
   });
 });

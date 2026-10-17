@@ -5,9 +5,6 @@ async function unexpectedDayPlanCall(): Promise<never> {
 }
 
 export const unrelatedDayPlanModule = {
-  timetable: unexpectedDayPlanCall,
-  tripPlan: unexpectedDayPlanCall,
+  route: unexpectedDayPlanCall,
   applyOrder: unexpectedDayPlanCall,
-  updateWindow: unexpectedDayPlanCall,
-  getWindow: unexpectedDayPlanCall,
 } satisfies DayPlanModule;

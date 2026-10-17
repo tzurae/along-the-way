@@ -1,17 +1,13 @@
 import { useMemo, useState } from "react";
 import type { CountryStopDto, TripMemberDto } from "@along-the-way/contracts/private-trips";
 import type {
-  ConstraintInput,
-  ConstraintStatus,
-  ConstraintType,
-  CreateItineraryItemInput,
   EndpointRole,
   ItineraryItemDto,
   PlaceDto,
   UpdateItineraryItemInput,
   ZonedEndpointInput,
 } from "@along-the-way/contracts/trip-skeleton";
-import { Pencil, Plus } from "lucide-react";
+import { Pencil } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -28,18 +24,20 @@ import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "./i18n";
+import { notify } from "./AppToaster";
 import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./ConflictPanel";
 import "./form-sheet.css";
 
 type EditableItem = Exclude<ItineraryItemDto, { type: "flight" | "lodging" }>;
 type EditableItemType = EditableItem["type"];
+type ItemValues = Omit<UpdateItineraryItemInput, "expectedVersion">;
 
 interface ItineraryItemDialogProps {
   countryStops: CountryStopDto[];
   members: TripMemberDto[];
   places: PlaceDto[];
-  item?: EditableItem;
-  save(input: CreateItineraryItemInput | UpdateItineraryItemInput, conflictBase?: number): Promise<void>;
+  item: EditableItem;
+  save(input: UpdateItineraryItemInput, conflictBase?: number): Promise<void>;
   load?(): Promise<ItineraryItemDto | null>;
   editingChanged?(open: boolean): void;
 }
@@ -71,8 +69,8 @@ const blankEndpoint: EndpointDraft = {
   utcOffset: "",
 };
 
-function draftEndpoint(item: ItineraryItemDto | undefined, role: EndpointRole): EndpointDraft {
-  const endpoint = item?.endpoints.find((candidate) => candidate.role === role);
+function draftEndpoint(item: ItineraryItemDto, role: EndpointRole): EndpointDraft {
+  const endpoint = item.endpoints.find((candidate) => candidate.role === role);
   return endpoint
     ? {
         countryStopId: endpoint.countryStopId ?? OUTSIDE_ROUTE,
@@ -209,33 +207,33 @@ function EndpointEditor({
   );
 }
 
-function itemDraft(item?: EditableItem) {
+function itemDraft(item: EditableItem) {
   return {
-    type: item?.type ?? "activity" as EditableItemType,
-    title: item?.title ?? "",
-    notes: item?.notes ?? "",
-    sourceUrl: item?.sourceUrl ?? "",
-    amountMinor: item?.money?.amountMinor.toString() ?? "",
-    currency: item?.money?.currency ?? "",
+    type: item.type,
+    title: item.title,
+    notes: item.notes ?? "",
+    sourceUrl: item.sourceUrl ?? "",
+    amountMinor: item.money?.amountMinor.toString() ?? "",
+    currency: item.money?.currency ?? "",
     start: draftEndpoint(item, "start"),
     end: draftEndpoint(item, "end"),
-    bookedBy: item && (item.type === "reservation" || item.type === "meal" || item.type === "activity")
+    bookedBy: item.type === "reservation" || item.type === "meal" || item.type === "activity"
       ? item.details.bookedBy ?? ""
       : "",
-    mode: item?.type === "transport" ? item.details.mode : "",
-    ticketInfo: item?.type === "transport" ? item.details.ticketInfo ?? "" : "",
-    durationMinutes: item && (item.type === "reservation" || item.type === "meal" || item.type === "activity" || item.type === "free-time")
+    mode: item.type === "transport" ? item.details.mode : "",
+    ticketInfo: item.type === "transport" ? item.details.ticketInfo ?? "" : "",
+    durationMinutes: item.type === "reservation" || item.type === "meal" || item.type === "activity" || item.type === "free-time"
       ? item.details.durationMinutes.toString()
       : "60",
-    confirmationStatus: item && (item.type === "reservation" || item.type === "meal" || item.type === "activity")
+    confirmationStatus: item.type === "reservation" || item.type === "meal" || item.type === "activity"
       ? item.details.confirmationStatus ?? ""
       : "",
-    participantMemberIds: item?.participants?.map((participant) => participant.memberId) ?? [],
-    expectedVersion: item?.version ?? null,
+    participantMemberIds: item.participants?.map((participant) => participant.memberId) ?? [],
+    expectedVersion: item.version,
   };
 }
 
-function itemValues(item: ItineraryItemDto): CreateItineraryItemInput {
+function itemValues(item: ItineraryItemDto): ItemValues {
   return {
     type: item.type, title: item.title, notes: item.notes, sourceUrl: item.sourceUrl, money: item.money,
     participantMemberIds: item.participants?.map((member) => member.memberId) ?? null,
@@ -264,20 +262,14 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
     initialDraft.participantMemberIds,
   );
   const [confirmationStatus, setConfirmationStatus] = useState(initialDraft.confirmationStatus);
-  const [expectedVersion, setExpectedVersion] = useState<number | null>(
-    initialDraft.expectedVersion,
-  );
-  const [constraintType, setConstraintType] = useState<ConstraintType | "">("");
-  const [constraintStatus, setConstraintStatus] = useState<ConstraintStatus>("unknown");
-  const [minimumBufferMinutes, setMinimumBufferMinutes] = useState("");
-  const [error, setError] = useState("");
+  const [expectedVersion, setExpectedVersion] = useState(initialDraft.expectedVersion);
   const [submitting, setSubmitting] = useState(false);
-  const [baseSnapshot, setBaseSnapshot] = useState<EditSnapshot<CreateItineraryItemInput> | null>(item ? { input: itemValues(item), version: item.version } : null);
-  const resolution = useVersionConflict<CreateItineraryItemInput>();
+  const [baseSnapshot, setBaseSnapshot] = useState<EditSnapshot<ItemValues> | null>({ input: itemValues(item), version: item.version });
+  const resolution = useVersionConflict<ItemValues>();
 
   function resetDraft() {
     resolution.clear();
-    setBaseSnapshot(item ? { input: itemValues(item), version: item.version } : null);
+    setBaseSnapshot({ input: itemValues(item), version: item.version });
     const latest = itemDraft(item);
     setType(latest.type);
     setTitle(latest.title);
@@ -294,10 +286,6 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
     setConfirmationStatus(latest.confirmationStatus);
     setParticipantMemberIds(latest.participantMemberIds);
     setExpectedVersion(latest.expectedVersion);
-    setConstraintType("");
-    setConstraintStatus("unknown");
-    setMinimumBufferMinutes("");
-    setError("");
   }
 
   function changeOpen(nextOpen: boolean) {
@@ -306,7 +294,7 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
     editingChanged?.(nextOpen);
   }
 
-  const details = useMemo<CreateItineraryItemInput["details"]>(() => {
+  const details = useMemo<ItemValues["details"]>(() => {
     switch (type) {
       case "transport":
         return { mode, ticketInfo: ticketInfo || null };
@@ -331,38 +319,29 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
         email: member.email,
         removed: false,
       })),
-      ...(item?.participants?.filter((participant) => !activeIds.has(participant.memberId)) ?? []),
+      ...(item.participants?.filter((participant) => !activeIds.has(participant.memberId)) ?? []),
     ];
-  }, [item?.participants, members]);
+  }, [item.participants, members]);
 
-  async function persist(input: CreateItineraryItemInput, version: number | null, conflictBase = resolution.conflictBaseVersion) {
+  async function persist(input: ItemValues, version: number, conflictBase = resolution.conflictBaseVersion) {
     setSubmitting(true);
-    setError("");
-    const { constraints: _constraints, ...updatable } = input;
     try {
-      await save(item ? { ...updatable, expectedVersion: version! } : input, conflictBase);
+      await save({ ...input, expectedVersion: version }, conflictBase);
       resolution.clear();
       changeOpen(false);
     } catch (reason) {
       try {
-        if (baseSnapshot && load && await resolution.capture(reason, baseSnapshot, updatable, async () => {
+        if (baseSnapshot && load && await resolution.capture(reason, baseSnapshot, input, async () => {
           const current = await load();
           return current ? { input: itemValues(current), version: current.version } : null;
         })) return;
-        setError(reason instanceof Error ? reason.message : t.itemDialog.saveError);
-      } catch (failure) { setError(failure instanceof Error ? failure.message : t.collaboration.loadError); }
+        notify("error", reason instanceof Error ? reason.message : t.itemDialog.saveError);
+      } catch (failure) { notify("error", failure instanceof Error ? failure.message : t.collaboration.loadError); }
     } finally { setSubmitting(false); }
   }
 
   async function submit() {
-    const constraints: ConstraintInput[] = constraintType
-      ? [{
-          type: constraintType,
-          status: constraintStatus,
-          minimumBufferMinutes: constraintType === "minimum_buffer" ? Number(minimumBufferMinutes) : null,
-        }]
-      : [];
-    const base: CreateItineraryItemInput = {
+    const base: ItemValues = {
       participantMemberIds: participantMemberIds.length > 0 ? participantMemberIds : null,
       type,
       title,
@@ -373,7 +352,6 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
         : { amountMinor: Number(amountMinor), currency },
       endpoints: [endpointInput("start", start), ...(type === "transport" ? [endpointInput("end", end)] : [])],
       details,
-      constraints,
     };
 
     await persist(base, expectedVersion);
@@ -383,15 +361,15 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
     <Dialog open={open} onOpenChange={changeOpen}>
       <DialogTrigger
         render={
-          <Button variant={item ? "outline" : "default"} size={item ? "sm" : "default"} disabled={!item && places.length === 0} />
+          <Button variant="outline" size="sm" />
         }
       >
-        {item ? <Pencil /> : <Plus />}
-        {item ? t.itemDialog.editTrigger(item.title) : t.itemDialog.addCommitment}
+        <Pencil />
+        {t.itemDialog.editTrigger(item.title)}
       </DialogTrigger>
       <DialogContent className="form-sheet form-sheet--itinerary" placement="sheet">
         <DialogHeader>
-          <DialogTitle>{item ? t.itemDialog.editCommitment : t.itemDialog.addCommitment}</DialogTitle>
+          <DialogTitle>{t.itemDialog.editCommitment}</DialogTitle>
           <DialogDescription>{t.itemDialog.endpointDescription}</DialogDescription>
         </DialogHeader>
         {resolution.conflict ? (
@@ -409,9 +387,8 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
               }}
               onAccept={() => { resolution.clear(); changeOpen(false); }}
               onReapply={() => void persist(resolution.conflict!.attempted, resolution.conflict!.current!.version, resolution.conflict!.base.version)}
-              onEdit={() => { setBaseSnapshot(resolution.conflict!.current!); setExpectedVersion(resolution.conflict!.current!.version); resolution.resume(); setError(""); }}
+              onEdit={() => { setBaseSnapshot(resolution.conflict!.current!); setExpectedVersion(resolution.conflict!.current!.version); resolution.resume(); }}
             />
-            {error ? <p role="alert" className="text-destructive">{error}</p> : null}
           </div>
         ) : null}
         <form
@@ -422,9 +399,9 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
           <div className="form-sheet__body grid gap-5">
           <div className="grid gap-4 sm:grid-cols-2">
             <Field>
-              <FieldLabel htmlFor={`item-type-${item?.id ?? "new"}`}>{t.itemDialog.type}</FieldLabel>
+              <FieldLabel htmlFor={`item-type-${item.id}`}>{t.itemDialog.type}</FieldLabel>
               <NativeSelect
-                id={`item-type-${item?.id ?? "new"}`}
+                id={`item-type-${item.id}`}
                 className="w-full rounded-lg border border-input bg-transparent"
                 value={type}
                 onChange={(event) => setType(event.target.value as EditableItemType)}
@@ -433,9 +410,9 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
               </NativeSelect>
             </Field>
             <Field>
-              <FieldLabel htmlFor={`item-title-${item?.id ?? "new"}`}>{t.itemDialog.title}</FieldLabel>
+              <FieldLabel htmlFor={`item-title-${item.id}`}>{t.itemDialog.title}</FieldLabel>
               <Input
-                id={`item-title-${item?.id ?? "new"}`}
+                id={`item-title-${item.id}`}
                 required
                 maxLength={200}
                 value={title}
@@ -528,47 +505,9 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
             </FieldSet>
           ) : null}
 
-          {!item ? (
-            <FieldSet className="rounded-xl border p-4">
-              <FieldLegend>{t.itemDialog.initialConstraint}</FieldLegend>
-              <div className="grid gap-4 sm:grid-cols-3">
-                <Field>
-                  <FieldLabel htmlFor="constraint-type">{t.itemDialog.constraint}</FieldLabel>
-                  <NativeSelect
-                    id="constraint-type"
-                    className="w-full rounded-lg border border-input bg-transparent"
-                    value={constraintType}
-                    onChange={(event) => setConstraintType(event.target.value as ConstraintType | "")}
-                  >
-                    <option value="">{t.itemDialog.none}</option>
-                    <option value="fixed_time">{t.itemDialog.constraintTypes.fixed_time}</option>
-                    <option value="immovable">{t.itemDialog.constraintTypes.immovable}</option>
-                    <option value="minimum_buffer">{t.itemDialog.constraintTypes.minimum_buffer}</option>
-                  </NativeSelect>
-                </Field>
-                <Field>
-                  <FieldLabel htmlFor="constraint-status">{t.travel.constraintStatus}</FieldLabel>
-                  <NativeSelect
-                    id="constraint-status"
-                    className="w-full rounded-lg border border-input bg-transparent"
-                    value={constraintStatus}
-                    onChange={(event) => setConstraintStatus(event.target.value as ConstraintStatus)}
-                  >
-                    <option value="confirmed">{t.itemDialog.constraintStatuses.confirmed}</option>
-                    <option value="unknown">{t.itemDialog.constraintStatuses.unknown}</option>
-                    <option value="conflicted">{t.itemDialog.constraintStatuses.conflicted}</option>
-                  </NativeSelect>
-                </Field>
-                {constraintType === "minimum_buffer" ? (
-                  <Field><FieldLabel htmlFor="constraint-buffer">{t.itemDialog.bufferMinutes}</FieldLabel><Input id="constraint-buffer" type="number" min="0" required value={minimumBufferMinutes} onChange={(event) => setMinimumBufferMinutes(event.target.value)} /></Field>
-                ) : null}
-              </div>
-            </FieldSet>
-          ) : null}
 
           <Field><FieldLabel htmlFor="item-source">{t.itemDialog.sourceUrl}</FieldLabel><Input id="item-source" type="url" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} /></Field>
           <Field><FieldLabel htmlFor="item-notes">{t.itemDialog.notes}</FieldLabel><Textarea id="item-notes" value={notes} onChange={(event) => setNotes(event.target.value)} /></Field>
-          {error ? <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 text-destructive">{error}</p> : null}
           </div>
           <DialogFooter className="form-sheet__footer">
             <Button type="button" variant="outline" disabled={submitting} onClick={() => changeOpen(false)}>
