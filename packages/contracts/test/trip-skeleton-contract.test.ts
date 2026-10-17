@@ -169,7 +169,7 @@ describe("trip skeleton contract", () => {
       [participant, participant],
       [{ ...participant, memberId: undefined }],
       [{ ...participant, displayName: undefined }],
-      [{ ...participant, email: null }],
+      [{ ...participant, email: undefined }],
       [{ ...participant, removed: "true" }],
     ]) {
       expect(() => parseItineraryItemResponse({

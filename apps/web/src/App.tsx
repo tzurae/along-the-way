@@ -5,11 +5,13 @@ import {
   parseApiError,
   parseInviteResponse,
   parseMagicLinkConsumeResponse,
+  parseMagicLinkConfirmationResponse,
   parseSessionResponse,
   parseTripListResponse,
   parseTripResponse,
   type CreateTripInput,
   type MagicLinkConsumeResponse,
+  type MagicLinkConfirmationResponse,
   type SessionResponse,
   type TripDto,
   type TripSummaryDto,
@@ -23,7 +25,8 @@ import { Button } from "@/components/ui/button";
 import { countryStopLabel } from "./country-stop-label";
 import { CreateTripDialog } from "./CreateTripDialog";
 import { FirstTripOnboarding } from "./FirstTripOnboarding";
-import { LoginExperience, AuthProgress, type AuthProgressPhase } from "./LoginExperience";
+import { LoginExperience, LoginConfirmation, AuthProgress, type AuthProgressPhase } from "./LoginExperience";
+import { auth } from "./locales/zh-TW/auth";
 import { DiscoveryWorkspace } from "./DiscoveryWorkspace";
 import { TripSkeletonWorkspace } from "./TripSkeletonWorkspace";
 import { TripPlaceWorkspace } from "./TripPlaceWorkspace";
@@ -35,7 +38,7 @@ import { parseTripPlaceListResponse, type TripPlaceListResponse } from "@along-t
 import { TodayWorkspace } from "./TodayWorkspace";
 import { TripOnboardingChecklist } from "./TripOnboardingChecklist";
 import { createTodayModel, tripClock } from "./today-model";
-import { TodaySnapshotStore, TODAY_SCHEMA_VERSION, TODAY_SIGNED_OUT_STORAGE_KEY, type TodaySnapshot } from "./today-snapshot";
+import { PENDING_SERVER_LOGOUT_STORAGE_KEY, TodaySnapshotStore, TODAY_SCHEMA_VERSION, TODAY_SIGNED_OUT_STORAGE_KEY, type TodaySnapshot } from "./today-snapshot";
 import {
   defaultSegment,
   itinerarySegmentIds,
@@ -73,6 +76,12 @@ const TERMINAL_MAGIC_CODES: Record<string, true> = {
 
 
 
+class LoginConfirmationRequired extends Error {
+  constructor(readonly details: MagicLinkConfirmationResponse) {
+    super(details.error.message);
+  }
+}
+
 async function requestJson<T>(
   messages: Messages["errors"],
   url: string,
@@ -100,6 +109,9 @@ async function requestJson<T>(
       parsed = parseApiError(value);
     } catch {
       throw new ApiRequestError("unknown", messages.unknown, undefined, undefined, undefined, response.status);
+    }
+    if (response.status === 409 && parsed.error.code === "confirmation_required") {
+      throw new LoginConfirmationRequired(parseMagicLinkConfirmationResponse(value));
     }
     throw new ApiRequestError(
       parsed.error.code,
@@ -405,7 +417,8 @@ function TripMembersWorkspace({ trip, currentUser, segment, onChanged, onProfile
       <p className="mt-1 max-w-[62ch] text-sm text-muted-foreground">{page.peopleHelp(trip.members.length)}</p>
       <ul className="mt-5 grid max-w-2xl gap-3">
         {trip.members.map((member) => {
-          const memberLabel = member.displayName ?? member.email;
+          const memberLabel = member.displayName ?? member.email ?? "成員";
+          const memberDetail = member.displayName ? member.email : page.noNickname;
           return (
             <li key={member.id} className="flex min-h-16 items-center gap-3 rounded-xl bg-surface-subtle px-4 py-3">
               <span aria-hidden="true" className="grid size-10 shrink-0 place-items-center rounded-full bg-ink-strong font-bold text-on-dark">
@@ -414,7 +427,7 @@ function TripMembersWorkspace({ trip, currentUser, segment, onChanged, onProfile
               <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
                 <strong className="block">{memberLabel}{member.userId === currentUser.id ? `（${t.app.you}）` : ""}</strong>
                 <small className="block text-muted-foreground">
-                  {t.app.role(member.role)}・{member.displayName ? member.email : page.noNickname}
+                  {t.app.role(member.role)}{memberDetail ? `・${memberDetail}` : ""}
                 </small>
               </span>
               {isOwner && member.role === "editor" ? (
@@ -431,7 +444,7 @@ function TripMembersWorkspace({ trip, currentUser, segment, onChanged, onProfile
   );
 }
 
-function TripSwitcher({ layout, trips, selectedTrip, signedInEmail, openCreateTrip, selectTrip, signOut }: {
+function TripSwitcher({ layout, trips, selectedTrip, signedInEmail, openCreateTrip, selectTrip, signOut, signOutEverywhere, signingOutEverywhere }: {
   layout: "mobile" | "desktop";
   trips: TripSummaryDto[];
   selectedTrip: TripDto | null;
@@ -439,6 +452,8 @@ function TripSwitcher({ layout, trips, selectedTrip, signedInEmail, openCreateTr
   openCreateTrip(returnFocus?: HTMLElement | null): void;
   selectTrip(tripId: string): void;
   signOut(): void;
+  signOutEverywhere(): void;
+  signingOutEverywhere: boolean;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -498,6 +513,10 @@ function TripSwitcher({ layout, trips, selectedTrip, signedInEmail, openCreateTr
           <div className="grid gap-2 border-t border-ink/10 pt-4">
             <p className="text-sm text-muted-foreground">{t.app.signedInAs(signedInEmail)}</p>
             <button type="button" className="min-h-11 w-full rounded-lg border px-4 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={signOut}>{t.app.signOut}</button>
+            <button type="button" className="min-h-11 w-full rounded-lg border border-accent-strong px-4 font-bold text-accent-strong outline-none hover:bg-surface focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={signingOutEverywhere} onClick={() => {
+              setOpen(false);
+              signOutEverywhere();
+            }}>{signingOutEverywhere ? t.app.signingOutEverywhere : t.app.signOutEverywhere}</button>
           </div>
         ) : null}
       </DialogContent>
@@ -654,12 +673,51 @@ export function App() {
   const [store] = useState(() => {
     try { return new TodaySnapshotStore(window.localStorage); } catch { return null; }
   });
+  const pendingLogoutTarget = useRef<string | null>(store?.pendingServerLogoutUserId() ?? null);
+  const [pendingLogoutUserId, setPendingLogoutUserId] = useState(pendingLogoutTarget.current);
+  const rememberPendingLogout = useCallback((userId: string | null) => {
+    pendingLogoutTarget.current = userId;
+    setPendingLogoutUserId(userId);
+    store?.setServerLogoutPending(userId);
+  }, [store]);
+  const restoreSessionAfterTargetMismatch = useRef<() => void>(() => {});
+  const pendingLogoutReplay = useRef<Promise<void> | null>(null);
+  const replayPendingLogout = useCallback(async () => {
+    const target = pendingLogoutTarget.current;
+    if (!target || !navigator.onLine) return;
+    let replay = pendingLogoutReplay.current;
+    if (!replay) {
+      replay = (async () => {
+        let targetMismatch = false;
+        try {
+          await requestJson<void>(t.errors, "/api/logout", {
+            method: "POST",
+            body: JSON.stringify({ userId: target }),
+          });
+        } catch (reason) {
+          if (!(reason instanceof ApiRequestError) || reason.code !== "logout_target_mismatch") throw reason;
+          targetMismatch = true;
+        }
+        if (pendingLogoutTarget.current === target) {
+          rememberPendingLogout(null);
+          if (targetMismatch) restoreSessionAfterTargetMismatch.current();
+        }
+      })();
+      pendingLogoutReplay.current = replay;
+    }
+    try {
+      await replay;
+    } finally {
+      if (pendingLogoutReplay.current === replay) pendingLogoutReplay.current = null;
+    }
+  }, [rememberPendingLogout, t.errors]);
   const [todaySnapshot, setTodaySnapshot] = useState<TodaySnapshot | null>(null);
   const [offline, setOffline] = useState(false);
   const [persisted, setPersisted] = useState(true);
   const [retrying, setRetrying] = useState(false);
   const [selectedDate, setSelectedDate] = useState<string | null>(() => readTripLocation().day);
   const request = useCallback(async <T,>(url: string, options: RequestOptions = {}): Promise<T> => {
+    if (url !== "/api/logout" && url !== "/api/logout-everywhere") await replayPendingLogout();
     if (options.method && !["GET", "HEAD"].includes(options.method.toUpperCase()) && (readOnly.current || !navigator.onLine)) {
       throw new Error(t.today.mutationDisabled);
     }
@@ -684,8 +742,9 @@ export function App() {
       }
       throw reason;
     }
-  }, [store, t.errors, t.today.mutationDisabled]);
+  }, [replayPendingLogout, store, t.errors, t.today.mutationDisabled]);
   const [user, setUser] = useState<UserDto | null | undefined>(undefined);
+  const [signingOutEverywhere, setSigningOutEverywhere] = useState(false);
   const [trips, setTrips] = useState<TripSummaryDto[]>([]);
   const [selectedTrip, setSelectedTrip] = useState<TripDto | null>(null);
   const [error, setError] = useState("");
@@ -699,9 +758,33 @@ export function App() {
   const [authAttempt, setAuthAttempt] = useState(0);
   const [retryMagicToken, setRetryMagicToken] = useState<string | null>(null);
   const [signInError, setSignInError] = useState("");
+  const [loginConfirmation, setLoginConfirmation] = useState<{
+    details: MagicLinkConfirmationResponse;
+    code?: { email: string; code: string };
+  } | null>(null);
+  const confirmedMagicToken = useRef<string | null>(null);
+  const pendingCodeSession = useRef<MagicLinkConsumeResponse | null>(null);
   const [authProgressPhase, setAuthProgressPhase] = useState<AuthProgressPhase>(
     () => authFragment.magicToken ? "consuming-link" : "restoring",
   );
+  restoreSessionAfterTargetMismatch.current = () => {
+    const needsRestore = signedOut.current || store?.isLocallySignedOut();
+    store?.setLocallySignedOut(false);
+    if (!needsRestore) return;
+    ++sessionEpoch.current;
+    signedOut.current = false;
+    completedAuthKeys.current.delete("session");
+    confirmedMagicToken.current = null;
+    pendingCodeSession.current = null;
+    removeTokenFragment("magicToken");
+    const nextAuthFragment = { ...authFragmentRef.current, magicToken: null };
+    authFragmentRef.current = nextAuthFragment;
+    setAuthFragment(nextAuthFragment);
+    setRetryMagicToken(null);
+    setAuthProgressPhase("restoring");
+    setUser(undefined);
+    setAuthAttempt((attempt) => attempt + 1);
+  };
   const [shellEntering, setShellEntering] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const createDialogReturnFocus = useRef<HTMLElement | null>(null);
@@ -906,14 +989,29 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const synchronizeSignOut = (event: StorageEvent) => {
-      if (event.key === TODAY_SIGNED_OUT_STORAGE_KEY && event.newValue === "true") {
-        clearLocalSession();
+    const synchronizeSessionState = (event: StorageEvent) => {
+      if (event.key === PENDING_SERVER_LOGOUT_STORAGE_KEY) {
+        const target = event.newValue || null;
+        pendingLogoutTarget.current = target;
+        setPendingLogoutUserId(target);
+      }
+      if (event.key === TODAY_SIGNED_OUT_STORAGE_KEY) {
+        if (event.newValue === "true") clearLocalSession();
+        else if (event.newValue === null && pendingLogoutTarget.current === null) {
+          restoreSessionAfterTargetMismatch.current();
+        }
       }
     };
-    window.addEventListener("storage", synchronizeSignOut);
-    return () => window.removeEventListener("storage", synchronizeSignOut);
+    window.addEventListener("storage", synchronizeSessionState);
+    return () => window.removeEventListener("storage", synchronizeSessionState);
   }, [clearLocalSession]);
+
+  useEffect(() => {
+    const replay = () => { void replayPendingLogout().catch(() => {}); };
+    replay();
+    window.addEventListener("online", replay);
+    return () => window.removeEventListener("online", replay);
+  }, [replayPendingLogout]);
 
   useEffect(() => {
     const unavailable = () => { restoreSnapshot(); };
@@ -951,6 +1049,9 @@ export function App() {
       setAuthFragment(next);
       if (next.magicToken && next.magicToken !== previous.magicToken) {
         ++sessionEpoch.current;
+        setLoginConfirmation(null);
+        confirmedMagicToken.current = null;
+        pendingCodeSession.current = null;
         setSignInError("");
         setRetryMagicToken(null);
         setOffline(false);
@@ -1022,6 +1123,7 @@ export function App() {
     let active = true;
     const epoch = sessionEpoch.current;
     const magicToken = authFragment.magicToken;
+    const codeSession = pendingCodeSession.current;
     const authKey = magicToken ?? "session";
     let authenticatedUser: UserDto | null = null;
     let linkedInviteOutcome: MagicLinkConsumeResponse["inviteOutcome"];
@@ -1034,7 +1136,7 @@ export function App() {
 
     void (async () => {
       try {
-        if (!magicToken && store?.isLocallySignedOut()) {
+        if (!magicToken && !codeSession && store?.isLocallySignedOut()) {
           completedAuthKeys.current.add(authKey);
           setUser(null);
           return;
@@ -1050,7 +1152,7 @@ export function App() {
           if (!consumeRequest) {
             consumeRequest = request<MagicLinkConsumeResponse>("/api/auth/magic-links/consume", {
               method: "POST",
-              body: JSON.stringify({ token: magicToken }),
+              body: JSON.stringify({ token: magicToken, confirm: confirmedMagicToken.current === magicToken }),
               parse: (value) => parseMagicLinkConsumeResponse(value),
             });
             consumeRequests.current.set(magicToken, consumeRequest);
@@ -1064,6 +1166,10 @@ export function App() {
             }
             if (!active || epoch !== sessionEpoch.current) return;
             setUser(null);
+            if (reason instanceof LoginConfirmationRequired) {
+              setLoginConfirmation({ details: reason.details });
+              return;
+            }
             if (
               reason instanceof ApiRequestError &&
               TERMINAL_MAGIC_CODES[reason.code]
@@ -1102,9 +1208,22 @@ export function App() {
           }
         } else {
           setAuthProgressPhase("restoring");
-          session = await request<SessionResponse>("/api/session", {
-            parse: (value) => parseSessionResponse(value),
-          });
+          if (codeSession) {
+            pendingCodeSession.current = null;
+            session = codeSession;
+            acceptedTripId = codeSession.acceptedTripId;
+            linkedInviteOutcome = codeSession.inviteOutcome;
+            if (acceptedTripId || linkedInviteOutcome) {
+              removeTokenFragment("inviteToken");
+              const next = { ...authFragmentRef.current, inviteToken: null };
+              authFragmentRef.current = next;
+              setAuthFragment(next);
+            }
+          } else {
+            session = await request<SessionResponse>("/api/session", {
+              parse: (value) => parseSessionResponse(value),
+            });
+          }
           completedAuthKeys.current.add(authKey);
         }
 
@@ -1212,10 +1331,52 @@ export function App() {
   }
 
   async function logout() {
-    const wasOffline = readOnly.current || !navigator.onLine;
+    const target = accountId.current ?? user?.id ?? null;
+    if (target) rememberPendingLogout(target);
     store?.setLocallySignedOut(true);
     clearLocalSession();
-    if (!wasOffline) await request("/api/logout", { method: "POST" }).catch(() => {});
+    if (target && navigator.onLine) await replayPendingLogout().catch(() => {});
+  }
+
+  async function logoutEverywhere() {
+    setSigningOutEverywhere(true);
+    setError("");
+    try {
+      await request("/api/logout-everywhere", { method: "POST" });
+      rememberPendingLogout(null);
+      store?.setLocallySignedOut(true);
+      clearLocalSession();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : t.app.unableSignOutEverywhere);
+    } finally {
+      setSigningOutEverywhere(false);
+    }
+  }
+
+  async function verifyCode(email: string, code: string, confirm = false) {
+    try {
+      const result = await request<MagicLinkConsumeResponse>("/api/auth/magic-links/verify-code", {
+        method: "POST", body: JSON.stringify({ email, code, confirm }),
+        parse: parseMagicLinkConsumeResponse,
+      });
+      ++sessionEpoch.current;
+      pendingCodeSession.current = result;
+      store?.setLocallySignedOut(false);
+      signedOut.current = false;
+      completedAuthKeys.current.delete("session");
+      removeTokenFragment("magicToken");
+      const next = { ...authFragmentRef.current, magicToken: null };
+      authFragmentRef.current = next;
+      setAuthFragment(next);
+      setUser(undefined);
+      setAuthAttempt((attempt) => attempt + 1);
+    } catch (reason) {
+      if (reason instanceof LoginConfirmationRequired) {
+        setLoginConfirmation({ details: reason.details, code: { email, code } });
+        return;
+      }
+      throw reason;
+    }
   }
 
   if (offline) {
@@ -1232,15 +1393,54 @@ export function App() {
     </main>;
   }
 
+  if (loginConfirmation) {
+    return <LoginConfirmation
+      targetEmail={loginConfirmation.details.targetEmail}
+      currentEmail={loginConfirmation.details.currentEmail}
+      confirm={() => {
+        setLoginConfirmation(null);
+        setUser(undefined);
+        setAuthProgressPhase("consuming-link");
+        if (loginConfirmation.code) {
+          void verifyCode(loginConfirmation.code.email, loginConfirmation.code.code, true).catch((reason) => {
+            setSignInError(reason instanceof Error ? reason.message : auth.invalidCode);
+            setUser(null);
+          });
+        } else {
+          confirmedMagicToken.current = authFragment.magicToken;
+          setAuthAttempt((attempt) => attempt + 1);
+        }
+      }}
+      cancel={() => {
+        ++sessionEpoch.current;
+        setLoginConfirmation(null);
+        confirmedMagicToken.current = null;
+        removeTokenFragment("magicToken");
+        const next = { ...authFragmentRef.current, magicToken: null };
+        authFragmentRef.current = next;
+        setAuthFragment(next);
+        completedAuthKeys.current.delete("session");
+        setUser(undefined);
+        setAuthAttempt((attempt) => attempt + 1);
+      }}
+    />;
+  }
+
   if (user === undefined) {
     return <div className="atw-auth-transition-surface"><AuthProgress phase={authProgressPhase} /></div>;
   }
   if (user === null) {
     return (
       <div className="atw-auth-transition-surface">
+        {pendingLogoutUserId ? (
+          <p className="mx-auto mb-4 w-[min(100%-2rem,30rem)] rounded-xl border border-accent-strong/30 bg-surface-subtle p-3 text-sm text-accent-strong" role="alert">
+            {t.app.pendingServerLogout}
+          </p>
+        ) : null}
         <LoginExperience
           initialError={signInError || null}
           inviteToken={authFragment.inviteToken}
+          verifyCode={verifyCode}
           requestLink={async (email) => {
             await requestJson<{ message: string }>(t.errors, "/api/auth/magic-links", {
               method: "POST",
@@ -1261,7 +1461,8 @@ export function App() {
             setUser(undefined);
             setAuthAttempt((attempt) => attempt + 1);
           } : undefined}
-          describeError={(reason) => reason instanceof Error ? reason.message : t.app.unableRequestLink}
+          describeError={(reason) => reason instanceof ApiRequestError && reason.code === "invalid_magic_code"
+            ? auth.invalidCode : reason instanceof Error ? reason.message : t.app.unableRequestLink}
         />
       </div>
     );
@@ -1304,7 +1505,7 @@ export function App() {
       <header className="atw-topbar">
         <div className="atw-topbar-content">
           <div className="min-w-0 flex-1">
-            <TripSwitcher layout="mobile" trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} openCreateTrip={openCreateTrip} selectTrip={selectTrip} signOut={() => void logout()} />
+            <TripSwitcher layout="mobile" trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} openCreateTrip={openCreateTrip} selectTrip={selectTrip} signOut={() => void logout()} signOutEverywhere={() => void logoutEverywhere()} signingOutEverywhere={signingOutEverywhere} />
           </div>
           {selectedTrip ? (
             <span
@@ -1320,7 +1521,7 @@ export function App() {
 
       <div className="atw-frame">
         <aside className="atw-rail">
-          <TripSwitcher layout="desktop" trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} openCreateTrip={openCreateTrip} selectTrip={selectTrip} signOut={() => void logout()} />
+          <TripSwitcher layout="desktop" trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} openCreateTrip={openCreateTrip} selectTrip={selectTrip} signOut={() => void logout()} signOutEverywhere={() => void logoutEverywhere()} signingOutEverywhere={signingOutEverywhere} />
           {selectedTrip ? <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} /> : null}
           <div className="mt-2 border-t border-ink/10 pt-4">
             {selectedTrip && liveConnected ? (
@@ -1330,7 +1531,10 @@ export function App() {
               </span>
             ) : null}
             <p className="atw-wrap-two-lines text-sm text-muted-foreground" title={user.email}>{t.app.signedInAs(user.email)}</p>
-            <button className="mt-2 min-h-11 w-full rounded-lg border px-4 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={() => void logout()}>{t.app.signOut}</button>
+            <div className="mt-2 grid gap-2">
+              <button className="min-h-11 w-full rounded-lg border px-4 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={() => void logout()}>{t.app.signOut}</button>
+              <button className="min-h-11 w-full rounded-lg border border-accent-strong px-4 font-bold text-accent-strong outline-none hover:bg-surface focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={signingOutEverywhere} onClick={() => void logoutEverywhere()}>{signingOutEverywhere ? t.app.signingOutEverywhere : t.app.signOutEverywhere}</button>
+            </div>
           </div>
         </aside>
 
@@ -1451,6 +1655,7 @@ export function App() {
                   <TripPlaceWorkspace
                     key={selectedTrip.id}
                     trip={selectedTrip}
+                    accountId={user.id}
                     request={request}
                     placesRevision={workspaceRevision}
                     onPlacesChanged={placesChanged}
@@ -1460,6 +1665,7 @@ export function App() {
                   <DiscoveryWorkspace
                     key={selectedTrip.id}
                     trip={selectedTrip}
+                    accountId={user.id}
                     request={request}
                     placesRevision={workspaceRevision}
                     onPlacesChanged={placesChanged}

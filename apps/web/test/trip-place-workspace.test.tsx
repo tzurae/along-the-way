@@ -145,7 +145,7 @@ it("reports result count, disables listed places, and clears stale search result
     throw new Error(`Unexpected request: ${path}`);
   };
 
-  render(<TripPlaceWorkspace trip={trip("owner")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  render(<TripPlaceWorkspace accountId="account" trip={trip("owner")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
   await screen.findByRole("heading", { name: /^口袋名單$/ });
   fireEvent.click(screen.getByRole("button", { name: /^加入地點$/ }));
   const dialog = await screen.findByRole("dialog", { name: /^加入地點$/ });
@@ -184,7 +184,7 @@ it("shows a zh-TW provider error instead of leaking the server's English message
     throw new Error(`Unexpected request: ${path}`);
   };
 
-  render(<TripPlaceWorkspace trip={trip("owner")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  render(<TripPlaceWorkspace accountId="account" trip={trip("owner")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
   await screen.findByRole("heading", { name: /^口袋名單$/ });
   fireEvent.click(screen.getByRole("button", { name: /^加入地點$/ }));
   const dialog = await screen.findByRole("dialog", { name: /^加入地點$/ });
@@ -210,7 +210,7 @@ it("preserves search and note drafts when confirmation returns already_in_wishli
     throw new Error(`Unexpected request: ${path}`);
   };
 
-  render(<TripPlaceWorkspace trip={trip("owner")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  render(<TripPlaceWorkspace accountId="account" trip={trip("owner")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
   await screen.findByRole("heading", { name: /^口袋名單$/ });
   fireEvent.click(screen.getByRole("button", { name: /^加入地點$/ }));
   const dialog = await screen.findByRole("dialog", { name: /^加入地點$/ });
@@ -249,7 +249,7 @@ it("shows progress only on the pending candidate and restores its label after fa
     throw new Error(`Unexpected request: ${path}`);
   };
 
-  render(<TripPlaceWorkspace trip={trip("owner")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  render(<TripPlaceWorkspace accountId="account" trip={trip("owner")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
   await screen.findByRole("heading", { name: /^口袋名單$/ });
   fireEvent.click(screen.getByRole("button", { name: /^加入地點$/ }));
   const dialog = await screen.findByRole("dialog", { name: /^加入地點$/ });
@@ -304,7 +304,7 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
     throw new Error(`Unexpected request: ${path}`);
   };
 
-  render(<TripPlaceWorkspace trip={trip("editor")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  render(<TripPlaceWorkspace accountId="account" trip={trip("editor")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
   await screen.findByText("未排程咖啡店", { exact: true });
   expect(screen.getAllByText("只有旅程擁有者，或擁有者開放的編輯者，可以排入、改期或移出行程。你仍可加入地點、投票與編輯備註。", { exact: true })).toHaveLength(1);
   expect(screen.queryByRole("button", { name: /^排入行程$/ })).not.toBeInTheDocument();
@@ -346,6 +346,36 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
   expect(screen.queryByRole("button", { name: "固定行程餐廳 的更多動作" })).not.toBeInTheDocument();
 });
 
+it("renders unsafe wishlist and duplicate source URLs as text instead of external links", async () => {
+  const current = { ...place(unscheduledId, "未受信任來源地點", false), sourceUrl: "javascript:alert(document.domain)" };
+  const duplicate = { ...place(scheduledId, "重複地點", false), sourceUrl: "data:text/html,unsafe" };
+  current.duplicateSuggestions = [{
+    id: "88888888-8888-4888-8888-888888888888",
+    otherTripPlaceId: duplicate.id,
+    reason: "same normalized name",
+    status: "pending",
+  }];
+  const places = [current, duplicate];
+  const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
+    if (path.endsWith("/trip-places") && !init?.method) return { tripPlaces: places } as T;
+    if (path.includes("/place-previews?")) return applyParser({ previews: [] }, init);
+    if (path.includes("/place-details?")) return applyParser({ detail: {
+      reference: { kind: "trip-place", id: current.id }, canonicalPlaceId: current.placeId, name: current.name,
+      asOfDate: null, sections: [], sources: [], photos: [], googlePhotos: [],
+    } }, init);
+    throw new Error(`Unexpected request: ${path}`);
+  };
+
+  render(<TripPlaceWorkspace accountId="account" trip={trip("owner")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  await waitFor(() => expect(document.querySelector(`[data-place-detail-trigger="${current.id}"]`)).not.toBeNull());
+  fireEvent.click(document.querySelector(`[data-place-detail-trigger="${current.id}"]`)!);
+  const detail = await screen.findByRole("dialog", { name: current.name });
+  const labels = within(detail).getAllByText("開啟原始來源");
+  expect(labels).toHaveLength(3);
+  expect(labels.every((label) => label.tagName === "SPAN")).toBe(true);
+  expect(detail.querySelector('a[href^="javascript:"], a[href^="data:"]')).toBeNull();
+});
+
 it("round-trips duration and budget values when saving only the wishlist reason", async () => {
   const current = {
     ...place(unscheduledId, "哲學之道", false),
@@ -376,7 +406,7 @@ it("round-trips duration and budget values when saving only the wishlist reason"
     throw new Error(`Unexpected request: ${path}`);
   };
 
-  render(<TripPlaceWorkspace trip={trip("editor")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  render(<TripPlaceWorkspace accountId="account" trip={trip("editor")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
   await waitFor(() => expect(document.querySelector(`[data-place-detail-trigger="${current.id}"]`)).not.toBeNull());
   fireEvent.click(document.querySelector(`[data-place-detail-trigger="${current.id}"]`)!);
   const detail = await screen.findByRole("dialog", { name: "哲學之道" });
@@ -425,7 +455,7 @@ it("keeps thumbnail detail access in and out of selection mode without per-row c
   };
 
   const rendered = render(
-    <TripPlaceWorkspace trip={trip("owner")} request={requestWithPhoto(googlePhoto())} placesRevision={0} onPlacesChanged={vi.fn()} />,
+    <TripPlaceWorkspace accountId="account" trip={trip("owner")} request={requestWithPhoto(googlePhoto())} placesRevision={0} onPlacesChanged={vi.fn()} />,
   );
   const row = await waitFor(() => {
     const element = rendered.container.querySelector<HTMLElement>(`[data-wishlist-place="${current.name}"]`);
@@ -472,11 +502,11 @@ it("updates a wishlist vote immediately, blocks a double tap, keeps a concurrent
   };
 
   const rendered = render(
-    <TripPlaceWorkspace trip={trip("editor")} request={request} placesRevision={0} onPlacesChanged={onPlacesChanged} />,
+    <TripPlaceWorkspace accountId="account" trip={trip("editor")} request={request} placesRevision={0} onPlacesChanged={onPlacesChanged} />,
   );
   const button = await screen.findByRole("button", { name: "想去，0 票" });
   rendered.rerender(
-    <TripPlaceWorkspace trip={trip("editor")} request={request} placesRevision={1} onPlacesChanged={onPlacesChanged} />,
+    <TripPlaceWorkspace accountId="account" trip={trip("editor")} request={request} placesRevision={1} onPlacesChanged={onPlacesChanged} />,
   );
   await waitFor(() => expect(listReads).toBe(2));
 
@@ -524,7 +554,7 @@ it("restores a failed wishlist vote, announces the exact error, and reuses its i
     throw new Error(`Unexpected request: ${path}`);
   };
 
-  render(<TripPlaceWorkspace trip={trip("editor")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  render(<TripPlaceWorkspace accountId="account" trip={trip("editor")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
   const button = await screen.findByRole("button", { name: "想去，0 票" });
   fireEvent.click(button);
   expect(button).toHaveAttribute("aria-pressed", "true");

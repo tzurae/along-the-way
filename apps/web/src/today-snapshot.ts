@@ -3,7 +3,11 @@ import type { TodayModel } from "./today-model";
 export const TODAY_SCHEMA_VERSION = 4;
 const PREFIX = "along-the-way:today:";
 const ACCOUNT_KEY = "along-the-way:today-account";
+const PLACE_FILTER_PREFIX = "along-the-way:place-filters:";
+const ONBOARDING_PREFIX = "along-the-way:trip-onboarding:";
 export const TODAY_SIGNED_OUT_STORAGE_KEY = "along-the-way:locally-signed-out";
+export const PENDING_SERVER_LOGOUT_STORAGE_KEY = "along-the-way:pending-server-logout";
+const DAY_MS = 24 * 60 * 60 * 1_000;
 export interface TodaySnapshot {
   schemaVersion: typeof TODAY_SCHEMA_VERSION;
   accountId: string;
@@ -81,6 +85,20 @@ function validSnapshot(value: unknown): value is TodaySnapshot {
     && list(item.facts, (fact) => record(fact, "kind value") && ["carrier", "serviceNumber", "confirmationNotes", "bookedBy", "confirmationCode", "mode", "ticketInfo", "durationMinutes", "confirmationStatus"].includes(String(fact.kind)) && text(fact.value)));
 }
 
+function expired(snapshot: TodaySnapshot, now: number) {
+  const fetchedExpiry = Date.parse(snapshot.fetchedAt) + 14 * DAY_MS;
+  const endDate = snapshot.model.days.reduce<string | null>(
+    (latest, day) => latest === null || day.date > latest ? day.date : latest,
+    null,
+  );
+  // The date-only trip contract has no trip-wide zone. Retain the complete seventh
+  // UTC calendar day after the final trip date, then discard at the next midnight.
+  const tripExpiry = endDate === null
+    ? Number.POSITIVE_INFINITY
+    : Date.parse(`${endDate}T00:00:00Z`) + 8 * DAY_MS;
+  return now > fetchedExpiry || now >= tripExpiry;
+}
+
 export class TodaySnapshotStore {
   constructor(private readonly storage: Storage) {}
 
@@ -104,7 +122,7 @@ export class TodaySnapshotStore {
     } catch { return null; }
   }
 
-  read(accountId: string, tripId: string): TodaySnapshot | null {
+  read(accountId: string, tripId: string, now = Date.now()): TodaySnapshot | null {
     const key = `${PREFIX}${accountId}:${tripId}`;
     try {
       const raw = this.storage.getItem(key);
@@ -112,6 +130,10 @@ export class TodaySnapshotStore {
       const parsed: unknown = JSON.parse(raw);
       const value = migrateLegacySnapshot(parsed);
       if (validSnapshot(value) && value.accountId === accountId && value.model.tripId === tripId) {
+        if (expired(value, now)) {
+          this.storage.removeItem(key);
+          return null;
+        }
         if (value !== parsed) {
           try { this.storage.setItem(key, JSON.stringify(value)); }
           catch { /* A failed upgrade write must not discard the readable legacy snapshot. */ }
@@ -137,6 +159,20 @@ export class TodaySnapshotStore {
     } catch { /* Storage can be disabled. */ }
   }
 
+  pendingServerLogoutUserId() {
+    try {
+      const userId = this.storage.getItem(PENDING_SERVER_LOGOUT_STORAGE_KEY);
+      return userId || null;
+    } catch { return null; }
+  }
+
+  setServerLogoutPending(userId: string | null) {
+    try {
+      if (userId) this.storage.setItem(PENDING_SERVER_LOGOUT_STORAGE_KEY, userId);
+      else this.storage.removeItem(PENDING_SERVER_LOGOUT_STORAGE_KEY);
+    } catch { /* Storage can be disabled. */ }
+  }
+
 
   forAccount(accountId: string): TodaySnapshot[] {
     const snapshots: TodaySnapshot[] = [];
@@ -158,7 +194,18 @@ export class TodaySnapshotStore {
   clearAccount(accountId: string) {
     try {
       const keys = Array.from({ length: this.storage.length }, (_, index) => this.storage.key(index));
-      for (const key of keys) if (key?.startsWith(`${PREFIX}${accountId}:`)) this.storage.removeItem(key);
+      for (const key of keys) {
+        if (!key) continue;
+        const legacyFilterParts = key.startsWith(PLACE_FILTER_PREFIX)
+          ? key.slice(PLACE_FILTER_PREFIX.length).split(":")
+          : [];
+        if (
+          key.startsWith(`${PREFIX}${accountId}:`)
+          || key.startsWith(`${PLACE_FILTER_PREFIX}${accountId}:`)
+          || key.startsWith(`${ONBOARDING_PREFIX}${accountId}:`)
+          || legacyFilterParts.length === 2
+        ) this.storage.removeItem(key);
+      }
       if (this.storage.getItem(ACCOUNT_KEY) === accountId) this.storage.removeItem(ACCOUNT_KEY);
     } catch { /* Storage can be disabled. */ }
   }

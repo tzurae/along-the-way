@@ -154,6 +154,17 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
   });
 
   async function login(address = "owner@example.test") {
+    const fixtureNow = new Date("2026-09-28T12:00:00.000Z");
+    await database.insertInto("users").values({
+      email: address,
+      display_name: null,
+      status: "active",
+      created_at: fixtureNow,
+      updated_at: fixtureNow,
+    }).onConflict((conflict) => conflict.column("email").doUpdateSet({
+      status: "active",
+      updated_at: fixtureNow,
+    })).execute();
     const requested = await app.request("/api/auth/magic-links", {
       method: "POST",
       headers: { "content-type": "application/json", origin: "https://app.example.test" },
@@ -167,7 +178,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     const consumed = await app.request("/api/auth/magic-links/consume", {
       method: "POST",
       headers: { "content-type": "application/json", origin: "https://app.example.test" },
-      body: body({ token }),
+      body: body({ token, confirm: true }),
     });
     expect(consumed.status).toBe(200);
     return cookieFrom(consumed);
@@ -468,6 +479,100 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     expect(await (await app.request(`/api/trips/${trip.id}/history`, { headers: { cookie } })).json()).toEqual(beforeHistory);
   });
 
+  it("lets only the owner unlock an item and keeps locked flights immutable", async () => {
+    const ownerCookie = await login();
+    const trip = await createTrip(ownerCookie);
+    const editor = await joinMember(ownerCookie, trip.id, "flight-lock-editor@example.test", "flight-lock-editor");
+    const flight = (await readSkeleton(ownerCookie, trip.id)).items.find((item) => item.type === "flight")!;
+    const lockedResponse = await mutate(ownerCookie, `/api/trips/${trip.id}/items/${flight.id}/lock`, "owner-lock-flight", {
+      expectedVersion: flight.version,
+    });
+    expect(lockedResponse.status).toBe(200);
+    const locked = parseItineraryItemResponse(await lockedResponse.json()).item;
+
+    expect((await mutate(editor.cookie, `/api/trips/${trip.id}/items/${flight.id}/unlock`, "editor-unlock-flight", {
+      expectedVersion: locked.version,
+    })).status).toBe(403);
+    expect((await mutate(ownerCookie, `/api/trips/${trip.id}/items/${flight.id}`, "owner-delete-locked-flight", {
+      expectedVersion: locked.version,
+    }, "DELETE")).status).toBe(409);
+    expect((await mutate(editor.cookie, `/api/trips/${trip.id}/flights/${flight.id}`, "editor-edit-locked-flight", {
+      ...tripFlights().outbound,
+      expectedVersion: locked.version,
+    }, "PATCH")).status).toBe(409);
+
+    const unlockedResponse = await mutate(ownerCookie, `/api/trips/${trip.id}/items/${flight.id}/unlock`, "owner-unlock-flight", {
+      expectedVersion: locked.version,
+    });
+    expect(unlockedResponse.status).toBe(200);
+    const unlocked = parseItineraryItemResponse(await unlockedResponse.json()).item;
+    expect((await mutate(ownerCookie, `/api/trips/${trip.id}/editors-can-schedule`, "allow-unlocked-flight-editor", {
+      enabled: true,
+    }, "PUT")).status).toBe(204);
+    expect((await mutate(editor.cookie, `/api/trips/${trip.id}/flights/${flight.id}`, "editor-edit-unlocked-flight", {
+      ...tripFlights().outbound,
+      carrier: "Editor airline",
+      expectedVersion: unlocked.version,
+    }, "PATCH")).status).toBe(200);
+  });
+
+  it("hides active and former participant emails according to the requesting member", async () => {
+    const ownerCookie = await login("participant-owner@example.test");
+    const trip = await createTrip(ownerCookie);
+    const editor = await joinMember(
+      ownerCookie, trip.id, "participant-editor@example.test", "participant-editor",
+    );
+    const former = await joinMember(
+      ownerCookie, trip.id, "participant-former@example.test", "participant-former",
+    );
+    const place = await createPlace(ownerCookie, trip.id, "participant-place", {
+      name: "Participant cafe", type: "restaurant", timeZone: "Asia/Tokyo",
+    });
+    const created = await mutate(ownerCookie, `/api/trips/${trip.id}/items`, "participant-private-item", {
+      type: "activity",
+      title: "Private participant activity",
+      participantMemberIds: [trip.members[0]!.id, editor.member.id, former.member.id],
+      endpoints: [{
+        role: "start",
+        placeId: place.id,
+        countryStopId: trip.countryStops[0]!.id,
+        timeZone: "Asia/Tokyo",
+        localDateTime: "2026-10-21T10:00",
+      }],
+      details: { durationMinutes: 60, bookedBy: null, confirmationStatus: null },
+      expectedTripVersion: await currentTripVersion(ownerCookie, trip.id),
+    });
+    expect(created.status).toBe(201);
+    const itemId = parseItineraryItemResponse(await created.json()).item.id;
+    expect((await app.request(`/api/trips/${trip.id}/members/${former.member.userId}`, {
+      method: "DELETE",
+      headers: {
+        cookie: ownerCookie,
+        origin: "https://app.example.test",
+        "idempotency-key": "remove-private-participant",
+      },
+    })).status).toBe(204);
+
+    const editorParticipants = (await readSkeleton(editor.cookie, trip.id)).items
+      .find((item) => item.id === itemId)!.participants!;
+    expect(new Map(editorParticipants.map((participant) => [
+      participant.memberId, [participant.email, participant.removed],
+    ]))).toEqual(new Map([
+      [trip.members[0]!.id, [null, false]],
+      [editor.member.id, [editor.member.email, false]],
+      [former.member.id, [null, true]],
+    ]));
+    const ownerParticipants = (await readSkeleton(ownerCookie, trip.id)).items
+      .find((item) => item.id === itemId)!.participants!;
+    expect(new Map(ownerParticipants.map((participant) => [
+      participant.memberId, [participant.email, participant.removed],
+    ]))).toEqual(new Map([
+      [trip.members[0]!.id, [trip.members[0]!.email, false]],
+      [editor.member.id, [editor.member.email, false]],
+      [former.member.id, [null, true]],
+    ]));
+  });
+
   it("adds missing flights to an old trip and creates, edits and deletes lodging without a wishlist hotel", async () => {
     const cookie = await login();
     const trip = await createTrip(cookie);
@@ -620,6 +725,102 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     expect(rejected.status).toBe(400);
     expect(await rejected.json()).toMatchObject({ error: { code: "validation_error" } });
     expect((await readSkeleton(cookie, trip.id)).items.some((item) => item.title === "Too many constraints")).toBe(false);
+  });
+
+  it("caps cumulative constraints and keeps the largest constraint response bounded", async () => {
+    const cookie = await login("constraint-cap-owner@example.test");
+    const trip = await createTrip(cookie);
+    const extraUsers = await database.insertInto("users").values(
+      Array.from({ length: 99 }, (_, index) => ({
+        email: `${String(index).padStart(2, "0")}-${"x".repeat(238)}@example.test`,
+        display_name: `${String(index).padStart(2, "0")}-${"m".repeat(37)}`,
+        status: "active" as const,
+      })),
+    ).returning("id").execute();
+    const extraMembers = await database.insertInto("trip_members").values(
+      extraUsers.map((user) => ({
+        trip_id: trip.id,
+        user_id: user.id,
+        role: "editor" as const,
+        removed_at: null,
+      })),
+    ).returning("id").execute();
+    const place = await createPlace(cookie, trip.id, "constraint-cap-place", {
+      name: "Constraint cap activity", type: "activity", timeZone: "Asia/Tokyo",
+    });
+    const createdResponse = await mutate(cookie, `/api/trips/${trip.id}/items`, "constraint-cap-item", {
+      type: "activity",
+      title: "t".repeat(200),
+      notes: "n".repeat(10_000),
+      sourceUrl: `https://example.test/${"s".repeat(1_978)}`,
+      money: { amountMinor: 2_147_483_647, currency: "TWD" },
+      participantMemberIds: [trip.members[0]!.id, ...extraMembers.map((member) => member.id)],
+      endpoints: [{
+        role: "start",
+        countryStopId: trip.countryStops[0]!.id,
+        placeId: place.id,
+        localDateTime: "2026-10-22T10:00",
+        timeZone: "Asia/Tokyo",
+      }],
+      details: {
+        durationMinutes: 60,
+        bookedBy: "b".repeat(200),
+        confirmationStatus: "c".repeat(200),
+      },
+      constraints: [],
+      expectedTripVersion: await currentTripVersion(cookie, trip.id),
+    });
+    expect(createdResponse.status, await createdResponse.clone().text()).toBe(201);
+    let item = parseItineraryItemResponse(await createdResponse.json()).item;
+
+    for (let index = 0; index < 20; index += 1) {
+      const response = await mutate(
+        cookie,
+        `/api/trips/${trip.id}/items/${item.id}/constraints`,
+        `constraint-cap-${index}`,
+        {
+          expectedItemVersion: item.version,
+          type: "minimum_buffer",
+          status: "unknown",
+          minimumBufferMinutes: 2_147_483_647 - index,
+        },
+      );
+      expect(response.status).toBe(201);
+      item = parseItineraryItemResponse(await response.json()).item;
+    }
+    expect(item.constraints).toHaveLength(20);
+    const stored = await database.selectFrom("mutation_requests")
+      .select([
+        sql<number>`octet_length(response::text)`.as("responseBytes"),
+        sql<number>`pg_column_size(response)`.as("storedBytes"),
+      ])
+      .where("actor_id", "=", trip.members[0]!.userId)
+      .where("operation", "=", `cc:${trip.id}:${item.id}`)
+      .where("idempotency_key", "=", "constraint-cap-19")
+      .executeTakeFirstOrThrow();
+    expect(Number(stored.responseBytes)).toBeLessThan(58_000);
+    expect(Number(stored.storedBytes)).toBeLessThan(8_000);
+
+    const rejected = await mutate(
+      cookie,
+      `/api/trips/${trip.id}/items/${item.id}/constraints`,
+      "constraint-cap-rejected",
+      {
+        expectedItemVersion: item.version,
+        type: "fixed_time",
+        status: "unknown",
+        minimumBufferMinutes: null,
+      },
+    );
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toMatchObject({
+      error: {
+        code: "validation_error",
+        message: "An itinerary item can have at most 20 constraints",
+      },
+    });
+    expect((await readSkeleton(cookie, trip.id)).items.find((entry) => entry.id === item.id))
+      .toMatchObject({ version: item.version, constraints: item.constraints });
   });
 
   it("uses IDs to keep equally-timestamped places in a stable user-visible order", async () => {
@@ -833,6 +1034,111 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     });
   });
 
+  it("requires scheduling permission to create, update, or delete timed wishlist-place items", async () => {
+    const ownerCookie = await login();
+    const trip = await createTrip(ownerCookie);
+    const editor = await joinMember(ownerCookie, trip.id, "timed-item-editor@example.test", "timed-item-editor");
+    const place = await createPlace(ownerCookie, trip.id, "timed-item-place", {
+      name: "Timed wishlist place", type: "activity", timeZone: "Asia/Tokyo",
+    });
+    const input = {
+      type: "activity" as const,
+      title: "Timed wishlist activity",
+      participantMemberIds: null,
+      endpoints: [{
+        role: "start" as const,
+        countryStopId: trip.countryStops[0]!.id,
+        placeId: place.id,
+        localDateTime: "2026-10-22T10:00",
+        timeZone: "Asia/Tokyo",
+      }],
+      details: { durationMinutes: 60, bookedBy: null, confirmationStatus: "unknown" as const },
+    };
+
+    expect((await mutate(editor.cookie, `/api/trips/${trip.id}/items`, "timed-editor-create", {
+      ...input, expectedTripVersion: await currentTripVersion(editor.cookie, trip.id),
+    })).status).toBe(403);
+
+    const createdResponse = await mutate(ownerCookie, `/api/trips/${trip.id}/items`, "timed-owner-create", {
+      ...input, expectedTripVersion: await currentTripVersion(ownerCookie, trip.id),
+    });
+    expect(createdResponse.status).toBe(201);
+    const created = parseItineraryItemResponse(await createdResponse.json()).item;
+    const update = { ...input, title: "Moved timed activity", expectedVersion: created.version };
+    expect((await mutate(editor.cookie, `/api/trips/${trip.id}/items/${created.id}`, "timed-editor-update", update, "PATCH")).status).toBe(403);
+    expect((await mutate(editor.cookie, `/api/trips/${trip.id}/items/${created.id}`, "timed-editor-delete", {
+      expectedVersion: created.version,
+    }, "DELETE")).status).toBe(403);
+    const lodgingResponse = await mutate(ownerCookie, `/api/trips/${trip.id}/lodgings`, "travel-permission-lodging", {
+      hotel: {
+        name: "Travel-only hotel", address: null, latitude: null, longitude: null,
+        sourceUrl: null, timeZone: "Asia/Tokyo",
+      },
+      countryStopId: trip.countryStops[0]!.id,
+      checkInLocalDateTime: "2026-10-23T15:00",
+      checkOutLocalDateTime: "2026-10-24T10:00",
+      expectedTripVersion: await currentTripVersion(ownerCookie, trip.id),
+    });
+    expect(lodgingResponse.status).toBe(201);
+    const lodging = parseItineraryItemResponse(await lodgingResponse.json()).item;
+    const flight = (await readSkeleton(ownerCookie, trip.id)).items.find((item) => item.type === "flight")!;
+    expect((await mutate(editor.cookie, `/api/trips/${trip.id}/flights/${flight.id}`, "travel-only-editor-flight", {
+      ...tripFlights().outbound,
+      expectedVersion: flight.version,
+    }, "PATCH")).status).toBe(403);
+    expect((await mutate(editor.cookie, `/api/trips/${trip.id}/items/${lodging.id}`, "travel-only-editor-lodging-delete", {
+      expectedVersion: lodging.version,
+    }, "DELETE")).status).toBe(403);
+    const sharedAirport = await createPlace(ownerCookie, trip.id, "timed-shared-airport", {
+      name: "Shared itinerary airport", type: "airport", timeZone: "Asia/Tokyo",
+    });
+    const wiredResponse = await mutate(ownerCookie, `/api/trips/${trip.id}/items/${flight.id}`, "wire-timed-flight", {
+      ...flight,
+      participantMemberIds: flight.participants?.map((participant) => participant.memberId) ?? null,
+      endpoints: flight.endpoints.map((endpoint) =>
+        endpoint.role === "end" ? { ...endpoint, placeId: sharedAirport.id } : endpoint
+      ),
+      expectedVersion: flight.version,
+    }, "PATCH");
+    expect(wiredResponse.status).toBe(200);
+    const wired = parseItineraryItemResponse(await wiredResponse.json()).item;
+    const travelUpdate = {
+      ...tripFlights().outbound,
+      arrivalAirport: { name: sharedAirport.name, timeZone: "Asia/Tokyo" },
+      expectedVersion: wired.version,
+    };
+    expect((await mutate(
+      editor.cookie,
+      `/api/trips/${trip.id}/flights/${flight.id}`,
+      "timed-editor-flight",
+      travelUpdate,
+      "PATCH",
+    )).status).toBe(403);
+
+
+    expect((await mutate(ownerCookie, `/api/trips/${trip.id}/editors-can-schedule`, "allow-timed-editor", {
+      enabled: true,
+    }, "PUT")).status).toBe(204);
+    expect((await mutate(
+      editor.cookie,
+      `/api/trips/${trip.id}/flights/${flight.id}`,
+      "timed-allowed-flight",
+      travelUpdate,
+      "PATCH",
+    )).status).toBe(200);
+    const updatedResponse = await mutate(
+      editor.cookie, `/api/trips/${trip.id}/items/${created.id}`, "timed-allowed-update", update, "PATCH",
+    );
+    expect(updatedResponse.status).toBe(200);
+    const updated = parseItineraryItemResponse(await updatedResponse.json()).item;
+    expect((await mutate(editor.cookie, `/api/trips/${trip.id}/items/${created.id}`, "timed-allowed-delete", {
+      expectedVersion: updated.version,
+    }, "DELETE")).status).toBe(204);
+    expect((await mutate(editor.cookie, `/api/trips/${trip.id}/items/${lodging.id}`, "allowed-editor-lodging-delete", {
+      expectedVersion: lodging.version,
+    }, "DELETE")).status).toBe(204);
+  });
+
   it("reloads independent activities and changes a shared party without duplicating the item", async () => {
     const cookie = await login();
     const trip = await createTrip(cookie);
@@ -841,6 +1147,9 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     const editor = await joinMember(cookie, trip.id, "second@example.test", "party-second");
     await joinMember(cookie, trip.id, "third@example.test", "party-third");
     const fourth = await joinMember(cookie, trip.id, "fourth@example.test", "party-fourth");
+    expect((await mutate(cookie, `/api/trips/${trip.id}/editors-can-schedule`, "allow-party-editor", {
+      enabled: true,
+    }, "PUT")).status).toBe(204);
     const place = await createPlace(cookie, trip.id, "party-place", {
       name: "Meeting point", type: "activity", timeZone: "Asia/Tokyo",
     });
@@ -912,7 +1221,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     );
     expect(rejected.status).toBe(409);
     expect(await rejected.json()).toMatchObject({ error: { code: "item_locked" } });
-    const beforeReplay = await readSkeleton(cookie, trip.id);
+    const beforeReplay = await readSkeleton(editor.cookie, trip.id);
     const createReplay = await mutate(cookie, `/api/trips/${trip.id}/items`, "party-a", createPayload);
     expect(createReplay.status).toBe(201);
     expect(parseItineraryItemResponse(await createReplay.json()).item).toEqual(a);
@@ -924,7 +1233,11 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     const reloaded = await readSkeleton(editor.cookie, trip.id);
     expect(reloaded).toEqual(beforeReplay);
     expect(reloaded.items.map((item) => item.id).sort()).toEqual([...initialItems.map((item) => item.id), a.id, b.id, unspecified.id].sort());
-    expect(reloaded.items.find((item) => item.id === a.id)).toEqual(locked);
+    expect(reloaded.items.find((item) => item.id === a.id)).toMatchObject({
+      id: locked.id,
+      lockedAt: locked.lockedAt,
+      version: locked.version,
+    });
     expect(reloaded.items.find((item) => item.id === b.id)).toMatchObject({
       participants: [{ memberId: editor.member.id }],
       endpoints: [{ localDateTime: "2026-10-21T11:00", instant: "2026-10-21T02:00:00.000Z" }],
@@ -997,7 +1310,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     expect(parseTripResponse(await rosterResponse.json()).trip.members).toEqual([owner]);
     const removedParticipant = {
       memberId: editor.member.id, displayName: "Historical traveler",
-      email: "historical@example.test", removed: true,
+      email: null, removed: true,
     };
     const removedRead = await readSkeleton(cookie, trip.id);
     expect(removedRead.items.find((entry) => entry.id === item.id)?.participants).toEqual([removedParticipant]);
@@ -1018,12 +1331,12 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     });
     expect(inactiveCreate.status).toBe(400);
     const rejoinedWithHistory = await joinMember(
-      cookie, trip.id, editor.member.email, "historical-rejoin-with-reference", editor.cookie,
+      cookie, trip.id, editor.member.email!, "historical-rejoin-with-reference", editor.cookie,
     );
     expect(rejoinedWithHistory.member.id).toBe(editor.member.id);
     expect((await readSkeleton(cookie, trip.id)).items.find((entry) => entry.id === item.id)).toMatchObject({
       id: item.id, version: retained.version,
-      participants: [{ ...removedParticipant, removed: false }],
+      participants: [{ ...removedParticipant, email: editor.member.email, removed: false }],
     });
     const removedAgain = await mutate(
       cookie, `/api/trips/${trip.id}/members/${editor.member.userId}`, "historical-remove-again", {}, "DELETE",
@@ -1045,7 +1358,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     expect(readd.status).toBe(400);
     expect(await readSkeleton(cookie, trip.id)).toEqual(beforeReadd);
     const rejoined = await joinMember(
-      cookie, trip.id, editor.member.email, "historical-rejoin", editor.cookie,
+      cookie, trip.id, editor.member.email!, "historical-rejoin", editor.cookie,
     );
     expect(rejoined.member.id).toBe(editor.member.id);
     const restoredResponse = await mutate(
@@ -1055,7 +1368,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     expect(restoredResponse.status).toBe(200);
     const restored = parseItineraryItemResponse(await restoredResponse.json()).item;
     expect(restored).toMatchObject({
-      id: item.id, participants: [{ ...removedParticipant, removed: false }],
+      id: item.id, participants: [{ ...removedParticipant, email: editor.member.email, removed: false }],
     });
     const deleted = await mutate(
       cookie, `/api/trips/${trip.id}/items/${item.id}`, "delete-party-item",
@@ -3267,6 +3580,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         const provider = new GooglePlacesProvider();
         const discovery = new PostgresDiscoveryModule({
           database, model: new OpenAiResponsesDiscoveryModel(), placeLookup: provider,
+          claimAiRun: async () => {},
           tripPlaces: new PostgresTripPlaceModule({ database, provider }),
         });
         const workspace = await discovery.getWorkspace(ownerId, trip.id);

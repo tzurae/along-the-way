@@ -38,6 +38,7 @@ import {
 import {
   googlePlacePhotoDto,
   googlePlacePhotoFingerprint,
+  ProviderQuotaError,
   ProviderUnavailableError,
   type PlaceProvider,
   type ProviderPlaceCandidate,
@@ -198,6 +199,14 @@ function replayedTripPlaces(value: unknown) {
   }).tripPlaces;
 }
 
+const TRIP_PLACES_READBACK = "trip_places_readback";
+
+function isTripPlacesReadback(value: unknown) {
+  return typeof value === "object"
+    && value !== null
+    && Reflect.get(value, "type") === TRIP_PLACES_READBACK;
+}
+
 function normalizedSimilarity(value: string | null) {
   return value?.normalize("NFKC").toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, "") ?? "";
 }
@@ -322,6 +331,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
   private readonly now: () => Date;
   private readonly photoCapability: GooglePhotoCapability | undefined;
   private readonly commonsPhotos: RepresentativePhotoSource | undefined;
+  private readonly pendingAdds = new Map<string, Promise<TripPlaceDto>>();
 
   constructor(options: ModuleOptions) {
     this.database = options.database;
@@ -375,7 +385,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
   ) {
     tripPlaceId = uuid(tripPlaceId, "tripPlaceId").toLowerCase();
     const key = requireIdempotencyKey(rawKey);
-    const operation = `tp:must:create:${tripPlaceId}`;
+    const operation = `tmc:${tripId.toLowerCase()}:${tripPlaceId}`;
     const parsed = mustItemInput(input);
     return this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
@@ -438,7 +448,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     tripPlaceId = uuid(tripPlaceId, "tripPlaceId").toLowerCase();
     itemId = uuid(itemId, "itemId").toLowerCase();
     const key = requireIdempotencyKey(rawKey);
-    const operation = `tp:must:update:${itemId}`;
+    const operation = `tmu:${tripId.toLowerCase()}:${itemId}`;
     const parsed = mustItemInput(input);
     return this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
@@ -499,7 +509,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     tripPlaceId = uuid(tripPlaceId, "tripPlaceId").toLowerCase();
     itemId = uuid(itemId, "itemId").toLowerCase();
     const key = requireIdempotencyKey(rawKey);
-    const operation = `tp:must:remove:${itemId}`;
+    const operation = `tmr:${tripId.toLowerCase()}:${itemId}`;
     await this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
@@ -545,6 +555,9 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       if (error instanceof TypeError) {
         throw new AppError("validation_error", error.message);
       }
+      if (error instanceof ProviderQuotaError) {
+        throw new AppError("provider_unavailable", error.message, 503);
+      }
       await this.markProviderUnavailable(tripId);
       throw new AppError(
         "provider_unavailable",
@@ -585,6 +598,9 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       if (error instanceof GoogleMapsUrlError || error instanceof TypeError) {
         throw new AppError("validation_error", error.message);
       }
+      if (error instanceof ProviderQuotaError) {
+        throw new AppError("provider_unavailable", error.message, 503);
+      }
       await this.markProviderUnavailable(tripId);
       throw new AppError(
         "provider_unavailable",
@@ -607,7 +623,25 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     await this.requireMember(this.database, userId, tripId);
     const earlyReplay = await replayed(this.database, userId, operation, key);
     if (earlyReplay) return replayedTripPlace(earlyReplay);
+    const pendingKey = `${userId}:${operation}:${key}`;
+    const pending = this.pendingAdds.get(pendingKey);
+    if (pending) return pending;
+    const execution = this.addFresh(userId, tripId, key, operation, input);
+    this.pendingAdds.set(pendingKey, execution);
+    try {
+      return await execution;
+    } finally {
+      if (this.pendingAdds.get(pendingKey) === execution) this.pendingAdds.delete(pendingKey);
+    }
+  }
 
+  private async addFresh(
+    userId: string,
+    tripId: string,
+    key: string,
+    operation: string,
+    input: CreateTripPlaceInput,
+  ) {
     let loadCandidate: (() => Promise<ProviderPlaceCandidateDto>) | null = null;
     let manual: ManualPlaceFacts | null = null;
     // A holder, not a `let`: values are assigned inside a callback, which flow analysis does not follow.
@@ -653,13 +687,16 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     const originalNote = optionalText(input.originalNote, "originalNote", 10_000);
 
     try {
+      // Provider and Commons intake can take seconds; finish it before reserving a pooled
+      // connection for the atomic idempotency and persistence transaction.
+      const candidate = loadCandidate ? await loadCandidate() : null;
       return await this.persistPlace(
         userId,
         tripId,
         key,
         operation,
         input.method,
-        loadCandidate,
+        candidate,
         manual,
         requestedSourceUrl,
         originalNote,
@@ -672,6 +709,9 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     } catch (error) {
       if (input.method !== "manual" && error instanceof TypeError) {
         throw new AppError("validation_error", error.message);
+      }
+      if (input.method !== "manual" && error instanceof ProviderQuotaError) {
+        throw new AppError("provider_unavailable", error.message, 503);
       }
       if (input.method !== "manual" && error instanceof ProviderUnavailableError) {
         await this.markProviderUnavailable(tripId);
@@ -762,7 +802,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     key: string,
     operation: string,
     intakeMethod: CreateTripPlaceInput["method"],
-    loadCandidate: (() => Promise<ProviderPlaceCandidateDto>) | null,
+    candidate: ProviderPlaceCandidateDto | null,
     manual: ManualPlaceFacts | null,
     requestedSourceUrl: string | null,
     originalNote: string | null,
@@ -774,7 +814,6 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedTripPlace(replay);
-      const candidate = loadCandidate ? await loadCandidate() : null;
       const sourceUrl = requestedSourceUrl ?? candidate?.sourceUrl ?? manual?.sourceUrl ?? null;
       await this.reconcileLegacyPlaces(transaction, tripId);
 
@@ -855,6 +894,8 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       ? await transaction.updateTable("trip_places").set({
           archived_at: null,
           provider_unavailable: false,
+          selected_for_itinerary: false,
+          unplaced_from_date: null,
           ...(originalNote === null ? {} : { notes: originalNote }),
           legacy_place_version: legacyPlace.version,
           updated_at: this.now(),
@@ -917,7 +958,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
   ) {
     uuid(tripPlaceId, "tripPlaceId");
     const key = requireIdempotencyKey(rawKey);
-    const operation = `tp:plan:${tripPlaceId}`;
+    const operation = `tpp:${tripId.toLowerCase()}:${tripPlaceId.toLowerCase()}`;
     const durationMinutes = input.durationMinutes ?? null;
     if (
       durationMinutes !== null &&
@@ -1002,12 +1043,16 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       await requireScheduler(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replayedTripPlaces(replay);
+      if (replay) {
+        return isTripPlacesReadback(replay)
+          ? this.readList(transaction, userId, tripId)
+          : replayedTripPlaces(replay);
+      }
       await this.lockTripContent(transaction, tripId);
       await this.reconcileLegacyPlaces(transaction, tripId);
       await this.writeDayAssignmentsInTransaction(transaction, userId, tripId, assignments);
       const response = await this.readList(transaction, userId, tripId);
-      await remember(transaction, userId, operation, key, { tripPlaces: response });
+      await remember(transaction, userId, operation, key, { type: TRIP_PLACES_READBACK });
       return response;
     });
   }
@@ -1126,7 +1171,11 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       await requireScheduler(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replayedTripPlaces(replay);
+      if (replay) {
+        return isTripPlacesReadback(replay)
+          ? this.readList(transaction, userId, tripId)
+          : replayedTripPlaces(replay);
+      }
       await this.lockTripContent(transaction, tripId);
       await this.reconcileLegacyPlaces(transaction, tripId);
       const validDays = await transaction.selectFrom("trip_days").select("id")
@@ -1186,7 +1235,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         }
       }
       const response = await this.readList(transaction, userId, tripId);
-      await remember(transaction, userId, operation, key, { tripPlaces: response });
+      await remember(transaction, userId, operation, key, { type: TRIP_PLACES_READBACK });
       return response;
     });
   }
@@ -1209,12 +1258,16 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     const ordered = ids.map((id) => uuid(id, "orderedTripPlaceIds").toLowerCase());
     if (new Set(ordered).size !== ordered.length) throw new AppError("validation_error", "A place can appear only once");
     const key = requireIdempotencyKey(rawKey);
-    const operation = `tp:arrange:${dayId}`;
+    const operation = `tpa:${tripId.toLowerCase()}:${dayId.toLowerCase()}`;
     return this.database.transaction().execute(async (transaction) => {
       await requireScheduler(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replayedTripPlaces(replay);
+      if (replay) {
+        return isTripPlacesReadback(replay)
+          ? this.readList(transaction, userId, tripId)
+          : replayedTripPlaces(replay);
+      }
       await this.lockTripContent(transaction, tripId);
       await this.reconcileLegacyPlaces(transaction, tripId);
       const validDay = await transaction.selectFrom("trip_days").select("id")
@@ -1272,7 +1325,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         summary: `Arranged ${ordered.length} planned places for a day`,
       });
       const response = await this.readList(transaction, userId, tripId);
-      await remember(transaction, userId, operation, key, { tripPlaces: response });
+      await remember(transaction, userId, operation, key, { type: TRIP_PLACES_READBACK });
       return response;
     });
   }
@@ -1348,7 +1401,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       throw new AppError("validation_error", "voted must be a boolean");
     }
     const key = requireIdempotencyKey(rawKey);
-    const operation = `tp:vote:${tripPlaceId}`;
+    const operation = `tpv:${tripId.toLowerCase()}:${tripPlaceId.toLowerCase()}`;
     return this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
@@ -1408,7 +1461,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       throw new AppError("validation_error", "A place cannot be merged into itself");
     }
     const key = requireIdempotencyKey(rawKey);
-    const operation = `tp:merge:${sourceTripPlaceId}`;
+    const operation = `tpm:${tripId.toLowerCase()}:${sourceTripPlaceId}`;
     return this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
       await this.lockTripContent(transaction, tripId);
@@ -1638,7 +1691,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
   ) {
     uuid(suggestionId, "suggestionId");
     const key = requireIdempotencyKey(rawKey);
-    const operation = `tp:separate:${suggestionId}`;
+    const operation = `tps:${tripId.toLowerCase()}:${suggestionId.toLowerCase()}`;
     await this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
@@ -1670,7 +1723,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
   ) {
     uuid(tripPlaceId, "tripPlaceId");
     const key = requireIdempotencyKey(rawKey);
-    const operation = `tp:remove:${tripPlaceId}`;
+    const operation = `tpr:${tripId.toLowerCase()}:${tripPlaceId.toLowerCase()}`;
     await this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
       await this.lockTripContent(transaction, tripId);
@@ -2068,7 +2121,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         .where("trip_place_id", "in", ids)
         .orderBy("trip_place_id").orderBy("created_at").orderBy("id").execute(),
       executor.selectFrom("trip_members").innerJoin("users", "users.id", "trip_members.user_id")
-        .select(["trip_members.user_id", "trip_members.joined_at", "users.email", "users.display_name"])
+        .select(["trip_members.user_id", "trip_members.role", "trip_members.joined_at", "users.email", "users.display_name"])
         .where("trip_members.trip_id", "=", tripId).where("trip_members.removed_at", "is", null)
         .orderBy("trip_members.joined_at").execute(),
       executor.selectFrom("trip_place_votes").selectAll()
@@ -2098,10 +2151,11 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       assignmentRows.map((assignment) => [assignment.trip_place_id, assignment]),
     );
     const originalSources = new Map(contributions.map((entry) => [entry.trip_place_id, entry.source_url]));
+    const requesterIsOwner = members.some((member) => member.user_id === userId && member.role === "owner");
     const places = placeRows.map((row): TripPlaceDto => {
       const voters = members.filter((member) => votesByKey.has(`${row.id}:${member.user_id}`)).map((member) => ({
         memberUserId: member.user_id,
-        memberEmail: member.email,
+        memberEmail: requesterIsOwner || member.user_id === userId ? member.email : null,
         memberDisplayName: member.display_name,
       }));
       const suggestions = duplicateRows.filter((suggestion) =>

@@ -14,7 +14,7 @@ import type {
   UpdateDayWindowInput,
   TravelMode,
 } from "@along-the-way/contracts/day-plans";
-import { TRAVEL_MODES } from "@along-the-way/contracts/day-plans";
+import { MAX_DAY_TIMETABLE_STOPS, TRAVEL_MODES } from "@along-the-way/contracts/day-plans";
 import type { RouteObservationProvider } from "@along-the-way/contracts/planning-observations";
 import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
 import type { ItineraryItemDto, TimelineDayDto, TripSkeletonDto } from "@along-the-way/contracts/trip-skeleton";
@@ -46,18 +46,26 @@ import { hoursOn, type LookedUpHours, type PlaceHoursLookup } from "./opening-ho
 import { distributePlaces } from "./trip-distribution";
 import { tripPlanBasis } from "./trip-plan-basis";
 import { legFor, routeModesFor, taxiAlternative, walkLimitFor } from "./travel-modes";
+import { ProviderQuotaError } from "../trip-places/google-places-provider";
 
 /** A lookup that failed (or a place that never had one): hours unknown, worth retrying. */
 const FAILED_LOOKUP: LookedUpHours = { missing: "failed" };
+const QUOTA_LOOKUP: LookedUpHours = { missing: "quota" };
 
 const DAY_MINUTES = 24 * 60;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export interface DayPlanModule {
   /** A draft timetable for the day; computed on request, never stored. */
-  timetable(userId: string, tripId: string, dayId: string, input: CreateDayTimetableInput): Promise<DayTimetableDto>;
+  timetable(
+    userId: string,
+    tripId: string,
+    dayId: string,
+    input: CreateDayTimetableInput,
+    reservePlanningWork?: (cost: number) => Promise<void>,
+  ): Promise<DayTimetableDto>;
   /** A draft adding the wishlist places not yet on any day to days; computed on request, never stored. */
-  tripPlan(userId: string, tripId: string): Promise<TripPlanDto>;
+  tripPlan(userId: string, tripId: string, reservePlanningWork?: (cost: number) => Promise<void>): Promise<TripPlanDto>;
   getWindow(userId: string, tripId: string, dayId: string): Promise<SavedDayWindowDto>;
   applyOrder(
     userId: string,
@@ -252,14 +260,25 @@ export class PostgresDayPlanModule implements DayPlanModule {
     tripId: string,
     dayId: string,
     input: CreateDayTimetableInput,
+    reservePlanningWork?: (cost: number) => Promise<void>,
   ): Promise<DayTimetableDto> {
     const order = input?.order;
     if (order !== "current" && order !== "suggested" && order !== "custom") {
       throw new AppError("validation_error", "order must be current, suggested or custom");
     }
+    const requestedStops = (input.orderedTripPlaceIds?.length ?? 0)
+      + (input.insertTripPlaceId ? 1 : 0);
+    if (order === "custom" && requestedStops > MAX_DAY_TIMETABLE_STOPS) {
+      throw new AppError("validation_error", `A timetable may plan at most ${MAX_DAY_TIMETABLE_STOPS} stops`);
+    }
     const insertId = order === "custom" && input.insertTripPlaceId ? input.insertTripPlaceId.toLowerCase() : null;
     const { context, planned, stops, stopsById, hours, storedModes } = await this.prepareDraft(
-      userId, tripId, dayId, order, insertId ? [...(input.orderedTripPlaceIds ?? []), insertId] : input.orderedTripPlaceIds,
+      userId,
+      tripId,
+      dayId,
+      order,
+      insertId ? [...(input.orderedTripPlaceIds ?? []), insertId] : input.orderedTripPlaceIds,
+      reservePlanningWork,
     );
     // A member's draft says how each leg is travelled; the saved order uses what was saved.
     const legModes = order === "custom" ? validLegModes(input.legModes, stopsById) : storedModes;
@@ -321,7 +340,14 @@ export class PostgresDayPlanModule implements DayPlanModule {
   }
 
   /** Reads the day once and resolves its stops: the day's places, or a member's custom list. */
-  private async prepareDraft(userId: string, tripId: string, dayId: string, order: DayTimetableOrder, customList: string[] | undefined) {
+  private async prepareDraft(
+    userId: string,
+    tripId: string,
+    dayId: string,
+    order: DayTimetableOrder,
+    customList: string[] | undefined,
+    reservePlanningWork?: (cost: number) => Promise<void>,
+  ) {
     const before = await this.getWindow(userId, tripId, dayId);
     // Both reads authorize membership and resolve names, coordinates, and zones. Saved ways of
     // arrival are read before the version is checked again, so they belong to that version.
@@ -343,6 +369,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
       : planned.filter(located);
     const poolById = new Map(pool.map((place) => [place.id, place]));
     const stops = (order === "custom" ? customOrder(customList, poolById).map((id) => poolById.get(id)!) : pool).map(plannedStop);
+    await reservePlanningWork?.(Math.min(100, Math.max(1, stops.length)));
     const context = this.dayContext(skeleton, day, window, stops, null);
     const stopsById = new Map(stops.map((stop) => [stop.id, stop]));
     const hours = await this.hoursFor(stops.map((stop) => stop.place));
@@ -361,7 +388,11 @@ export class PostgresDayPlanModule implements DayPlanModule {
     return byDay;
   }
 
-  async tripPlan(userId: string, tripId: string): Promise<TripPlanDto> {
+  async tripPlan(
+    userId: string,
+    tripId: string,
+    reservePlanningWork?: (cost: number) => Promise<void>,
+  ): Promise<TripPlanDto> {
     // Fingerprint before and after the reads: a plan never claims a basis it was not built on.
     const basis = await tripPlanBasis(this.database, tripId);
     const [skeleton, places, arrivalModes] = await Promise.all([
@@ -382,6 +413,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
       date: null,
     }));
     const candidates = unplanned.filter(located).map(plannedStop);
+    await reservePlanningWork?.(Math.min(100, Math.max(1, candidates.length)));
     if (candidates.length === 0) {
       return { basis, days: [], unplaced };
     }
@@ -717,10 +749,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
     // mutation_requests.operation is varchar(80); two UUIDs leave room for a 6-character prefix.
     const operation = `dpw:${tripId.toLowerCase()}:${day}`;
     return this.database.transaction().execute(async (transaction) => {
-      const membership = await transaction.selectFrom("trip_members").select("role")
-        .where("trip_id", "=", tripId).where("user_id", "=", userId)
-        .where("removed_at", "is", null).executeTakeFirst();
-      if (!membership) throw new AppError("trip_not_found", "Trip not found", 404);
+      await requireScheduler(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replay as SavedDayWindowDto;
@@ -778,14 +807,14 @@ export class PostgresDayPlanModule implements DayPlanModule {
     try {
       return await this.placeHours.openingHours(place.providerPlaceId);
     } catch (reason) {
-      // The timetable still drafts without hours; record the failure so a broken key or quota is visible.
+      // The timetable still drafts without hours; keep quota separate so retry advice stays honest.
       console.error(JSON.stringify({
         event: "opening_hours_lookup_failed",
         tripPlaceId: place.id,
         providerPlaceId: place.providerPlaceId,
         error: reason instanceof Error ? reason.name : typeof reason,
       }));
-      return FAILED_LOOKUP;
+      return reason instanceof ProviderQuotaError ? QUOTA_LOOKUP : FAILED_LOOKUP;
     }
   }
 

@@ -32,6 +32,7 @@ import { PLACE_TYPES, type PlaceType } from "@along-the-way/contracts/trip-skele
 import { placeTypeFilterLabel } from "./locales/zh-TW/place-types";
 
 import { googleMapsPlaceUrl } from "./google-maps";
+import { safeExternalUrl } from "./external-url";
 import { useI18n, type Messages } from "./i18n";
 import { VoteControl, VoteVoters } from "./VoteControl";
 import { PlaceDetailContent } from "./PlaceDetailContent";
@@ -108,6 +109,7 @@ function isScheduledForRemovalPolicy(place: TripPlaceDto) {
 }
 interface TripPlaceWorkspaceProps {
   trip: TripDto;
+  accountId: string;
   request<T>(url: string, options?: RequestOptions): Promise<T>;
   placesRevision: number;
   onPlacesChanged(): void;
@@ -592,6 +594,7 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
 
 export function TripPlaceWorkspace({
   trip,
+  accountId,
   request,
   placesRevision,
   onPlacesChanged,
@@ -946,7 +949,7 @@ export function TripPlaceWorkspace({
     typeLabel: placeTypeFilterLabel(place.type),
     area: placeArea(place.address),
     mine: place.ownVote,
-  })), `along-the-way:place-filters:${trip.id}:wishlist`);
+  })), `along-the-way:place-filters:${accountId}:${trip.id}:wishlist`);
   const filteredPlaces = listedPlaces.filter((place) => filters.visibleIds.has(place.id));
   const placeNameCounts = new Map<string, number>();
   for (const place of listedPlaces) {
@@ -1057,6 +1060,9 @@ export function TripPlaceWorkspace({
     const available = placesById.has(place.id);
     const manageLocationHref = `?${new URLSearchParams({ trip: trip.id, tab: "itinerary", segment: "daily", manage: "places" })}`;
     const duplicateSuggestions = duplicateSuggestionsByPlace.get(place.id) ?? [];
+    const sourceIsGoogleMaps = place.sourceUrl !== null
+      && /google\.[a-z.]+\/maps|maps\.google\.|goo\.gl\/maps|maps\.app\.goo\.gl/i.test(place.sourceUrl);
+    const sourceHref = safeExternalUrl(place.sourceUrl);
     return (
       <PlaceDetailContent
         tripId={trip.id}
@@ -1089,7 +1095,11 @@ export function TripPlaceWorkspace({
             {/* One way out to Google Maps; a source link that is itself Google Maps would only repeat it. */}
             <div className="pd-source-links mt-3">
               {place.provider === "google" && place.providerPlaceId ? <a className="pd-secondary" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><MapPin aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
-              {place.sourceUrl && !/google\.[a-z.]+\/maps|maps\.google\.|goo\.gl\/maps|maps\.app\.goo\.gl/i.test(place.sourceUrl) ? <a className="inline-flex min-h-11 items-center break-all text-sm font-bold text-accent-strong underline underline-offset-2" href={place.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
+              {place.sourceUrl && !sourceIsGoogleMaps
+                ? sourceHref
+                  ? <a className="inline-flex min-h-11 items-center break-all text-sm font-bold text-accent-strong underline underline-offset-2" href={sourceHref} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a>
+                  : <span className="inline-flex min-h-11 items-center text-sm font-bold">{t.workspace.openOriginalSource}</span>
+                : null}
             </div>
           </section>
           {available && place.votingAvailable && place.voters.length > 0 ? <section className="pd-detail-section"><VoteVoters voters={place.voters} /></section> : null}
@@ -1104,20 +1114,27 @@ export function TripPlaceWorkspace({
                   {([
                     [t.duplicates.thisOption, place],
                     [t.duplicates.otherOption, other],
-                  ] as const).map(([label, candidate]) => (
-                    <section key={label} className="rounded-lg border border-ink/10 p-3" aria-label={label}>
-                      <span className="text-xs font-bold text-muted-foreground">{label}</span>
-                      {candidate ? (
-                        <>
-                          <h5 className="text-xl font-semibold">{candidate.name}</h5>
-                          <p className="text-sm">{t.placeType[candidate.type]}・{candidate.address ?? t.workspace.unknownAddress}</p>
-                          <p className="mt-1 text-sm text-muted-foreground">{candidate.factsSource === "provider" ? t.duplicates.providerFacts : t.duplicates.memberFacts}</p>
-                          {candidate.notes ? <p className="mt-1 whitespace-pre-wrap break-words text-sm">{candidate.notes}</p> : null}
-                          {candidate.sourceUrl ? <a className="mt-1 block break-all text-sm underline underline-offset-2" href={candidate.sourceUrl} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a> : null}
-                        </>
-                      ) : <p className="mt-1 text-sm text-muted-foreground">{t.duplicates.unavailable}</p>}
-                    </section>
-                  ))}
+                  ] as const).map(([label, candidate]) => {
+                    const candidateSourceHref = safeExternalUrl(candidate?.sourceUrl ?? null);
+                    return (
+                      <section key={label} className="rounded-lg border border-ink/10 p-3" aria-label={label}>
+                        <span className="text-xs font-bold text-muted-foreground">{label}</span>
+                        {candidate ? (
+                          <>
+                            <h5 className="text-xl font-semibold">{candidate.name}</h5>
+                            <p className="text-sm">{t.placeType[candidate.type]}・{candidate.address ?? t.workspace.unknownAddress}</p>
+                            <p className="mt-1 text-sm text-muted-foreground">{candidate.factsSource === "provider" ? t.duplicates.providerFacts : t.duplicates.memberFacts}</p>
+                            {candidate.notes ? <p className="mt-1 whitespace-pre-wrap break-words text-sm">{candidate.notes}</p> : null}
+                            {candidate.sourceUrl
+                              ? candidateSourceHref
+                                ? <a className="mt-1 block break-all text-sm underline underline-offset-2" href={candidateSourceHref} rel="noreferrer" target="_blank">{t.workspace.openOriginalSource}</a>
+                                : <span className="mt-1 block text-sm">{t.workspace.openOriginalSource}</span>
+                              : null}
+                          </>
+                        ) : <p className="mt-1 text-sm text-muted-foreground">{t.duplicates.unavailable}</p>}
+                      </section>
+                    );
+                  })}
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   {canSchedule || !mergeIsOwnerOnly ? <button className="min-h-11 rounded-lg bg-accent px-3 font-bold text-ink-strong outline-none hover:bg-accent/80 focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={!other} onClick={() => {

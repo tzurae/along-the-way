@@ -20,6 +20,12 @@ export class TokenIssuer {
       .digest("base64url");
   }
 
+  // Domain separation prevents the short code from disclosing any part of the bearer token.
+  code(identifier: string) {
+    const bytes = createHmac("sha256", this.secret).update(`login-code:${identifier}`).digest();
+    return (bytes.readUInt32BE(0) % 1_000_000).toString().padStart(6, "0");
+  }
+
   matches(identifier: string, candidate: string) {
     const expected = Buffer.from(this.issue(identifier));
     const actual = Buffer.from(candidate);

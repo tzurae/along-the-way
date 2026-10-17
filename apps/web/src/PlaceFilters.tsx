@@ -222,16 +222,36 @@ export function PlaceFilterEmpty({ onClear }: { onClear(): void }) {
 }
 
 /**
- * The ward or city of an address, for grouping places by area: 「…東山区清水1丁目…」→「東山区」,
- * 「… Higashiyama Ward, Kyoto, 605-0862」→「Higashiyama Ward」. Null when nothing recognisable.
+ * Derive only a Japanese municipality-level area. Japanese addresses are parsed
+ * structurally: remove the country/postal prefix, cross the prefecture boundary,
+ * then read a municipality and its optional ward. 市/町/村 are not delimiters:
+ * they can be part of the real administrative name (四日市市, 中村区).
+ * Romanized addresses normalize Ward/-ku/City/Town/District components. Country
+ * names, postal codes and street text are never fallback labels.
  */
 export function placeArea(address: string | null): string | null {
   if (!address) return null;
-  // Japanese form: the ward after the city (京都市東山区 → 東山区), else the city or town itself.
-  const ward = address.match(/市([^\s、,，市区]+区)/u)?.[1] ?? address.match(/([^\s、,，都道府県〒\d-]+[市町村])/u)?.[1];
-  if (ward) return ward;
-  const parts = address.split(/[,，]/).map((part) => part.trim()).filter((part) => part && !/^[〒\d\s-]+$/u.test(part) && !/^(Japan|日本)$/u.test(part));
-  const english = parts.find((part) => /\b(Ward|ku|City|Town|District)\b/i.test(part));
-  if (english) return english.replace(/\s*\d{3}-?\d{4}.*$/u, "");
-  return parts.length >= 2 ? parts[parts.length - 2]! : null;
+  const compact = address.replace(/[\s　]/gu, "")
+    .replace(/^(?:(?:日本)|(?:〒?\d{3}-?\d{4}))+/u, "");
+  const prefecture = compact.match(/^(?:東京都|北海道|京都府|大阪府|.{2,3}?県)(.+)$/u);
+  const administrative = prefecture?.[1] ?? compact;
+  const cityWard = administrative.match(/^(.+市)(.+?[区區])/u)?.[2];
+  if (cityWard) return cityWard;
+  const city = administrative.match(/^(.+市)/u)?.[1];
+  if (city) return city;
+  const districtEnd = administrative.indexOf("郡");
+  const rural = districtEnd >= 0 ? administrative.slice(districtEnd + 1) : administrative;
+  const townOrVillage = rural.match(/^(.+[町村])/u)?.[1];
+  if (townOrVillage) return townOrVillage;
+  const specialWard = administrative.match(/^(.+?[区區])/u)?.[1];
+  if (specialWard) return specialWard;
+
+  const parts = address.split(/[,，]/).map((part) =>
+    part.trim().replace(/\s+(?:〒\s*)?\d{3}-?\d{4}.*$/u, "").trim(),
+  ).filter((part) =>
+    part !== ""
+    && !/^(?:Japan|日本)$/iu.test(part)
+    && !/^(?:〒\s*)?\d{3}-?\d{4}$/u.test(part));
+  const area = parts.find((part) => /(?:\s+Ward|-ku|\s+(?:City|Town|District))$/iu.test(part));
+  return area?.replace(/(?:\s+Ward|-ku|\s+(?:City|Town|District))$/iu, "").trim() || null;
 }

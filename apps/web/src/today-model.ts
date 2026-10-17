@@ -80,7 +80,11 @@ export function createTodayModel(trip: TripDto, skeleton: TripSkeletonDto, place
         return { role: endpoint.role, instant: endpoint.instant, timeZone: endpoint.timeZone,
           place: place ? { id: place.id, name: place.name, address: place.address, latitude: place.latitude, longitude: place.longitude } : null };
       }),
-      participants: item.participants?.map((person) => ({ id: person.memberId, name: person.displayName ?? person.email, removed: person.removed })) ?? null,
+      participants: item.participants?.map((person) => ({
+        id: person.memberId,
+        name: person.displayName ?? person.email ?? (person.removed ? "前成員" : "成員"),
+        removed: person.removed,
+      })) ?? null,
       locked: item.lockedAt !== null,
       constraints: item.constraints.map((constraint) => ({ type: constraint.type, status: constraint.status, minutes: constraint.minimumBufferMinutes })),
       facts: itemFacts(item), notes: item.notes, sourceUrl: item.sourceUrl,

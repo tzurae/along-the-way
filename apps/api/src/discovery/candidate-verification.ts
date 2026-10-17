@@ -1,6 +1,7 @@
 import type { ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
 
 import {
+  ProviderQuotaError,
   ProviderUnavailableError,
   type RatedPlaceCandidate,
   type RatedPlaceLookup,
@@ -108,6 +109,7 @@ export async function verifyResearchedCandidates(input: {
     try {
       return await input.placeLookup.lookup(query, { languageCode });
     } catch (error) {
+      if (error instanceof ProviderQuotaError) throw error;
       if (!(error instanceof ProviderUnavailableError)) throw error;
       unavailable += 1;
       return null;

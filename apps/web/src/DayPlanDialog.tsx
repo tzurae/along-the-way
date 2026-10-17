@@ -1032,6 +1032,7 @@ export function DayPlanDialog({
                   <ChevronDown aria-hidden="true" />
                 </span>
               </summary>
+              {canArrange ? (
               <form
                 hidden={Boolean(resolution.conflict)}
                 className="route-constraints"
@@ -1070,6 +1071,7 @@ export function DayPlanDialog({
                   {t.dayPlan.rePlan}
                 </Button>
               </form>
+              ) : null}
             </details>
             <div className="route-versions">
               {savedVersion()}

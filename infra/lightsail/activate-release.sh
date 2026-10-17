@@ -2,7 +2,7 @@
 set -eu
 
 release_id="${1:?Pass a release id}"
-app_root="/opt/along-the-way"
+app_root="${APP_ROOT:-/opt/along-the-way}"
 release_dir="$app_root/releases/$release_id"
 release_env="$app_root/shared/env/$release_id.env"
 
@@ -22,6 +22,10 @@ esac
   exit 1
 }
 
+release_dir=$(CDPATH= cd -- "$release_dir" && pwd -P)
+release_env=$(readlink -f "$release_env")
+
+
 old_release=""
 old_env=""
 if [ -L "$app_root/current" ]; then
@@ -31,13 +35,27 @@ if [ -L "$app_root/current-env" ]; then
   old_env=$(readlink -f "$app_root/current-env")
 fi
 
-compose_has_worker() {
+compose_has_service() {
   release="$1"
   environment_file="$2"
+  service="$3"
   docker compose \
     --env-file "$environment_file" \
     --file "$release/compose.yaml" \
-    config --services | grep -qx worker
+    config --services | grep -qx "$service"
+}
+
+remove_inactive_mailpit() {
+  if compose_has_service "$release_dir" "$release_env" mailpit; then
+    return 0
+  fi
+
+  # Compose leaves containers for services hidden by an inactive profile.
+  docker compose \
+    --profile local \
+    --env-file "$release_env" \
+    --file "$release_dir/compose.yaml" \
+    rm --stop --force mailpit
 }
 
 restore_previous() {
@@ -56,7 +74,7 @@ restore_previous() {
       return 1
     fi
 
-    if compose_has_worker "$release_dir" "$release_env"; then
+    if compose_has_service "$release_dir" "$release_env" worker; then
       docker compose \
         --env-file "$release_env" \
         --file "$release_dir/compose.yaml" \
@@ -70,8 +88,11 @@ restore_previous() {
       return 1
     fi
     old_services="api web caddy"
-    if compose_has_worker "$old_release" "$old_env"; then
+    if compose_has_service "$old_release" "$old_env" worker; then
       old_services="$old_services worker"
+    fi
+    if compose_has_service "$old_release" "$old_env" mailpit; then
+      old_services="$old_services mailpit"
     fi
     if ! docker compose \
       --env-file "$old_env" \
@@ -81,7 +102,7 @@ restore_previous() {
       return 1
     fi
 
-    old_site_address=$(sed -n 's/^SITE_ADDRESS=//p' "$old_env" | tail -n 1)
+    old_site_address="${READY_ADDRESS:-$(sed -n 's/^SITE_ADDRESS=//p' "$old_env" | tail -n 1)}"
     curl \
       --connect-timeout 5 \
       --max-time 10 \
@@ -103,7 +124,7 @@ if ! docker compose \
   exit 1
 fi
 
-site_address=$(sed -n 's/^SITE_ADDRESS=//p' "$release_env" | tail -n 1)
+site_address="${READY_ADDRESS:-$(sed -n 's/^SITE_ADDRESS=//p' "$release_env" | tail -n 1)}"
 if [ -z "$site_address" ] || ! curl \
   --connect-timeout 5 \
   --max-time 10 \
@@ -118,6 +139,11 @@ if [ -z "$site_address" ] || ! curl \
   exit 1
 fi
 
+if ! remove_inactive_mailpit; then
+  restore_previous
+  exit 1
+fi
+
 if [ -n "$old_release" ] && [ "$old_release" != "$release_dir" ]; then
   ln -sfn "$old_release" "$app_root/previous"
 fi
@@ -126,5 +152,12 @@ if [ -n "$old_env" ] && [ "$old_env" != "$release_env" ]; then
 fi
 ln -sfn "$release_dir" "$app_root/current"
 ln -sfn "$release_env" "$app_root/current-env"
+if [ "$(id -u)" -eq 0 ]; then
+  APP_ROOT="$app_root" sh "$release_dir/infra/lightsail/install-backup-timer.sh"
+else
+  sudo env APP_ROOT="$app_root" \
+    sh "$release_dir/infra/lightsail/install-backup-timer.sh"
+fi
+APP_ROOT="$app_root" sh "$release_dir/infra/lightsail/prune-release-env.sh"
 
 printf 'Activated %s at %s\n' "$release_id" "$site_address"

@@ -41,6 +41,7 @@ import { TripPlanDialog } from "./TripPlanDialog";
 import { useI18n, type Messages } from "./i18n";
 import { canArrangeItinerary } from "./trip-permissions";
 import { ApiRequestError } from "./api-error";
+import { safeExternalUrl } from "./external-url";
 import "./plan-route.css";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 
@@ -156,7 +157,7 @@ function ParticipantSummary({ item }: { item: ItineraryItemDto }) {
         <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
           {item.participants.map((participant) => (
             <li key={participant.memberId} className="min-w-0 [overflow-wrap:anywhere]">
-              {participant.displayName ?? participant.email}
+              {participant.displayName ?? participant.email ?? (participant.removed ? "前成員" : "成員")}
               {participant.removed ? `・${t.tripSkeleton.participantRemoved}` : ""}
             </li>
           ))}
@@ -966,6 +967,7 @@ export function TripSkeletonWorkspace({
   function itemDetail(item: ItineraryItemDto, continuation = false) {
     const start = itemEndpoint(item, "start");
     const end = displayedEndEndpoint(item, start);
+    const sourceHref = safeExternalUrl(item.sourceUrl);
     return (
       <article key={`${item.id}-${continuation ? "continuation" : "full"}`} className="itinerary-card" data-item-id={item.id}>
         {error ? <p role="alert" className="pd-notice">{error}</p> : null}
@@ -999,10 +1001,16 @@ export function TripSkeletonWorkspace({
               </div>
             ) : null}
             {item.notes ? <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{item.notes}</p> : null}
-            {item.sourceUrl ? <a className="mt-2 inline-block text-sm font-semibold text-accent-strong underline" href={item.sourceUrl} rel="noreferrer" target="_blank">{t.tripSkeleton.officialSource}</a> : null}
+            {item.sourceUrl
+              ? sourceHref
+                ? <a className="mt-2 inline-block text-sm font-semibold text-accent-strong underline" href={sourceHref} rel="noreferrer" target="_blank">{t.tripSkeleton.officialSource}</a>
+                : <span className="mt-2 inline-block text-sm font-semibold">{t.tripSkeleton.officialSource}</span>
+              : null}
             <div className="mt-4 flex flex-wrap gap-2">
               {item.lockedAt ? (
-                <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => { setError(""); setUnlockingItem(item); }}><Unlock /> {t.tripSkeleton.unlock}</Button>
+                trip.role === "owner" ? (
+                  <Button size="sm" variant="outline" disabled={busyId === item.id} onClick={() => { setError(""); setUnlockingItem(item); }}><Unlock /> {t.tripSkeleton.unlock}</Button>
+                ) : null
               ) : (
                 <>
                   {item.type === "flight" || item.type === "lodging" ? (
