@@ -23,16 +23,22 @@ export function walkLimitFor(mode: TravelMode, dayWalkLimit: number) {
   return mode === "walk" ? dayWalkLimit : PREFERRED_WALK_MINUTES;
 }
 
+/** Why a provider gave no transit answer this time, when asking again later may succeed. */
+const TEMPORARY_TRANSIT_FAILURES: ReadonlySet<string> = new Set(["quota", "timeout", "provider_unavailable"]);
+
 /**
  * One leg from what the providers observed. Taxi is the drive plus time to get a cab.
- * Otherwise walk within the limit, else transit; with neither, the leg is unknown, never a
- * long walk standing in for missing transit.
+ * Otherwise walk within the limit, else transit. A long walk never stands in for missing transit.
+ * When transit is missing only because a provider is out of quota or failing for now and
+ * `straightLineMinutes` is given, the leg takes it as an estimated train ride, keeping why the real
+ * time is missing in `unavailableReason`; a provider that found no route leaves the leg unknown.
  */
 export function legFor(
   observations: RouteObservation[],
   names: { fromName: string; toName: string },
   mode: TravelMode,
   walkLimit: number,
+  straightLineMinutes?: number,
 ): DayLegDto {
   const reasons = [...new Set(observations.flatMap((entry) => entry.status === "unavailable" ? [entry.reason] : []))];
   if (mode === "taxi") {
@@ -51,6 +57,21 @@ export function legFor(
   const walking = firstAvailable(observations, "walking");
   const transit = firstAvailable(observations, "transit");
   const chosen = walking && walking.durationMinutes <= walkLimit ? walking : transit;
+  const transitFailures = observations.flatMap((entry) =>
+    entry.mode === "transit" && entry.status === "unavailable" ? [entry.reason] : []);
+  const temporary = transitFailures.filter((reason) => TEMPORARY_TRANSIT_FAILURES.has(reason));
+  if (!chosen && straightLineMinutes !== undefined && temporary.length > 0 && !transitFailures.includes("no_route")) {
+    return {
+      ...names,
+      mode: "transit",
+      durationMinutes: straightLineMinutes,
+      walkingMinutes: walking?.durationMinutes ?? null,
+      transitMinutes: null,
+      estimated: true,
+      attribution: null,
+      unavailableReason: [...new Set(temporary)].join(", "),
+    };
+  }
   return {
     ...names,
     mode: chosen ? (chosen.mode === "walking" ? "walking" : "transit") : null,

@@ -71,6 +71,8 @@ function legSummary(leg: DayLegDto, t: Messages["timetable"]) {
   if (leg.mode === null) return t.estimatedTravelWithoutLocation(leg.durationMinutes);
   if (leg.mode === "walking") return t.walk(leg.durationMinutes);
   if (leg.mode === "taxi") return t.taxi(leg.durationMinutes);
+  // Transit with a reason it is missing: the providers gave no time, so this is a straight-line estimate.
+  if (leg.unavailableReason !== null) return t.trainEstimate(leg.durationMinutes);
   const walk = leg.walkingMinutes === null ? "" : `・${t.walkingTime(leg.walkingMinutes)}`;
   const average = leg.estimated ? `（${t.average}）` : "";
   return `${t.train(leg.durationMinutes)}${average}${walk}`;

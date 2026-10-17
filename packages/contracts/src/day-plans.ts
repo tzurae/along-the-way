@@ -74,9 +74,10 @@ export interface DayLegDto {
   durationMinutes: number | null;
   walkingMinutes: number | null;
   transitMinutes: number | null;
-  /** Transit duration is an average, not a timetable. */
+  /** Duration is an average or an estimate, not a timetable. */
   estimated: boolean;
   attribution: string | null;
+  /** Why no provider time was found; with a duration, that duration is an estimate standing in for it. */
   unavailableReason: string | null;
 }
 

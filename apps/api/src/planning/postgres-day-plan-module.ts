@@ -15,7 +15,7 @@ import type {
   TravelMode,
 } from "@along-the-way/contracts/day-plans";
 import { MAX_DAY_TIMETABLE_STOPS, TRAVEL_MODES } from "@along-the-way/contracts/day-plans";
-import type { RouteObservationProvider } from "@along-the-way/contracts/planning-observations";
+import type { RouteMode, RouteObservation, RouteObservationProvider } from "@along-the-way/contracts/planning-observations";
 import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
 import type { ItineraryItemDto, TimelineDayDto, TripSkeletonDto } from "@along-the-way/contracts/trip-skeleton";
 import type { Kysely, Transaction } from "kysely";
@@ -43,7 +43,7 @@ import {
   type TimetableStop,
 } from "./day-timetable";
 import { hoursOn, type LookedUpHours, type PlaceHoursLookup } from "./opening-hours";
-import { distributePlaces } from "./trip-distribution";
+import { distributePlaces, estimatedTravelMinutes } from "./trip-distribution";
 import { tripPlanBasis } from "./trip-plan-basis";
 import { legFor, routeModesFor, taxiAlternative, walkLimitFor } from "./travel-modes";
 import { ProviderQuotaError } from "../trip-places/google-places-provider";
@@ -892,7 +892,10 @@ export class PostgresDayPlanModule implements DayPlanModule {
   /**
    * One leg, travelled `mode`: taxi drives (plus the wait); transit and walk walk when the walk is
    * within `walkLimit` and otherwise take transit. A long walk never stands in for missing transit:
-   * the leg is then unknown, so the day is not judged on a two-hour walk nobody would take.
+   * the leg is then unknown, so the day is not judged on a two-hour walk nobody would take. Transit
+   * missing only because a provider is out of quota or failing for now is estimated from the
+   * straight-line distance instead, marked as such. Transit is asked for only after the walk turns
+   * out longer than `walkLimit` (or unknown): a short walk needs no train time, and asking costs quota.
    */
   private async leg(
     from: RoutePoint,
@@ -901,15 +904,23 @@ export class PostgresDayPlanModule implements DayPlanModule {
     mode: TravelMode,
     walkLimit: number,
   ): Promise<DayLegDto> {
-    const query = {
+    const ask = async (modes: RouteMode[]) => (await Promise.all(this.routeProviders.map((provider) => provider.observe({
       origin: { placeId: from.id, latitude: from.latitude, longitude: from.longitude },
       destination: { placeId: to.id, latitude: to.latitude, longitude: to.longitude },
       departureTime,
-      modes: routeModesFor(mode),
-    };
-    const observations = (await Promise.all(
-      this.routeProviders.map((provider) => provider.observe(query)),
-    )).flat();
-    return legFor(observations, { fromName: from.name, toName: to.name }, mode, walkLimit);
+      modes,
+    })))).flat();
+    const modes = routeModesFor(mode);
+    let observations: RouteObservation[];
+    if (!modes.includes("walking")) {
+      observations = await ask(modes);
+    } else {
+      observations = await ask(["walking"]);
+      const walk = observations.find((entry) => entry.mode === "walking" && entry.status === "available");
+      if (!walk || walk.status !== "available" || walk.durationMinutes > walkLimit) {
+        observations = [...observations, ...await ask(modes.filter((entry) => entry !== "walking"))];
+      }
+    }
+    return legFor(observations, { fromName: from.name, toName: to.name }, mode, walkLimit, estimatedTravelMinutes(from, to));
   }
 }

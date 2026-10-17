@@ -95,7 +95,7 @@ Add these environment values:
 | Optional secret | `STAGING_GOOGLE_MAPS_API_KEY` | Server-side Google key with Places API (New) and Routes API enabled; without it place search and Google routes are unavailable |
 | Optional secret | `STAGING_OPENAI_API_KEY` | OpenAI API key for AI 建議; without it AI research is unavailable |
 | Optional variable | `STAGING_OPENAI_MODEL` | OpenAI model ID for AI 建議; defaults to the Compose default when unset |
-| Optional secret | `STAGING_RAPIDAPI_KEY` | RapidAPI key subscribed to NAVITIME Route (totalnavi); without it Japan transit routes are unavailable |
+| Optional secret | `STAGING_RAPIDAPI_KEY` | RapidAPI key subscribed to NAVITIME Route (totalnavi), or several separated by commas (each on its own plan quota, tried in order); without it Japan transit routes are unavailable |
 
 Get the SSH host key from a trusted Lightsail console session on the instance,
 not from an unauthenticated network scan:

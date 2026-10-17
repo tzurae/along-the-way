@@ -21,6 +21,7 @@ export const timetable = {
   taxi: (minutes: number) => `計程車約 ${minutes} 分（含等車）`,
   walkingTime: (minutes: number) => `步行 ${minutes} 分`,
   train: (minutes: number) => `電車 ${minutes} 分`,
+  trainEstimate: (minutes: number) => `電車約 ${minutes} 分（估計：交通時間查不到，依直線距離）`,
   average: "平均",
   leave: (name: string) => `從「${name}」出發`,
   arriveAndWaitForOpening: (time: string, minutes: number) => `抵達 ${time}・等候 ${minutes} 分至開門`,

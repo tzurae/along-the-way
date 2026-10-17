@@ -292,6 +292,11 @@ null follows the day). Legs back to the lodging use the day's way.
 - 計程車 `taxi`: the drive plus 5 minutes to get a cab.
 - With no transit beyond walking distance the leg is unknown (交通時間查不到);
   a long walk never stands in for it.
+- When transit is missing only because a provider is out of quota, timed out or
+  failed, the leg is a train ride estimated from the straight-line distance
+  (15 minutes plus 2 per km; walking pace up to 1.2 km), shown as
+  「電車約 N 分（估計：交通時間查不到，依直線距離）」 with `unavailableReason`
+  kept. A provider that found no route still leaves the leg unknown.
 
 `POST …/days/:dayId/timetable` with `order: "custom"` accepts `legModes`
 (keyed by the place a leg reaches) and, when a place has just been dropped in,
@@ -310,12 +315,17 @@ whole-trip planning consume `route_planning` units equal to the number of stops
 or candidates (at most 100 units per request), per account and client IP.
 Every actual outbound request also atomically reserves from provider-specific
 UTC-day budgets: 900 globally, 450 per account, and 600 per client IP for each
-of Google Routes, Google Places, and NAVITIME. A week of day planning makes a few
+of Google Routes and Google Places. A week of day planning makes a few
 hundred lookups, so one account may use half of the day's budget: the owner can
 plan, and no other single account can take all of it. Raising the Google quota
-in the Cloud console is the way to give everyone more.
-Exhaustion prevents the network call. NAVITIME is used only when both endpoints
-are in Japan. Google Places photo-metadata reads are additionally capped at
+in the Cloud console is the way to give everyone more. NAVITIME's RapidAPI
+BASIC plan allows 500 requests a month per key, so its budget is 15 a day per
+key in total. `RAPIDAPI_KEY` may list several keys separated by commas; they are
+tried in order. Exhaustion prevents the network call. NAVITIME is used only when
+both endpoints are in Japan. After a key answers 429 for its plan quota, the API
+process sends it nothing more until the next UTC day (any other 429: one
+minute) and the same leg goes to the next key.
+Google Places photo-metadata reads are additionally capped at
 300/hour per account and 600/hour per IP. Google/NAVITIME HTTP 429 and a local
 provider-budget refusal surface as `quota`; opening-hours quota displays
 「Google 今日額度已用完，營業時間暫時查不到」.
@@ -324,7 +334,15 @@ The rules, fifteen blind-derived scenarios and open questions are in
 [`docs/day-scheduling-scenarios.md`](docs/day-scheduling-scenarios.md).
 `FAKE_EXTERNAL_DATA=1` (local and browser E2E only) replaces route and
 opening-hours providers with deterministic offline data; never set it in
-production.
+production. Automated tests and CI never reach Google or NAVITIME, but a local
+stack with real keys does: give it its own RapidAPI key, never the production
+one, and run browser verification with `FAKE_EXTERNAL_DATA=1` unless real
+routes are what is being verified.
+
+A leg asks for transit only after its walk is longer than the walk limit (or
+unknown). The API process remembers each NAVITIME answer (route or no route)
+for 24 hours by endpoints and departure, so redrafting a day reuses it; quota
+refusals and failures are not remembered.
 
 Flights and lodging are reached from the 行程 navigation: on desktop the rail
 shows 總覽／航班／住宿 under 行程; on mobile the same three appear as a segment

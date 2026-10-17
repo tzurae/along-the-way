@@ -20,6 +20,7 @@ Each pair of places has: walk minutes, transit minutes (or "none" = no transit),
 
 - 大眾運輸 (transit): if walk ≤ 15 minutes → walk; otherwise → transit minutes; if transit is "none" → the leg's time is unknown (never substitute a long walk).
 - 盡量走路 (walk) with the day's walk limit L: if walk ≤ L → walk; otherwise transit; if transit is "none" → unknown.
+- Transit missing only because a provider is out of quota or failing for now (not "none"): the leg is an estimated train ride from the straight-line distance (15 minutes + 2 per km), labelled 估計.
 - 計程車 (taxi): drive minutes + 5 (waiting for the cab).
 
 ### Placing places

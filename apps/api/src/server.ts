@@ -68,7 +68,7 @@ const dayPlans = new PostgresDayPlanModule({
   routeProviders: fakeExternalData ? [new FakeRouteProvider()] : [
     new NavitimeRoutesProvider({
       apiKey: process.env.RAPIDAPI_KEY,
-      consumeBudget: () => rateLimiter.tryConsumePaidProvider("navitime"),
+      consumeBudget: (keyCount) => rateLimiter.tryConsumePaidProvider("navitime", keyCount),
     }),
     new GoogleRoutesProvider({
       apiKey: process.env.GOOGLE_MAPS_API_KEY,
