@@ -430,6 +430,8 @@ ln -s "$previous_env" "$rollback_root/current-env"
 mkdir -p "$rollback_root/systemd" "$rollback_root/fake-bin"
 cat >"$rollback_root/fake-bin/sudo" <<'EOF'
 #!/usr/bin/env sh
+# Activation uses non-interactive sudo; the stand-in runs the command as is.
+[ "${1:-}" = "-n" ] && shift
 exec "$@"
 EOF
 chmod 700 "$rollback_root/fake-bin/sudo"

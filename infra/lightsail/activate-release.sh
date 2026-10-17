@@ -152,12 +152,18 @@ if [ -n "$old_env" ] && [ "$old_env" != "$release_env" ]; then
 fi
 ln -sfn "$release_dir" "$app_root/current"
 ln -sfn "$release_env" "$app_root/current-env"
-if [ "$(id -u)" -eq 0 ]; then
-  APP_ROOT="$app_root" sh "$release_dir/infra/lightsail/install-backup-timer.sh"
-else
-  sudo env APP_ROOT="$app_root" \
-    sh "$release_dir/infra/lightsail/install-backup-timer.sh"
-fi
 APP_ROOT="$app_root" sh "$release_dir/infra/lightsail/prune-release-env.sh"
+
+# The release is live by now. Backups matter, but a host without systemd or passwordless sudo must
+# not turn a working deploy into a failed one: warn loudly and leave the release active.
+if [ "$(id -u)" -eq 0 ]; then
+  backup_install="APP_ROOT=$app_root sh $release_dir/infra/lightsail/install-backup-timer.sh"
+  if ! APP_ROOT="$app_root" sh "$release_dir/infra/lightsail/install-backup-timer.sh"; then
+    printf 'WARNING: nightly backup timer was not installed; run %s by hand\n' "$backup_install" >&2
+  fi
+elif ! sudo -n env APP_ROOT="$app_root" \
+  sh "$release_dir/infra/lightsail/install-backup-timer.sh"; then
+  printf 'WARNING: nightly backup timer was not installed (needs passwordless sudo and systemd)\n' >&2
+fi
 
 printf 'Activated %s at %s\n' "$release_id" "$site_address"
