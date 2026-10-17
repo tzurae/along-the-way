@@ -112,7 +112,7 @@ it("renders proposal behavior in the compact shared row without exposing the add
     return (init?.parse ? init.parse(value) : value) as T;
   };
 
-  const { container } = render(<DiscoveryWorkspace trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  const { container } = render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
   const heading = await screen.findByRole("heading", { name: "AI 建議" });
   const headingCopy = heading.closest(".pd-pagehead-copy")!;
   expect(within(headingCopy as HTMLElement).getByText("只要說明一次旅程需求，AI 就會研究可信來源、在 Google Maps 確認每個地點，並只顯示至少有兩個獨立來源推薦的地點。", { exact: true })).toBeInTheDocument();
@@ -130,6 +130,44 @@ it("renders proposal behavior in the compact shared row without exposing the add
   expect(within(row).getByRole("button", { name: "不要再推薦" })).toBeVisible();
   // AI 建議 go only into the itinerary; there is no path into 口袋名單.
   expect(within(row).queryByRole("button", { name: "加入口袋名單" })).not.toBeInTheDocument();
+});
+
+it("renders an unsafe discovery citation as text instead of an external link", async () => {
+  const unsafe = {
+    ...proposal,
+    recommendationSentences: [{ text: "市場適合散步。", evidenceIds: ["evidence-1"] }],
+    evidence: [{
+      id: "evidence-1",
+      kind: "web-source",
+      providerPlaceId: null,
+      sourceUrl: "javascript:alert(document.domain)",
+      title: "未受信任來源",
+      attribution: "Web",
+      observedAt: "2026-10-17T00:00:00Z",
+      expiresAt: null,
+      isStale: false,
+    }],
+  };
+  const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
+    let value: unknown;
+    if (path.endsWith("/discovery")) value = { discovery: { brief: null, latestRun: null, proposals: [unsafe], decided: [], modelAvailable: true, placeProviderAvailable: true } };
+    else if (path.endsWith("/trip-places")) value = { tripPlaces: [] };
+    else if (path.includes("/place-previews?")) value = { previews: [] };
+    else if (path.includes("/place-details?")) value = { detail: {
+      reference: { kind: "proposal", id: proposal.id }, canonicalPlaceId: null, name: proposal.name,
+      asOfDate: null, sections: [], sources: [], photos: [], googlePhotos: [],
+    } };
+    else throw new Error(`Unexpected request: ${path}`);
+    return (init?.parse ? init.parse(value) : value) as T;
+  };
+
+  render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  await waitFor(() => expect(document.querySelector(`[data-proposal-detail-trigger="${proposal.id}"]`)).not.toBeNull());
+  fireEvent.click(document.querySelector(`[data-proposal-detail-trigger="${proposal.id}"]`)!);
+  const detail = await screen.findByRole("dialog", { name: proposal.name });
+  const citation = within(detail).getByText("[1]");
+  expect(citation.tagName).toBe("SPAN");
+  expect(detail.querySelector('a[href^="javascript:"]')).toBeNull();
 });
 
 it("shows an accepted proposal's detail as reasons then location, without wishlist-only sections", async () => {
@@ -167,7 +205,7 @@ it("shows an accepted proposal's detail as reasons then location, without wishli
     return (init?.parse ? init.parse(value) : value) as T;
   };
 
-  render(<DiscoveryWorkspace trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
   await waitFor(() => expect(document.querySelector(`[data-proposal-detail-trigger="${proposal.id}"]`)).not.toBeNull());
   fireEvent.click(document.querySelector(`[data-proposal-detail-trigger="${proposal.id}"]`)!);
   const detail = await screen.findByRole("dialog", { name: "錦市場" });
@@ -225,7 +263,7 @@ it("opens proposal thumbnails during normal and selection modes without per-row 
   };
 
   const rendered = render(
-    <DiscoveryWorkspace trip={trip} request={requestWithPhoto(googlePhoto)} placesRevision={0} onPlacesChanged={vi.fn()} />,
+    <DiscoveryWorkspace accountId="account" trip={trip} request={requestWithPhoto(googlePhoto)} placesRevision={0} onPlacesChanged={vi.fn()} />,
   );
   const row = await waitFor(() => {
     const element = rendered.container.querySelector<HTMLElement>(`[data-discovery-proposal="${selectableProposal.name}"]`);
@@ -283,11 +321,11 @@ it("updates a discovery vote immediately, blocks a double tap, never lets a late
   };
 
   const rendered = render(
-    <DiscoveryWorkspace trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />,
+    <DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />,
   );
   const button = await screen.findByRole("button", { name: "想去，0 票" });
   rendered.rerender(
-    <DiscoveryWorkspace trip={trip} request={request} placesRevision={1} onPlacesChanged={vi.fn()} />,
+    <DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={1} onPlacesChanged={vi.fn()} />,
   );
   await waitFor(() => expect(discoveryReads).toBe(2));
 
@@ -341,7 +379,7 @@ it("restores a failed discovery vote, announces the exact error, and reuses its 
     return (init?.parse ? init.parse(value) : value) as T;
   };
 
-  render(<DiscoveryWorkspace trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
   const button = await screen.findByRole("button", { name: "想去，0 票" });
   fireEvent.click(button);
   expect(button).toHaveAttribute("aria-pressed", "true");

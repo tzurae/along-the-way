@@ -158,7 +158,7 @@ export interface FreeTimeDetails {
 export interface ItineraryParticipantDto {
   memberId: string;
   displayName: string | null;
-  email: string;
+  email: string | null;
   removed: boolean;
 }
 
@@ -377,7 +377,7 @@ function participantsValue(value: unknown): ItineraryParticipantDto[] | null {
     return {
       memberId,
       displayName: nullableString(participant.displayName),
-      email: stringValue(participant.email),
+      email: nullableString(participant.email),
       removed: participant.removed,
     };
   });

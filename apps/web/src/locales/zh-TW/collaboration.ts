@@ -6,7 +6,7 @@ export const collaboration = {
   accept: "接受目前版本", reapply: "重新套用我的修改", edit: "返回編輯",
   dismiss: "放棄修改並關閉",
   unavailable: "這個項目已被刪除或無法存取，不能重新套用。你的輸入仍保留在此。",
-  unknownActor: "旅程成員", unknownChange: "尚無可顯示的修改者紀錄", empty: "未填寫",
+  unknownActor: "成員", formerActor: "前成員", unknownChange: "尚無可顯示的修改者紀錄", empty: "未填寫",
   changedBy: (actor: string, time: string) => `${actor} 於 ${time} 修改`,
   version: (version: number) => `目前版本 ${version}`,
   entry: (index: number) => `第 ${index + 1} 筆`,

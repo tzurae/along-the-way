@@ -361,11 +361,11 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     userId: string,
     tripId: string,
   ): Promise<TripSkeletonDto> {
-    await this.requireMember(executor, userId, tripId);
+    const requesterRole = await this.requireMember(executor, userId, tripId);
     const [trip, places, items, dayRows] = await Promise.all([
       executor.selectFrom("trips").select("version").where("id", "=", tripId).executeTakeFirstOrThrow(),
       this.readPlaces(executor, tripId),
-      this.readItems(executor, tripId),
+      this.readItems(executor, userId, tripId, requesterRole),
       executor
         .selectFrom("trip_days")
         .select(["id", "date"])
@@ -719,11 +719,12 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedItem(replay);
-      const current = itemId ? await this.readItem(transaction, tripId, itemId) : undefined;
+      const current = itemId ? await this.readItem(transaction, userId, tripId, itemId) : undefined;
       if (current) {
         this.requireExpectedVersion(current.version, expectedVersion);
         this.requireUnlocked(current.lockedAt);
         if (current.type !== travel.type) throw new AppError("validation_error", "Item type does not match this route");
+        await requireScheduler(transaction, userId, tripId);
       } else {
         await this.incrementTripVersion(transaction, tripId, expectedVersion);
       }
@@ -749,6 +750,12 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       } else {
         input = await this.lodgingInputInTransaction(transaction, userId, tripId, travel.input, current?.type === "lodging" ? current : undefined);
       }
+      await this.requireSchedulerForNonTravelEndpoints(
+        transaction,
+        userId,
+        tripId,
+        this.inputEndpointPlaceIds(input.endpoints),
+      );
       let response: ItineraryItemDto;
       if (current) {
         const validated = await this.validateItem(transaction, tripId, input, current.id);
@@ -763,7 +770,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         await this.replaceEndpoints(transaction, tripId, current.id, validated.endpoints);
         await recordEvent(transaction, { tripId, actorId: userId, eventType: "itinerary_item.updated",
           targetType: "itinerary_item", targetId: current.id, summary: `Updated a ${travel.type} itinerary item` });
-        response = await this.readItem(transaction, tripId, current.id);
+        response = await this.readItem(transaction, userId, tripId, current.id);
       } else {
         response = await this.createItemInTransaction(transaction, userId, tripId, input);
       }
@@ -955,6 +962,12 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     const operation = `create_itinerary_item:${tripId}`;
     return this.database.transaction().execute(async (transaction) => {
       await this.requireMemberForMutation(transaction, userId, tripId);
+      await this.requireSchedulerForNonTravelEndpoints(
+        transaction,
+        userId,
+        tripId,
+        this.inputEndpointPlaceIds(input.endpoints),
+      );
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedItem(replay);
@@ -1003,7 +1016,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
           })),
         ).execute();
       }
-      const response = await this.readItem(transaction, tripId, created.id);
+      const response = await this.readItem(transaction, userId, tripId, created.id);
       await recordEvent(transaction, {
         tripId,
         actorId: userId,
@@ -1032,6 +1045,23 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       const current = await this.lockItemRow(transaction, tripId, itemId);
       this.requireExpectedVersion(current.version, input.expectedVersion);
       this.requireUnlocked(current.locked_at);
+      if (
+        input.type === "flight" ||
+        input.type === "lodging" ||
+        current.item_type === "flight" ||
+        current.item_type === "lodging"
+      ) {
+        await requireScheduler(transaction, userId, tripId);
+      }
+      await this.requireSchedulerForNonTravelEndpoints(
+        transaction,
+        userId,
+        tripId,
+        [
+          ...await this.itemEndpointPlaceIds(transaction, tripId, itemId),
+          ...this.inputEndpointPlaceIds(input.endpoints),
+        ],
+      );
       const validated = await this.validateItem(transaction, tripId, input, itemId);
       await transaction
         .updateTable("itinerary_items")
@@ -1058,7 +1088,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         targetId: itemId,
         summary: "Updated an itinerary item",
       });
-      const response = await this.readItem(transaction, tripId, itemId);
+      const response = await this.readItem(transaction, userId, tripId, itemId);
       await remember(transaction, userId, operation, key, response);
       return response;
     });
@@ -1081,6 +1111,15 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       const current = await this.lockItemRow(transaction, tripId, itemId);
       this.requireExpectedVersion(current.version, expectedVersion);
       this.requireUnlocked(current.locked_at);
+      if (current.item_type === "flight" || current.item_type === "lodging") {
+        await requireScheduler(transaction, userId, tripId);
+      }
+      await this.requireSchedulerForNonTravelEndpoints(
+        transaction,
+        userId,
+        tripId,
+        await this.itemEndpointPlaceIds(transaction, tripId, itemId),
+      );
       await this.replaceEndpoints(transaction, tripId, itemId, []);
       await transaction.deleteFrom("itinerary_items").where("id", "=", itemId).execute();
       await recordEvent(transaction, {
@@ -1134,6 +1173,17 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       this.requireExpectedVersion(item.version, expectedItemVersion);
       this.requireUnlocked(item.locked_at);
       const constraint = validateConstraint(input);
+      const count = await transaction.selectFrom("itinerary_constraints")
+        .select((builder) => builder.fn.countAll().as("count"))
+        .where("trip_id", "=", tripId)
+        .where("itinerary_item_id", "=", itemId)
+        .executeTakeFirstOrThrow();
+      if (Number(count.count) >= MAX_ITINERARY_ITEM_CONSTRAINTS) {
+        throw new AppError(
+          "validation_error",
+          `An itinerary item can have at most ${MAX_ITINERARY_ITEM_CONSTRAINTS} constraints`,
+        );
+      }
       await transaction.insertInto("itinerary_constraints").values({
         trip_id: tripId,
         itinerary_item_id: itemId,
@@ -1143,7 +1193,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         created_by: userId,
       }).execute();
       await this.incrementItemVersion(transaction, itemId);
-      const response = await this.readItem(transaction, tripId, itemId);
+      const response = await this.readItem(transaction, userId, tripId, itemId);
       await recordEvent(transaction, {
         tripId,
         actorId: userId,
@@ -1202,7 +1252,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         summary: "Updated an itinerary constraint",
         relatedTargetIds: [itemId],
       });
-      const response = await this.readItem(transaction, tripId, itemId);
+      const response = await this.readItem(transaction, userId, tripId, itemId);
       await remember(transaction, userId, operation, key, response);
       return response;
     });
@@ -1246,7 +1296,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         summary: "Deleted an itinerary constraint",
         relatedTargetIds: [itemId],
       });
-      const response = await this.readItem(transaction, tripId, itemId);
+      const response = await this.readItem(transaction, userId, tripId, itemId);
       await remember(transaction, userId, operation, key, response);
       return response;
     });
@@ -1263,14 +1313,17 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     const key = requireIdempotencyKey(rawKey);
     const operation = `${locked ? "il" : "in"}:${tripId}:${itemId}`;
     return this.database.transaction().execute(async (transaction) => {
-      await this.requireMemberForMutation(transaction, userId, tripId);
+      const role = await this.requireMemberForMutation(transaction, userId, tripId);
+      if (!locked && role !== "owner") {
+        throw new AppError("forbidden", "Only the trip owner can do that", 403);
+      }
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedItem(replay);
       const current = await this.lockItemRow(transaction, tripId, itemId);
       this.requireExpectedVersion(current.version, expectedVersion);
       if ((locked && current.locked_at) || (!locked && !current.locked_at)) {
-        const response = await this.readItem(transaction, tripId, itemId);
+        const response = await this.readItem(transaction, userId, tripId, itemId);
         await remember(transaction, userId, operation, key, response);
         return response;
       }
@@ -1288,7 +1341,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         targetId: itemId,
         summary: locked ? "Locked an itinerary item" : "Unlocked an itinerary item",
       });
-      const response = await this.readItem(transaction, tripId, itemId);
+      const response = await this.readItem(transaction, userId, tripId, itemId);
       await remember(transaction, userId, operation, key, response);
       return response;
     });
@@ -1321,6 +1374,46 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       .executeTakeFirst();
     if (!membership) throw new AppError("trip_not_found", "Trip not found", 404);
     return membership.role;
+  }
+
+  private inputEndpointPlaceIds(endpoints: unknown) {
+    if (!Array.isArray(endpoints)) return [];
+    return endpoints.flatMap((endpoint) =>
+      isRecord(endpoint) && typeof endpoint.placeId === "string" && UUID.test(endpoint.placeId)
+        ? [endpoint.placeId.toLowerCase()]
+        : []
+    );
+  }
+
+  private async itemEndpointPlaceIds(
+    transaction: Transaction<AlongTheWayDatabase>,
+    tripId: string,
+    itemId: string,
+  ) {
+    const endpoints = await transaction.selectFrom("itinerary_endpoints")
+      .select("place_id")
+      .where("trip_id", "=", tripId)
+      .where("itinerary_item_id", "=", itemId)
+      .execute();
+    return endpoints.map((endpoint) => endpoint.place_id);
+  }
+
+
+  private async requireSchedulerForNonTravelEndpoints(
+    transaction: Transaction<AlongTheWayDatabase>,
+    userId: string,
+    tripId: string,
+    placeIds: string[],
+  ) {
+    const uniqueIds = [...new Set(placeIds)];
+    if (uniqueIds.length === 0) return;
+    const wishlistPlace = await transaction.selectFrom("places")
+      .select("id")
+      .where("trip_id", "=", tripId)
+      .where("id", "in", uniqueIds)
+      .where("travel_only", "=", false)
+      .executeTakeFirst();
+    if (wishlistPlace) await requireScheduler(transaction, userId, tripId);
   }
 
   private async requireMember(executor: DatabaseExecutor, userId: string, tripId: string) {
@@ -1679,7 +1772,12 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     };
   }
 
-  private async readItems(executor: DatabaseExecutor, tripId: string) {
+  private async readItems(
+    executor: DatabaseExecutor,
+    userId: string,
+    tripId: string,
+    requesterRole?: "owner" | "editor",
+  ) {
     const rows = await executor.selectFrom("itinerary_items").selectAll()
       .where("trip_id", "=", tripId).orderBy("created_at").orderBy("id").execute();
     if (rows.length === 0) return [];
@@ -1697,6 +1795,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         .select([
           "participant.itinerary_item_id",
           "member.id as memberId",
+          "member.user_id as userId",
           "member.removed_at",
           "users.display_name as displayName",
           "users.email",
@@ -1733,13 +1832,16 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       });
       constraints.set(constraint.itinerary_item_id, values);
     }
+    const role = requesterRole ?? await this.requireMember(executor, userId, tripId);
     const participants = new Map<string, ItineraryParticipantDto[]>();
     for (const participant of participantRows) {
       const values = participants.get(participant.itinerary_item_id) ?? [];
       values.push({
         memberId: participant.memberId,
         displayName: participant.displayName,
-        email: participant.email,
+        email: participant.removed_at === null && (role === "owner" || participant.userId === userId)
+          ? participant.email
+          : null,
         removed: participant.removed_at !== null,
       });
       participants.set(participant.itinerary_item_id, values);
@@ -1767,8 +1869,8 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     }).item);
   }
 
-  private async readItem(executor: DatabaseExecutor, tripId: string, itemId: string) {
-    const items = await this.readItems(executor, tripId);
+  private async readItem(executor: DatabaseExecutor, userId: string, tripId: string, itemId: string) {
+    const items = await this.readItems(executor, userId, tripId);
     const item = items.find((candidate) => candidate.id === itemId);
     if (!item) throw new AppError("item_not_found", "Itinerary item not found", 404);
     return item;
@@ -1786,7 +1888,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     itemId: string,
   ) {
     const item = await transaction.selectFrom("itinerary_items")
-      .select(["version", "locked_at"])
+      .select(["version", "locked_at", "item_type"])
       .where("trip_id", "=", tripId)
       .where("id", "=", itemId)
       .forUpdate()

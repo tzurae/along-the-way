@@ -29,12 +29,13 @@ export interface PlaceHoursLookup {
 
 /**
  * Why hours are unknown: `none` the provider has no hours for the place, `failed` the lookup
- * failed (it may work on retry), `manual` the place did not come from the provider.
+ * failed (it may work on retry), `quota` today's provider budget is gone, `manual` the place did
+ * not come from the provider.
  */
-export type UnknownHoursCause = "none" | "failed" | "manual";
+export type UnknownHoursCause = "none" | "failed" | "quota" | "manual";
 
 /** What a lookup produced: the provider's hours, or why there are none to read. */
-export type LookedUpHours = PlaceOpeningHours | { missing: "failed" | "manual" };
+export type LookedUpHours = PlaceOpeningHours | { missing: "failed" | "quota" | "manual" };
 
 export type ClosedReason = "closed_that_day" | "temporarily_closed" | "permanently_closed";
 

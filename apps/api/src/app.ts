@@ -1,11 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import type { PostgresCollaborationModule } from "./private-trips/postgres-collaboration-module";
-import { conflictResolutionContext } from "./private-trips/postgres-private-trip-store";
+import { conflictResolutionContext, normalizeEmail } from "./private-trips/postgres-private-trip-store";
 import type {
   ConstraintInput,
   CreateItineraryItemInput,
@@ -36,6 +36,7 @@ import {
   type AuthenticatedUser,
   type CreateTripInput,
   type IdentityAccessModule,
+  type LoginResult,
   type ReadinessProbe,
   type TripWorkspaceModule,
 } from "./private-trips/private-trip-module";
@@ -53,10 +54,9 @@ import {
 } from "@along-the-way/contracts/place-details";
 import type { PlaceDetailModule } from "./place-details/place-detail-module";
 
-const SESSION_COOKIE = "along_the_way_session";
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
-interface AppDependencies {
+export interface AppDependencies {
   collaboration: PostgresCollaborationModule;
   dayPlans: DayPlanModule;
   discovery: DiscoveryModule;
@@ -363,10 +363,21 @@ export function createApp({
 }: AppDependencies) {
   const app = new Hono();
   const site = new URL(siteAddress);
+  if (site.protocol !== "https:" &&
+    !(site.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(site.hostname))) {
+    throw new Error("SITE_ADDRESS must use HTTPS, except HTTP on localhost, 127.0.0.1 or ::1.");
+  }
   const secureCookie = site.protocol === "https:";
+  const SESSION_COOKIE = secureCookie ? "__Host-along_the_way_session" : "along_the_way_session";
+  const LOGIN_NONCE_COOKIE = secureCookie ? "__Host-along_the_way_login_nonce" : "along_the_way_login_nonce";
   const expectedOrigin = site.origin;
   const activeEventStreams = new Map<string, number>();
   const maxEventStreamsPerAccount = 6;
+  const withPaidProviderIdentity = <T>(
+    context: Context,
+    userId: string,
+    work: () => Promise<T>,
+  ) => rateLimiter.withPaidProviderIdentity(clientIp(context), userId, work);
 
   function acquireEventStream(userId: string) {
     const active = activeEventStreams.get(userId) ?? 0;
@@ -392,6 +403,39 @@ export function createApp({
       sameSite: "Lax",
       path: "/",
       maxAge: SESSION_MAX_AGE_SECONDS,
+    });
+  }
+
+  function loginNonce(context: Context) {
+    const nonce = randomBytes(32).toString("base64url");
+    setCookie(context, LOGIN_NONCE_COOKIE, nonce, {
+      httpOnly: true, secure: secureCookie, sameSite: "Lax", path: "/", maxAge: 15 * 60,
+    });
+    return nonce;
+  }
+
+  function loginContext(context: Context, body: Record<string, unknown>) {
+    return {
+      nonce: getCookie(context, LOGIN_NONCE_COOKIE) ?? "",
+      sessionToken: getCookie(context, SESSION_COOKIE) ?? "",
+      confirm: body.confirm === true,
+    };
+  }
+
+  function loginResponse(context: Context, result: LoginResult) {
+    if ("confirmationRequired" in result) {
+      return context.json({
+        error: { code: "confirmation_required", message: "Confirm signing in on this device." },
+        targetEmail: result.targetEmail,
+        currentEmail: result.currentEmail,
+      }, 409);
+    }
+    refreshCookie(context, result.sessionToken);
+    deleteCookie(context, LOGIN_NONCE_COOKIE, { path: "/", secure: secureCookie, sameSite: "Lax" });
+    return context.json({
+      user: result.user,
+      ...(result.acceptedTripId ? { acceptedTripId: result.acceptedTripId } : {}),
+      ...(result.inviteOutcome ? { inviteOutcome: result.inviteOutcome } : {}),
     });
   }
 
@@ -459,9 +503,10 @@ export function createApp({
 
   app.post("/api/auth/magic-links", async (context) => {
     const body = await jsonBody(context);
-    const email = stringField(body, "email");
+    const email = normalizeEmail(stringField(body, "email"));
+    const nonce = loginNonce(context);
     await rateLimiter.consume("magic_link", clientIp(context), email);
-    await identityAccess.requestMagicLink(email);
+    await identityAccess.requestMagicLink(email, nonce);
     return context.json(
       {
         message:
@@ -474,9 +519,10 @@ export function createApp({
   app.post("/api/auth/invite-magic-links", async (context) => {
     const body = await jsonBody(context);
     const inviteToken = stringField(body, "inviteToken");
+    const nonce = loginNonce(context);
     const rateLimitKey = createHash("sha256").update(inviteToken).digest("hex");
     await rateLimiter.consume("magic_link", clientIp(context), rateLimitKey);
-    await identityAccess.requestInviteMagicLink(inviteToken);
+    await identityAccess.requestInviteMagicLink(inviteToken, nonce);
     return context.json(
       {
         message:
@@ -489,13 +535,18 @@ export function createApp({
   app.post("/api/auth/magic-links/consume", async (context) => {
     const body = await jsonBody(context);
     await rateLimiter.consume("magic_link_consume", clientIp(context));
-    const result = await identityAccess.consumeMagicLink(stringField(body, "token"));
-    refreshCookie(context, result.sessionToken);
-    return context.json({
-      user: result.user,
-      ...(result.acceptedTripId ? { acceptedTripId: result.acceptedTripId } : {}),
-      ...(result.inviteOutcome ? { inviteOutcome: result.inviteOutcome } : {}),
-    });
+    return loginResponse(context, await identityAccess.consumeMagicLink(
+      stringField(body, "token"), loginContext(context, body),
+    ));
+  });
+
+  app.post("/api/auth/magic-links/verify-code", async (context) => {
+    const body = await jsonBody(context);
+    const email = normalizeEmail(stringField(body, "email"));
+    await rateLimiter.consume("magic_link_code", clientIp(context), email);
+    return loginResponse(context, await identityAccess.verifyMagicLinkCode(
+      email, stringField(body, "code"), loginContext(context, body),
+    ));
   });
 
   app.get("/api/session", async (context) => {
@@ -515,12 +566,27 @@ export function createApp({
 
   app.post("/api/logout", async (context) => {
     const token = getCookie(context, SESSION_COOKIE) ?? "";
-    await identityAccess.logout(token);
+    let targetUserId: string | undefined;
+    if (await context.req.text()) {
+      const body = await jsonBody(context);
+      if (body.userId !== undefined) {
+        targetUserId = stringField(body, "userId");
+        if (!targetUserId) throw new AppError("validation_error", "userId must not be empty");
+      }
+    }
+    await identityAccess.logout(token, targetUserId);
     deleteCookie(context, SESSION_COOKIE, {
       path: "/",
       secure: secureCookie,
       sameSite: "Lax",
     });
+    return context.body(null, 204);
+  });
+
+  app.post("/api/logout-everywhere", async (context) => {
+    const { user } = await authenticated(context);
+    await identityAccess.logoutEverywhere(user.id);
+    deleteCookie(context, SESSION_COOKIE, { path: "/", secure: secureCookie, sameSite: "Lax" });
     return context.body(null, 204);
   });
 
@@ -661,13 +727,13 @@ export function createApp({
       if (!(error instanceof AppError) || error.code !== "rate_limited") throw error;
       includeGooglePhoto = false;
     }
-    const result = await placeDetails.getDetail(
+    const result = await withPaidProviderIdentity(context, user.id, () => placeDetails.getDetail(
       user.id,
       uuidParam(context, "tripId"),
       reference,
       date,
       includeGooglePhoto,
-    );
+    ));
     context.header("Cache-Control",
       includeGooglePhoto && !result.googleFallbackFailed ? "private, max-age=3600" : "private, no-store");
     return context.json({ detail: result.detail });
@@ -690,13 +756,13 @@ export function createApp({
       if (!(error instanceof AppError) || error.code !== "rate_limited") throw error;
       includeGooglePhoto = false;
     }
-    const result = await placeDetails.getPreviews(
+    const result = await withPaidProviderIdentity(context, user.id, () => placeDetails.getPreviews(
       user.id,
       uuidParam(context, "tripId"),
       kind,
       ids,
       includeGooglePhoto,
-    );
+    ));
     context.header("Cache-Control",
       includeGooglePhoto && !result.googleFallbackFailed ? "private, max-age=3600" : "private, no-store");
     return context.json({ previews: result.previews });
@@ -733,7 +799,7 @@ export function createApp({
     }
     const index = requestedIndex === "0" ? 0 : requestedIndex === "1" ? 1 : requestedIndex === "2" ? 2 : null;
     if (index === null) throw new AppError("validation_error", "index must be 0, 1, or 2");
-    const photo = await placeDetails.getGooglePhoto(
+    const photo = await withPaidProviderIdentity(context, user.id, () => placeDetails.getGooglePhoto(
       user.id,
       uuidParam(context, "tripId"),
       context.req.param("providerPlaceId"),
@@ -742,7 +808,7 @@ export function createApp({
       maxWidth,
       context.req.query("exp") ?? null,
       context.req.query("sig") ?? null,
-    );
+    ));
     return new Response(photo.bytes, { headers: {
       "Content-Type": photo.mediaType,
       "Content-Length": String(photo.bytes.byteLength),
@@ -797,12 +863,12 @@ export function createApp({
     await rateLimiter.consume("trip_content", clientIp(context), user.id);
     const body = await jsonBody(context);
     return context.json({
-      discovery: await discovery.generate(
+      discovery: await withPaidProviderIdentity(context, user.id, () => discovery.generate(
         user.id,
         uuidParam(context, "tripId"),
         idempotencyKey(context),
         { expectedBriefVersion: numberField(body, "expectedBriefVersion") },
-      ),
+      )),
     });
   });
 
@@ -880,11 +946,11 @@ export function createApp({
     await rateLimiter.consume("trip_content", clientIp(context), user.id);
     const body = await jsonBody(context);
     return context.json(
-      await tripPlaces.search(
+      await withPaidProviderIdentity(context, user.id, () => tripPlaces.search(
         user.id,
         uuidParam(context, "tripId"),
         stringField(body, "query"),
-      ),
+      )),
     );
   });
 
@@ -893,11 +959,11 @@ export function createApp({
     await rateLimiter.consume("trip_content", clientIp(context), user.id);
     const body = await jsonBody(context);
     return context.json(
-      await tripPlaces.resolveUrl(
+      await withPaidProviderIdentity(context, user.id, () => tripPlaces.resolveUrl(
         user.id,
         uuidParam(context, "tripId"),
         stringField(body, "url"),
-      ),
+      )),
     );
   });
 
@@ -905,12 +971,12 @@ export function createApp({
     const { user } = await authenticated(context);
     await rateLimiter.consume("trip_content", clientIp(context), user.id);
     const body = await jsonBody(context);
-    const tripPlace = await tripPlaces.add(
+    const tripPlace = await withPaidProviderIdentity(context, user.id, () => tripPlaces.add(
       user.id,
       uuidParam(context, "tripId"),
       idempotencyKey(context),
       tripPlaceInput(body),
-    );
+    ));
     return context.json({ tripPlace }, 201);
   });
 
@@ -1017,8 +1083,11 @@ export function createApp({
     "/api/trips/:tripId/trip-plan",
     async (context) => {
       const { user } = await authenticated(context);
-      await rateLimiter.consume("trip_content", clientIp(context), user.id);
-      const plan = await dayPlans.tripPlan(user.id, uuidParam(context, "tripId"));
+      const plan = await withPaidProviderIdentity(context, user.id, () => dayPlans.tripPlan(
+        user.id,
+        uuidParam(context, "tripId"),
+        (cost) => rateLimiter.consume("route_planning", clientIp(context), user.id, cost),
+      ));
       return context.json({ plan });
     },
   );
@@ -1053,9 +1122,8 @@ export function createApp({
     "/api/trips/:tripId/days/:dayId/timetable",
     async (context) => {
       const { user } = await authenticated(context);
-      await rateLimiter.consume("trip_content", clientIp(context), user.id);
       const body = await jsonBody(context);
-      const timetable = await dayPlans.timetable(
+      const timetable = await withPaidProviderIdentity(context, user.id, () => dayPlans.timetable(
         user.id,
         uuidParam(context, "tripId"),
         uuidParam(context, "dayId"),
@@ -1066,7 +1134,8 @@ export function createApp({
           ...(body.legModes === undefined ? {} : { legModes: objectBody(body.legModes) as CreateDayTimetableInput["legModes"] }),
           ...(body.taxiFallbackFor === undefined ? {} : { taxiFallbackFor: stringField(body, "taxiFallbackFor") }),
         },
-      );
+        (cost) => rateLimiter.consume("route_planning", clientIp(context), user.id, cost),
+      ));
       return context.json({ timetable });
     },
   );
@@ -1508,6 +1577,7 @@ export function createApp({
       JSON.stringify({
         event: "request_failed",
         correlationId,
+        errorClass: error instanceof Error ? error.constructor.name : "NonErrorThrow",
         result: "failed",
       }),
     );

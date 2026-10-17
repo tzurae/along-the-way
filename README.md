@@ -15,28 +15,118 @@ This repository currently contains two deliberately separate surfaces:
 ```sh
 cp .env.example .env
 # Replace both database passwords, set TOKEN_SECRET, and set BOOTSTRAP_OWNER_EMAIL.
-docker compose up --detach --build --wait
+docker compose --profile local up --detach --build --wait
 ```
 
 Open `http://localhost`, request a sign-in link for the configured Owner, then
 open the captured message at `http://localhost:8025`. A PostgreSQL-backed worker
 delivers queued authentication and invitation email. The same magic-link,
 session, Trip, membership, and invitation path is used outside local
-development; Mailpit replaces only the SMTP destination.
+development; Mailpit exists only in the local Compose profile, while staging
+uses authenticated Gmail SMTP.
 Authentication requests are deliberately bounded: `/api/auth/*` accepts at most
 8 KiB, other `/api/*` requests accept at most 2 MiB, and magic-link consumption
 allows 30 attempts per client IP in 10 minutes. A successful authenticated
 request renews the 30-day browser cookie. PostgreSQL persists that sliding
 renewal at most once per day and keeps one extra day of server-side expiry slack,
-so write throttling never shortens the 30-day idle lifetime.
+so write throttling never shortens the 30-day idle lifetime. Every session also
+expires absolutely 90 days after creation. `POST /api/logout-everywhere` revokes
+all sessions for the signed-in account and clears this browser's cookie.
+`POST /api/logout` also accepts an optional `{userId}` target for immediate or
+deferred sign-out. A matching session (or no valid session) returns 204 and clears
+the cookie. If the cookie now belongs to a different account, it returns
+`409 logout_target_mismatch` without revocation or any cookie change.
 
-The email worker retries unknown and transient SMTP failures with 30-second,
-2-minute, 10-minute, 1-hour, 6-hour, and 24-hour backoff steps. A definitive SMTP
-5xx rejection becomes terminal immediately; an unknown/transient failure becomes
-terminal only after the 24-hour retry. Terminal jobs retain `failed_at` for
-operations. A failed pending invitation remains pending: the Owner recovers by
-revoking it and sending a new invitation. Magic-link jobs naturally stop once
-their 15-minute token is no longer usable.
+HTTPS sessions use `__Host-along_the_way_session` with Secure, HttpOnly,
+SameSite=Lax and Path=/, without Domain. Local HTTP uses `along_the_way_session`;
+the old unprefixed cookie is not accepted on HTTPS, so existing users sign in again.
+Startup rejects non-HTTPS `SITE_ADDRESS` values except HTTP on `localhost`,
+`127.0.0.1` or `::1`; the local Compose address `http://localhost` remains allowed.
+Both magic-link request routes always set a 15-minute HttpOnly login-nonce cookie
+(`__Host-along_the_way_login_nonce` on HTTPS), including unknown recipients.
+Only its SHA-256 hash is stored with the link. A matching browser signs in directly;
+a foreign browser or a switch from a different signed-in account receives
+`409 confirmation_required` with `targetEmail` and nullable `currentEmail` (both
+masked). The link remains unused until the user explicitly resubmits
+`{token, confirm: true}`. Successful sign-in revokes the replaced browser session.
+
+The email also contains a 6-digit one-time code. `POST /api/auth/magic-links/verify-code`
+accepts `{email, code}` only with the matching login-nonce cookie. Link and code
+share a 15-minute expiry and one successful use; five wrong codes revoke both.
+Code attempts are limited to 10 per normalized address and 30 per IP per 15 minutes.
+The sign-in screen supports code entry and an explicit account-switch confirmation.
+Email addresses are NFKC-normalized, trimmed and lowercased, and only one plain
+`local@domain` address is accepted (no display names, quoting or recipient lists).
+
+Invites create `invited`, not active, users. Ordinary login sends them no mail;
+accepting a still-valid invite-linked magic link activates the account. Existing
+active accounts remain active. A global 300-email UTC-day budget covers both magic
+links and invitations before enqueueing: exhaustion silently preserves the generic
+202 login response, but invitation creation returns 429. Invitation and trip-creation
+limits are respectively 10 and 5 attempts per account per UTC day. Invite email
+labels are plain text, stripped of URL-like content and controls, and capped at
+60 characters; the subject contains no user-supplied name.
+
+Operators can disable an account using its normalized email address:
+
+```sql
+update users set status = 'disabled' where email = 'person@example.com';
+```
+
+Disabled accounts fail authentication on every subsequent HTTP request. Existing
+SSE streams close at their next authorization check, before another private payload
+or heartbeat. Already-issued magic links/codes cannot sign them in, and neither
+ordinary nor invite-linked login requests enqueue mail. New invitations to disabled
+recipients are refused. Queued mail checks recipient status before delivery and skips
+disabled recipients. Disabling does not delete trips, memberships or account history.
+
+The email worker separately reserves a global 300-attempt UTC-day delivery budget
+immediately before each SMTP send, across magic links, invitations and retries.
+This prevents an outage backlog from bypassing the daily ceiling after recovery.
+Valid jobs refused by that ceiling remain queued until the next UTC midnight;
+the refusal neither increments their SMTP attempt count nor marks them failed.
+Expired/revoked magic links and invitations are still skipped rather than sent.
+
+Unknown and transient SMTP failures retry with 30-second, 2-minute, 10-minute,
+1-hour, 6-hour, and 24-hour backoff steps. SMTP 4xx and quota responses such as
+`550 5.4.5` / “daily sending quota exceeded” are retryable, not immediate permanent
+failures. Permanent recipient errors such as `5.1.x` fail immediately; other
+definitive non-quota 5xx rejections retain the same terminal behavior. A transient
+job becomes terminal only after exhausting the retry schedule. Terminal jobs retain
+`failed_at` for operations. A failed pending invitation remains pending: the Owner
+recovers by revoking it and sending a new invitation.
+
+Migration `029_auth_hardening` deliberately retains the expanded `users.status`
+constraint and invited/disabled users on downgrade, while removing its magic-link
+columns and index. It does not delete or activate those accounts. Original pending
+invitation links for invited users remain usable after upgrading again.
+
+Residual access policy: an invitee who accepts becomes an active account and can
+create trips and invite a second generation of addresses, including mailbox aliases.
+Those accounts have their own 10-invitation/day and 5-trip/day account limits;
+the two global 300/day email ceilings bound mail, not the number of approved people.
+Aliases remain distinct normalized addresses. There is no operator-approval gate
+for subsequent invitations or per-recipient daily invitation limit in this policy.
+Preventing that expansion requires an explicit product rule; these quotas do not
+claim to eliminate it.
+
+The same worker runs database retention at most once per hour. Idempotent mutation
+responses can be replayed for 7 days; older `mutation_requests` rows are deleted,
+and rate-limit counters are deleted as soon as their own window has elapsed.
+Migration `031_usage_limits` indexes the replay timestamp. List-returning trip-place
+mutations and discovery workspace mutations store only a readback marker: a retry
+does not repeat the write, but returns the authorized current read model rather than
+preserving a potentially multi-megabyte historical snapshot. Older full snapshots
+remain replayable until retention removes them.
+Within that seven-day window, stored historical mutation responses can still include
+emails that were visible when the response was created, even if current membership
+or roster permissions no longer expose those emails. This residual applies to stored
+snapshots, not the current authorized projections returned by readback markers.
+
+Application rollback to v0.10.0 cannot interpret the new compact readback markers.
+Retries of mutations whose stored result is such a marker fail on that older binary
+rather than replaying successfully. This is an accepted rollback limitation, not a
+claim of replay compatibility with v0.10.0.
 
 
 Useful checks:
@@ -56,7 +146,9 @@ bun run test
 bun run build
 ```
 
-Staging setup, HTTPS deployment, persistent data, and rollback are documented in
+Staging setup, HTTPS security headers, isolated and resource-limited containers,
+three-release secret retention, nightly database backups and tested restore
+commands, persistent data, and rollback are documented in
 [`docs/operations/staging.md`](docs/operations/staging.md).
 
 ## Place details and photos
@@ -97,7 +189,12 @@ the row and its 「⋯」 menu (`RowMenu`).
 
 Both lists share search (name or area) and filter chips (`PlaceFilters`):
 我按過讚, 狀態, 類型 and 地區. Chips within a group combine with OR, groups with
-AND, and only values that occur are offered. Filters are not kept in the URL.
+AND, and only values that occur are offered. Filters are not kept in the URL;
+their localStorage keys include both account and trip and are removed on sign-out
+or account switch. Japanese addresses use the ward after a city, then the
+municipality; Romanized `Ward`, `-ku`, `City`, `Town` and `District` components
+drop that suffix so variants group together. Postal, country and street text never
+become area chips.
 
 ### Place categories (migration 027)
 
@@ -124,6 +221,26 @@ with `{ "enabled": boolean }`, stored in `trips.editors_can_schedule`, default
 false). Scheduling, rescheduling, reordering and removing scheduled places then
 accept editors; otherwise they return 403 as before. Rejecting AI proposals stays
 owner-only.
+
+The same scheduling gate covers a day's available-time and travel-mode settings,
+plus creating, moving, or deleting timed items whose endpoints use wishlist
+places. Rewriting or deleting a flight or lodging also requires scheduling
+permission even when all of its places are travel-only. Locked itinerary items
+remain read-only and cannot be deleted until the owner unlocks them; only the
+owner is shown and may use the unlock action. Item deletion is permanent; there
+is no recoverable-delete flow.
+
+Member, voter and itinerary-participant email fields are nullable. Owners receive
+active members' email addresses; editors receive only their own, and former
+members' addresses are never returned. History and conflict actor emails follow
+the same active-member rule and are visible only to the owner or that actor.
+Other actors are identified by display name or a generic active/former-member
+label. Child-resource idempotency scopes include the route trip, so retries
+cannot cross trip boundaries. Migration 030 copies retained pre-deploy replay
+rows to their trip-scoped keys and keeps the legacy rows so a production
+rollback can still replay them. A must-item removal or merge whose child was
+already hard-deleted cannot be mapped safely; its legacy row remains, and a
+post-deploy retry returns 404 because the child is already gone.
 
 Wishlist details list members' 必買／必吃／必喝 items:
 
@@ -186,6 +303,22 @@ offers the same taxi fallback for that slot. Taking a place out of a day keeps
 the placed ones in order and moves the unscheduled ones after them; if a placed
 place would still drop out (the new shortcut leg has no transit, say), the
 dialog refuses the removal and says why.
+
+Custom drafts are capped at 100 stops, including `insertTripPlaceId`, matching
+the arrangement writer so saved large days remain editable. Timetable and
+whole-trip planning consume `route_planning` units equal to the number of stops
+or candidates (at most 100 units per request), per account and client IP.
+Every actual outbound request also atomically reserves from provider-specific
+UTC-day budgets: 900 globally, 450 per account, and 600 per client IP for each
+of Google Routes, Google Places, and NAVITIME. A week of day planning makes a few
+hundred lookups, so one account may use half of the day's budget: the owner can
+plan, and no other single account can take all of it. Raising the Google quota
+in the Cloud console is the way to give everyone more.
+Exhaustion prevents the network call. NAVITIME is used only when both endpoints
+are in Japan. Google Places photo-metadata reads are additionally capped at
+300/hour per account and 600/hour per IP. Google/NAVITIME HTTP 429 and a local
+provider-budget refusal surface as `quota`; opening-hours quota displays
+「Google 今日額度已用完，營業時間暫時查不到」.
 
 The rules, fifteen blind-derived scenarios and open questions are in
 [`docs/day-scheduling-scenarios.md`](docs/day-scheduling-scenarios.md).
@@ -277,6 +410,11 @@ airports/hotel and endpoint times; notes, source URL, money, booking/confirmatio
 details, participants, constraints and locks are retained. Locked items still
 require unlocking. Delete uses `DELETE /api/trips/:tripId/items/:itemId` with
 `expectedVersion`; existing lock/unlock routes continue to apply.
+An itinerary item can store at most 20 constraints, whether supplied with the
+item or added later. The item dialog creates at most one initial constraint; the
+larger API allowance supports imported and incrementally maintained itineraries
+without allowing cumulative replay responses to grow without bound.
+
 
 The overview lists every stored flight by departure instant: first 去程, last 回程,
 intermediate flights 其他航班. Fewer than two produces a nonblocking 尚未填寫航班
@@ -335,10 +473,12 @@ Stale evidence is labelled for re-checking and is never refreshed automatically.
 ## AI discovery questions (Issue #66)
 
 Discovery mutations require an `Idempotency-Key` and the current version.
-Generation is limited to 10 starts per account per hour and 6 starts per trip
-per hour because each run incurs model and Google lookups. A claimed request
-counts even when its provider call fails; replaying the same `Idempotency-Key`
-does not count or call the provider again.
+Generation is limited to 10 model starts per account per fixed UTC hour and 6
+per trip because each run incurs OpenAI and Google work. The counters are stored
+independently from idempotency responses and are charged immediately before
+`model.plan`; model failures and later Google quota refusals never refund them.
+A local Google budget refusal removes only the idempotency claim, so the same key
+may retry after quota becomes available without bypassing the OpenAI limits.
 
 `GET /api/trips/:tripId/discovery` is read-only. Wishlist removal, legacy-place
 deletion, and trip-place reconciliation reopen stale accepted proposals in
@@ -656,9 +796,11 @@ preference events are kept.
 Explicit Google search and Maps-URL intake refuses an already-active provider
 identity in the same trip with `409 already_in_wishlist` (「這個地點已在想去清單。」).
 No additional wishlist row or contribution is written. Removing and re-adding an
-ordinary identity unarchives its existing row; travel-only identities still
-return `409 travel_place`. Manual intake and the possible-duplicate/merge flow
-are unchanged. AI acceptance continues to reuse an existing wishlist identity.
+ordinary identity unarchives its existing row but resets
+`selectedForItinerary=false` and `unplacedFromDate=null`; travel-only identities
+still return `409 travel_place`. Google and Wikimedia intake finishes before the
+atomic database transaction opens. Manual intake and the possible-duplicate/merge
+flow are unchanged. AI acceptance continues to reuse an existing wishlist identity.
 
 `TripPlaceDto` exposes `notes` and `sourceUrl: string | null`, not contributions.
 The source is the earliest contribution's URL, falling back to the legacy
@@ -766,9 +908,12 @@ participation and half-open time intervals (`start <= now < end`). Unconfirmed
 participants are never promoted to the whole group. Overlaps stay in one column
 and are labeled 「並行」, without inventing travel between adjacent group items.
 Only reliable coordinates produce Maps links; transport directions use that
-formal item's own endpoints. Missing locations stay 「位置待補充」. No persisted
-route observation is part of this formal read model, so transportation is labeled
-unavailable rather than displaying generated route estimates or stale live traffic.
+formal item's own endpoints. Every external URL sourced from provider or member
+data is rendered as a link only after the shared client check accepts an absolute
+HTTP or HTTPS URL; rejected values remain plain text. Missing locations stay
+「位置待補充」. No persisted route observation is part of this formal read model,
+so transportation is labeled unavailable rather than displaying generated route
+estimates or stale live traffic.
 
 Each successful, version-consistent read saves one localStorage snapshot per
 account and trip: `{ schemaVersion: 4, accountId, fetchedAt, model }`. The model
@@ -784,8 +929,10 @@ Missing endpoint place references and legacy participant-removal status remain
 If persisting that upgrade fails, the validated in-memory model remains readable
 and the original saved value is preserved. See the
 [feature migration details](docs/engineering/place-details-and-photos.md#ui失敗與-today-snapshot).
-Malformed, extra-field or incompatible snapshots are discarded. Storage failure
-is visible and does not prevent reading the online itinerary.
+Malformed, extra-field or incompatible snapshots are discarded. A valid snapshot
+is also removed on read once it is more than 14 days old or after the complete
+seventh day following the trip's final date, whichever comes first. Storage
+failure is visible and does not prevent reading the online itinerary.
 
 Browser-offline events or failed core API reads open a dedicated 「離線資料」
 shell with snapshot time and an explicit warning that membership and newer edits
@@ -795,12 +942,21 @@ trip membership again before replacing the snapshot. Every successful authorized
 trip-list read also purges this account's snapshots for absent trips, including
 unselected revoked trips. Core trip GETs returning 401/403/404 delete cached access;
 an inaccessible bookmarked trip does not invalidate a valid session or hide other
-authorized trips. Logout clears that account's snapshots and in-memory itinerary.
-Offline logout also records a local signed-out boolean so a surviving HttpOnly
-cookie cannot silently reopen private data on reconnect; a `storage` event applies
-that teardown to every open tab. A new magic-link sign-in clears the marker. Offline
-logout does not queue a remote logout. Online the action is 「重新同步」; the
-read-only shell offers 「重新連線並同步」.
+authorized trips. Logout clears that account's snapshots, account-scoped filters,
+onboarding state and in-memory itinerary. Offline logout also records a local
+signed-out boolean so a surviving HttpOnly cookie cannot silently reopen private
+data; a `storage` event applies that teardown to every open tab. A new magic-link
+sign-in clears the marker. If the browser is offline or the logout request fails,
+a separate pending marker stores that account's user ID and replays
+`POST /api/logout` with `{ userId }` before later API work as soon as connectivity
+returns. The signed-out screen warns while this server logout remains pending.
+An online logout still sends immediately when localStorage is blocked or full.
+The target is removed after a 204, or after `logout_target_mismatch` establishes
+that a newer account owns the current cookie without signing that account out.
+The account controls also offer 「登出所有裝置」, backed by
+`POST /api/logout-everywhere`.
+Online the action is 「重新同步」; the read-only shell offers
+「重新連線並同步」.
 A failed mutation while the browser remains online keeps its existing dialog,
 input, error feedback and idempotency key for an explicit retry; it does not switch
 to the offline shell. Provider-only failures likewise do not change this boundary.

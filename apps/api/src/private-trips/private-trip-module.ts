@@ -21,16 +21,32 @@ export interface SessionResult {
   inviteOutcome?: LinkedInviteOutcome;
 }
 
+export interface LoginContext {
+  nonce: string;
+  sessionToken: string;
+  confirm: boolean;
+}
+
+export interface LoginConfirmation {
+  confirmationRequired: true;
+  targetEmail: string;
+  currentEmail: string | null;
+}
+
+export type LoginResult = SessionResult | LoginConfirmation;
+
 export interface AcceptedInvite {
   tripId: string;
 }
 
 export interface IdentityAccessModule {
-  requestMagicLink(email: string): Promise<void>;
-  requestInviteMagicLink(inviteToken: string): Promise<void>;
-  consumeMagicLink(token: string): Promise<SessionResult>;
+  requestMagicLink(email: string, nonce: string): Promise<void>;
+  requestInviteMagicLink(inviteToken: string, nonce: string): Promise<void>;
+  consumeMagicLink(token: string, context: LoginContext): Promise<LoginResult>;
+  verifyMagicLinkCode(email: string, code: string, context: LoginContext): Promise<LoginResult>;
   authenticate(sessionToken: string): Promise<AuthenticatedUser | null>;
-  logout(sessionToken: string): Promise<void>;
+  logout(sessionToken: string, targetUserId?: string): Promise<void>;
+  logoutEverywhere(userId: string): Promise<void>;
   /** Self-only: set or clear the signed-in member's nickname. */
   updateDisplayName(userId: string, displayName: string | null): Promise<AuthenticatedUser>;
   inviteMember(
@@ -111,7 +127,9 @@ export class AppError extends Error {
       | "voting_unavailable"
       | "invite_not_found"
       | "conflict"
+      | "logout_target_mismatch"
       | "invalid_magic_link"
+      | "invalid_magic_code"
       | "expired_magic_link"
       | "used_magic_link"
       | "revoked_magic_link"

@@ -38,14 +38,14 @@ SELECT
 
 \if :role_privileged
   \echo 'Refusing to alter a privileged PostgreSQL role'
-  \quit 1
+  SELECT 1 / 0;
 \endif
 
 \if :role_exists
   \if :role_managed
   \else
     \echo 'Refusing to alter a role not owned by Along the Way'
-    \quit 1
+    SELECT 1 / 0;
   \endif
 \endif
 
@@ -85,6 +85,20 @@ SELECT format(
   :'app_user'
 )
 \gexec
+
+-- Kysely alone owns migration state, and PostGIS owns spatial_ref_sys. A
+-- compromised runtime role must not be able to make the next admin migration
+-- rerun old work or use a forged SRID definition.
+SELECT format(
+  'REVOKE ALL PRIVILEGES ON TABLE public.kysely_migration, public.kysely_migration_lock FROM %I',
+  :'app_user'
+)
+\gexec
+SELECT format(
+  'REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public.spatial_ref_sys FROM %I',
+  :'app_user'
+)
+\gexec
 SELECT format(
   'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I',
   :'app_user'
@@ -95,6 +109,41 @@ SELECT format(
   :'app_user'
 )
 \gexec
+
+SELECT
+  has_table_privilege(:'app_user', 'public.kysely_migration', 'SELECT')
+    OR has_table_privilege(:'app_user', 'public.kysely_migration', 'INSERT')
+    OR has_table_privilege(:'app_user', 'public.kysely_migration', 'UPDATE')
+    OR has_table_privilege(:'app_user', 'public.kysely_migration', 'DELETE')
+    OR has_table_privilege(:'app_user', 'public.kysely_migration_lock', 'SELECT')
+    OR has_table_privilege(:'app_user', 'public.kysely_migration_lock', 'INSERT')
+    OR has_table_privilege(:'app_user', 'public.kysely_migration_lock', 'UPDATE')
+    OR has_table_privilege(:'app_user', 'public.kysely_migration_lock', 'DELETE')
+    AS migration_privilege_remaining,
+  has_table_privilege(:'app_user', 'public.spatial_ref_sys', 'INSERT')
+    OR has_table_privilege(:'app_user', 'public.spatial_ref_sys', 'UPDATE')
+    OR has_table_privilege(:'app_user', 'public.spatial_ref_sys', 'DELETE')
+    OR has_table_privilege(:'app_user', 'public.spatial_ref_sys', 'TRUNCATE')
+    OR has_table_privilege(:'app_user', 'public.spatial_ref_sys', 'REFERENCES')
+    OR has_table_privilege(:'app_user', 'public.spatial_ref_sys', 'TRIGGER')
+    AS spatial_write_privilege_remaining,
+  has_table_privilege(:'app_user', 'public.spatial_ref_sys', 'SELECT')
+    AS spatial_read_available
+\gset
+
+\if :migration_privilege_remaining
+  \echo 'Application role still has migration bookkeeping privileges'
+  SELECT 1 / 0;
+\endif
+\if :spatial_write_privilege_remaining
+  \echo 'Application role still has spatial_ref_sys write privileges'
+  SELECT 1 / 0;
+\endif
+\if :spatial_read_available
+\else
+  \echo 'Application role lost required spatial_ref_sys read access'
+  SELECT 1 / 0;
+\endif
 
 COMMIT;
 SQL

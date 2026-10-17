@@ -90,28 +90,23 @@ jobs:
           fi
           test -n "$BOOTSTRAP_OWNER_EMAIL"
           test -n "$TOKEN_SECRET"
-          smtp_host="${SMTP_HOST:-mailpit}"
-          smtp_port="${SMTP_PORT:-1025}"
-          email_from="${EMAIL_FROM:-Along the Way <along-the-way@example.test>}"
+          smtp_host="${SMTP_HOST:-smtp.gmail.com}"
+          smtp_port="${SMTP_PORT:-587}"
           smtp_secure="${SMTP_SECURE:-false}"
-          smtp_require_tls="${SMTP_REQUIRE_TLS:-}"
-          if { [ -n "$SMTP_USERNAME" ] && [ -z "$SMTP_PASSWORD" ]; } || \
-            { [ -z "$SMTP_USERNAME" ] && [ -n "$SMTP_PASSWORD" ]; }; then
-            echo "STAGING_SMTP_USERNAME and STAGING_SMTP_PASSWORD must be set together" >&2
+          smtp_require_tls="${SMTP_REQUIRE_TLS:-true}"
+          if [ "$smtp_host" = mailpit ]; then
+            echo "Staging must use Gmail SMTP, not the local Mailpit profile" >&2
             exit 1
           fi
-          if [ -z "$smtp_require_tls" ]; then
-            if [ -n "$SMTP_USERNAME" ]; then
-              smtp_require_tls=true
-            else
-              smtp_require_tls=false
-            fi
+          if [ -z "$SMTP_USERNAME" ] || [ -z "$SMTP_PASSWORD" ]; then
+            echo "STAGING_SMTP_USERNAME and STAGING_SMTP_PASSWORD are required" >&2
+            exit 1
           fi
-          if [ -n "$SMTP_USERNAME" ] && \
-            [ "$smtp_secure" != true ] && [ "$smtp_require_tls" != true ]; then
+          if [ "$smtp_secure" != true ] && [ "$smtp_require_tls" != true ]; then
             echo "Authenticated SMTP requires TLS" >&2
             exit 1
           fi
+          email_from="${EMAIL_FROM:-Along the Way <$SMTP_USERNAME>}"
           umask 077
           {
             printf 'POSTGRES_DB=along_the_way\n'

@@ -7,8 +7,8 @@ COPY package.json bun.lock ./
 COPY packages/contracts/package.json ./packages/contracts/package.json
 RUN bun install --frozen-lockfile --production
 
-COPY --chown=bun:bun apps/api ./apps/api
-COPY --chown=bun:bun packages/contracts ./packages/contracts
+COPY apps/api ./apps/api
+COPY packages/contracts ./packages/contracts
 
 USER bun
 EXPOSE 3000

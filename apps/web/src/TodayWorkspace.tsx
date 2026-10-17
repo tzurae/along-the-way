@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowRight, CalendarDays, Check, ChevronRight, CircleDot, Cl
 import type { PlaceDetailReference } from "@along-the-way/contracts/place-details";
 import { useI18n } from "./i18n";
 import { googleMapsCoordinatesUrl, googleMapsNavigationUrl } from "./google-maps";
+import { safeExternalUrl } from "./external-url";
 import { dayItems, localDate, parallelItemIds, personalState, tripClock, type TodayItem, type TodayModel } from "./today-model";
 import { readTripLocation } from "./trip-location";
 import { PlaceDetailContent } from "./PlaceDetailContent";
@@ -17,10 +18,6 @@ interface TodayDetailSelection {
   date: string;
 }
 
-function safeExternalUrl(value: string | null) {
-  if (!value) return null;
-  try { const url = new URL(value); return url.protocol === "https:" || url.protocol === "http:" ? url.href : null; } catch { return null; }
-}
 
 
 function TodayTime({ item, zone }: { item: TodayItem; zone: string | null }) {

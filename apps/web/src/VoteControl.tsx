@@ -9,7 +9,7 @@ export function VoteVoters({ voters }: {
 }) {
   const { t: { tripPlaces: { vote: t } } } = useI18n();
   if (voters.length === 0) return null;
-  return <p className="pd-voters">{t.voters(voters.map((member) => member.memberDisplayName || member.memberEmail).join("、"))}</p>;
+  return <p className="pd-voters">{t.voters(voters.map((member) => member.memberDisplayName ?? member.memberEmail ?? "成員").join("、"))}</p>;
 }
 
 export function VoteControl({ name, voters, voteCount, ownVote, votingAvailable, disabled, busy = false, compact = false, onChange }: {

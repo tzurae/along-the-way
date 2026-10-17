@@ -60,16 +60,37 @@ export function AuthProgress({ phase }: { phase: AuthProgressPhase }): JSX.Eleme
   );
 }
 
+export function LoginConfirmation(props: {
+  targetEmail: string;
+  currentEmail: string | null;
+  confirm: () => void;
+  cancel: () => void;
+}): JSX.Element {
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => { heading.current?.focus(); }, []);
+  return <AuthFrame>
+    <h1 id="auth-title" className="auth-title" tabIndex={-1} ref={heading}>{auth.confirmHeading}</h1>
+    <p className="auth-intro break-words">{auth.confirmMessage(props.targetEmail)}</p>
+    {props.currentEmail ? <p className="auth-error break-words" role="alert">{auth.switchWarning(props.currentEmail)}</p> : null}
+    <div className="auth-form">
+      <Button type="button" size="lg" onClick={props.confirm}>{auth.confirmSignIn}</Button>
+      <Button type="button" variant="outline" size="lg" onClick={props.cancel}>{auth.cancelSignIn}</Button>
+    </div>
+  </AuthFrame>;
+}
+
 export function LoginExperience(props: {
   initialError?: string | null;
   inviteToken?: string | null;
   requestLink: (email: string) => Promise<void>;
   requestInviteLink: (inviteToken: string) => Promise<void>;
+  verifyCode: (email: string, code: string) => Promise<void>;
   retryConsume?: () => void;
   describeError: (error: unknown) => string;
 }): JSX.Element {
   const [email, setEmail] = useState("");
   const [submittedEmail, setSubmittedEmail] = useState("");
+  const [code, setCode] = useState("");
   const [screen, setScreen] = useState<"form" | "sent">("form");
   const [pending, setPending] = useState(false);
   const [resendDeadline, setResendDeadline] = useState<{ key: string; expiresAt: number } | null>(null);
@@ -162,6 +183,24 @@ export function LoginExperience(props: {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await sendLink(email);
+  }
+
+  async function submitCode(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (pending) return;
+    if (!/^\d{6}$/.test(code)) {
+      setError({ kind: "form", message: auth.invalidCode });
+      return;
+    }
+    setPending(true);
+    setError(null);
+    try {
+      await props.verifyCode(inviteMode ? email : submittedEmail, code);
+    } catch (reason) {
+      setError({ kind: "form", message: props.describeError(reason) });
+    } finally {
+      setPending(false);
+    }
   }
 
   function handleInvalid(event: InvalidEvent<HTMLInputElement>) {
@@ -268,6 +307,23 @@ export function LoginExperience(props: {
               </p>
               <p className="auth-private-note">{auth.invitedOnly}</p>
             </div>
+            <form className="auth-form" onSubmit={submitCode}>
+              {inviteMode ? <Field>
+                <FieldLabel htmlFor="auth-code-email">{auth.email}</FieldLabel>
+                <Input id="auth-code-email" type="email" autoComplete="email" required value={email} disabled={pending}
+                  onChange={(event) => setEmail(event.target.value)} />
+              </Field> : null}
+              <Field>
+                <FieldLabel htmlFor="auth-code">{auth.code}</FieldLabel>
+                <Input id="auth-code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}"
+                  maxLength={6} required value={code} disabled={pending} aria-describedby="auth-code-hint"
+                  onChange={(event) => setCode(event.target.value)} />
+                <FieldDescription id="auth-code-hint">{auth.codeHint}</FieldDescription>
+              </Field>
+              <Button type="submit" size="lg" disabled={pending}>
+                {pending ? auth.verifyingCode : auth.verifyCode}
+              </Button>
+            </form>
             <div className="auth-sent-actions">
               {inviteMode ? null : (
                 <Button type="button" variant="link" onClick={editEmail} disabled={pending}>

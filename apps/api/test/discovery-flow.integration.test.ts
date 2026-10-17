@@ -33,10 +33,11 @@ import { PostgresReadinessProbe } from "../src/private-trips/postgres-readiness-
 import { PostgresTripWorkspaceModule } from "../src/private-trips/postgres-trip-workspace-module";
 import { TokenIssuer } from "../src/private-trips/token-issuer";
 import { PostgresTripSkeletonModule } from "../src/trip-skeleton/postgres-trip-skeleton-module";
-import type {
-  PlaceProvider,
-  RatedPlaceCandidate,
-  RatedPlaceLookup,
+import {
+  ProviderQuotaError,
+  type PlaceProvider,
+  type RatedPlaceCandidate,
+  type RatedPlaceLookup,
 } from "../src/trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
 import { unrelatedDayPlanModule } from "./day-plan-test-support";
@@ -78,6 +79,8 @@ class ControlledPlaceProvider implements PlaceProvider, RatedPlaceLookup {
   readonly available = true;
   readonly attribution = "Google Maps";
   lookups: string[] = [];
+  quotaRefusals = 0;
+  alwaysQuota = false;
   /** Further places Google knows, by name: well reviewed and, unless overridden, open, in Japan, with coordinates. */
   readonly known = new Map<string, {
     businessStatus?: RatedPlaceCandidate["businessStatus"];
@@ -91,6 +94,11 @@ class ControlledPlaceProvider implements PlaceProvider, RatedPlaceLookup {
     return market;
   }
   async lookup(query: string): Promise<RatedPlaceCandidate[]> {
+    if (this.alwaysQuota) throw new ProviderQuotaError();
+    if (this.quotaRefusals > 0) {
+      this.quotaRefusals -= 1;
+      throw new ProviderQuotaError();
+    }
     this.lookups.push(query);
     const open = { businessStatus: "operational" as const, countryCode: "JP" };
     const known = [...this.known.keys()].find((name) => query.includes(name));
@@ -366,11 +374,17 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       tokenIssuer,
       now,
     });
+    const rateLimiter = new PostgresRateLimiter(
+      database,
+      "discovery-rate-secret-at-least-32-bytes",
+      now,
+    );
     const tripPlaces = new PostgresTripPlaceModule({ database, provider, now });
     const discovery = new PostgresDiscoveryModule({
       database,
       model,
       placeLookup: provider,
+      claimAiRun: (userId, tripId) => rateLimiter.claimDiscoveryAiRun(userId, tripId),
       tripPlaces,
       sourceChecks,
       now,
@@ -382,7 +396,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       dayPlans: unrelatedDayPlanModule,
       discovery,
       identityAccess,
-      rateLimiter: new PostgresRateLimiter(database, "discovery-rate-secret-at-least-32-bytes", now),
+      rateLimiter,
       readiness: new PostgresReadinessProbe(database, now),
       siteAddress: "https://app.example.test",
       tripPlaces,
@@ -396,6 +410,17 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
   });
 
   async function login(address = "owner@example.test") {
+    const fixtureNow = new Date("2026-09-28T12:00:00.000Z");
+    await database.insertInto("users").values({
+      email: address,
+      display_name: null,
+      status: "active",
+      created_at: fixtureNow,
+      updated_at: fixtureNow,
+    }).onConflict((conflict) => conflict.column("email").doUpdateSet({
+      status: "active",
+      updated_at: fixtureNow,
+    })).execute();
     const requested = await app.request("/api/auth/magic-links", {
       method: "POST",
       headers: {
@@ -413,7 +438,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     const consumed = await app.request("/api/auth/magic-links/consume", {
       method: "POST",
       headers: { "content-type": "application/json", origin: "https://app.example.test" },
-      body: json({ token }),
+      body: json({ token, confirm: true }),
     });
     expect(consumed.status).toBe(200);
     return sessionCookie(consumed);
@@ -491,6 +516,205 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(generated.status).toBe(200);
     return parseDiscoveryWorkspaceResponse(await generated.json()).discovery;
   }
+
+  it("does not persist a failed discovery replay when Google refuses a local quota reservation", async () => {
+    const cookie = await login("discovery-quota@example.test");
+    const trip = await createTrip(cookie, "Discovery quota retry");
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "quota-brief", {
+      originalText: "Food markets.",
+      expectedVersion: null,
+    })).status).toBe(200);
+    provider.quotaRefusals = 1;
+    const generate = () => discoveryRequest(
+      cookie,
+      `/api/trips/${trip.id}/discovery/generate`,
+      "quota-retry",
+      { expectedBriefVersion: 1 },
+    );
+    const refused = generate();
+    await model.planStarted;
+    model.releasePlan();
+    expect((await refused).status).toBe(503);
+    expect(await database.selectFrom("mutation_requests")
+      .select("idempotency_key")
+      .where("idempotency_key", "=", "quota-retry")
+      .execute()).toHaveLength(0);
+
+    const retried = await generate();
+    expect(retried.status, await retried.clone().text()).toBe(200);
+    expect(model.researchCalls).toBe(2);
+    expect(provider.lookups.length).toBeGreaterThan(0);
+  });
+
+  it("counts repeated same-key Google quota refusals against the hourly AI start limit", async () => {
+    const cookie = await login("discovery-quota-limit@example.test");
+    const trip = await createTrip(cookie, "Discovery quota limit");
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "quota-limit-brief", {
+      originalText: "Food markets.",
+      expectedVersion: null,
+    })).status).toBe(200);
+    provider.alwaysQuota = true;
+    model.releasePlan();
+    const generate = () => discoveryRequest(
+      cookie,
+      `/api/trips/${trip.id}/discovery/generate`,
+      "quota-limit-same-key",
+      { expectedBriefVersion: 1 },
+    );
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const refused = await generate();
+      expect(refused.status).toBe(503);
+      expect(await database.selectFrom("mutation_requests")
+        .select("idempotency_key")
+        .where("idempotency_key", "=", "quota-limit-same-key")
+        .execute()).toHaveLength(0);
+    }
+    const limited = await generate();
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toMatch(/^\d+$/);
+    expect(await limited.json()).toMatchObject({ error: { code: "research_limit_reached" } });
+    expect(model.planCalls).toBe(6);
+    expect(model.researchCalls).toBe(6);
+  });
+
+  it("stores a readback marker and replays a mutation with a large decided list", async () => {
+    const cookie = await login("large-discovery-replay@example.test");
+    const trip = await createTrip(cookie, "Large discovery replay");
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "large-replay-initial", {
+      originalText: "Gardens.",
+      expectedVersion: null,
+    })).status).toBe(200);
+    const owner = await database.selectFrom("users")
+      .select("id")
+      .where("email", "=", "large-discovery-replay@example.test")
+      .executeTakeFirstOrThrow();
+    const run = await database.insertInto("discovery_runs").values({
+      trip_id: trip.id,
+      brief_version: 1,
+      policy_version: "large-replay-test",
+      model_id: "fixture",
+      status: "completed",
+      search_plan: {},
+      error_code: null,
+      created_by: owner.id,
+      completed_at: now(),
+    }).returning("id").executeTakeFirstOrThrow();
+    const proposal = (index: number) => ({
+      trip_id: trip.id,
+      run_id: run.id,
+      provider_place_id: `ChIJ-large-rejected-${index}`,
+      name: `Rejected place ${index} ${"x".repeat(160)}`,
+      place_type: "activity" as const,
+      address: null,
+      latitude: null,
+      longitude: null,
+      source_url: null,
+      recommendation: "Older rejected recommendation",
+      matched_needs: JSON.stringify([]),
+      tradeoffs: JSON.stringify([]),
+      unknowns: JSON.stringify([]),
+      confidence: "medium" as const,
+      status: "rejected" as const,
+      accepted_trip_place_id: null,
+      decided_by: owner.id,
+      decided_at: now(),
+    });
+    await database.insertInto("candidate_proposals")
+      .values(Array.from({ length: 400 }, (_, index) => proposal(index)))
+      .execute();
+    await database.updateTable("discovery_runs")
+      .set({ created_at: new Date(now().valueOf() - 60_000) })
+      .where("id", "=", run.id)
+      .execute();
+    await database.insertInto("discovery_runs").values({
+      trip_id: trip.id,
+      brief_version: 1,
+      policy_version: "large-replay-test",
+      model_id: "fixture-latest",
+      status: "completed",
+      search_plan: {},
+      error_code: null,
+      created_by: owner.id,
+      completed_at: now(),
+    }).execute();
+    const body = { originalText: "Gardens and markets.", expectedVersion: 1 };
+    const first = await discoveryRequest(
+      cookie,
+      `/api/trips/${trip.id}/discovery/brief`,
+      "large-replay-update",
+      body,
+    );
+    expect(first.status, await first.clone().text()).toBe(200);
+    expect(parseDiscoveryWorkspaceResponse(await first.json()).discovery.decided).toHaveLength(400);
+    const stored = await database.selectFrom("mutation_requests")
+      .select([
+        "response",
+        sql<number>`pg_column_size(response)`.as("bytes"),
+      ])
+      .where("idempotency_key", "=", "large-replay-update")
+      .executeTakeFirstOrThrow();
+    expect(stored.response).toEqual({ type: "discovery_workspace_readback" });
+    expect(stored.bytes).toBeLessThan(100);
+
+    await database.insertInto("candidate_proposals").values(proposal(400)).execute();
+    const replay = await discoveryRequest(
+      cookie,
+      `/api/trips/${trip.id}/discovery/brief`,
+      "large-replay-update",
+      body,
+    );
+    expect(replay.status, await replay.clone().text()).toBe(200);
+    expect(parseDiscoveryWorkspaceResponse(await replay.json()).discovery.decided).toHaveLength(401);
+  });
+
+  it("hides other voters' emails in discovery reads and vote responses", async () => {
+    const ownerCookie = await login("discovery-email-owner@example.test");
+    const trip = await createTrip(ownerCookie, "Private discovery voters");
+    const editor = await addEditorMember(trip.id, "discovery-email-editor@example.test");
+    const generated = await generateLocatedProposals(
+      ownerCookie,
+      trip.id,
+      "private-discovery-voters",
+      ["Gion Garden"],
+    );
+    const proposal = generated.proposals[0]!;
+    expect((await discoveryRequest(
+      ownerCookie,
+      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/vote`,
+      "private-discovery-owner-vote",
+      { voted: true },
+    )).status).toBe(200);
+    const editorVote = await discoveryRequest(
+      editor.cookie,
+      `/api/trips/${trip.id}/discovery/proposals/${proposal.id}/vote`,
+      "private-discovery-editor-vote",
+      { voted: true },
+    );
+    expect(editorVote.status).toBe(200);
+    expect(parseUpdateCandidateProposalVoteResponse(await editorVote.json()).proposal.voters
+      .map((voter) => [voter.memberUserId, voter.memberEmail])).toEqual([
+      [trip.members[0]!.userId, null],
+      [editor.userId, "discovery-email-editor@example.test"],
+    ]);
+
+    const editorRead = parseDiscoveryWorkspaceResponse(await (await app.request(
+      `/api/trips/${trip.id}/discovery`,
+      { headers: { cookie: editor.cookie } },
+    )).json()).discovery;
+    expect(editorRead.proposals[0]!.voters.map((voter) => [voter.memberUserId, voter.memberEmail]))
+      .toEqual([
+        [trip.members[0]!.userId, null],
+        [editor.userId, "discovery-email-editor@example.test"],
+      ]);
+    const ownerRead = parseDiscoveryWorkspaceResponse(await (await app.request(
+      `/api/trips/${trip.id}/discovery`,
+      { headers: { cookie: ownerCookie } },
+    )).json()).discovery;
+    expect(ownerRead.proposals[0]!.voters.map((voter) => voter.memberEmail)).toEqual([
+      "discovery-email-owner@example.test",
+      "discovery-email-editor@example.test",
+    ]);
+  });
 
   it("treats a concurrently created discovery brief as a version conflict without overwriting it", async () => {
     const cookie = await login();
@@ -793,6 +1017,30 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     });
   });
 
+
+  it("returns 404 instead of replaying a proposal response through another trip", async () => {
+    const cookie = await login();
+    const sourceTrip = await createTrip(cookie, "Discovery replay source");
+    const routeTrip = await createTrip(cookie, "Discovery replay route");
+    const generated = await generateLocatedProposals(cookie, sourceTrip.id, "discovery-replay", [
+      "Gion Garden",
+    ]);
+    const proposal = generated.proposals[0]!;
+    const key = "cross-trip-proposal-replay";
+    expect((await discoveryRequest(
+      cookie,
+      `/api/trips/${sourceTrip.id}/discovery/proposals/${proposal.id}/vote`,
+      key,
+      { voted: true },
+    )).status).toBe(200);
+
+    expect((await discoveryRequest(
+      cookie,
+      `/api/trips/${routeTrip.id}/discovery/proposals/${proposal.id}/vote`,
+      key,
+      { voted: false },
+    )).status).toBe(404);
+  });
 
   it.each([false, true])("reopens one historical acceptance per identity (latest pending: %s)", async (latestPending) => {
     const cookie = await login();

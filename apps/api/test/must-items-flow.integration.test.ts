@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Hono } from "hono";
-import type { Kysely } from "kysely";
+import { sql, type Kysely } from "kysely";
 import { parseTripResponse } from "@along-the-way/contracts/private-trips";
 import {
   parseTripPlaceMustItemListResponse,
@@ -16,9 +16,14 @@ import {
 import { createApp } from "../src/app";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
 import { runMigrations } from "../src/database/migrate";
+import {
+  down as downgradePermissions,
+  up as upgradePermissions,
+} from "../src/database/migrations/030_permission_hardening";
 import { PostgresPlaceDetailModule } from "../src/place-details/postgres-place-detail-module";
 import { packagedPhotoRoot } from "../src/place-details/photo-assets";
 import { PostgresCollaborationModule } from "../src/private-trips/postgres-collaboration-module";
+import { replayed } from "../src/private-trips/postgres-private-trip-store";
 import { PostgresIdentityAccessModule } from "../src/private-trips/postgres-identity-access-module";
 import { PostgresRateLimiter } from "../src/private-trips/postgres-rate-limiter";
 import { PostgresReadinessProbe } from "../src/private-trips/postgres-readiness-probe";
@@ -138,7 +143,7 @@ describe("trip-place must-items through HTTP and PostgreSQL", () => {
       last_seen_at: now(),
       revoked_at: null,
     }).execute();
-    return { id: user.id, cookie: `along_the_way_session=${token}` };
+    return { id: user.id, cookie: `__Host-along_the_way_session=${token}` };
   }
 
   async function createTrip(cookie: string) {
@@ -220,7 +225,7 @@ describe("trip-place must-items through HTTP and PostgreSQL", () => {
     method: "GET" | "POST" | "PATCH" | "DELETE",
     path = "",
     body?: unknown,
-    key = randomUUID(),
+    key: string = randomUUID(),
     targetPlace = place,
     targetTripId = tripId,
   ) {
@@ -240,7 +245,7 @@ describe("trip-place must-items through HTTP and PostgreSQL", () => {
     kind: MustItemKind,
     label: string,
     targetPlace = place,
-    key = randomUUID(),
+    key: string = randomUUID(),
   ): Promise<{ response: Response; item: TripPlaceMustItemDto | null }> {
     const response = await mustItemsRequest(actor, "POST", "", { kind, label }, key, targetPlace);
     const item = response.status === 201
@@ -292,6 +297,71 @@ describe("trip-place must-items through HTTP and PostgreSQL", () => {
       "trip_place.must_item_updated",
       "trip_place.must_item_removed",
     ]);
+  });
+
+  it("copies pre-deploy replay keys for both binaries without allowing cross-trip replay", async () => {
+    const key = "legacy-must-item-replay";
+    const created = await createMustItem(owner, "eat", "Legacy noodles", place, key);
+    expect(created.response.status).toBe(201);
+    const original = created.item!;
+    const currentOperation = `tmc:${tripId}:${place.id}`;
+    const legacyOperation = `tp:must:create:${place.id}`;
+
+    await sql`
+      insert into mutation_requests (actor_id, operation, idempotency_key, response, created_at)
+      select actor_id, ${legacyOperation}, idempotency_key, response, created_at
+      from mutation_requests
+      where actor_id = ${owner.id}
+        and operation = ${currentOperation}
+        and idempotency_key = ${key}
+    `.execute(database);
+    await database.deleteFrom("mutation_requests")
+      .where("actor_id", "=", owner.id)
+      .where("operation", "=", currentOperation)
+      .where("idempotency_key", "=", key)
+      .execute();
+    await database.updateTable("trip_place_must_items")
+      .set({ label: "Changed after first response" })
+      .where("id", "=", original.id)
+      .execute();
+
+    await upgradePermissions(database);
+    expect((await database.selectFrom("mutation_requests").select("operation")
+      .where("actor_id", "=", owner.id)
+      .where("idempotency_key", "=", key)
+      .orderBy("operation")
+      .execute()).map((row) => row.operation)).toEqual([
+      currentOperation,
+      legacyOperation,
+    ]);
+    expect(await replayed(database, owner.id, legacyOperation, key)).toEqual(original);
+
+    const replay = await createMustItem(owner, "eat", "Legacy noodles", place, key);
+    expect(replay.response.status).toBe(201);
+    expect(replay.item).toEqual(original);
+    expect(await database.selectFrom("trip_place_must_items")
+      .select("id")
+      .where("trip_place_id", "=", place.id)
+      .execute()).toHaveLength(1);
+
+    const otherTripId = await createTrip(owner.cookie);
+    const crossTrip = await mustItemsRequest(
+      owner,
+      "POST",
+      "",
+      { kind: "eat", label: "Legacy noodles" },
+      key,
+      place,
+      otherTripId,
+    );
+    expect(crossTrip.status).toBe(404);
+
+    await downgradePermissions(database);
+    expect((await database.selectFrom("mutation_requests").select("operation")
+      .where("actor_id", "=", owner.id)
+      .where("idempotency_key", "=", key)
+      .execute()).map((row) => row.operation)).toEqual([legacyOperation]);
+    await upgradePermissions(database);
   });
 
   it("lets editors write while denying non-members", async () => {

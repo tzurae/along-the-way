@@ -1,8 +1,10 @@
-import type { Kysely } from "kysely";
+import type { Kysely, Transaction } from "kysely";
 
 import type { AlongTheWayDatabase } from "../database/database";
-import type { EmailSender } from "./email-sender";
+import { safeInviteLabel, type EmailSender } from "./email-sender";
 import type { TokenIssuer } from "./token-issuer";
+import { AppError } from "./private-trip-module";
+import { PostgresRateLimiter } from "./postgres-rate-limiter";
 
 const EMAIL_WORKER = "email_delivery";
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -18,9 +20,12 @@ const EMAIL_RETRY_DELAYS_MS = [
 function isDefinitiveSmtpRejection(error: unknown) {
   if (typeof error !== "object" || error === null) return false;
   const responseCode = Reflect.get(error, "responseCode");
-  return typeof responseCode === "number" &&
-    responseCode >= 500 &&
-    responseCode < 600;
+  if (typeof responseCode !== "number" || responseCode < 500 || responseCode >= 600) return false;
+  const details = [Reflect.get(error, "response"), Reflect.get(error, "message")]
+    .filter((value): value is string => typeof value === "string").join(" ");
+  if (/\b5\.1\.\d+\b/.test(details)) return true;
+  // Gmail can report its recoverable daily sending quota as a 550, not a 4xx.
+  return !/\b(?:5\.4\.5|4\.\d+\.\d+)\b|quota|rate[\s-]*limit|sending[\s-]*limit/i.test(details);
 }
 
 interface WorkerOptions {
@@ -37,6 +42,7 @@ export class PostgresEmailWorker {
   private readonly tokenIssuer: TokenIssuer;
   private readonly siteAddress: string;
   private readonly now: () => Date;
+  private readonly deliveryBudgetSecret: string;
   private heartbeatDueAt = 0;
 
   constructor(options: WorkerOptions) {
@@ -45,6 +51,7 @@ export class PostgresEmailWorker {
     this.tokenIssuer = options.tokenIssuer;
     this.siteAddress = options.siteAddress;
     this.now = options.now ?? (() => new Date());
+    this.deliveryBudgetSecret = this.tokenIssuer.issue("email-budget");
   }
 
   private async recordHeartbeatIfDue() {
@@ -58,6 +65,22 @@ export class PostgresEmailWorker {
       )
       .execute();
     this.heartbeatDueAt = now.valueOf() + HEARTBEAT_INTERVAL_MS;
+  }
+
+  private async reserveDelivery(transaction: Transaction<AlongTheWayDatabase>, jobId: string) {
+    try {
+      await new PostgresRateLimiter(transaction, this.deliveryBudgetSecret, this.now)
+        .consume("email_delivery", "global");
+      return true;
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== "rate_limited") throw error;
+      const now = this.now();
+      const tomorrow = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+      // Backlogged jobs must compete with today's new mail, without being lost to the daily ceiling.
+      await transaction.updateTable("email_jobs").set({ available_at: tomorrow })
+        .where("id", "=", jobId).execute();
+      return false;
+    }
   }
 
   async runOnce() {
@@ -88,10 +111,13 @@ export class PostgresEmailWorker {
         if (job.kind === "magic_link" && job.magic_link_token_id) {
           const link = await transaction
             .selectFrom("magic_link_tokens")
-            .select(["expires_at", "used_at", "revoked_at"])
-            .where("id", "=", job.magic_link_token_id)
+            .innerJoin("users", "users.id", "magic_link_tokens.user_id")
+            .select(["magic_link_tokens.expires_at", "magic_link_tokens.used_at", "magic_link_tokens.revoked_at"])
+            .where("magic_link_tokens.id", "=", job.magic_link_token_id)
+            .where("users.status", "in", ["active", "invited"])
             .executeTakeFirst();
           if (link && !link.used_at && !link.revoked_at && new Date(link.expires_at) > this.now()) {
+            if (!(await this.reserveDelivery(transaction, job.id))) return true;
             const url = new URL("/", this.siteAddress);
             url.hash = new URLSearchParams({
               magicToken: this.tokenIssuer.issue(job.magic_link_token_id),
@@ -99,19 +125,24 @@ export class PostgresEmailWorker {
             await this.emailSender.sendMagicLink({
               to: job.recipient,
               url: url.toString(),
+              code: this.tokenIssuer.code(job.magic_link_token_id),
             });
           }
         } else if (job.kind === "trip_invite" && job.invite_id) {
           const invite = await transaction
             .selectFrom("invites")
             .innerJoin("trips", "trips.id", "invites.trip_id")
+            .innerJoin("users", "users.id", "invites.invited_by")
+            .innerJoin("users as recipient_user", "recipient_user.email", "invites.email")
             .select([
               "trips.name as tripName",
+              "users.display_name as inviterName",
               "invites.expires_at",
               "invites.accepted_at",
               "invites.revoked_at",
             ])
             .where("invites.id", "=", job.invite_id)
+            .where("recipient_user.status", "in", ["active", "invited"])
             .executeTakeFirst();
           if (
             invite &&
@@ -119,13 +150,15 @@ export class PostgresEmailWorker {
             !invite.revoked_at &&
             new Date(invite.expires_at) > this.now()
           ) {
+            if (!(await this.reserveDelivery(transaction, job.id))) return true;
             const url = new URL("/", this.siteAddress);
             url.hash = new URLSearchParams({
               inviteToken: this.tokenIssuer.issue(job.invite_id),
             }).toString();
             await this.emailSender.sendTripInvite({
               to: job.recipient,
-              tripName: invite.tripName,
+              tripName: safeInviteLabel(invite.tripName),
+              inviterName: safeInviteLabel(invite.inviterName ?? ""),
               url: url.toString(),
             });
           }

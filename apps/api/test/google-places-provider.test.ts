@@ -4,6 +4,7 @@ import {
   GooglePlacesProvider,
   googlePlacePhotoDto,
   PlacePhotoNotFoundError,
+  ProviderQuotaError,
   ProviderUnavailableError,
 } from "../src/trip-places/google-places-provider";
 
@@ -188,6 +189,26 @@ describe("Google Places provider adapter", () => {
     await expect(provider.search("Kyoto")).rejects.toBeInstanceOf(
       ProviderUnavailableError,
     );
+  });
+
+  it("surfaces HTTP 429 and local daily-budget exhaustion as quota without extra fetches", async () => {
+    const rejected = new GooglePlacesProvider({
+      apiKey: "server-only-key",
+      fetch: async () => Response.json({ error: { message: "private quota detail" } }, { status: 429 }),
+    });
+    await expect(rejected.openingHours("ChIJ-blue-bottle-1234")).rejects.toBeInstanceOf(ProviderQuotaError);
+
+    let fetched = false;
+    const exhausted = new GooglePlacesProvider({
+      apiKey: "server-only-key",
+      consumeBudget: async () => false,
+      fetch: async () => {
+        fetched = true;
+        return Response.json({});
+      },
+    });
+    await expect(exhausted.openingHours("ChIJ-blue-bottle-1234")).rejects.toBeInstanceOf(ProviderQuotaError);
+    expect(fetched).toBe(false);
   });
 
   it("looks places up with rating, review count, website, business status and country, keeping only plausible values", async () => {

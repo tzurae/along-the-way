@@ -1,5 +1,6 @@
 import { createDatabase, requireDatabaseUrl } from "./database/database";
 import { PostgresEmailWorker } from "./private-trips/postgres-email-worker";
+import { PostgresRetention } from "./private-trips/retention";
 import { SmtpEmailSender } from "./private-trips/smtp-email-sender";
 import { TokenIssuer } from "./private-trips/token-issuer";
 
@@ -51,6 +52,7 @@ const worker = new PostgresEmailWorker({
     username: smtpUsername,
   }),
 });
+const retention = new PostgresRetention(database);
 let stopping = false;
 
 function delay(milliseconds: number) {
@@ -62,6 +64,7 @@ function delay(milliseconds: number) {
 async function run() {
   console.info(JSON.stringify({ event: "email_worker_started", status: "ok" }));
   while (!stopping) {
+    await retention.runIfDue();
     const processed = await worker.runOnce();
     if (!processed) await delay(1_000);
   }

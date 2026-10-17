@@ -19,6 +19,7 @@ import type { TripDto } from "@along-the-way/contracts/private-trips";
 import { parseTripPlaceListResponse, type TripPlaceDto } from "@along-the-way/contracts/trip-places";
 import { ApiRequestError } from "./api-error";
 import { googleMapsPlaceUrl } from "./google-maps";
+import { safeExternalUrl } from "./external-url";
 import { useI18n, type Messages } from "./i18n";
 import { VoteControl, VoteVoters } from "./VoteControl";
 import { ConflictPanel, useVersionConflict } from "./ConflictPanel";
@@ -39,6 +40,7 @@ import "./pocket-discovery.css";
 
 interface DiscoveryWorkspaceProps {
   trip: TripDto;
+  accountId: string;
   request: PlaceDetailRequest;
   placesRevision: number;
   onPlacesChanged(): void;
@@ -167,20 +169,24 @@ function ClaimSentence({
       <span>{sentence.text}</span>
       {cited.length ? (
         <span className="ml-1 whitespace-nowrap">
-          {cited.map(({ item, number }) => (
-            <a
-              key={item.id}
-              // Inline citation: must not grow the text line (a 44px box pushed bullets apart);
-              // padding plus the gap keeps it tappable without breaking the sentence.
-              className="mr-1 inline-block px-1 align-baseline text-xs font-bold leading-none text-accent-strong underline"
-              href={item.sourceUrl}
-              target="_blank"
-              rel="noreferrer"
-              aria-label={t.proposal.citationLabel(number, item.title)}
-            >
-              [{number}]
-            </a>
-          ))}
+          {cited.map(({ item, number }) => {
+            const href = safeExternalUrl(item.sourceUrl);
+            const label = t.proposal.citationLabel(number, item.title);
+            return href ? (
+              <a
+                key={item.id}
+                // Inline citation: must not grow the text line (a 44px box pushed bullets apart);
+                // padding plus the gap keeps it tappable without breaking the sentence.
+                className="mr-1 inline-block px-1 align-baseline text-xs font-bold leading-none text-accent-strong underline"
+                href={href}
+                target="_blank"
+                rel="noreferrer"
+                aria-label={label}
+              >
+                [{number}]
+              </a>
+            ) : <span key={item.id} className="mr-1 inline-block px-1 text-xs font-bold" aria-label={label}>[{number}]</span>;
+          })}
           {cited.some(({ item }) => item.isStale)
             ? <span className="text-xs font-bold text-destructive">{t.proposal.staleEvidence}</span>
             : null}
@@ -231,7 +237,7 @@ function ResearchPanel({ first, open, onClose, children, footer }: { first: bool
 }
 
 
-export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChanged }: DiscoveryWorkspaceProps) {
+export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, onPlacesChanged }: DiscoveryWorkspaceProps) {
   const { locale, t: { discovery: t, schedule: scheduleT, tripPlaces: tripPlacesT } } = useI18n();
   const [workspace, setWorkspace] = useState<DiscoveryWorkspaceDto | null>(null);
   const [tripPlaces, setTripPlaces] = useState<TripPlaceDto[]>([]);
@@ -728,7 +734,7 @@ export function DiscoveryWorkspace({ trip, request, placesRevision, onPlacesChan
       area: placeArea(proposal.address),
       mine: proposal.status === "pending" ? proposal.ownVote : Boolean(place?.ownVote),
     };
-  }), `along-the-way:place-filters:${trip.id}:discovery`);
+  }), `along-the-way:place-filters:${accountId}:${trip.id}:discovery`);
   const filteredProposals = listedProposals.filter((proposal) => proposalFilters.visibleIds.has(proposal.id));
   /** Status label; an accepted proposal whose wishlist place is scheduled reads 「已加入行程」. */
   const proposalStatusLabel = (proposal: CandidateProposalDto, status: CandidateProposalDto["status"] = proposal.status) => {

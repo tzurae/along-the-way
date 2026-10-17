@@ -96,6 +96,8 @@ export interface SavedDayWindowDto extends DayWindowDto {
 
 /** `current` the day's saved order, `suggested` the shortest straight-line order, `custom` one a member arranged. */
 export type DayTimetableOrder = "current" | "suggested" | "custom";
+/** Same bound as the arrangement writer, so an existing large day remains reorderable. */
+export const MAX_DAY_TIMETABLE_STOPS = 100;
 
 export interface CreateDayTimetableInput {
   /** `current` keeps the day's order; `suggested` orders closest places first; `custom` uses `orderedTripPlaceIds`. */
@@ -149,9 +151,10 @@ export type DayTimetableRowDto =
       /**
        * `listed`: checked against Google opening hours, which never include last entry.
        * Otherwise why hours were not checked: `none` Google has no hours for the place,
-       * `failed` the lookup failed (drafting again may succeed), `manual` not a Google place.
+       * `failed` a transient lookup failed, `quota` today's Google budget is exhausted,
+       * `manual` not a Google place.
        */
-      hours: "listed" | "none" | "failed" | "manual";
+      hours: "listed" | "none" | "failed" | "quota" | "manual";
     }
   | {
       kind: "fixed";
@@ -388,7 +391,7 @@ function timetableRow(value: unknown): DayTimetableRowDto {
         endMinute: integer(row.endMinute),
         stayMinutes: integer(row.stayMinutes),
         stayEstimated: bool(row.stayEstimated),
-        hours: oneOf(row.hours, ["listed", "none", "failed", "manual"] as const),
+        hours: oneOf(row.hours, ["listed", "none", "failed", "quota", "manual"] as const),
       };
     case "fixed":
       return {

@@ -42,3 +42,30 @@ it("still localizes typed enum fields in three-way comparisons", async () => {
     { type: "restaurant", endpoints: [{ role: "end" }], constraints: [{ status: "confirmed" }] },
   )).toEqual(["活動", "餐廳", "活動", "開始", "結束", "開始", "未確認", "已確認", "未確認"]);
 });
+
+it.each([
+  [true, "成員"],
+  [false, "前成員"],
+] as const)("labels an unnamed actor without exposing a hidden email (active=%s)", async (actorIsActiveMember, label) => {
+  await act(async () => root.render(<ConflictPanel
+    conflict={{
+      base: { input: { name: "Before" }, version: 1 },
+      current: { input: { name: "Current" }, version: 2 },
+      attempted: { name: "Attempted" },
+      latestChange: {
+        eventId: "event",
+        actorId: "actor",
+        actorDisplayName: null,
+        actorEmail: null,
+        actorIsActiveMember,
+        isOwn: false,
+        changedAt: "2026-10-17T00:00:00.000Z",
+      },
+    }}
+    busy={false}
+    onAccept={() => {}}
+    onReapply={() => {}}
+    onEdit={() => {}}
+  />));
+  expect(host.textContent).toContain(`${label} 於`);
+});

@@ -45,6 +45,7 @@ import {
 } from "./discovery-model";
 import type { DiscoveryModule } from "./discovery-module";
 import {
+  ProviderQuotaError,
   ProviderUnavailableError,
   type RatedPlaceLookup,
 } from "../trip-places/google-places-provider";
@@ -56,6 +57,8 @@ interface PostgresDiscoveryModuleOptions {
   /** Google lookups with rating and review count, used to place and screen researched candidates. */
   placeLookup: RatedPlaceLookup;
   tripPlaces: PostgresTripPlaceModule;
+  /** Permanently charges one hourly AI start immediately before the model is called. */
+  claimAiRun: (userId: string, tripId: string) => Promise<void>;
   sourceChecks?: RecommendationSourceChecks;
   now?: () => Date;
   policyVersion?: string;
@@ -194,6 +197,12 @@ function replayedWorkspace(value: unknown) {
   return parseDiscoveryWorkspaceResponse({ discovery: upgradeStoredWorkspace(value) }).discovery;
 }
 
+const DISCOVERY_WORKSPACE_READBACK = "discovery_workspace_readback";
+
+function isDiscoveryWorkspaceReadback(value: unknown) {
+  return jsonObject(value).type === DISCOVERY_WORKSPACE_READBACK;
+}
+
 /**
  * Votes recorded before 0.8.0 stored the whole workspace as their response; newer ones store the
  * proposal. A retried old vote must still replay, so pick its proposal out of the stored workspace.
@@ -236,6 +245,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
   private readonly model: DiscoveryModel;
   private readonly placeLookup: RatedPlaceLookup;
   private readonly tripPlaces: PostgresTripPlaceModule;
+  private readonly claimAiRun: (userId: string, tripId: string) => Promise<void>;
   private readonly sourceChecks: RecommendationSourceChecks;
   private readonly now: () => Date;
   private readonly policyVersion: string;
@@ -245,6 +255,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     this.model = options.model;
     this.placeLookup = options.placeLookup;
     this.tripPlaces = options.tripPlaces;
+    this.claimAiRun = options.claimAiRun;
     this.sourceChecks = options.sourceChecks ?? defaultRecommendationSourceChecks;
     this.now = options.now ?? (() => new Date());
     // v2: research first, Google only places candidates, two independent sources required.
@@ -271,7 +282,11 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       await this.requireMember(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replayedWorkspace(replay);
+      if (replay) {
+        return isDiscoveryWorkspaceReadback(replay)
+          ? this.readWorkspace(transaction, tripId, userId)
+          : replayedWorkspace(replay);
+      }
       // A missing row cannot be FOR UPDATE locked: serialize creation by this
       // aggregate's identity before checking whether its initial version exists.
       await sql`select pg_advisory_xact_lock(hashtextextended(${operation}, 0))`.execute(transaction);
@@ -315,7 +330,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         summary: "Saved the trip discovery brief",
       });
       const response = await this.readWorkspace(transaction, tripId, userId);
-      await remember(transaction, userId, operation, key, response);
+      await remember(transaction, userId, operation, key, { type: DISCOVERY_WORKSPACE_READBACK });
       return response;
     });
   }
@@ -336,7 +351,11 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       await this.requireMember(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replayedWorkspace(replay);
+      if (replay) {
+        return isDiscoveryWorkspaceReadback(replay)
+          ? this.readWorkspace(transaction, tripId, userId)
+          : replayedWorkspace(replay);
+      }
       const brief = await transaction.selectFrom("discovery_briefs")
         .select(["version", "unresolved_questions", "question_answers"])
         .where("trip_id", "=", tripId)
@@ -383,7 +402,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         summary: "Saved answers to AI discovery questions",
       });
       const response = await this.readWorkspace(transaction, tripId, userId);
-      await remember(transaction, userId, operation, key, response);
+      await remember(transaction, userId, operation, key, { type: DISCOVERY_WORKSPACE_READBACK });
       return response;
     });
   }
@@ -403,7 +422,11 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     const operation = `${GENERATE_OPERATION_PREFIX}${tripId.toLowerCase()}`;
     await this.requireMember(this.database, userId, tripId);
     const earlyReplay = await replayed(this.database, userId, operation, key);
-    if (earlyReplay) return aiRequestReplay(earlyReplay);
+    if (earlyReplay) {
+      return isDiscoveryWorkspaceReadback(earlyReplay)
+        ? this.readWorkspace(this.database, tripId, userId)
+        : aiRequestReplay(earlyReplay);
+    }
     const brief = await this.database.selectFrom("discovery_briefs")
       .select(["original_text", "version", "question_answers"])
       .where("trip_id", "=", tripId)
@@ -430,7 +453,23 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       });
       return null;
     });
-    if (claimedReplay) return aiRequestReplay(claimedReplay);
+    if (claimedReplay) {
+      return isDiscoveryWorkspaceReadback(claimedReplay)
+        ? this.readWorkspace(this.database, tripId, userId)
+        : aiRequestReplay(claimedReplay);
+    }
+    try {
+      await this.claimAiRun(userId, tripId);
+    } catch (error) {
+      // The model was not called. Release only the idempotency claim; successful earlier model
+      // starts remain in the independent hourly accounting windows.
+      await this.database.deleteFrom("mutation_requests")
+        .where("actor_id", "=", userId)
+        .where("operation", "=", operation)
+        .where("idempotency_key", "=", key)
+        .execute();
+      throw error;
+    }
     try {
       const plan = await this.model.plan({
         brief: brief.original_text,
@@ -471,6 +510,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         wishlistProviderPlaceIds: new Set(wishlist.flatMap((row) => row.provider_place_id ?? [])),
         tripCountryCodes: new Set(trip.countries.map((country) => country.code)),
       }).catch((error: unknown) => {
+        if (error instanceof ProviderQuotaError) throw error;
         if (error instanceof ProviderUnavailableError) {
           throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
         }
@@ -491,7 +531,11 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         await this.requireMember(transaction, userId, tripId);
         await lockMutation(transaction, userId, operation, key);
         const replay = await replayed(transaction, userId, operation, key);
-        if (replay && !isAiRequestClaim(replay)) return replayedWorkspace(replay);
+        if (replay && !isAiRequestClaim(replay)) {
+          return isDiscoveryWorkspaceReadback(replay)
+            ? this.readWorkspace(transaction, tripId, userId)
+            : replayedWorkspace(replay);
+        }
         // Serialize against removal/voting before touching old proposals, without blocking brief writers' event FKs.
         await transaction.selectFrom("trips").select("id").where("id", "=", tripId)
           .forKeyShare().executeTakeFirstOrThrow();
@@ -664,7 +708,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           summary: `Generated ${verification.gate.shown.length} place proposals vouched for by two independent sources`,
         });
         const response = await this.readWorkspace(transaction, tripId, userId);
-        await transaction.updateTable("mutation_requests").set({ response })
+        await transaction.updateTable("mutation_requests")
+          .set({ response: { type: DISCOVERY_WORKSPACE_READBACK } })
           .where("actor_id", "=", userId)
           .where("operation", "=", operation)
           .where("idempotency_key", "=", key)
@@ -672,6 +717,16 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         return response;
       });
     } catch (error) {
+      if (error instanceof ProviderQuotaError) {
+        // A daily budget refusal is transient and made no Google request. Remove the claim so the
+        // same idempotency key can retry after capacity becomes available.
+        await this.database.deleteFrom("mutation_requests")
+          .where("actor_id", "=", userId)
+          .where("operation", "=", operation)
+          .where("idempotency_key", "=", key)
+          .execute();
+        throw new AppError("provider_unavailable", error.message, 503);
+      }
       const failure = error instanceof AppError
         ? error
         : error instanceof DiscoveryModelUnavailableError
@@ -730,7 +785,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       throw new AppError("validation_error", "voted must be a boolean");
     }
     const key = requireIdempotencyKey(rawKey);
-    const operation = `discovery:vote:${proposalId}`;
+    const operation = `dv:${tripId.toLowerCase()}:${proposalId.toLowerCase()}`;
     return this.database.transaction().execute(async (transaction) => {
       await this.requireMember(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
@@ -807,7 +862,11 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         .forUpdate().executeTakeFirstOrThrow();
       await requireScheduler(transaction, userId, tripId);
       const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replayedWorkspace(replay);
+      if (replay) {
+        return isDiscoveryWorkspaceReadback(replay)
+          ? this.readWorkspace(transaction, tripId, userId)
+          : replayedWorkspace(replay);
+      }
       await PostgresTripPlaceModule.reconcileLegacyPlacesInTransaction(transaction, tripId, this.now);
       const day = await transaction.selectFrom("trip_days").select("id")
         .where("trip_id", "=", tripId).where("id", "=", tripDayId).executeTakeFirst();
@@ -844,7 +903,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         places.map((place) => ({ tripPlaceId: place.id, tripDayId, expectedVersion: place.version })),
       );
       const response = await this.readWorkspace(transaction, tripId, userId);
-      await remember(transaction, userId, operation, key, response);
+      await remember(transaction, userId, operation, key, { type: DISCOVERY_WORKSPACE_READBACK });
       return response;
     });
   }
@@ -990,7 +1049,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     uuid(proposalId, "proposalId");
     const key = requireIdempotencyKey(rawKey);
     const version = expectedVersion(input.expectedVersion);
-    const operation = `discovery:reject:${proposalId}`;
+    const operation = `dr:${tripId.toLowerCase()}:${proposalId.toLowerCase()}`;
     return this.database.transaction().execute(async (transaction) => {
       await requireTripOwner(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
@@ -998,7 +1057,11 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         .forUpdate().executeTakeFirstOrThrow();
       await requireTripOwner(transaction, userId, tripId);
       const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replayedWorkspace(replay);
+      if (replay) {
+        return isDiscoveryWorkspaceReadback(replay)
+          ? this.readWorkspace(transaction, tripId, userId)
+          : replayedWorkspace(replay);
+      }
       const updated = await transaction.updateTable("candidate_proposals").set({
         status: "rejected",
         reopened_at: null,
@@ -1027,7 +1090,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         summary: "Marked an AI place proposal as not recommended",
       });
       const response = await this.readWorkspace(transaction, tripId, userId);
-      await remember(transaction, userId, operation, key, response);
+      await remember(transaction, userId, operation, key, { type: DISCOVERY_WORKSPACE_READBACK });
       return response;
     });
   }
@@ -1047,7 +1110,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 0) {
       throw new AppError("validation_error", "expectedVersion must be a non-negative integer");
     }
-    const operation = `discovery:restore:${proposalId}`;
+    const operation = `ds:${tripId.toLowerCase()}:${proposalId.toLowerCase()}`;
     return this.database.transaction().execute(async (transaction) => {
       await requireTripOwner(transaction, userId, tripId);
       await lockMutation(transaction, userId, operation, key);
@@ -1055,7 +1118,11 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         .forUpdate().executeTakeFirstOrThrow();
       await requireTripOwner(transaction, userId, tripId);
       const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replayedWorkspace(replay);
+      if (replay) {
+        return isDiscoveryWorkspaceReadback(replay)
+          ? this.readWorkspace(transaction, tripId, userId)
+          : replayedWorkspace(replay);
+      }
       const target = await transaction.selectFrom("candidate_proposals")
         .select(["provider_place_id", "status", "version", "decided_at"])
         .where("id", "=", proposalId).where("trip_id", "=", tripId)
@@ -1108,7 +1175,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         summary: "Restored an AI place proposal marked as not recommended",
       });
       const response = await this.readWorkspace(transaction, tripId, userId);
-      await remember(transaction, userId, operation, key, response);
+      await remember(transaction, userId, operation, key, { type: DISCOVERY_WORKSPACE_READBACK });
       return response;
     });
   }
@@ -1238,7 +1305,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
 
     const members = await executor.selectFrom("trip_members as member")
       .innerJoin("users", "users.id", "member.user_id")
-      .select(["member.user_id", "users.email", "users.display_name"])
+      .select(["member.user_id", "member.role", "users.email", "users.display_name"])
       .where("member.trip_id", "=", tripId)
       .where("member.removed_at", "is", null)
       .orderBy("member.joined_at")
@@ -1248,9 +1315,10 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       .where("proposal_id", "=", proposalId)
       .execute();
     const votedMemberIds = new Set(voteRows.map((vote) => vote.member_user_id));
+    const requesterIsOwner = members.some((member) => member.user_id === userId && member.role === "owner");
     const voters = members.filter((member) => votedMemberIds.has(member.user_id)).map((member) => ({
       memberUserId: member.user_id,
-      memberEmail: member.email,
+      memberEmail: requesterIsOwner || member.user_id === userId ? member.email : null,
       memberDisplayName: member.display_name,
     }));
     const evidenceRows = await executor.selectFrom("candidate_proposal_evidence as link")
@@ -1369,7 +1437,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       ? []
       : await executor.selectFrom("trip_members as member")
         .innerJoin("users", "users.id", "member.user_id")
-        .select(["member.user_id", "users.email", "users.display_name"])
+        .select(["member.user_id", "member.role", "users.email", "users.display_name"])
         .where("member.trip_id", "=", tripId)
         .where("member.removed_at", "is", null)
         .orderBy("member.joined_at")
@@ -1381,6 +1449,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         .where("proposal_id", "in", proposalIds)
         .execute();
     const proposalVotesByKey = new Set(proposalVoteRows.map((vote) => `${vote.proposal_id}:${vote.member_user_id}`));
+    const requesterIsOwner = members.some((member) => member.user_id === userId && member.role === "owner");
     // Earlier runs' decisions stay visible after a new run replaces their undecided proposals:
     // one entry per place, its newest decision, unless the latest run lists the place itself.
     const earlierDecisions = run
@@ -1485,7 +1554,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       proposals: proposalRows.map((proposal) => {
         const voters = members.filter((member) => proposalVotesByKey.has(`${proposal.id}:${member.user_id}`)).map((member) => ({
           memberUserId: member.user_id,
-          memberEmail: member.email,
+          memberEmail: requesterIsOwner || member.user_id === userId ? member.email : null,
           memberDisplayName: member.display_name,
         }));
         return {

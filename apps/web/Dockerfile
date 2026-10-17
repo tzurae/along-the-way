@@ -13,9 +13,9 @@ FROM oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b4
 WORKDIR /app
 ENV NODE_ENV=production
 
-COPY --from=build --chown=bun:bun /app/apps/web/dist ./apps/web/dist
-COPY --chown=bun:bun apps/web/server.ts ./apps/web/server.ts
-COPY --chown=bun:bun apps/web/server ./apps/web/server
+COPY --from=build /app/apps/web/dist ./apps/web/dist
+COPY apps/web/server.ts ./apps/web/server.ts
+COPY apps/web/server ./apps/web/server
 
 USER bun
 EXPOSE 4173

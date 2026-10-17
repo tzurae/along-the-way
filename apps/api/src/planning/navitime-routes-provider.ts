@@ -8,12 +8,15 @@ import type {
   RouteUnavailableReason,
 } from "@along-the-way/contracts/planning-observations";
 import { isRecord } from "@along-the-way/contracts/private-trips";
+import { inJapan } from "./japan";
 
 interface NavitimeRoutesProviderOptions {
   apiKey?: string;
   fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   now?: () => Date;
   timeoutMs?: number;
+  /** Reserves one unit immediately before each paid outbound request. */
+  consumeBudget?: () => Promise<boolean>;
 }
 
 const HOST = "navitime-route-totalnavi.p.rapidapi.com";
@@ -41,12 +44,14 @@ export class NavitimeRoutesProvider implements RouteObservationProvider {
   private readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   private readonly now: () => Date;
   private readonly timeoutMs: number;
+  private readonly consumeBudget: () => Promise<boolean>;
 
   constructor(options: NavitimeRoutesProviderOptions = {}) {
     this.apiKey = options.apiKey?.trim() || undefined;
     this.fetch = options.fetch ?? ((input, init) => fetch(input, init));
     this.now = options.now ?? (() => new Date());
     this.timeoutMs = options.timeoutMs ?? 3_000;
+    this.consumeBudget = options.consumeBudget ?? (async () => true);
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0) {
       throw new TypeError("Route timeout must be positive integer milliseconds");
     }
@@ -86,7 +91,9 @@ export class NavitimeRoutesProvider implements RouteObservationProvider {
     if (query.origin.latitude === null || query.origin.longitude === null || query.destination.latitude === null || query.destination.longitude === null) {
       return failed("location_unknown");
     }
+    if (!inJapan(query.origin) || !inJapan(query.destination)) return failed("unsupported_mode");
     if (!this.apiKey) return failed("provider_not_configured");
+    if (!(await this.consumeBudget())) return failed("quota");
     const url = new URL(`https://${HOST}/route_transit`);
     url.searchParams.set("start", `${query.origin.latitude},${query.origin.longitude}`);
     url.searchParams.set("goal", `${query.destination.latitude},${query.destination.longitude}`);

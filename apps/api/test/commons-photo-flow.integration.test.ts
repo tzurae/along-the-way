@@ -140,7 +140,7 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
     createdUsers.push(user.id);
     await database.insertInto("sessions").values({ user_id: user.id, token_hash: hashToken(token),
       expires_at: "2026-11-01T00:00:00Z", last_seen_at: now(), revoked_at: null }).execute();
-    cookie = `along_the_way_session=${token}`;
+    cookie = `__Host-along_the_way_session=${token}`;
     const response = await app.request("/api/trips", { method: "POST", headers: {
       cookie, "content-type": "application/json", origin: "https://app.example.test", "idempotency-key": randomUUID(),
     }, body: JSON.stringify({ name: `Commons 照片驗證 ${randomUUID()}`, startDate: "2026-10-20", endDate: "2026-10-22",
