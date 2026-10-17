@@ -8,12 +8,15 @@ import type {
   RouteUnavailableReason,
 } from "@along-the-way/contracts/planning-observations";
 import { isRecord } from "@along-the-way/contracts/private-trips";
+import { inJapan } from "./japan";
 
 interface GoogleRoutesProviderOptions {
   apiKey?: string;
   fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   now?: () => Date;
   timeoutMs?: number;
+  /** Reserves one unit immediately before each paid outbound request. */
+  consumeBudget?: () => Promise<boolean>;
 }
 
 const FRESHNESS_MS = 15 * 60 * 1_000;
@@ -83,33 +86,20 @@ function walkingLegs(route: Record<string, unknown>): number[] | null {
   return result;
 }
 
-/**
- * Whether a point is in Japan, closely enough to pick a transit provider: Japan's bounding box
- * without the parts of China, Korea and Russia that fall inside it.
- */
-function inJapan(point: { latitude: number | null; longitude: number | null }) {
-  const { latitude, longitude } = point;
-  if (latitude === null || longitude === null) return false;
-  if (latitude < 24 || latitude > 46 || longitude < 122 || longitude > 154) return false;
-  if (longitude < 124 && latitude > 26) return false; // China's coast (Shandong)
-  if (longitude < 128.5 && latitude > 32.5) return false; // Korea's west and south coasts, Jeju
-  if (longitude < 129.6 && latitude > 34.75) return false; // Korea's east coast: Busan, Ulsan, Pohang
-  if (longitude < 132 && latitude > 37) return false; // Ulleungdo, North Korea
-  if (longitude < 139.3 && latitude > 38.7) return false; // North Korea's and Russia's coasts
-  return true;
-}
 
 export class GoogleRoutesProvider implements RouteObservationProvider {
   private readonly apiKey: string | undefined;
   private readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   private readonly now: () => Date;
   private readonly timeoutMs: number;
+  private readonly consumeBudget: () => Promise<boolean>;
 
   constructor(options: GoogleRoutesProviderOptions = {}) {
     this.apiKey = options.apiKey?.trim() || undefined;
     this.fetch = options.fetch ?? ((input, init) => fetch(input, init));
     this.now = options.now ?? (() => new Date());
     this.timeoutMs = options.timeoutMs ?? 3_000;
+    this.consumeBudget = options.consumeBudget ?? (async () => true);
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0) {
       throw new TypeError("Route timeout must be positive integer milliseconds");
     }
@@ -164,6 +154,7 @@ export class GoogleRoutesProvider implements RouteObservationProvider {
     if ((mode === "walking" && offset < 0) || (mode === "transit" && (offset < -7 * DAY_MS || offset > 100 * DAY_MS))) {
       return unavailable("unsupported_departure_time");
     }
+    if (!(await this.consumeBudget())) return unavailable("quota");
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {

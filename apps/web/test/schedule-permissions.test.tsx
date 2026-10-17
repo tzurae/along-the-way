@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import type { DayTimetableDto, TripPlanDto } from "@along-the-way/contracts/day-plans";
 import { ApiRequestError } from "../src/api-error";
@@ -10,6 +10,7 @@ import { TodayWorkspace } from "../src/TodayWorkspace";
 import { TripOnboardingChecklist } from "../src/TripOnboardingChecklist";
 import { TripPlanDialog } from "../src/TripPlanDialog";
 import { createTodayModel } from "../src/today-model";
+import { TripSkeletonWorkspace } from "../src/TripSkeletonWorkspace";
 import { todayActivity, todaySkeleton, todayTrip, todayUser } from "./today-fixtures";
 import tripSkeletonWorkspaceSource from "../src/TripSkeletonWorkspace.tsx?raw";
 
@@ -145,6 +146,11 @@ describe("owner-only schedule surfaces", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "儲存為第 1 天的安排" })).not.toBeInTheDocument());
     expect(screen.getByRole("tab", { name: /依距離排/ })).toBeInTheDocument();
 
+    fireEvent.click(screen.getByText("可安排時間・交通方式"));
+    expect(screen.queryByLabelText("開始")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("結束")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "這天怎麼移動" })).not.toBeInTheDocument();
+
     rerender(<DayPlanDialog {...props} canArrange />);
     expect(await screen.findByRole("button", { name: "儲存為第 1 天的安排" })).toBeInTheDocument();
     expect(screen.queryByText(ownerOnly)).not.toBeInTheDocument();
@@ -239,6 +245,46 @@ describe("owner-only schedule surfaces", () => {
     await waitFor(() => expect(document.querySelector(".place-photo-credit")).toHaveTextContent("Google Maps・端點攝影者"));
     expect(screen.getByRole("link", { name: "端點攝影者" })).toHaveAttribute("href", "https://maps.google.com/contrib/today-author");
     expect(screen.getByRole("img", { name: "共 3 張照片" })).toBeInTheDocument();
+  });
+
+  it("hides locked-item unlock, edit, and delete controls from editors", async () => {
+    const ownerTrip = todayTrip();
+    const lockedItem = {
+      ...todayActivity("locked-booking"),
+      lockedAt: "2026-10-21T00:00:00.000Z",
+      lockedBy: todayUser.id,
+    };
+    const skeleton = todaySkeleton(ownerTrip, [lockedItem]);
+    const request = async <T,>(url: string) => {
+      if (url.endsWith("/skeleton")) return { skeleton } as T;
+      if (url.endsWith("/trip-places")) return { tripPlaces: [] } as T;
+      throw new Error(`Unexpected request: ${url}`);
+    };
+    const props = {
+      request,
+      onTripChanged: async () => {},
+      placesRevision: 0,
+      onPlacesChanged: () => {},
+      onTravelEdit: () => {},
+    };
+    const { rerender } = render(
+      <TripSkeletonWorkspace {...props} trip={{ ...ownerTrip, role: "editor" }} />,
+    );
+
+    const row = await screen.findByRole("button", { name: /locked-booking/ });
+    fireEvent.click(row);
+    const detail = await waitFor(() => {
+      const article = document.querySelector<HTMLElement>('[data-item-id="locked-booking"].itinerary-card');
+      expect(article).toBeInTheDocument();
+      return article!;
+    });
+    expect(within(detail).queryByRole("button", { name: "解鎖" })).not.toBeInTheDocument();
+    expect(within(detail).queryByRole("button", { name: "刪除" })).not.toBeInTheDocument();
+    expect(within(detail).queryByRole("button", { name: /編輯/ })).not.toBeInTheDocument();
+
+    rerender(<TripSkeletonWorkspace {...props} trip={ownerTrip} />);
+    expect(await within(detail).findByRole("button", { name: "解鎖" })).toBeInTheDocument();
+    expect(within(detail).queryByRole("button", { name: "刪除" })).not.toBeInTheDocument();
   });
 
   it("offers the assign-place onboarding item only to owners", () => {

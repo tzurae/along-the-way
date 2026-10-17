@@ -33,7 +33,7 @@ export interface ProviderPlaceSearchResultDto extends ProviderPlaceCandidateDto 
 
 export interface MemberVoteDto {
   memberUserId: string;
-  memberEmail: string;
+  memberEmail: string | null;
   memberDisplayName: string | null;
 }
 
@@ -255,7 +255,7 @@ export function parseMemberVote(value: unknown): MemberVoteDto {
   const row = record(value);
   return {
     memberUserId: text(row.memberUserId),
-    memberEmail: text(row.memberEmail),
+    memberEmail: nullableText(row.memberEmail),
     memberDisplayName: nullableText(row.memberDisplayName),
   };
 }

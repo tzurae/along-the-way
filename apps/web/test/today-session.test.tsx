@@ -22,9 +22,14 @@ let liveSources: Array<EventTarget & { url: string }> = [];
 let previewFails = false;
 let magicConsumeFailure: "network" | "terminal" | 403 | 429 | 500 | null = null;
 let magicInviteOutcome = false;
+let magicConfirmationRequired = false;
 let inviteNetworkFailure = false;
 let memberActionFailure = false;
 let sessionNetworkFailure = false;
+let logoutNetworkFailure = false;
+let logoutTargetMismatch = false;
+let logoutBodies: unknown[] = [];
+let sessionUser = todayUser;
 let tripPlacesOverride: TripPlaceDto[] | null = null;
 const reply = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 
@@ -33,13 +38,17 @@ beforeEach(() => {
   trips = [todayTrip(), todayTrip("B", "11")];
   skeleton = todaySkeleton(trips[0]);
   dayVersion = 1;
-  savedOrder = false; gate = null; requests = [];
+  savedOrder = false; gate = null; requests = []; logoutBodies = [];
   liveVersion = 0; liveSources = []; previewFails = false;
   magicConsumeFailure = null;
   magicInviteOutcome = false;
+  magicConfirmationRequired = false;
   inviteNetworkFailure = false;
   memberActionFailure = false;
   sessionNetworkFailure = false;
+  logoutNetworkFailure = false;
+  logoutTargetMismatch = false;
+  sessionUser = todayUser;
   tripPlacesOverride = null;
   history.replaceState({}, "", "/?trip=A&tab=today&day=2026-10-21");
   Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
@@ -48,14 +57,37 @@ beforeEach(() => {
     constructor(readonly url: string) { super(); liveSources.push(this); }
     close = vi.fn();
   });
+  vi.stubGlobal("ResizeObserver", class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  });
   vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
     requests.push(input);
     if (gate && input.startsWith("/api/trips/A")) await gate;
     if (input === "/api/session") {
       if (sessionNetworkFailure) throw new TypeError("Failed to fetch");
-      return reply({ user: todayUser });
+      return reply({ user: sessionUser });
+    }
+    if (input === "/api/logout" && init?.method === "POST") {
+      logoutBodies.push(init.body ? JSON.parse(String(init.body)) : null);
+      if (logoutNetworkFailure) throw new TypeError("Failed to fetch");
+      if (logoutTargetMismatch) return reply({
+        error: { code: "logout_target_mismatch", message: "Another account is signed in." },
+      }, 409);
+      return new Response(null, { status: 204 });
+    }
+    if (input === "/api/logout-everywhere" && init?.method === "POST") {
+      return new Response(null, { status: 204 });
     }
     if (input === "/api/auth/magic-links/consume") {
+      if (magicConfirmationRequired && !JSON.parse(String(init?.body)).confirm) {
+        return reply({
+          error: { code: "confirmation_required", message: "Confirm signing in." },
+          targetEmail: "ne***@example.test",
+          currentEmail: "ow***@example.test",
+        }, 409);
+      }
       if (magicConsumeFailure === "network") throw new TypeError("Failed to fetch");
       if (magicConsumeFailure) {
         const status = magicConsumeFailure === "terminal" ? 400 : magicConsumeFailure;
@@ -76,6 +108,11 @@ beforeEach(() => {
         user: todayUser,
         ...(magicInviteOutcome ? { inviteOutcome: "expired-or-revoked" } : {}),
       });
+    }
+    if (input === "/api/auth/magic-links") return reply({ message: "If eligible, sent." }, 202);
+    if (input === "/api/auth/magic-links/verify-code") {
+      expect(JSON.parse(String(init?.body))).toMatchObject({ email: "owner@example.test", code: "012345" });
+      return reply({ user: todayUser });
     }
     if (input === "/api/trips") return reply({ trips });
     if (input === "/api/invites/accept") return reply({ error: { code: "used_invite", message: "This invitation was already used" } }, 409);
@@ -152,6 +189,54 @@ async function travelHistory(direction: "back" | "forward") {
   });
 }
 
+
+it("SEC-01 shows both masked accounts and waits for explicit confirmation before switching", async () => {
+  await mount();
+  await waitFor(() => expect(snapshot()).toBeTruthy());
+  const previousSnapshot = snapshot();
+  magicConfirmationRequired = true;
+  history.replaceState({}, "", "/?trip=A&tab=today#magicToken=foreign-token");
+  await act(async () => window.dispatchEvent(new HashChangeEvent("hashchange")));
+  await waitFor(() => expect(document.body).toHaveTextContent("這個連結會以 ne***@example.test 登入這個裝置"));
+  expect(document.querySelector('[role="alert"]')).toHaveTextContent("目前登入的是 ow***@example.test，繼續會登出");
+  expect(document.querySelector("#auth-title")).toHaveFocus();
+  expect(requests.filter((url) => url === "/api/auth/magic-links/consume")).toHaveLength(1);
+  expect(snapshot()).toEqual(previousSnapshot);
+  await click(button("確認登入"));
+  await waitFor(() => expect(document.querySelector('[data-trip-tab="today"]')).toBeInTheDocument());
+  const consumes = vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/auth/magic-links/consume");
+  expect(consumes).toHaveLength(2);
+  expect(JSON.parse(String(consumes[1]![1]!.body))).toEqual({ token: "foreign-token", confirm: true });
+});
+
+it("SEC-01 cancellation preserves the original account without consuming the foreign link", async () => {
+  await mount();
+  magicConfirmationRequired = true;
+  history.replaceState({}, "", "/?trip=A&tab=today#magicToken=cancelled-token");
+  await act(async () => window.dispatchEvent(new HashChangeEvent("hashchange")));
+  await waitFor(() => expect(document.body).toHaveTextContent("確認登入這個裝置"));
+  await click(button("取消，保留目前帳號"));
+  await waitFor(() => expect(document.querySelector('[data-trip-tab="today"]')).toBeInTheDocument());
+  expect(requests.filter((url) => url === "/api/auth/magic-links/consume")).toHaveLength(1);
+  expect(location.hash).not.toContain("magicToken");
+});
+
+it("SEC-01 signs in through the public code-entry form", async () => {
+  new TodaySnapshotStore(localStorage).setLocallySignedOut(true);
+  await mount();
+  await act(async () => {
+    fireEvent.change(document.querySelector("#auth-email")!, { target: { value: "owner@example.test" } });
+    fireEvent.submit(button("寄送登入連結").closest("form")!);
+  });
+  await waitFor(() => expect(document.querySelector("#auth-code")).toBeInTheDocument());
+  await act(async () => {
+    fireEvent.change(document.querySelector("#auth-code")!, { target: { value: "012345" } });
+    fireEvent.submit(button("使用登入碼登入").closest("form")!);
+  });
+  await waitFor(() => expect(document.querySelector('[data-trip-tab="today"]')).toBeInTheDocument());
+  expect(requests.filter((url) => url === "/api/auth/magic-links/verify-code")).toHaveLength(1);
+  expect(new TodaySnapshotStore(localStorage).isLocallySignedOut()).toBe(false);
+});
 
 it("consumes each magic token once when the hash changes in the same document", async () => {
   await mount();
@@ -515,6 +600,27 @@ it("handles member action failures with localized feedback instead of an unhandl
   expect(panel.querySelector('[role="status"]')).not.toHaveTextContent("Database connection failed");
 });
 
+it("renders an unsafe itinerary item source as text instead of an external link", async () => {
+  const unsafeItem = { ...todayActivity(), sourceUrl: "javascript:alert(document.domain)" };
+  skeleton = todaySkeleton(trips[0]!, [unsafeItem]);
+
+  await mount();
+  await click(document.querySelector<HTMLButtonElement>('[data-trip-tab="itinerary"]')!);
+
+  const itinerary = document.getElementById("itinerary-segment-panel-daily")!;
+  const itemTrigger = [...itinerary.querySelectorAll<HTMLButtonElement>("button")]
+    .find((entry) => entry.textContent?.includes(unsafeItem.title));
+  expect(itemTrigger).toBeDefined();
+  await click(itemTrigger!);
+  const card = await waitFor(() => {
+    const item = document.querySelector<HTMLElement>(`[data-item-id="${unsafeItem.id}"].itinerary-card`);
+    expect(item).toBeInTheDocument();
+    return item!;
+  });
+  expect(card).toHaveTextContent("官方來源");
+  expect([...card.querySelectorAll("a")].some((link) => link.textContent === "官方來源")).toBe(false);
+});
+
 it("reopens the private read-only snapshot when the session read loses the network", async () => {
   new TodaySnapshotStore(localStorage).save(
     todayUser.id,
@@ -558,6 +664,144 @@ it("clears private state when another tab signs out of the shared browser accoun
   await waitFor(() => expect(button("寄送登入連結")).toBeInTheDocument());
   expect(new TodaySnapshotStore(localStorage).read(todayUser.id, "A")).toBeNull();
   expect(document.body).not.toHaveTextContent("Trip A");
+});
+
+it("clears account-scoped filters and onboarding state when signing out", async () => {
+  await mount();
+  localStorage.setItem("along-the-way:place-filters:account:A:wishlist", "{\"query\":\"private search\"}");
+  localStorage.setItem("along-the-way:trip-onboarding:account:A", "dismissed");
+
+  await click(button("登出"));
+
+  await waitFor(() => expect(button("寄送登入連結")).toBeInTheDocument());
+  expect(requests).toContain("/api/logout");
+  expect(localStorage.getItem("along-the-way:place-filters:account:A:wishlist")).toBeNull();
+  expect(localStorage.getItem("along-the-way:trip-onboarding:account:A")).toBeNull();
+});
+
+it("clears the previous account's filters and onboarding state when the server session changes account", async () => {
+  const previousAccount = "previous-account";
+  localStorage.setItem("along-the-way:today-account", previousAccount);
+  localStorage.setItem(`along-the-way:place-filters:${previousAccount}:A:wishlist`, "{\"query\":\"old account\"}");
+  localStorage.setItem(`along-the-way:trip-onboarding:${previousAccount}:A`, "dismissed");
+
+  await mount();
+
+  await waitFor(() => expect(document.querySelector('[data-trip-tab="today"]')).toBeInTheDocument());
+  expect(localStorage.getItem(`along-the-way:place-filters:${previousAccount}:A:wishlist`)).toBeNull();
+  expect(localStorage.getItem(`along-the-way:trip-onboarding:${previousAccount}:A`)).toBeNull();
+});
+
+it("offers logout everywhere and signs the current browser out after revoking every session", async () => {
+  await mount();
+
+  await click(button("登出所有裝置"));
+
+  await waitFor(() => expect(button("寄送登入連結")).toBeInTheDocument());
+  expect(requests.filter((entry) => entry === "/api/logout-everywhere")).toHaveLength(1);
+});
+
+it("keeps a failed server logout pending, warns visibly, and replays the bound account when online", async () => {
+  await mount();
+  logoutNetworkFailure = true;
+
+  await click(button("登出"));
+
+  await waitFor(() => expect(button("寄送登入連結")).toBeInTheDocument());
+  expect(document.querySelector('[role="alert"]')).toHaveTextContent("伺服器端登出尚未完成；恢復連線後會自動重試。");
+  expect(localStorage.getItem("along-the-way:pending-server-logout")).toBe(todayUser.id);
+  expect(logoutBodies).toEqual([{ userId: todayUser.id }]);
+  logoutNetworkFailure = false;
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+  });
+  await waitFor(() => expect(localStorage.getItem("along-the-way:pending-server-logout")).toBeNull());
+  expect(logoutBodies).toEqual([{ userId: todayUser.id }, { userId: todayUser.id }]);
+});
+
+it("queues offline logout for the current account and replays that target after connectivity returns", async () => {
+  await mount();
+  Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+
+  await click(button("登出"));
+
+  expect(requests).not.toContain("/api/logout");
+  expect(localStorage.getItem("along-the-way:pending-server-logout")).toBe(todayUser.id);
+  Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+  });
+  await waitFor(() => expect(localStorage.getItem("along-the-way:pending-server-logout")).toBeNull());
+  expect(logoutBodies).toEqual([{ userId: todayUser.id }]);
+});
+
+it("still sends online logout when durable pending storage is full", async () => {
+  await mount();
+  const setItem = Storage.prototype.setItem;
+  vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+    if (key === "along-the-way:pending-server-logout") throw new DOMException("Storage full", "QuotaExceededError");
+    setItem.call(this, key, value);
+  });
+
+  await click(button("登出"));
+
+  await waitFor(() => expect(button("寄送登入連結")).toBeInTheDocument());
+  expect(logoutBodies).toEqual([{ userId: todayUser.id }]);
+});
+
+it("drops a deferred target mismatch without signing out the newer account", async () => {
+  const newerUser = { ...todayUser, id: "new-account", email: "new-account@example.test" };
+  sessionUser = newerUser;
+  trips = trips.map((trip) => ({
+    ...trip,
+    members: trip.members.map((member) => member.userId === todayUser.id
+      ? { ...member, userId: newerUser.id, email: newerUser.email }
+      : member),
+  }));
+  skeleton = todaySkeleton(trips[0]!);
+  localStorage.setItem("along-the-way:pending-server-logout", todayUser.id);
+  localStorage.setItem("along-the-way:locally-signed-out", "true");
+  logoutTargetMismatch = true;
+
+  await mount();
+
+  await waitFor(() => expect(document.body).toHaveTextContent(`登入帳號：${newerUser.email}`));
+  expect(logoutBodies).toEqual([{ userId: todayUser.id }]);
+  expect(localStorage.getItem("along-the-way:pending-server-logout")).toBeNull();
+  expect(localStorage.getItem("along-the-way:locally-signed-out")).toBeNull();
+  expect(document.querySelector('input[type="email"]')).toBeNull();
+});
+
+it("restores a newer account after target mismatch even when this tab previously consumed a magic link", async () => {
+  history.replaceState({}, "", "/?trip=A&tab=today#magicToken=first-account-token");
+  await mount();
+  await waitFor(() => expect(document.body).toHaveTextContent(`登入帳號：${todayUser.email}`));
+  expect(requests.filter((url) => url === "/api/auth/magic-links/consume")).toHaveLength(1);
+
+  Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+  await click(button("登出"));
+  await waitFor(() => expect(button("寄送登入連結")).toBeInTheDocument());
+
+  const newerUser = { ...todayUser, id: "new-account", email: "new-account@example.test" };
+  sessionUser = newerUser;
+  trips = trips.map((trip) => ({
+    ...trip,
+    members: trip.members.map((member) => member.userId === todayUser.id
+      ? { ...member, userId: newerUser.id, email: newerUser.email }
+      : member),
+  }));
+  skeleton = todaySkeleton(trips[0]!);
+  logoutTargetMismatch = true;
+  Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+  });
+
+  await waitFor(() => expect(document.body).toHaveTextContent(`登入帳號：${newerUser.email}`));
+  expect(logoutBodies).toEqual([{ userId: todayUser.id }]);
+  expect(requests.filter((url) => url === "/api/auth/magic-links/consume")).toHaveLength(1);
+  expect(localStorage.getItem("along-the-way:pending-server-logout")).toBeNull();
+  expect(localStorage.getItem("along-the-way:locally-signed-out")).toBeNull();
 });
 
 it("keeps a failed online mutation's error visible after a live read refresh", async () => {

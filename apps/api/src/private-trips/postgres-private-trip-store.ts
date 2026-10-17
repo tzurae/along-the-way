@@ -11,11 +11,16 @@ export type DatabaseExecutor =
 /** Request-scoped audit context only; it never changes concurrency or validation. */
 export const conflictResolutionContext = new AsyncLocalStorage<string | undefined>();
 export function normalizeEmail(value: string) {
-  return value.trim().toLowerCase();
+  return value.normalize("NFKC").trim().toLowerCase();
 }
 
 export function validEmail(value: string) {
-  return value.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  if (value.length > 254) return false;
+  const [local, domain, extra] = value.split("@");
+  return extra === undefined && !!local && local.length <= 64 && !!domain &&
+    /^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*$/.test(local) &&
+    domain.split(".").length >= 2 &&
+    domain.split(".").every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
 }
 
 export function isoTimestamp(value: Date | string) {

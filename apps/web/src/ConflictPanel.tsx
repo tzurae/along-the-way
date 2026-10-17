@@ -67,7 +67,12 @@ export function ConflictPanel<T>({ conflict, busy, onAccept, onReapply, onEdit, 
   return <section aria-labelledby={id} className="grid gap-4 rounded-xl border border-accent-strong/40 bg-surface-subtle p-4" data-conflict-panel>
     <h3 id={id} ref={heading} tabIndex={-1} className="font-semibold text-lg outline-none">{conflict.latestChange?.isOwn ? t.ownTitle : t.title}</h3>
     <p className="text-sm">{t.description}</p>
-    <p className="text-sm [overflow-wrap:anywhere]">{conflict.latestChange ? t.changedBy(conflict.latestChange.actorDisplayName ?? conflict.latestChange.actorEmail, new Date(conflict.latestChange.changedAt).toLocaleString(locale)) : t.unknownChange}</p>
+    <p className="text-sm [overflow-wrap:anywhere]">{conflict.latestChange ? t.changedBy(
+      conflict.latestChange.actorDisplayName
+        ?? conflict.latestChange.actorEmail
+        ?? (conflict.latestChange.actorIsActiveMember ? t.unknownActor : t.formerActor),
+      new Date(conflict.latestChange.changedAt).toLocaleString(locale),
+    ) : t.unknownChange}</p>
     {conflict.current ? <p className="text-sm">{t.version(conflict.current.version)}</p> : <p role="alert">{t.unavailable}</p>}
     <dl className="grid divide-y divide-ink/10">
       {differingFields.map((path) => <div key={path} className="py-3">

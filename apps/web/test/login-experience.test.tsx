@@ -14,6 +14,7 @@ function renderLogin(overrides: Partial<React.ComponentProps<typeof LoginExperie
       inviteToken={overrides.inviteToken ?? null}
       requestLink={requestLink}
       requestInviteLink={requestInviteLink}
+      verifyCode={overrides.verifyCode ?? vi.fn(async () => {})}
       retryConsume={overrides.retryConsume}
       describeError={overrides.describeError ?? (() => "無法索取登入連結。")}
     />,
@@ -60,6 +61,7 @@ it("ignores an invite-link response after the tab changes to a different invitat
       inviteToken="first-invite"
       requestLink={vi.fn(async () => {})}
       requestInviteLink={requestInviteLink}
+      verifyCode={vi.fn(async () => {})}
       describeError={describeError}
     />,
   );
@@ -72,6 +74,7 @@ it("ignores an invite-link response after the tab changes to a different invitat
       requestLink={vi.fn(async () => {})}
       requestInviteLink={requestInviteLink}
       describeError={describeError}
+      verifyCode={vi.fn(async () => {})}
     />,
   );
   expect(screen.getByRole("button", { name: "寄送登入連結到受邀信箱" })).toBeEnabled();
@@ -172,4 +175,29 @@ it("renders an initial localized error on mount", () => {
   renderLogin({ initialError: "這個登入連結已使用。請寄一封新的登入信。" });
 
   expect(screen.getByRole("alert")).toHaveTextContent("這個登入連結已使用。請寄一封新的登入信。");
+});
+
+it("SEC-01 submits the emailed code with the original address and reports failures", async () => {
+  const verifyCode = vi.fn(async () => { throw new Error("wrong code"); });
+  renderLogin({ verifyCode, describeError: () => "登入碼無效，請再試一次。" });
+  submitEmail("owner@example.test");
+  await screen.findByRole("heading", { name: "查看你的電子郵件" });
+  const input = screen.getByRole("textbox", { name: "6 位數登入碼" });
+  expect(input).toHaveAttribute("autocomplete", "one-time-code");
+  fireEvent.change(input, { target: { value: "012345" } });
+  fireEvent.submit(screen.getByRole("button", { name: "使用登入碼登入" }).closest("form")!);
+  await waitFor(() => expect(verifyCode).toHaveBeenCalledWith("owner@example.test", "012345"));
+  expect(await screen.findByRole("alert")).toHaveTextContent("登入碼無效，請再試一次。");
+  expect(screen.getByRole("button", { name: "使用登入碼登入" })).toBeEnabled();
+});
+
+it("SEC-01 lets an invite recipient enter their email and code without exposing it beforehand", async () => {
+  const verifyCode = vi.fn(async () => {});
+  renderLogin({ verifyCode, inviteToken: "invitation" });
+  fireEvent.click(screen.getByRole("button", { name: "寄送登入連結到受邀信箱" }));
+  await screen.findByRole("heading", { name: "查看你的電子郵件" });
+  fireEvent.change(screen.getByRole("textbox", { name: "電子郵件" }), { target: { value: "invited@example.test" } });
+  fireEvent.change(screen.getByRole("textbox", { name: "6 位數登入碼" }), { target: { value: "123456" } });
+  fireEvent.submit(screen.getByRole("button", { name: "使用登入碼登入" }).closest("form")!);
+  await waitFor(() => expect(verifyCode).toHaveBeenCalledWith("invited@example.test", "123456"));
 });

@@ -13,6 +13,8 @@ import {
   type AuthenticatedUser,
   type IdentityAccessModule,
   type InviteReadModel,
+  type LoginContext,
+  type LoginResult,
   type SessionResult,
 } from "./private-trip-module";
 import {
@@ -27,10 +29,12 @@ import {
   validEmail,
 } from "./postgres-private-trip-store";
 import { hashToken, type TokenIssuer } from "./token-issuer";
+import { PostgresRateLimiter } from "./postgres-rate-limiter";
 
 const MAGIC_LINK_LIFETIME_MS = 15 * 60 * 1_000;
 const INVITE_LIFETIME_MS = 7 * 24 * 60 * 60 * 1_000;
 const SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1_000;
+const SESSION_ABSOLUTE_LIFETIME_MS = 90 * 24 * 60 * 60 * 1_000;
 const SESSION_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const SESSION_STORED_LIFETIME_MS =
   SESSION_LIFETIME_MS + SESSION_REFRESH_INTERVAL_MS;
@@ -45,6 +49,11 @@ interface ModuleOptions {
 
 function defaultSessionToken() {
   return randomBytes(32).toString("base64url");
+}
+
+function maskedEmail(email: string) {
+  const [local, domain] = email.split("@");
+  return `${local!.slice(0, 2)}***@${domain}`;
 }
 
 function storedInvite(value: unknown): InviteDto {
@@ -73,6 +82,7 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
   private readonly now: () => Date;
   private readonly randomSessionToken: () => string;
   private readonly randomIdentifier: () => string;
+  private readonly emailBudgetSecret: string;
 
   constructor(options: ModuleOptions) {
     this.database = options.database;
@@ -80,6 +90,7 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
     this.now = options.now ?? (() => new Date());
     this.randomSessionToken = options.randomSessionToken ?? defaultSessionToken;
     this.randomIdentifier = options.randomIdentifier ?? randomUUID;
+    this.emailBudgetSecret = this.tokenIssuer.issue("email-budget");
   }
 
   private async queueMagicLink(
@@ -87,7 +98,15 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
     user: { id: string; email: string },
     linkedInviteId: string | null,
     now: Date,
+    nonce: string,
   ) {
+    try {
+      await new PostgresRateLimiter(transaction, this.emailBudgetSecret, this.now).consume("email_send", "global");
+    } catch (error) {
+      // Public login requests must not reveal whether this recipient could receive mail.
+      if (error instanceof AppError && error.code === "rate_limited") return;
+      throw error;
+    }
     const id = this.randomIdentifier();
     const token = this.tokenIssuer.issue(id);
     await transaction
@@ -97,6 +116,9 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         user_id: user.id,
         token_hash: hashToken(token),
         linked_invite_id: linkedInviteId,
+        login_nonce_hash: hashToken(nonce),
+        code_hash: hashToken(this.tokenIssuer.code(id)),
+        created_at: now,
         expires_at: new Date(now.valueOf() + MAGIC_LINK_LIFETIME_MS),
         used_at: null,
         revoked_at: null,
@@ -115,7 +137,7 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
       .execute();
   }
 
-  async requestMagicLink(rawEmail: string) {
+  async requestMagicLink(rawEmail: string, nonce: string) {
     const email = normalizeEmail(rawEmail);
     if (!validEmail(email)) return;
     const now = this.now();
@@ -126,13 +148,14 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         .select(["id", "email"])
         .where("email", "=", email)
         .where("status", "=", "active")
+        .forUpdate()
         .executeTakeFirst();
       if (!user) return;
-      await this.queueMagicLink(transaction, user, null, now);
+      await this.queueMagicLink(transaction, user, null, now, nonce);
     });
   }
 
-  async requestInviteMagicLink(inviteToken: string) {
+  async requestInviteMagicLink(inviteToken: string, nonce: string) {
     const now = this.now();
     await this.database.transaction().execute(async (transaction) => {
       const invitation = await transaction
@@ -147,7 +170,7 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         .where("invites.accepted_at", "is", null)
         .where("invites.revoked_at", "is", null)
         .where("invites.expires_at", ">", now)
-        .where("users.status", "=", "active")
+        .where("users.status", "in", ["active", "invited"])
         .forUpdate()
         .executeTakeFirst();
       if (!invitation) return;
@@ -156,15 +179,30 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         { id: invitation.userId, email: invitation.email },
         invitation.inviteId,
         now,
+        nonce,
       );
     });
   }
 
-  async consumeMagicLink(token: string): Promise<SessionResult> {
-    const sessionToken = this.randomSessionToken();
+  async consumeMagicLink(token: string, context: LoginContext): Promise<LoginResult> {
+    return this.signIn({ token }, context);
+  }
+
+  async verifyMagicLinkCode(rawEmail: string, code: string, context: LoginContext): Promise<LoginResult> {
+    const email = normalizeEmail(rawEmail);
+    if (!validEmail(email) || !context.nonce || !/^\d{6}$/.test(code)) {
+      throw new AppError("invalid_magic_code", "This code is invalid or expired. Request a new link.");
+    }
+    return this.signIn({ email, code }, context);
+  }
+
+  private async signIn(
+    credential: { token: string } | { email: string; code: string },
+    context: LoginContext,
+  ): Promise<LoginResult> {
     const now = this.now();
-    return this.database.transaction().execute(async (transaction) => {
-      const link = await transaction
+    const result = await this.database.transaction().execute(async (transaction): Promise<LoginResult | AppError> => {
+      let query = transaction
         .selectFrom("magic_link_tokens")
         .innerJoin("users", "users.id", "magic_link_tokens.user_id")
         .select([
@@ -173,13 +211,38 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
           "magic_link_tokens.used_at",
           "magic_link_tokens.revoked_at",
           "magic_link_tokens.linked_invite_id as linkedInviteId",
+          "magic_link_tokens.login_nonce_hash",
+          "magic_link_tokens.code_hash",
+          "magic_link_tokens.code_attempts",
+          "users.status",
           "users.id as userId",
           "users.email",
           "users.display_name as displayName",
         ])
-        .where("magic_link_tokens.token_hash", "=", hashToken(token))
-        .forUpdate()
-        .executeTakeFirst();
+        .where("users.status", "in", ["active", "invited"]);
+      if ("token" in credential) {
+        query = query.where("magic_link_tokens.token_hash", "=", hashToken(credential.token));
+      } else {
+        query = query
+          .where("users.email", "=", credential.email)
+          .where("magic_link_tokens.login_nonce_hash", "=", hashToken(context.nonce))
+          .where("magic_link_tokens.used_at", "is", null)
+          .where("magic_link_tokens.revoked_at", "is", null)
+          .where("magic_link_tokens.expires_at", ">", now)
+          .orderBy("magic_link_tokens.created_at", "desc");
+      }
+      const link = await query.forUpdate().executeTakeFirst();
+
+      if (!("token" in credential) && (!link || link.code_hash !== hashToken(credential.code))) {
+        if (link) {
+          const attempts = link.code_attempts + 1;
+          await transaction.updateTable("magic_link_tokens")
+            .set({ code_attempts: attempts, ...(attempts >= 5 ? { revoked_at: now } : {}) })
+            .where("id", "=", link.id).execute();
+        }
+        // Return instead of throwing so failed attempts and revocation are committed.
+        return new AppError("invalid_magic_code", "This code is invalid or expired. Request a new link.");
+      }
 
       if (!link) {
         throw new AppError(
@@ -204,6 +267,24 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
           "expired_magic_link",
           "This sign-in link expired. Request a new link.",
         );
+      }
+
+      const previous = context.sessionToken
+        ? await transaction.selectFrom("sessions").innerJoin("users", "users.id", "sessions.user_id")
+          .select(["users.id", "users.email"])
+          .where("sessions.token_hash", "=", hashToken(context.sessionToken))
+          .where("sessions.revoked_at", "is", null)
+          .where("sessions.expires_at", ">", now)
+          .where("sessions.created_at", ">", new Date(now.valueOf() - SESSION_ABSOLUTE_LIFETIME_MS))
+          .where("users.status", "=", "active").executeTakeFirst()
+        : undefined;
+      const sameBrowser = !!context.nonce && link.login_nonce_hash === hashToken(context.nonce);
+      if (!context.confirm && (!sameBrowser || (previous && previous.id !== link.userId))) {
+        return {
+          confirmationRequired: true,
+          targetEmail: maskedEmail(link.email),
+          currentEmail: previous && previous.id !== link.userId ? maskedEmail(previous.email) : null,
+        };
       }
 
       let acceptedTripId: string | undefined;
@@ -301,6 +382,21 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         }
       }
 
+      if (link.status === "invited") {
+        if (!acceptedTripId) {
+          throw new AppError("invalid_invite", "This invitation is no longer valid.");
+        }
+        await transaction.updateTable("users")
+          .set({ status: "active", updated_at: now }).where("id", "=", link.userId).execute();
+      }
+      // Replacing the browser cookie must not leave its previous session valid elsewhere.
+      if (context.sessionToken) {
+        await transaction.updateTable("sessions").set({ revoked_at: now })
+          .where("token_hash", "=", hashToken(context.sessionToken))
+          .where("revoked_at", "is", null).execute();
+      }
+      const sessionToken = this.randomSessionToken();
+
       await transaction
         .updateTable("magic_link_tokens")
         .set({ used_at: now })
@@ -313,6 +409,7 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
           token_hash: hashToken(sessionToken),
           expires_at: new Date(now.valueOf() + SESSION_STORED_LIFETIME_MS),
           last_seen_at: now,
+          created_at: now,
           revoked_at: null,
         })
         .execute();
@@ -328,6 +425,8 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         ...(inviteOutcome ? { inviteOutcome } : {}),
       };
     });
+    if (result instanceof AppError) throw result;
+    return result;
   }
 
   async authenticate(sessionToken: string): Promise<AuthenticatedUser | null> {
@@ -341,27 +440,31 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         "sessions.expires_at",
         "sessions.last_seen_at",
         "sessions.revoked_at",
+        "sessions.created_at",
         "users.id as userId",
         "users.email",
         "users.display_name as displayName",
       ])
       .where("sessions.token_hash", "=", hashToken(sessionToken))
+      .where("users.status", "=", "active")
       .executeTakeFirst();
 
-    if (!session || session.revoked_at || new Date(session.expires_at) <= now) {
+    if (!session || session.revoked_at || new Date(session.expires_at) <= now ||
+      new Date(session.created_at).valueOf() + SESSION_ABSOLUTE_LIFETIME_MS <= now.valueOf()) {
       return null;
     }
 
     // Persist only when the stored expiry would no longer cover a full 30 days from now. Renewals
     // store 31 days, so this writes at most about once a day, and sessions created by an earlier
     // release (stored with exactly 30 days) gain the slack on their first use after upgrade.
-    const mustCover = new Date(now.valueOf() + SESSION_LIFETIME_MS);
+    const absoluteExpiry = new Date(new Date(session.created_at).valueOf() + SESSION_ABSOLUTE_LIFETIME_MS);
+    const mustCover = new Date(Math.min(now.valueOf() + SESSION_LIFETIME_MS, absoluteExpiry.valueOf()));
     if (new Date(session.expires_at) < mustCover) {
       await this.database
         .updateTable("sessions")
         .set({
           last_seen_at: now,
-          expires_at: new Date(now.valueOf() + SESSION_STORED_LIFETIME_MS),
+          expires_at: new Date(Math.min(now.valueOf() + SESSION_STORED_LIFETIME_MS, absoluteExpiry.valueOf())),
         })
         .where("id", "=", session.id)
         .where("revoked_at", "is", null)
@@ -391,14 +494,30 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
     return { id: updated.id, email: updated.email, displayName: updated.display_name };
   }
 
-  async logout(sessionToken: string) {
+  async logout(sessionToken: string, targetUserId?: string) {
     if (!sessionToken) return;
-    await this.database
-      .updateTable("sessions")
-      .set({ revoked_at: this.now() })
-      .where("token_hash", "=", hashToken(sessionToken))
-      .where("revoked_at", "is", null)
-      .execute();
+    const now = this.now();
+    await this.database.transaction().execute(async (transaction) => {
+      const session = await transaction.selectFrom("sessions").select(["id", "user_id"])
+        .where("token_hash", "=", hashToken(sessionToken))
+        .where("revoked_at", "is", null)
+        .where("expires_at", ">", now)
+        .where("created_at", ">", new Date(now.valueOf() - SESSION_ABSOLUTE_LIFETIME_MS))
+        .forUpdate().executeTakeFirst();
+      if (!session) return;
+      // A delayed request from another tab must not revoke a replacement account's cookie.
+      if (targetUserId !== undefined && session.user_id !== targetUserId) {
+        throw new AppError("logout_target_mismatch", "This device is signed in to a different account.", 409);
+      }
+      await transaction.updateTable("sessions").set({ revoked_at: now })
+        .where("id", "=", session.id).execute();
+    });
+  }
+
+  async logoutEverywhere(userId: string) {
+    await this.database.updateTable("sessions")
+      .set({ revoked_at: this.now() }).where("user_id", "=", userId)
+      .where("revoked_at", "is", null).execute();
   }
 
   async inviteMember(
@@ -416,6 +535,15 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
 
     return this.database.transaction().execute(async (transaction) => {
       await requireOwner(transaction, userId, tripId);
+      const recipient = await transaction
+        .selectFrom("users")
+        .select("status")
+        .where("email", "=", email)
+        .forUpdate()
+        .executeTakeFirst();
+      if (recipient?.status === "disabled") {
+        throw new AppError("forbidden", "This email cannot receive invitations.", 403);
+      }
       await lockMutation(transaction, userId, `invite_member:${tripId}`, key);
       const replay = await replayed(
         transaction,
@@ -449,9 +577,11 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
         throw new AppError("conflict", "A pending invite already exists", 409);
       }
 
+      await new PostgresRateLimiter(transaction, this.emailBudgetSecret, this.now).consume("email_send", "global");
+
       await transaction
         .insertInto("users")
-        .values({ email, display_name: null, status: "active" })
+        .values({ email, display_name: null, status: "invited" })
         .onConflict((conflict) => conflict.column("email").doNothing())
         .execute();
       const trip = await transaction

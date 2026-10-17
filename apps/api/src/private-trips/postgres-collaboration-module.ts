@@ -8,10 +8,11 @@ export class PostgresCollaborationModule {
   constructor(private readonly database: Kysely<AlongTheWayDatabase>) {}
 
   async authorize(userId: string, tripId: string) {
-    const member = await this.database.selectFrom("trip_members").select("id")
+    const member = await this.database.selectFrom("trip_members").select(["id", "role"])
       .where("trip_id", "=", tripId).where("user_id", "=", userId)
       .where("removed_at", "is", null).executeTakeFirst();
     if (!member) throw new AppError("trip_not_found", "Trip not found", 404);
+    return member;
   }
 
   async version(userId: string, tripId: string) {
@@ -49,7 +50,7 @@ export class PostgresCollaborationModule {
   }
 
   async history(userId: string, tripId: string, before: string | null, limit: number): Promise<TripHistoryResponse> {
-    await this.authorize(userId, tripId);
+    const requester = await this.authorize(userId, tripId);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw new AppError("validation_error", "limit must be between 1 and 100");
     }
@@ -57,6 +58,12 @@ export class PostgresCollaborationModule {
     let query = this.database.selectFrom("change_events as event")
       .innerJoin("users as actor", "actor.id", "event.actor_id")
       .select(["event.id", "event.actor_id", "actor.display_name", "actor.email", "event.created_at", "event.event_type", "event.target_type", "event.target_id", "event.summary", "event.conflict_base_version"])
+      .select(sql<boolean>`exists (
+        select 1 from trip_members actor_membership
+        where actor_membership.trip_id = event.trip_id
+          and actor_membership.user_id = event.actor_id
+          and actor_membership.removed_at is null
+      )`.as("actor_is_active_member"))
       .select(sql<string | null>`case event.target_type
         when 'trip' then (
           select name from trips where id = event.target_id and id = event.trip_id
@@ -89,7 +96,13 @@ export class PostgresCollaborationModule {
     if (order) query = query.where("event.event_order", "<", order);
     const rows = await query.orderBy("event.event_order", "desc").limit(limit + 1).execute();
     const events = rows.slice(0, limit).map((row) => ({
-      id: row.id, actorId: row.actor_id, actorDisplayName: row.display_name, actorEmail: row.email,
+      id: row.id,
+      actorId: row.actor_id,
+      actorDisplayName: row.display_name,
+      actorEmail: row.actor_is_active_member && (requester.role === "owner" || row.actor_id === userId)
+        ? row.email
+        : null,
+      actorIsActiveMember: row.actor_is_active_member,
       createdAt: isoTimestamp(row.created_at), eventType: row.event_type,
       targetType: row.target_type, targetId: row.target_id, summary: row.summary,
       targetName: row.target_name,
@@ -99,7 +112,7 @@ export class PostgresCollaborationModule {
   }
 
   async latestChange(userId: string, tripId: string, targetIds: string[]): Promise<ConflictChange | null> {
-    await this.authorize(userId, tripId);
+    const requester = await this.authorize(userId, tripId);
     const mirrors = await this.database.selectFrom("trip_places").select(["id", "legacy_place_id"])
       .where("trip_id", "=", tripId)
       .where((where) => where.or([where("id", "in", targetIds), where("legacy_place_id", "in", targetIds)])).execute();
@@ -107,11 +120,23 @@ export class PostgresCollaborationModule {
     const event = await this.database.selectFrom("change_events as event")
       .innerJoin("users as actor", "actor.id", "event.actor_id")
       .select(["event.id", "event.actor_id", "actor.display_name", "actor.email", "event.created_at"])
+      .select(sql<boolean>`exists (
+        select 1 from trip_members actor_membership
+        where actor_membership.trip_id = event.trip_id
+          and actor_membership.user_id = event.actor_id
+          and actor_membership.removed_at is null
+      )`.as("actor_is_active_member"))
       .where("event.trip_id", "=", tripId)
       .where((where) => where.or([where("event.target_id", "in", relatedIds), sql<boolean>`event.related_target_ids && ${relatedIds}::uuid[]`]))
       .orderBy("event.event_order", "desc").limit(1).executeTakeFirst();
     return event ? {
-      eventId: event.id, actorId: event.actor_id, actorDisplayName: event.display_name, actorEmail: event.email,
+      eventId: event.id,
+      actorId: event.actor_id,
+      actorDisplayName: event.display_name,
+      actorEmail: event.actor_is_active_member && (requester.role === "owner" || event.actor_id === userId)
+        ? event.email
+        : null,
+      actorIsActiveMember: event.actor_is_active_member,
       isOwn: event.actor_id === userId, changedAt: isoTimestamp(event.created_at),
     } : null;
   }

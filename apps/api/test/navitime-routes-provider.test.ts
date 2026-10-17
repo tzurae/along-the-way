@@ -55,6 +55,34 @@ describe("NAVITIME route observation adapter", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("does not fetch NAVITIME unless both endpoints are in Japan", async () => {
+    const fetch = vi.fn(async () => Response.json({ items: [route] }));
+    const provider = new NavitimeRoutesProvider({
+      apiKey: "test-only-key", now: () => NOW, fetch,
+    });
+
+    const observations = await provider.observe({
+      ...query,
+      origin: { ...query.origin, latitude: 25.04, longitude: 121.56 },
+    });
+
+    expect(observations[1]).toMatchObject({ status: "unavailable", reason: "unsupported_mode" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("returns quota without fetching when the daily NAVITIME budget is exhausted", async () => {
+    const fetch = vi.fn(async () => Response.json({ items: [route] }));
+    const provider = new NavitimeRoutesProvider({
+      apiKey: "test-only-key", now: () => NOW, fetch,
+      consumeBudget: async () => false,
+    });
+
+    const observations = await provider.observe(query);
+
+    expect(observations[1]).toMatchObject({ status: "unavailable", reason: "quota" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("includes time waiting before the provider route actually starts", async () => {
     const delayed = { ...route, summary: { move: {
       ...route.summary.move, from_time: "2026-10-04T09:05:00+09:00", to_time: "2026-10-04T09:36:00+09:00",

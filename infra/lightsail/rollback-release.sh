@@ -83,6 +83,11 @@ start_without_migrations() {
     "$release" "$environment_file" config --services | grep -qx worker; then
     services="$services worker"
   fi
+  if compose_for_release \
+    "$release" "$environment_file" config --services | grep -qx mailpit; then
+    services="$services mailpit"
+  fi
+
 
   compose_for_release \
     "$release" "$environment_file" \
@@ -103,7 +108,7 @@ stop_worker_if_present() {
 }
 
 check_ready() {
-  site_address=$(sed -n 's/^SITE_ADDRESS=//p' "$1" | tail -n 1)
+  site_address="${READY_ADDRESS:-$(sed -n 's/^SITE_ADDRESS=//p' "$1" | tail -n 1)}"
   [ -n "$site_address" ] && curl \
     --connect-timeout 5 \
     --max-time 10 \

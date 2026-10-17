@@ -1,7 +1,7 @@
 import { PostgresCollaborationModule } from "../src/private-trips/postgres-collaboration-module";
 import { createHash } from "node:crypto";
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { sql, type Kysely } from "kysely";
 import { MAX_TRIP_COUNTRY_STOPS } from "@along-the-way/contracts/countries";
 import type { Hono } from "hono";
@@ -12,7 +12,7 @@ import {
   parseTripResponse,
 } from "@along-the-way/contracts/private-trips";
 
-import { createApp } from "../src/app";
+import { createApp, type AppDependencies } from "../src/app";
 import { PostgresPlaceDetailModule } from "../src/place-details/postgres-place-detail-module";
 import { packagedPhotoRoot } from "../src/place-details/photo-assets";
 import {
@@ -21,7 +21,9 @@ import {
 } from "../src/database/database";
 import { runMigrations } from "../src/database/migrate";
 import { seedDatabase } from "../src/database/seed";
+import { down as downgradeAuth, up as upgradeAuth } from "../src/database/migrations/029_auth_hardening";
 import type { EmailSender } from "../src/private-trips/email-sender";
+import { SmtpEmailSender } from "../src/private-trips/smtp-email-sender";
 import { PostgresEmailWorker } from "../src/private-trips/postgres-email-worker";
 import { PostgresIdentityAccessModule } from "../src/private-trips/postgres-identity-access-module";
 import { PostgresRateLimiter } from "../src/private-trips/postgres-rate-limiter";
@@ -35,6 +37,11 @@ import { unrelatedDayPlanModule } from "./day-plan-test-support";
 import { unrelatedDiscoveryModule } from "./discovery-test-support";
 import { tripFlights } from "./travel-test-support";
 
+const { sendMail } = vi.hoisted(() => ({
+  sendMail: vi.fn(async (_message: { to: { address: string; name: string }; subject: string; text: string }) => {}),
+}));
+vi.mock("nodemailer", () => ({ default: { createTransport: () => ({ sendMail }) } }));
+
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required");
 
@@ -42,6 +49,8 @@ interface CapturedMessage {
   to: string;
   url: string;
   tripName?: string;
+  inviterName?: string;
+  code?: string;
 }
 
 class CapturingEmailSender implements EmailSender {
@@ -80,8 +89,8 @@ class ScriptedEmailSender implements EmailSender {
   }
 }
 
-function smtpError(responseCode: number) {
-  return Object.assign(new Error(`SMTP ${responseCode}`), { responseCode });
+function smtpError(responseCode: number, response = `SMTP ${responseCode}`) {
+  return Object.assign(new Error(response), { responseCode, response });
 }
 
 
@@ -108,6 +117,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
   let tokenNumber: number;
   let tokenIssuer: TokenIssuer;
   let app: Hono;
+  let appDependencies: AppDependencies;
   let emailWorker: PostgresEmailWorker;
 
   beforeAll(async () => {
@@ -170,7 +180,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       tokenIssuer,
       now: () => new Date(now),
     });
-    app = createApp({
+    appDependencies = {
       placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
       collaboration: new PostgresCollaborationModule(database),
       dayPlans: unrelatedDayPlanModule,
@@ -193,7 +203,8 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         now: () => new Date(now),
       }),
       tripWorkspace,
-    });
+    };
+    app = createApp(appDependencies);
   });
 
   afterAll(async () => {
@@ -231,11 +242,13 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         "content-type": "application/json",
         origin: "https://app.example.test",
       },
-      body: body({ token }),
+      body: body({ token, confirm: true }),
     });
   }
 
   async function login(address: string) {
+    // These older membership scenarios start with an independently approved active account.
+    await database.updateTable("users").set({ status: "active" }).where("email", "=", address).execute();
     const previousCount = email.magicLinks.length;
     const request = await requestMagicLink(address);
     expect(request.status).toBe(202);
@@ -248,6 +261,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       headers: {
         "content-type": "application/json",
         origin: "https://app.example.test",
+        cookie: cookieFrom(request),
       },
       body: body({ token }),
     });
@@ -311,6 +325,427 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     });
   }
 
+  function authPost(path: string, payload: unknown, cookie = "") {
+    return app.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://app.example.test", cookie },
+      body: body(payload),
+    });
+  }
+
+  it.each([
+    "http://app.example.test", "http://192.0.2.1", "http://localhost.example.test",
+    "http://[2001:db8::1]", "ftp://localhost",
+  ])("SEC-05 refuses insecure non-loopback startup at %s", (siteAddress) => {
+    expect(() => createApp({ ...appDependencies, siteAddress })).toThrow(
+      "SITE_ADDRESS must use HTTPS, except HTTP on localhost, 127.0.0.1 or ::1.",
+    );
+  });
+
+  it.each([
+    "http://localhost", "http://localhost:8080", "http://127.0.0.1:8080",
+    "http://[::1]:8080", "https://app.example.test",
+  ])("SEC-05 permits secure or local startup at %s", async (siteAddress) => {
+    const configuredApp = createApp({ ...appDependencies, siteAddress });
+    expect((await configuredApp.request("/health")).status).toBe(200);
+    const response = await configuredApp.request("/api/auth/magic-links", {
+      method: "POST", headers: { origin: new URL(siteAddress).origin, "content-type": "application/json" },
+      body: body({ email: "unknown@example.test" }),
+    });
+    expect(response.status).toBe(202);
+    if (siteAddress.startsWith("https:")) {
+      expect(response.headers.get("set-cookie")).toContain("__Host-along_the_way_login_nonce=");
+      expect(response.headers.get("set-cookie")).toContain("Secure");
+    } else {
+      expect(response.headers.get("set-cookie")).toMatch(/^along_the_way_login_nonce=/);
+      expect(response.headers.get("set-cookie")).not.toContain("Secure");
+    }
+  });
+
+  it("SEC-02 disabling an account rejects every session and already-issued sign-in credential", async () => {
+    const first = await login("owner@example.test");
+    const second = await login("owner@example.test");
+    const requested = await requestMagicLink("owner@example.test");
+    const message = email.magicLinks.at(-1)!;
+    const token = linkToken(message.url, "magicToken")!;
+    await database.updateTable("users").set({ status: "disabled" }).where("email", "=", message.to).execute();
+    for (const cookie of [first.cookie, second.cookie]) {
+      for (const path of ["/api/session", "/api/trips"]) {
+        expect((await app.request(path, { headers: { cookie } })).status).toBe(401);
+      }
+      expect((await authPost("/api/trips", {}, cookie)).status).toBe(401);
+    }
+    const count = email.magicLinks.length;
+    expect((await authPost("/api/auth/magic-links", { email: message.to })).status).toBe(202);
+    expect(await emailWorker.runOnce()).toBe(false);
+    expect(email.magicLinks).toHaveLength(count);
+    expect((await authPost("/api/auth/magic-links/consume", { token, confirm: true }, cookieFrom(requested))).status).toBe(400);
+    expect((await authPost("/api/auth/magic-links/verify-code", { email: message.to, code: message.code }, cookieFrom(requested))).status).toBe(400);
+    expect((await database.selectFrom("users").select("status").where("email", "=", message.to).executeTakeFirstOrThrow()).status).toBe("disabled");
+  });
+
+  it("SEC-02 disabled invitees cannot receive new invitations or activate through an existing invitation", async () => {
+    const owner = await login("owner@example.test");
+    const trip = (await createTrip(owner.cookie, "disabled-invite-trip")).trip;
+    const secondTrip = (await createTrip(owner.cookie, "disabled-other-trip")).trip;
+    const invitation = await invite(owner.cookie, trip.id, "disabled@example.test", "disabled-invite");
+    const requested = await requestInviteMagicLink(invitation.token);
+    await emailWorker.runOnce();
+    const message = email.magicLinks.at(-1)!;
+    await database.updateTable("users").set({ status: "disabled" }).where("email", "=", message.to).execute();
+    const count = email.magicLinks.length;
+    expect((await requestInviteMagicLink(invitation.token)).status).toBe(202);
+    expect(await emailWorker.runOnce()).toBe(false);
+    expect(email.magicLinks).toHaveLength(count);
+    const token = linkToken(message.url, "magicToken")!;
+    expect((await authPost("/api/auth/magic-links/consume", { token, confirm: true }, cookieFrom(requested))).status).toBe(400);
+    const response = await app.request(`/api/trips/${secondTrip.id}/invites`, {
+      method: "POST", headers: { cookie: owner.cookie, origin: "https://app.example.test", "content-type": "application/json", "idempotency-key": "disabled-new-invite" },
+      body: body({ email: message.to }),
+    });
+    expect(response.status).toBe(403);
+    expect((await database.selectFrom("users").select("status").where("email", "=", message.to).executeTakeFirstOrThrow()).status).toBe("disabled");
+    expect(await emailWorker.runOnce()).toBe(false);
+  });
+
+  it("SEC-02 queued magic-link and invitation email is skipped after its recipient is disabled", async () => {
+    const owner = await login("owner@example.test");
+    const tripId = (await createTrip(owner.cookie)).trip.id;
+    await database.insertInto("users").values({ email: "queued-disabled@example.test", display_name: null, status: "active" }).execute();
+    expect((await authPost("/api/auth/magic-links", { email: "queued-disabled@example.test" })).status).toBe(202);
+    const invited = await app.request(`/api/trips/${tripId}/invites`, {
+      method: "POST", headers: { cookie: owner.cookie, origin: "https://app.example.test", "content-type": "application/json", "idempotency-key": "queued-disabled" },
+      body: body({ email: "queued-disabled@example.test" }),
+    });
+    expect(invited.status).toBe(201);
+    await database.updateTable("users").set({ status: "disabled" }).where("email", "=", "queued-disabled@example.test").execute();
+    expect(await emailWorker.runOnce()).toBe(true);
+    expect(await emailWorker.runOnce()).toBe(true);
+    expect(email.magicLinks).toHaveLength(1);
+    expect(email.invites).toHaveLength(0);
+  });
+
+  it("SEC-02 disabling an account closes an existing SSE stream before its next private payload", async () => {
+    const owner = await login("owner@example.test");
+    const tripId = (await createTrip(owner.cookie)).trip.id;
+    const invitation = await invite(owner.cookie, tripId, "stream-disabled@example.test", "stream-disabled");
+    const member = await login("stream-disabled@example.test");
+    expect((await accept(member.cookie, invitation.token, "accept-stream-disabled")).status).toBe(200);
+    const version = await (await app.request(`/api/trips/${tripId}/version`, { headers: { cookie: member.cookie } })).json() as { lastEventId: string };
+    const controller = new AbortController();
+    const response = await app.request(`/api/trips/${tripId}/events`, {
+      headers: { cookie: member.cookie, "last-event-id": version.lastEventId }, signal: controller.signal,
+    });
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    try {
+      const connected = await reader.read();
+      expect(new TextDecoder().decode(connected.value)).toContain(": connected");
+      await database.updateTable("users").set({ status: "disabled" }).where("email", "=", "stream-disabled@example.test").execute();
+      await invite(owner.cookie, tripId, "stream-event@example.test", "stream-event");
+      const next = await reader.read();
+      expect(next.done).toBe(true);
+      expect((await app.request(`/api/trips/${tripId}/events`, { headers: { cookie: member.cookie } })).status).toBe(401);
+    } finally {
+      controller.abort();
+      await reader.cancel();
+    }
+  });
+
+  it("SEC-01 requires confirmation for a foreign browser without consuming the link", async () => {
+    await requestMagicLink("owner@example.test");
+    const token = linkToken(email.magicLinks.at(-1)!.url, "magicToken")!;
+    const foreign = await authPost("/api/auth/magic-links/consume", { token });
+    expect(foreign.status).toBe(409);
+    expect(await foreign.json()).toMatchObject({
+      error: { code: "confirmation_required" },
+      targetEmail: "ow***@example.test",
+      currentEmail: null,
+    });
+    expect((await database.selectFrom("magic_link_tokens").select("used_at").executeTakeFirstOrThrow()).used_at).toBeNull();
+    const confirmed = await authPost("/api/auth/magic-links/consume", { token, confirm: true });
+    expect(confirmed.status).toBe(200);
+    expect((await app.request("/api/session", { headers: { cookie: cookieFrom(confirmed) } })).status).toBe(200);
+  });
+
+  it("SEC-01/05 binds same-browser links and issues host-only nonce and session cookies", async () => {
+    const unknown = await requestMagicLink("unknown@example.test");
+    const requested = await requestMagicLink("owner@example.test");
+    for (const response of [unknown, requested]) {
+      expect(response.status).toBe(202);
+      const header = response.headers.get("set-cookie")!;
+      expect(header).toMatch(/^__Host-along_the_way_login_nonce=/);
+      expect(header).toContain("HttpOnly");
+      expect(header).toContain("Secure");
+      expect(header).toContain("SameSite=Lax");
+      expect(header).toContain("Max-Age=900");
+      expect(header).not.toContain("Domain=");
+    }
+    const token = linkToken(email.magicLinks.at(-1)!.url, "magicToken")!;
+    const consumed = await authPost("/api/auth/magic-links/consume", { token }, cookieFrom(requested));
+    expect(consumed.status).toBe(200);
+    const cookie = cookieFrom(consumed);
+    expect(cookie).toMatch(/^__Host-along_the_way_session=/);
+    expect((await app.request("/api/session", { headers: { cookie } })).status).toBe(200);
+    const legacy = cookie.replace("__Host-", "");
+    expect((await app.request("/api/session", { headers: { cookie: legacy } })).status).toBe(401);
+  });
+
+  it("SEC-01 requires account-switch confirmation even with the nonce and revokes the replaced session", async () => {
+    const original = await login("owner@example.test");
+    await database.insertInto("users").values({ email: "new@example.test", display_name: null, status: "active" }).execute();
+    const requested = await requestMagicLink("new@example.test");
+    const token = linkToken(email.magicLinks.at(-1)!.url, "magicToken")!;
+    const cookies = `${original.cookie}; ${cookieFrom(requested)}`;
+    const response = await authPost("/api/auth/magic-links/consume", { token }, cookies);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ targetEmail: "ne***@example.test", currentEmail: "ow***@example.test" });
+    expect((await app.request("/api/session", { headers: { cookie: original.cookie } })).status).toBe(200);
+    const confirmed = await authPost("/api/auth/magic-links/consume", { token, confirm: true }, cookies);
+    expect(confirmed.status).toBe(200);
+    expect(parseMagicLinkConsumeResponse(await confirmed.json()).user.email).toBe("new@example.test");
+    expect((await app.request("/api/session", { headers: { cookie: original.cookie } })).status).toBe(401);
+  });
+
+  it("SEC-01 verifies a one-time code only in the requesting browser", async () => {
+    const requested = await requestMagicLink("owner@example.test");
+    const message = email.magicLinks.at(-1)!;
+    expect(message.code).toMatch(/^\d{6}$/);
+    const payload = { email: " OWNER@example.test ", code: message.code };
+    const foreign = await authPost("/api/auth/magic-links/verify-code", payload);
+    expect(foreign.status).toBe(400);
+    const wrongNonce = await requestMagicLink("unknown@example.test");
+    expect((await authPost("/api/auth/magic-links/verify-code", { ...payload, confirm: true }, cookieFrom(wrongNonce))).status).toBe(400);
+    const verified = await authPost("/api/auth/magic-links/verify-code", payload, cookieFrom(requested));
+    expect(verified.status).toBe(200);
+    expect(parseMagicLinkConsumeResponse(await verified.json()).user.email).toBe("owner@example.test");
+    const token = linkToken(message.url, "magicToken")!;
+    expect((await authPost("/api/auth/magic-links/consume", { token, confirm: true })).status).toBe(400);
+    expect((await authPost("/api/auth/magic-links/verify-code", payload, cookieFrom(requested))).status).toBe(400);
+  });
+
+  it("SEC-01 revokes both the link and code after five wrong codes", async () => {
+    const requested = await requestMagicLink("owner@example.test");
+    const message = email.magicLinks.at(-1)!;
+    const wrongCode = message.code === "000000" ? "000001" : "000000";
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await authPost("/api/auth/magic-links/verify-code", { email: message.to, code: wrongCode }, cookieFrom(requested));
+      expect(response.status).toBe(400);
+    }
+    const correct = await authPost("/api/auth/magic-links/verify-code", { email: message.to, code: message.code }, cookieFrom(requested));
+    expect(correct.status).toBe(400);
+    const token = linkToken(message.url, "magicToken")!;
+    const response = await authPost("/api/auth/magic-links/consume", { token, confirm: true });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "revoked_magic_link" } });
+  });
+
+  it("SEC-01 expires codes and rate-limits code guesses", async () => {
+    const requested = await requestMagicLink("owner@example.test");
+    const message = email.magicLinks.at(-1)!;
+    now = new Date(now.valueOf() + 15 * 60 * 1_000);
+    expect((await authPost("/api/auth/magic-links/verify-code", { email: message.to, code: message.code }, cookieFrom(requested))).status).toBe(400);
+    for (let attempt = 0; attempt < 9; attempt += 1) {
+      expect((await authPost("/api/auth/magic-links/verify-code", { email: message.to, code: "000000" })).status).toBe(400);
+    }
+    const limited = await authPost("/api/auth/magic-links/verify-code", { email: message.to, code: "000000" });
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBeTruthy();
+  });
+
+  it("SEC-02 keeps invited users inactive until an invite-linked sign-in accepts membership", async () => {
+    const owner = await login("owner@example.test");
+    const trip = (await createTrip(owner.cookie)).trip;
+    const invitation = await invite(owner.cookie, trip.id, "pending@example.test", "pending");
+    const before = email.magicLinks.length;
+    expect((await requestMagicLink("pending@example.test")).status).toBe(202);
+    expect(email.magicLinks).toHaveLength(before);
+    const requested = await requestInviteMagicLink(invitation.token);
+    await emailWorker.runOnce();
+    const token = linkToken(email.magicLinks.at(-1)!.url, "magicToken")!;
+    const accepted = await authPost("/api/auth/magic-links/consume", { token }, cookieFrom(requested));
+    expect(accepted.status).toBe(200);
+    expect(parseMagicLinkConsumeResponse(await accepted.json())).toMatchObject({ acceptedTripId: trip.id, inviteOutcome: "accepted" });
+    expect((await app.request(`/api/trips/${trip.id}`, { headers: { cookie: cookieFrom(accepted) } })).status).toBe(200);
+    const count = email.magicLinks.length;
+    expect((await requestMagicLink("pending@example.test")).status).toBe(202);
+    expect(email.magicLinks).toHaveLength(count + 1);
+  });
+
+  it("SEC-02 enforces one daily outbound email budget across magic links and invitations", async () => {
+    const owner = await login("owner@example.test");
+    const trip = (await createTrip(owner.cookie)).trip;
+    await database.updateTable("rate_limit_windows").set({ request_count: 300 }).where("scope", "=", "email_send:ip").execute();
+    const previous = email.magicLinks.length;
+    const known = await requestMagicLink("owner@example.test");
+    const unknown = await requestMagicLink("unknown@example.test");
+    expect(known.status).toBe(202);
+    expect(await known.json()).toEqual(await unknown.json());
+    expect(email.magicLinks).toHaveLength(previous);
+    const response = await app.request(`/api/trips/${trip.id}/invites`, {
+      method: "POST", headers: { cookie: owner.cookie, origin: "https://app.example.test", "content-type": "application/json", "idempotency-key": "budget" },
+      body: body({ email: "new@example.test" }),
+    });
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBeTruthy();
+    expect(await emailWorker.runOnce()).toBe(false);
+    now = new Date("2026-09-28T00:00:00Z");
+    expect((await requestMagicLink("owner@example.test")).status).toBe(202);
+    expect(email.magicLinks).toHaveLength(previous + 1);
+  });
+
+  it("SEC-02 rolls back email budget when enqueueing fails", async () => {
+    await requestMagicLink("owner@example.test");
+    const existingToken = linkToken(email.magicLinks.at(-1)!.url, "magicToken")!;
+    await database.updateTable("rate_limit_windows").set({ request_count: 299 }).where("scope", "=", "email_send:ip").execute();
+    // A duplicate token makes the real insert fail after the budget reservation.
+    const issuer = vi.spyOn(tokenIssuer, "issue").mockReturnValueOnce(existingToken);
+    expect((await requestMagicLink("owner@example.test")).status).toBe(500);
+    issuer.mockRestore();
+    expect(email.magicLinks).toHaveLength(1);
+    expect((await requestMagicLink("owner@example.test")).status).toBe(202);
+    expect(email.magicLinks).toHaveLength(2);
+    expect((await requestMagicLink("owner@example.test")).status).toBe(202);
+    expect(email.magicLinks).toHaveLength(2);
+  });
+
+  it("SEC-02 sanitizes untrusted trip and inviter labels before email delivery", async () => {
+    const owner = await login("owner@example.test");
+    const trip = (await createTrip(owner.cookie)).trip;
+    await database.updateTable("trips").set({ name: `Plan https://evil.example/login www.bad.test bad.example\n${"長".repeat(100)}` }).where("id", "=", trip.id).execute();
+    await database.updateTable("users").set({ display_name: "Name http://bad.test www.bad.test bad.example\n你好" }).where("email", "=", "owner@example.test").execute();
+    await invite(owner.cookie, trip.id, "safe@example.test", "sanitized");
+    const message = email.invites.at(-1)!;
+    expect(message.tripName).toMatch(/^Plan 長/);
+    expect(message.tripName!.length).toBeLessThanOrEqual(60);
+    expect(message.inviterName).toBe("Name 你好");
+    expect(`${message.tripName} ${message.inviterName}`).not.toMatch(/http|www\.|bad\.|evil\.|[\r\n]/);
+    expect(new URL(message.url).origin).toBe("https://app.example.test");
+  });
+
+  it("SEC-01/02/04 delivers the real email template with a usable code and literal recipient", async () => {
+    sendMail.mockClear();
+    const smtpWorker = new PostgresEmailWorker({
+      database, tokenIssuer, siteAddress: "https://app.example.test", now: () => new Date(now),
+      emailSender: new SmtpEmailSender({
+        host: "unused.example.test", port: 465, from: "official@example.test", requireTls: true, secure: true,
+      }),
+    });
+    const requested = await authPost("/api/auth/magic-links", { email: " OWNER@example.test " });
+    expect(requested.status).toBe(202);
+    await smtpWorker.runOnce();
+    const message = sendMail.mock.calls[0]![0];
+    expect(message.to).toEqual({ address: "owner@example.test", name: "" });
+    const code = /一次性登入碼：(\d{6})/.exec(message.text)?.[1];
+    expect(code).toMatch(/^\d{6}$/);
+    expect(message.text).toContain("請在你索取連結的瀏覽器");
+    const verified = await authPost("/api/auth/magic-links/verify-code", { email: message.to.address, code }, cookieFrom(requested));
+    expect(verified.status).toBe(200);
+    const trip = (await createTrip(cookieFrom(verified))).trip;
+    await database.updateTable("trips").set({ name: "Trip https://evil.example" }).where("id", "=", trip.id).execute();
+    const invited = await app.request(`/api/trips/${trip.id}/invites`, {
+      method: "POST", headers: { cookie: cookieFrom(verified), origin: "https://app.example.test", "content-type": "application/json", "idempotency-key": "smtp-template" },
+      body: body({ email: "new@example.test" }),
+    });
+    expect(invited.status).toBe(201);
+    await smtpWorker.runOnce();
+    const invitation = sendMail.mock.calls[1]![0];
+    expect(invitation.to).toEqual({ address: "new@example.test", name: "" });
+    expect(invitation.subject).toBe("邀請你加入旅程｜Along the Way");
+    expect(invitation.text).toContain("「Trip」");
+    expect(invitation.text).not.toContain("evil.example");
+  });
+
+  it("SEC-03 revokes every session through logout-everywhere", async () => {
+    const first = await login("owner@example.test");
+    const second = await login("owner@example.test");
+    const response = await authPost("/api/logout-everywhere", {}, first.cookie);
+    expect(response.status).toBe(204);
+    expect(response.headers.get("set-cookie")).toContain("__Host-along_the_way_session=;");
+    for (const cookie of [first.cookie, second.cookie]) {
+      expect((await app.request("/api/session", { headers: { cookie } })).status).toBe(401);
+      expect((await app.request("/api/trips", { headers: { cookie } })).status).toBe(401);
+    }
+  });
+
+  it("SEC-03 caps sliding sessions at an absolute ninety days", async () => {
+    const signedIn = await login("owner@example.test");
+    const created = now.valueOf();
+    for (const days of [29, 58, 87, 89]) {
+      now = new Date(created + days * 24 * 60 * 60 * 1_000);
+      expect((await app.request("/api/session", { headers: { cookie: signedIn.cookie } })).status).toBe(200);
+    }
+    now = new Date(created + 90 * 24 * 60 * 60 * 1_000);
+    expect((await app.request("/api/session", { headers: { cookie: signedIn.cookie } })).status).toBe(401);
+  });
+
+  it("SEC-04 rejects address-list syntax and normalizes a single plain address", async () => {
+    const owner = await login("owner@example.test");
+    const trip = (await createTrip(owner.cookie)).trip;
+    for (const [index, address] of ["1<victim@x.com>", '"victim"@x.com', "a,b@x.com", "a;b@x.com", "a b@x.com", "a@@x.com", ".a@x.com", "a@-x.com"].entries()) {
+      const response = await app.request(`/api/trips/${trip.id}/invites`, {
+        method: "POST", headers: { cookie: owner.cookie, origin: "https://app.example.test", "content-type": "application/json", "idempotency-key": `strict-${index}` },
+        body: body({ email: address }),
+      });
+      expect(response.status, address).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code: "validation_error" } });
+    }
+    await invite(owner.cookie, trip.id, " Ｎｅｗ+tag@EXAMPLE.test ", "normalized");
+    expect(email.invites.at(-1)!.to).toBe("new+tag@example.test");
+  });
+
+  it("SEC-02 applies daily invitation and trip-creation caps", async () => {
+    const owner = await login("owner@example.test");
+    let firstTripId = "";
+    for (let index = 0; index < 5; index += 1) {
+      const trip = (await createTrip(owner.cookie, `daily-trip-${index}`)).trip;
+      firstTripId ||= trip.id;
+    }
+    expect((await authPost("/api/trips", {}, owner.cookie)).status).toBe(429);
+    for (let index = 0; index < 10; index += 1) {
+      await invite(owner.cookie, firstTripId, `daily-${index}@example.test`, `daily-invite-${index}`);
+    }
+    const limited = await app.request(`/api/trips/${firstTripId}/invites`, {
+      method: "POST", headers: { cookie: owner.cookie, origin: "https://app.example.test", "content-type": "application/json", "idempotency-key": "daily-overflow" },
+      body: body({ email: "overflow@example.test" }),
+    });
+    expect(limited.status).toBe(429);
+    now = new Date("2026-09-28T00:00:00Z");
+    await createTrip(owner.cookie, "next-day");
+    await invite(owner.cookie, firstTripId, "next-day@example.test", "next-day");
+  });
+
+  it("SEC-02 supports auth migration down/up without activating invited or disabled users", async () => {
+    const owner = await login("owner@example.test");
+    const trip = (await createTrip(owner.cookie)).trip;
+    const invitation = await invite(owner.cookie, trip.id, "unaccepted@example.test", "downgrade");
+    const invitee = await database.selectFrom("users").select(["id", "status"])
+      .where("email", "=", "unaccepted@example.test").executeTakeFirstOrThrow();
+    await database.updateTable("users").set({ status: "disabled" }).where("email", "=", "owner@example.test").execute();
+    await downgradeAuth(database);
+    expect(await database.selectFrom("users").select(["id", "status"])
+      .where("email", "=", "unaccepted@example.test").executeTakeFirst()).toEqual(invitee);
+    expect((await app.request("/api/session", { headers: { cookie: owner.cookie } })).status).toBe(401);
+    await upgradeAuth(database);
+    const count = email.magicLinks.length;
+    await requestMagicLink("unaccepted@example.test");
+    expect(email.magicLinks).toHaveLength(count);
+    const requested = await requestInviteMagicLink(invitation.token);
+    expect(requested.status).toBe(202);
+    await emailWorker.runOnce();
+    expect(email.magicLinks).toHaveLength(count + 1);
+    const token = linkToken(email.magicLinks.at(-1)!.url, "magicToken")!;
+    const consumed = await authPost("/api/auth/magic-links/consume", { token }, cookieFrom(requested));
+    expect(consumed.status).toBe(200);
+    expect(parseMagicLinkConsumeResponse(await consumed.json())).toMatchObject({
+      user: { id: invitee.id }, acceptedTripId: trip.id, inviteOutcome: "accepted",
+    });
+    expect((await app.request(`/api/trips/${trip.id}`, { headers: { cookie: cookieFrom(consumed) } })).status).toBe(200);
+    expect((await app.request("/api/session", { headers: { cookie: owner.cookie } })).status).toBe(401);
+    await requestMagicLink("owner@example.test");
+    expect(email.magicLinks).toHaveLength(count + 1);
+  });
+
   it("rejects oversized API bodies before auth work or route parsing", async () => {
     const oversizedAuth = await app.request("/api/auth/magic-links", {
       method: "POST",
@@ -369,6 +804,113 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     });
   });
 
+  it("SEC-02 bounds delivery-day sends across an outage backlog and defers excess until tomorrow", async () => {
+    await login("owner@example.test");
+    now = new Date("2026-09-28T12:00:00Z");
+    let firstOwnerCookie = "";
+    let firstTripId = "";
+    for (let account = 0; account < 30; account += 1) {
+      const owner = await database.insertInto("users")
+        .values({ email: `queue-owner-${account}@example.test`, display_name: null, status: "active" })
+        .returning("id").executeTakeFirstOrThrow();
+      const token = `backlog-owner-${account}`;
+      await database.insertInto("sessions").values({
+        user_id: owner.id, token_hash: createHash("sha256").update(token).digest("hex"),
+        created_at: now, last_seen_at: now, expires_at: "2026-10-28T12:00:00Z", revoked_at: null,
+      }).execute();
+      const cookie = `__Host-along_the_way_session=${token}`;
+      const tripId = (await createTrip(cookie, `backlog-trip-${account}`)).trip.id;
+      if (account === 0) { firstOwnerCookie = cookie; firstTripId = tripId; }
+      for (let recipient = 0; recipient < 10; recipient += 1) {
+        const response = await app.request(`/api/trips/${tripId}/invites`, {
+          method: "POST",
+          headers: { cookie, origin: "https://app.example.test", "content-type": "application/json",
+            "idempotency-key": `queued-${recipient}`, "x-forwarded-for": `203.0.113.${account + 1}` },
+          body: body({ email: `recipient-${account}-${recipient}@example.test` }),
+        });
+        expect(response.status).toBe(201);
+      }
+    }
+    expect(email.invites).toHaveLength(0);
+    now = new Date("2026-09-29T12:00:00Z");
+    const todayInvite = await app.request(`/api/trips/${firstTripId}/invites`, {
+      method: "POST",
+      headers: { cookie: firstOwnerCookie, origin: "https://app.example.test", "content-type": "application/json", "idempotency-key": "today-invite" },
+      body: body({ email: "today-recipient@example.test" }),
+    });
+    expect(todayInvite.status).toBe(201);
+    expect((await authPost("/api/auth/magic-links", { email: "owner@example.test" })).status).toBe(202);
+    while (await emailWorker.runOnce()) { /* Drain only jobs eligible today. */ }
+    expect(email.invites).toHaveLength(300);
+    expect(email.magicLinks).toHaveLength(1);
+    expect(email.invites.some((message) => message.to === "today-recipient@example.test")).toBe(false);
+    const deferred = await database.selectFrom("email_jobs").select(["kind", "available_at", "failed_at", "attempt_count"])
+      .where("delivered_at", "is", null).execute();
+    expect(deferred).toHaveLength(2);
+    for (const job of deferred) {
+      expect(job.available_at.toISOString()).toBe("2026-09-30T00:00:00.000Z");
+      expect(job.failed_at).toBeNull();
+      expect(job.attempt_count).toBe(0);
+    }
+    now = new Date("2026-09-30T00:00:00Z");
+    while (await emailWorker.runOnce()) { /* Expired magic links are skipped; live invitations remain deliverable. */ }
+    expect(email.invites).toHaveLength(301);
+    expect(email.invites.at(-1)!.to).toBe("today-recipient@example.test");
+    expect(email.magicLinks).toHaveLength(1);
+  }, 60_000);
+
+  it.each([
+    [550, "550 5.4.5 Daily user sending limit exceeded"],
+    [550, "550 Daily sending quota exceeded"],
+    [450, "450 4.7.0 Temporary rate limit"],
+  ])("SEC-02 retries SMTP quota/transient response %s %s", async (responseCode, responseText) => {
+    const owner = await login("owner@example.test");
+    const tripId = (await createTrip(owner.cookie)).trip.id;
+    const response = await app.request(`/api/trips/${tripId}/invites`, {
+      method: "POST",
+      headers: { cookie: owner.cookie, origin: "https://app.example.test", "content-type": "application/json", "idempotency-key": "quota-retry" },
+      body: body({ email: "quota-recipient@example.test" }),
+    });
+    expect(response.status).toBe(201);
+    const sender = new ScriptedEmailSender([smtpError(responseCode, responseText)]);
+    const worker = new PostgresEmailWorker({ database, tokenIssuer, emailSender: sender, siteAddress: "https://app.example.test", now: () => new Date(now) });
+    expect(await worker.runOnce()).toBe(true);
+    expect(await worker.runOnce()).toBe(false);
+    const job = await database.selectFrom("email_jobs").select(["failed_at", "delivered_at", "attempt_count", "available_at"])
+      .where("recipient", "=", "quota-recipient@example.test").executeTakeFirstOrThrow();
+    expect(job.failed_at).toBeNull();
+    expect(job.delivered_at).toBeNull();
+    expect(job.attempt_count).toBe(1);
+    expect(job.available_at.valueOf()).toBe(now.valueOf() + 30_000);
+    now = new Date(now.valueOf() + 30_000);
+    expect(await worker.runOnce()).toBe(true);
+    expect(sender.attempts).toBe(2);
+    const delivered = await database.selectFrom("email_jobs").select(["failed_at", "delivered_at"])
+      .where("recipient", "=", "quota-recipient@example.test").executeTakeFirstOrThrow();
+    expect(delivered.failed_at).toBeNull();
+    expect(delivered.delivered_at).not.toBeNull();
+  });
+
+  it("SEC-03 targeted logout leaves a replacement account session and cookie untouched", async () => {
+    const original = await login("owner@example.test");
+    const originalUser = parseMagicLinkConsumeResponse(await (await app.request("/api/session", { headers: { cookie: original.cookie } })).json()).user;
+    await database.insertInto("users").values({ email: "replacement@example.test", display_name: null, status: "active" }).execute();
+    const replacement = await login("replacement@example.test");
+    const replacementUser = parseMagicLinkConsumeResponse(await (await app.request("/api/session", { headers: { cookie: replacement.cookie } })).json()).user;
+    const staleLogout = await authPost("/api/logout", { userId: originalUser.id }, replacement.cookie);
+    expect(staleLogout.status).toBe(409);
+    expect(await staleLogout.json()).toMatchObject({ error: { code: "logout_target_mismatch" } });
+    expect(staleLogout.headers.get("set-cookie")).toBeNull();
+    expect((await app.request("/api/session", { headers: { cookie: replacement.cookie } })).status).toBe(200);
+    expect((await app.request("/api/session", { headers: { cookie: original.cookie } })).status).toBe(200);
+    const matchingLogout = await authPost("/api/logout", { userId: replacementUser.id }, replacement.cookie);
+    expect(matchingLogout.status).toBe(204);
+    expect(matchingLogout.headers.get("set-cookie")).toContain("__Host-along_the_way_session=;");
+    expect((await app.request("/api/session", { headers: { cookie: replacement.cookie } })).status).toBe(401);
+    expect((await authPost("/api/logout", { userId: originalUser.id })).status).toBe(204);
+    expect((await app.request("/api/logout", { method: "POST", headers: { origin: "https://app.example.test", cookie: original.cookie } })).status).toBe(204);
+  });
+
   it("keeps retrying transient email failures and delivers after recovery", async () => {
     const owner = await login("owner@example.test");
     const trip = (await createTrip(owner.cookie, "transient-email-failure")).trip;
@@ -425,7 +967,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     });
     expect(queued.status).toBe(201);
 
-    const scriptedEmail = new ScriptedEmailSender([smtpError(550)]);
+    const scriptedEmail = new ScriptedEmailSender([smtpError(550, "550 5.1.1 No such recipient")]);
     const failingWorker = new PostgresEmailWorker({
       database,
       emailSender: scriptedEmail,
@@ -530,6 +1072,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       headers: {
         "content-type": "application/json",
         origin: "https://app.example.test",
+        cookie: cookieFrom(known),
       },
       body: body({ token }),
     });
@@ -742,11 +1285,8 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       .where("id", "=", expiredInvite.inviteId)
       .execute();
     const expiredConsume = await consumeMagicLink(expiredMagicToken);
-    expect(expiredConsume.status).toBe(200);
-    expect(parseMagicLinkConsumeResponse(await expiredConsume.json())).toMatchObject({
-      inviteOutcome: "expired-or-revoked",
-      user: { email: "expired-race@example.test" },
-    });
+    expect(expiredConsume.status).toBe(400);
+    expect(await expiredConsume.json()).toMatchObject({ error: { code: "invalid_invite" } });
     expect(await database
       .selectFrom("trip_members")
       .innerJoin("users", "users.id", "trip_members.user_id")
@@ -778,11 +1318,8 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     );
     expect(revoke.status).toBe(204);
     const revokedConsume = await consumeMagicLink(revokedMagicToken);
-    expect(revokedConsume.status).toBe(200);
-    expect(parseMagicLinkConsumeResponse(await revokedConsume.json())).toMatchObject({
-      inviteOutcome: "expired-or-revoked",
-      user: { email: "revoked-race@example.test" },
-    });
+    expect(revokedConsume.status).toBe(400);
+    expect(await revokedConsume.json()).toMatchObject({ error: { code: "invalid_invite" } });
     expect(await database
       .selectFrom("trip_members")
       .innerJoin("users", "users.id", "trip_members.user_id")
@@ -834,7 +1371,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     expect(parseTripResponse(await afterRemoval.json()).trip.members).toEqual(first.members);
 
     const reinvitation = await invite(
-      owner.cookie, first.id, joined.email, "membership-reinvite",
+      owner.cookie, first.id, joined.email!, "membership-reinvite",
     );
     const reaccepted = await accept(editor.cookie, reinvitation.token, "membership-reaccept");
     expect(reaccepted.status).toBe(200);
@@ -959,6 +1496,8 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
         { countryCode: "JP", position: 0, timeZone: "Asia/Tokyo" },
       ],
     });
+    // The preceding validation/replay scenarios used today's five creation attempts.
+    now = new Date(now.valueOf() + 24 * 60 * 60 * 1_000);
     const ambiguousTimeZone = await app.request("/api/trips", {
       method: "POST",
       headers: {

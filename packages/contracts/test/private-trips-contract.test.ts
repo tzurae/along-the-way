@@ -6,7 +6,7 @@ import {
   inferCountryRoute,
 } from "../src/countries";
 
-import { parseTripResponse } from "../src/private-trips";
+import { parseTripHistoryResponse, parseTripResponse } from "../src/private-trips";
 
 const tripResponse = {
   trip: {
@@ -63,6 +63,39 @@ const tripResponse = {
 describe("private trip wire contract", () => {
   it("accepts the complete relational trip response", () => {
     expect(parseTripResponse(tripResponse)).toEqual(tripResponse);
+  });
+
+  it("accepts a hidden member email", () => {
+    const response = {
+      trip: {
+        ...tripResponse.trip,
+        members: [{ ...tripResponse.trip.members[0], email: null }],
+      },
+    };
+    expect(parseTripResponse(response)).toEqual(response);
+  });
+
+  it("accepts a hidden former-member history actor", () => {
+    expect(parseTripHistoryResponse({
+      events: [{
+        id: "88888888-8888-4888-8888-888888888888",
+        actorId: "33333333-3333-4333-8333-333333333333",
+        actorDisplayName: null,
+        actorEmail: null,
+        actorIsActiveMember: false,
+        createdAt: "2026-10-17T00:00:00.000Z",
+        eventType: "trip.updated",
+        targetType: "trip",
+        targetId: tripResponse.trip.id,
+        targetName: null,
+        summary: "Updated trip",
+        reappliedFromVersion: null,
+      }],
+      nextCursor: null,
+    }).events[0]).toMatchObject({
+      actorEmail: null,
+      actorIsActiveMember: false,
+    });
   });
 
   it("rejects an account identity without a membership identity", () => {

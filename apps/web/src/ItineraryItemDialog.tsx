@@ -447,7 +447,9 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
             <FieldLegend>{t.itemDialog.participants}</FieldLegend>
             <FieldDescription>{t.itemDialog.participantsDescription}</FieldDescription>
             {participantChoices.map((participant) => {
-              const label = participant.displayName ?? participant.email;
+              const label = participant.displayName
+                ?? participant.email
+                ?? (participant.removed ? t.itemDialog.removedMember : t.itemDialog.tripMember);
               return (
                 <label
                   key={participant.memberId}
@@ -466,7 +468,7 @@ export function ItineraryItemDialog({ countryStops, members, places, item, save,
                   <span className="min-w-0 [overflow-wrap:anywhere]">
                     <strong className="block">{label}</strong>
                     <small className="text-muted-foreground">
-                      {participant.displayName ? `${participant.email}・` : ""}
+                      {participant.displayName && participant.email ? `${participant.email}・` : ""}
                       {participant.removed ? t.itemDialog.removedMember : t.itemDialog.tripMember}
                     </small>
                   </span>

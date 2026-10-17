@@ -59,6 +59,12 @@ export class ProviderUnavailableError extends Error {
   }
 }
 
+export class ProviderQuotaError extends ProviderUnavailableError {
+  constructor() {
+    super("Google Places daily quota is exhausted");
+  }
+}
+
 export class PlacePhotoNotFoundError extends Error {}
 
 export interface PlaceSearchOptions {
@@ -158,6 +164,8 @@ interface GooglePlacesProviderOptions {
   fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   now?: () => Date;
   timeoutMs?: number;
+  /** Reserves one unit immediately before each paid outbound request. */
+  consumeBudget?: () => Promise<boolean>;
 }
 
 interface GooglePlaceValue {
@@ -328,6 +336,7 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
   private readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   private readonly now: () => Date;
   private readonly timeoutMs: number;
+  private readonly consumeBudget: () => Promise<boolean>;
 
   constructor(options: GooglePlacesProviderOptions = {}) {
     this.apiKey = options.apiKey?.trim() || undefined;
@@ -335,6 +344,7 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
     this.fetch = options.fetch ?? ((input, init) => fetch(input, init));
     this.now = options.now ?? (() => new Date());
     this.timeoutMs = options.timeoutMs ?? 3_000;
+    this.consumeBudget = options.consumeBudget ?? (async () => true);
   }
 
   async search(rawQuery: string, options: PlaceSearchOptions = {}) {
@@ -473,6 +483,7 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
 
   private async request(url: string, init: RequestInit, photoNotFound = false) {
     if (!this.apiKey) throw new ProviderUnavailableError();
+    if (!(await this.consumeBudget())) throw new ProviderQuotaError();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -489,6 +500,7 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup, Pl
         if (photoNotFound && (response.status === 400 || response.status === 404)) {
           throw new PlacePhotoNotFoundError();
         }
+        if (response.status === 429) throw new ProviderQuotaError();
         throw new ProviderUnavailableError();
       }
       const bytes = await this.readBoundedBytes(response, 256 * 1024);

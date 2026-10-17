@@ -12,6 +12,31 @@
     reverse_proxy web:4173
   }
 
-  header -Server
+  @https protocol https
+  header @https Strict-Transport-Security "max-age=31536000"
 
+  header {
+    Content-Security-Policy "default-src 'self'; base-uri 'self'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data: blob:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self'"
+    Permissions-Policy "camera=(), geolocation=(), microphone=()"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "DENY"
+    -Server
+  }
+
+  @api path /api/*
+  header @api ?Cache-Control "no-store"
+
+  log {
+    output file /data/access.log {
+      mode 0600
+      roll_size 50MiB
+      roll_keep 5
+      roll_keep_for 336h
+    }
+    format filter {
+      request>uri regexp "\?.*" ""
+      wrap json
+    }
+  }
 }

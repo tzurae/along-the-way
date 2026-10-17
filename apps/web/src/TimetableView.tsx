@@ -133,7 +133,9 @@ export function TimetableRow({ row, drag }: { row: DayTimetableRowDto; drag?: { 
               <p className="route-stop-evidence">
                 {row.hours === "none"
                   ? t.timetable.openingHoursNone
-                  : row.hours === "failed" ? t.timetable.openingHoursFailed : t.timetable.openingHoursManual}
+                  : row.hours === "failed"
+                    ? t.timetable.openingHoursFailed
+                    : row.hours === "quota" ? t.timetable.openingHoursQuota : t.timetable.openingHoursManual}
               </p>
             ) : null}
           </div>

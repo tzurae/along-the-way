@@ -168,6 +168,24 @@ describe("Google Routes observation adapter", () => {
     expect(JSON.stringify(observations)).not.toContain("private provider details");
   });
 
+  it("returns quota without fetching when the daily Google Routes budget is exhausted", async () => {
+    const fetch = vi.fn(async () => Response.json({ routes: [{ duration: "120s", distanceMeters: 100 }] }));
+    const provider = new GoogleRoutesProvider({
+      apiKey: "test-only-key",
+      now: () => NOW,
+      fetch,
+      consumeBudget: async () => false,
+    });
+
+    const observations = await provider.observe(query);
+
+    expect(observations).toEqual([
+      expect.objectContaining({ mode: "walking", status: "unavailable", reason: "quota" }),
+      expect.objectContaining({ mode: "transit", status: "unavailable", reason: "quota" }),
+    ]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it.each([{}, { routes: [] }])("reports omitted or empty route collections as no-route: %j", async (body) => {
     const observations = await providerWithResponse(body).observe(query);
     expect(observations.map((entry) => entry.status === "unavailable" ? entry.reason : "available")).toEqual(["no_route", "no_route"]);

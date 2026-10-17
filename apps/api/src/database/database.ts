@@ -15,7 +15,7 @@ export interface UserTable {
   id: Generated<string>;
   email: string;
   display_name: string | null;
-  status: "active";
+  status: "active" | "invited" | "disabled";
   created_at: Timestamp;
   updated_at: Timestamp;
 }
@@ -25,6 +25,9 @@ export interface MagicLinkTokenTable {
   user_id: string;
   token_hash: string;
   linked_invite_id: string | null;
+  login_nonce_hash: string | null;
+  code_hash: string | null;
+  code_attempts: Generated<number>;
   expires_at: Timestamp;
   used_at: Timestamp | null;
   revoked_at: Timestamp | null;

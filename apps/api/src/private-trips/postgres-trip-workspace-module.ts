@@ -354,7 +354,10 @@ export class PostgresTripWorkspaceModule implements TripWorkspaceModule {
         date: dateOnly(day.date),
         title: day.title,
       })),
-      members,
+      members: members.map((member) => ({
+        ...member,
+        email: trip.role === "owner" || member.userId === userId ? member.email : null,
+      })),
       invites: invites.map((invite) => ({
         id: invite.id,
         email: invite.email,

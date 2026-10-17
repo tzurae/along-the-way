@@ -12,7 +12,7 @@ export interface UserDto {
 export interface TripMemberDto {
   id: string;
   userId: string;
-  email: string;
+  email: string | null;
   displayName: string | null;
   role: MemberRole;
 }
@@ -109,6 +109,12 @@ export interface MagicLinkConsumeResponse extends SessionResponse {
   inviteOutcome?: LinkedInviteOutcome;
 }
 
+export interface MagicLinkConfirmationResponse {
+  error: { code: "confirmation_required"; message: string };
+  targetEmail: string;
+  currentEmail: string | null;
+}
+
 export interface TripListResponse {
   trips: TripSummaryDto[];
 }
@@ -125,7 +131,8 @@ export interface ConflictChange {
   eventId: string;
   actorId: string;
   actorDisplayName: string | null;
-  actorEmail: string;
+  actorEmail: string | null;
+  actorIsActiveMember: boolean;
   isOwn: boolean;
   changedAt: string;
 }
@@ -144,7 +151,8 @@ export interface TripHistoryEvent {
   id: string;
   actorId: string;
   actorDisplayName: string | null;
-  actorEmail: string;
+  actorEmail: string | null;
+  actorIsActiveMember: boolean;
   createdAt: string;
   eventType: string;
   targetType: string;
@@ -221,7 +229,7 @@ function memberValue(value: unknown): TripMemberDto {
   return {
     id: stringValue(value.id),
     userId: stringValue(value.userId),
-    email: stringValue(value.email),
+    email: nullableString(value.email),
     displayName: nullableString(value.displayName),
     role: roleValue(value.role),
   };
@@ -297,6 +305,17 @@ export function parseSessionResponse(value: unknown): SessionResponse {
   return { user: userValue(value.user) };
 }
 
+export function parseMagicLinkConfirmationResponse(value: unknown): MagicLinkConfirmationResponse {
+  if (!isRecord(value) || !isRecord(value.error) || value.error.code !== "confirmation_required") {
+    return invalidResponse();
+  }
+  return {
+    error: { code: "confirmation_required", message: stringValue(value.error.message) },
+    targetEmail: stringValue(value.targetEmail),
+    currentEmail: nullableString(value.currentEmail),
+  };
+}
+
 export function parseMagicLinkConsumeResponse(value: unknown): MagicLinkConsumeResponse {
   if (!isRecord(value)) return invalidResponse();
   const acceptedTripId = value.acceptedTripId;
@@ -361,12 +380,13 @@ export function parseApiError(value: unknown): ApiErrorResponse {
 }
 
 function conflictChange(value: unknown): ConflictChange {
-  if (!isRecord(value) || typeof value.isOwn !== "boolean") return invalidResponse();
+  if (!isRecord(value) || typeof value.isOwn !== "boolean" || typeof value.actorIsActiveMember !== "boolean") return invalidResponse();
   return {
     eventId: stringValue(value.eventId),
     actorId: stringValue(value.actorId),
     actorDisplayName: nullableString(value.actorDisplayName),
-    actorEmail: stringValue(value.actorEmail),
+    actorEmail: nullableString(value.actorEmail),
+    actorIsActiveMember: value.actorIsActiveMember,
     isOwn: value.isOwn,
     changedAt: stringValue(value.changedAt),
   };
@@ -394,7 +414,12 @@ export function parseTripHistoryResponse(value: unknown): TripHistoryResponse {
         id: stringValue(event.id),
         actorId: stringValue(event.actorId),
         actorDisplayName: nullableString(event.actorDisplayName),
-        actorEmail: stringValue(event.actorEmail),
+        actorEmail: nullableString(event.actorEmail),
+        actorIsActiveMember: event.actorIsActiveMember === true
+          ? true
+          : event.actorIsActiveMember === false
+            ? false
+            : invalidResponse(),
         createdAt: stringValue(event.createdAt),
         eventType: stringValue(event.eventType),
         targetType: stringValue(event.targetType),

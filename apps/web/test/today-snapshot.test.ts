@@ -21,6 +21,19 @@ describe("account-scoped read-only Today snapshots", () => {
     store.save("account", { ...model, tripVersion: 8 });
     expect(reopened.read("account", "trip")?.model.tripVersion).toBe(8);
   });
+  it("drops snapshots at the earlier of fourteen days after fetch and seven full days after the trip ends", () => {
+    const store = new TodaySnapshotStore(localStorage);
+    const fetchedAt = Date.parse("2026-10-01T12:00:00Z");
+    store.save("account", model, fetchedAt);
+
+    expect(store.read("account", "trip", Date.parse("2026-10-15T12:00:00Z"))).not.toBeNull();
+    expect(store.read("account", "trip", Date.parse("2026-10-15T12:00:00.001Z"))).toBeNull();
+    expect(localStorage.getItem(key)).toBeNull();
+
+    store.save("account", model, Date.parse("2026-10-20T12:00:00Z"));
+    expect(store.read("account", "trip", Date.parse("2026-10-29T00:00:00Z"))).toBeNull();
+    expect(localStorage.getItem(key)).toBeNull();
+  });
   it("clears one trip on denied access and all account snapshots on logout, not another account's", () => {
     const store = new TodaySnapshotStore(localStorage);
     store.save("other", model);
@@ -33,6 +46,21 @@ describe("account-scoped read-only Today snapshots", () => {
     expect(store.forAccount("account")).toEqual([]);
     expect(store.read("other", "trip")?.model.tripName).toBe("Private trip");
     expect(store.lastAccount()).toBeNull();
+  });
+  it("clears every account-scoped Along the Way key without deleting another account or the signed-out marker", () => {
+    const store = new TodaySnapshotStore(localStorage);
+    store.save("account", model);
+    localStorage.setItem("along-the-way:place-filters:account:trip:wishlist", "{\"query\":\"secret\"}");
+    localStorage.setItem("along-the-way:trip-onboarding:account:trip", "dismissed");
+    localStorage.setItem("along-the-way:place-filters:other:trip:wishlist", "{\"query\":\"keep\"}");
+    localStorage.setItem("along-the-way:locally-signed-out", "true");
+
+    store.clearAccount("account");
+
+    expect([...Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index))]
+      .filter((entry): entry is string => entry !== null && entry.includes(":account:"))).toEqual([]);
+    expect(localStorage.getItem("along-the-way:place-filters:other:trip:wishlist")).toBe("{\"query\":\"keep\"}");
+    expect(localStorage.getItem("along-the-way:locally-signed-out")).toBe("true");
   });
   it("discards incompatible, corrupt, wrong-account and extra-field snapshots", () => {
     const store = new TodaySnapshotStore(localStorage);

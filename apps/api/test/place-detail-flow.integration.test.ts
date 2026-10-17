@@ -96,7 +96,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     createdUsers.push(user.id);
     await database.insertInto("sessions").values({ user_id: user.id, token_hash: hashToken(token),
       expires_at: "2026-11-01T00:00:00Z", last_seen_at: now(), revoked_at: null }).execute();
-    return { id: user.id, cookie: `along_the_way_session=${token}` };
+    return { id: user.id, cookie: `__Host-along_the_way_session=${token}` };
   }
 
   async function createTrip(cookie: string) {
@@ -428,10 +428,10 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
       scope,
       key_hash: createHmac("sha256", Buffer.from(secret)).update(`${scope}:${owner.id}`).digest("hex"),
       window_start: new Date("2026-10-09T12:00:00.000Z"),
-      request_count: 5_999,
+      request_count: 299,
     }).execute();
 
-    // Two requested IDs consume two units, so this batch crosses the account limit.
+    // Two requested IDs consume two units, so this batch crosses the 300/hour account limit.
     const previewResponse = await app.request(
       `/api/trips/${tripId}/place-previews?kind=trip-place&ids=${branch.id},${place.id}`,
       { headers: { cookie: owner.cookie } },

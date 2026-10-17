@@ -11,13 +11,19 @@ x-app-environment: &app-environment
 
 x-worker-environment: &worker-environment
   <<: *app-environment
-  SMTP_HOST: "${SMTP_HOST:-mailpit}"
-  SMTP_PORT: "${SMTP_PORT:-1025}"
-  EMAIL_FROM: "${EMAIL_FROM:-Along the Way <along-the-way@example.test>}"
+  SMTP_HOST: "${SMTP_HOST:?Set SMTP_HOST in .env}"
+  SMTP_PORT: "${SMTP_PORT:?Set SMTP_PORT in .env}"
+  EMAIL_FROM: "${EMAIL_FROM:?Set EMAIL_FROM in .env}"
   SMTP_SECURE: "${SMTP_SECURE:-false}"
-  SMTP_REQUIRE_TLS: "${SMTP_REQUIRE_TLS:-false}"
+  SMTP_REQUIRE_TLS: "${SMTP_REQUIRE_TLS:-true}"
   SMTP_USERNAME: "${SMTP_USERNAME:-}"
   SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 
 services:
   db:
@@ -37,6 +43,19 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    mem_limit: 512m
+    pids_limit: 128
+    logging: *default-logging
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
@@ -58,11 +77,22 @@ services:
       db:
         condition: service_healthy
     restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    mem_limit: 512m
+    pids_limit: 128
+    logging: *default-logging
     networks:
       - private
 
   provision-app-role:
     image: postgis/postgis:17-3.5-alpine@sha256:fae81f3e8da88b8e684c58c8a8616aadda72e6fc1affcb050b490891ecb3db1c
+    user: postgres
     environment:
       PGHOST: db
       PGPORT: "5432"
@@ -78,16 +108,37 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    mem_limit: 128m
+    pids_limit: 64
+    logging: *default-logging
     networks:
       - private
 
   mailpit:
     image: axllent/mailpit:v1.31.3@sha256:ed9b00c609e77e99c79b93f1178255ebc271868920f2c69a8d166bd5634ed10d
+    profiles: ["local"]
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:${MAILPIT_HTTP_PORT:-8025}:8025"
     expose:
       - "1025"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    mem_limit: 256m
+    pids_limit: 128
+    logging: *default-logging
     networks:
       - private
 
@@ -99,10 +150,19 @@ services:
     depends_on:
       provision-app-role:
         condition: service_completed_successfully
-      mailpit:
-        condition: service_started
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    mem_limit: 256m
+    pids_limit: 128
+    logging: *default-logging
     networks:
       - private
+      - worker-egress
 
   api:
     image: "along-the-way-api:${RELEASE_IMAGE_TAG:-local}"
@@ -135,7 +195,18 @@ services:
       start_period: 5s
     expose:
       - "3000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    mem_limit: 512m
+    pids_limit: 128
+    logging: *default-logging
     networks:
+      - edge
       - private
 
   web:
@@ -160,8 +231,18 @@ services:
       start_period: 5s
     expose:
       - "4173"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    mem_limit: 128m
+    pids_limit: 64
+    logging: *default-logging
     networks:
-      - private
+      - edge
 
   caddy:
     image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
@@ -169,8 +250,8 @@ services:
     environment:
       SITE_ADDRESS: "${SITE_ADDRESS:-http://localhost}"
     ports:
-      - "80:80"
-      - "443:443"
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -180,11 +261,27 @@ services:
         condition: service_healthy
       web:
         condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    mem_limit: 128m
+    pids_limit: 128
+    logging: *default-logging
     networks:
-      - private
+      - edge
 
 networks:
+  edge:
+    driver: bridge
   private:
+    driver: bridge
+  worker-egress:
     driver: bridge
 
 volumes:

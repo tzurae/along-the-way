@@ -36,8 +36,10 @@ const identityAccess = new PostgresIdentityAccessModule({
 });
 const tripWorkspace = new PostgresTripWorkspaceModule({ database });
 const tripSkeleton = new PostgresTripSkeletonModule({ database });
+const rateLimiter = new PostgresRateLimiter(database, tokenSecret);
 const placeProvider = new GooglePlacesProvider({
   apiKey: process.env.GOOGLE_MAPS_API_KEY,
+  consumeBudget: () => rateLimiter.tryConsumePaidProvider("google_places"),
 });
 const tripPlaces = new PostgresTripPlaceModule({
   database,
@@ -55,17 +57,23 @@ const discovery = new PostgresDiscoveryModule({
     model: process.env.OPENAI_MODEL,
   }),
   placeLookup: placeProvider,
+  claimAiRun: (userId, tripId) => rateLimiter.claimDiscoveryAiRun(userId, tripId),
   tripPlaces,
 });
-const rateLimiter = new PostgresRateLimiter(database, tokenSecret);
 const dayPlans = new PostgresDayPlanModule({
   database,
   tripSkeleton,
   tripPlaces,
   // NAVITIME first: Google Routes has no transit in Japan.
   routeProviders: fakeExternalData ? [new FakeRouteProvider()] : [
-    new NavitimeRoutesProvider({ apiKey: process.env.RAPIDAPI_KEY }),
-    new GoogleRoutesProvider({ apiKey: process.env.GOOGLE_MAPS_API_KEY }),
+    new NavitimeRoutesProvider({
+      apiKey: process.env.RAPIDAPI_KEY,
+      consumeBudget: () => rateLimiter.tryConsumePaidProvider("navitime"),
+    }),
+    new GoogleRoutesProvider({
+      apiKey: process.env.GOOGLE_MAPS_API_KEY,
+      consumeBudget: () => rateLimiter.tryConsumePaidProvider("google_routes"),
+    }),
   ],
   placeHours: fakeExternalData ? new FakePlaceHours() : placeProvider,
 });

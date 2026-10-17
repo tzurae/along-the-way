@@ -30,6 +30,7 @@ export const timetable = {
   openAccordingToGoogle: "依 Google Maps 顯示為營業時間・請自行確認最晚入場時間",
   openingHoursNone: "Google 沒有提供營業時間",
   openingHoursFailed: "營業時間查詢失敗，重新排一次可能就查得到",
+  openingHoursQuota: "Google 今日額度已用完，營業時間暫時查不到",
   openingHoursManual: "手動新增的地點，沒有營業時間資料",
   fixedTimeNotMoved: "固定時間，不可移動",
   arriveEarly: (minutes: number, certainty: string) => `提早 ${minutes} 分抵達（${certainty}）`,
