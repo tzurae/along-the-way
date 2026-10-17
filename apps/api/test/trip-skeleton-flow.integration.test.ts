@@ -1712,6 +1712,142 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
     expect((await readSkeleton(cookie, novemberFirst.tripId)).items.map((item) => item.title).sort()).toEqual(["FIXTURE-OUT", "FIXTURE-RETURN"]);
   });
 
+  it("rejects invalid item types, details, durations, currencies, and lodging endpoints", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    const firstPlace = await createPlace(cookie, trip.id, "validation-place-one", {
+      name: "First place",
+      type: "lodging",
+      address: null,
+      latitude: null,
+      longitude: null,
+      timeZone: "Asia/Tokyo",
+      sourceUrl: null,
+      notes: null,
+    });
+    const secondPlace = await createPlace(cookie, trip.id, "validation-place-two", {
+      name: "Second place",
+      type: "lodging",
+      address: null,
+      latitude: null,
+      longitude: null,
+      timeZone: "Asia/Tokyo",
+      sourceUrl: null,
+      notes: null,
+    });
+    const start = {
+      role: "start" as const,
+      countryStopId: trip.countryStops[0]!.id,
+      placeId: firstPlace.id,
+      localDateTime: "2026-10-22T10:00",
+      timeZone: "Asia/Tokyo",
+    };
+    const base = {
+      type: "activity" as const,
+      title: "Validation target",
+      notes: null,
+      sourceUrl: null,
+      money: null,
+      participantMemberIds: null,
+      endpoints: [start],
+      details: {
+        durationMinutes: 60,
+        bookedBy: null,
+        confirmationStatus: "unknown",
+      },
+      constraints: [],
+    } satisfies CreateItineraryItemInput;
+    const original = await seedItem(trip.members[0]!.userId, trip.id, base);
+    const cases: Array<{ key: string; payload: Record<string, unknown> }> = [
+      {
+        key: "invalid-unknown-item-type",
+        payload: { ...base, type: "mystery" },
+      },
+      {
+        key: "invalid-details-shape",
+        payload: { ...base, details: [] },
+      },
+      {
+        key: "invalid-zero-duration",
+        payload: { ...base, details: { ...base.details, durationMinutes: 0 } },
+      },
+      {
+        key: "invalid-negative-duration",
+        payload: { ...base, details: { ...base.details, durationMinutes: -30 } },
+      },
+      {
+        // 2026-10-22T10:00 + 8040 min is 2026-10-28T00:00, after the trip's last date.
+        key: "invalid-duration-after-trip",
+        payload: { ...base, details: { ...base.details, durationMinutes: 8040 } },
+      },
+      {
+        key: "invalid-unrepresentable-duration",
+        payload: { ...base, details: { ...base.details, durationMinutes: Number.MAX_SAFE_INTEGER } },
+      },
+      {
+        key: "invalid-free-time-after-trip",
+        payload: { ...base, type: "free-time", details: { durationMinutes: Number.MAX_SAFE_INTEGER } },
+      },
+      {
+        key: "invalid-currency",
+        payload: {
+          ...base,
+          money: { amountMinor: 1000, currency: "ZZZ" },
+        },
+      },
+      {
+        key: "invalid-lodging-endpoint",
+        payload: {
+          ...base,
+          type: "lodging",
+          endpoints: [
+            start,
+            {
+              ...start,
+              role: "end",
+              placeId: secondPlace.id,
+              localDateTime: "2026-10-23T10:00",
+            },
+          ],
+          details: { bookedBy: null, confirmationCode: null },
+        },
+      },
+    ];
+
+    for (const invalid of cases) {
+      const response = await mutate(
+        cookie,
+        `/api/trips/${trip.id}/items/${original.id}`,
+        invalid.key,
+        { ...invalid.payload, expectedVersion: original.version },
+        "PATCH",
+      );
+      expect(response.status, invalid.key).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: { code: "validation_error" },
+      });
+      const unchanged = (await readSkeleton(cookie, trip.id)).items
+        .find((item) => item.id === original.id);
+      expect(unchanged?.version, invalid.key).toBe(original.version);
+      expect(unchanged, invalid.key).toEqual(original);
+    }
+
+    const lastMinute = await mutate(
+      cookie,
+      `/api/trips/${trip.id}/items/${original.id}`,
+      "valid-duration-last-trip-minute",
+      {
+        ...base,
+        details: { ...base.details, durationMinutes: 8039 },
+        expectedVersion: original.version,
+      },
+      "PATCH",
+    );
+    expect(lastMinute.status).toBe(200);
+    expect(parseItineraryItemResponse(await lastMinute.json()).item.details)
+      .toMatchObject({ durationMinutes: 8039 });
+  });
+
   it("falls back from Place to Country Stop and explicitly confirmed endpoint time zones", async () => {
     const cookie = await login();
     const japanTrip = await createTrip(cookie);
