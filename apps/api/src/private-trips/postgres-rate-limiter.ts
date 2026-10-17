@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHmac } from "node:crypto";
 
 import type { Kysely } from "kysely";
+import { Temporal } from "@js-temporal/polyfill";
 
 import type { AlongTheWayDatabase } from "../database/database";
 import { AppError } from "./private-trip-module";
@@ -17,13 +18,13 @@ export type RateLimitedAction =
   | "trip_content"
   | "place_photo"
   | "place_photo_metadata"
-  | "discovery_ai"
-  | "route_planning";
-export type PaidProvider = "google_places" | "google_routes" | "navitime";
+  | "discovery_ai";
+export type PaidProvider = "google_places" | "google_maps_js";
 export interface RateLimiter {
   consume(action: RateLimitedAction, clientIp: string, account?: string, cost?: number): Promise<void>;
   claimDiscoveryAiRun(account: string, tripId: string): Promise<void>;
   withPaidProviderIdentity<T>(clientIp: string, account: string, work: () => Promise<T>): Promise<T>;
+  tryConsumePaidProvider(provider: PaidProvider): Promise<boolean>;
 }
 
 interface Rule {
@@ -44,16 +45,35 @@ const RULES: Record<RateLimitedAction, Rule> = {
   place_photo: { windowSeconds: 60 * 60, ipLimit: 1_200, accountLimit: 600 },
   place_photo_metadata: { windowSeconds: 60 * 60, ipLimit: 600, accountLimit: 300 },
   discovery_ai: { windowSeconds: 60 * 60, ipLimit: 6, accountLimit: 10 },
-  route_planning: { windowSeconds: 60 * 60, ipLimit: 600, accountLimit: 300 },
 };
 
-// Below the project's 1000/day Google quota. One planning session (a week of days, a few drafts
-// and drops each) makes several hundred lookups, so an account may use half of the day's budget:
-// enough for the owner to plan, while one other account cannot take all of it.
-const PAID_PROVIDER_GLOBAL_DAILY_LIMIT = 900;
-const PAID_PROVIDER_ACCOUNT_DAILY_LIMIT = 450;
-const PAID_PROVIDER_IP_DAILY_LIMIT = 600;
+// Paid-provider budgets deliberately leave headroom below their Google Cloud project quotas.
+// Places keeps its existing UTC-day accounting; browser map loads follow Google's Pacific reset.
+const PAID_PROVIDER_DAILY_LIMITS: Record<PaidProvider, { global: number; account: number; ip: number }> = {
+  google_places: { global: 2000, account: 2000, ip: 2000 },
+  google_maps_js: { global: 310, account: 310, ip: 310 },
+};
 const PAID_PROVIDER_WINDOW_SECONDS = 24 * 60 * 60;
+const GOOGLE_MAPS_JS_RETENTION_SECONDS = 25 * 60 * 60;
+const GOOGLE_MAPS_TIME_ZONE = "America/Los_Angeles";
+const RETIRED_RETENTION_RULES = [
+  { scopePattern: "paid_provider:google_routes:%", windowSeconds: PAID_PROVIDER_WINDOW_SECONDS },
+  { scopePattern: "paid_provider:navitime:%", windowSeconds: PAID_PROVIDER_WINDOW_SECONDS },
+  { scopePattern: "route_planning:%", windowSeconds: 60 * 60 },
+] as const;
+function paidProviderWindowStart(provider: PaidProvider, now: Date) {
+  if (provider === "google_places") {
+    return new Date(Math.floor(now.valueOf() / (PAID_PROVIDER_WINDOW_SECONDS * 1_000))
+      * PAID_PROVIDER_WINDOW_SECONDS * 1_000);
+  }
+  return new Date(
+    Temporal.Instant.fromEpochMilliseconds(now.valueOf())
+      .toZonedDateTimeISO(GOOGLE_MAPS_TIME_ZONE)
+      .startOfDay()
+      .toInstant()
+      .epochMilliseconds,
+  );
+}
 const DISCOVERY_AI_REFUSED = Symbol("discovery AI budget refused");
 const PAID_PROVIDER_REFUSED = Symbol("paid provider budget refused");
 /** Rate-window families and their exact lifetime, used by the hourly retention worker. */
@@ -64,9 +84,16 @@ export function rateLimitRetentionRules() {
       windowSeconds: rule.windowSeconds,
     })),
     {
-      scopePattern: "paid_provider:%",
+      scopePattern: "paid_provider:google_places:%",
       windowSeconds: PAID_PROVIDER_WINDOW_SECONDS,
     },
+    {
+      // A Pacific calendar day can be 25 hours when daylight saving time ends.
+      scopePattern: "paid_provider:google_maps_js:%",
+      windowSeconds: GOOGLE_MAPS_JS_RETENTION_SECONDS,
+    },
+    // Cleanup only: these producers are retired, but existing hashed counters must still expire.
+    ...RETIRED_RETENTION_RULES,
   ];
 }
 
@@ -208,21 +235,18 @@ export class PostgresRateLimiter implements RateLimiter {
     }
   }
 
-  /**
-   * Atomically reserves one real outbound request from the UTC-day provider budgets. Each request
-   * consumes global, account and IP capacity together; a refusal rolls all three reservations back.
-   */
+  /** Reserves one paid-provider request in that provider's Cloud-quota calendar day. */
   async tryConsumePaidProvider(provider: PaidProvider) {
     const identity = this.paidProviderIdentity.getStore();
     // Production entrypoints establish the identity in createApp. Fail closed if a new caller does not.
     if (!identity) return false;
     const now = this.now();
-    const windowMilliseconds = PAID_PROVIDER_WINDOW_SECONDS * 1_000;
-    const windowStart = new Date(Math.floor(now.valueOf() / windowMilliseconds) * windowMilliseconds);
+    const windowStart = paidProviderWindowStart(provider, now);
+    const limits = PAID_PROVIDER_DAILY_LIMITS[provider];
     const attempts = [
-      { scope: `paid_provider:${provider}:global`, key: "global", limit: PAID_PROVIDER_GLOBAL_DAILY_LIMIT },
-      { scope: `paid_provider:${provider}:account`, key: identity.account, limit: PAID_PROVIDER_ACCOUNT_DAILY_LIMIT },
-      { scope: `paid_provider:${provider}:ip`, key: identity.clientIp, limit: PAID_PROVIDER_IP_DAILY_LIMIT },
+      { scope: `paid_provider:${provider}:global`, key: "global", limit: limits.global },
+      { scope: `paid_provider:${provider}:account`, key: identity.account, limit: limits.account },
+      { scope: `paid_provider:${provider}:ip`, key: identity.clientIp, limit: limits.ip },
     ];
     try {
       await this.database.transaction().execute(async (transaction) => {
@@ -252,8 +276,7 @@ export class PostgresRateLimiter implements RateLimiter {
     }
   }
   /**
-   * Makes the authenticated account and request IP available to every provider call in `work`,
-   * including concurrent route fan-out. The provider adapters reserve immediately before fetch.
+   * Makes the authenticated account and request IP available to every provider call in `work`.
    */
   withPaidProviderIdentity<T>(clientIp: string, account: string, work: () => Promise<T>) {
     const identity = {

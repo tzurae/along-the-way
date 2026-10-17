@@ -27,7 +27,7 @@ export const collaboration = {
     bookingReference: "訂位資料", operator: "營運單位", originalText: "旅程需求", answers: "問題回答", question: "問題", answer: "回答",
     interpretation: "理解內容", interests: "興趣", exclusions: "排除項目", pace: "步調", budget: "預算", summary: "摘要", decision: "決定",
     lockedAt: "鎖定時間", start: "開始", end: "結束", constraints: "限制", status: "狀態", minimumBufferMinutes: "最少緩衝分鐘",
-    startMinute: "開始時間", endMinute: "結束時間", bookedBy: "訂房人", ticketInfo: "票券資料", confirmationNotes: "確認備註",
+    bookedBy: "訂房人", ticketInfo: "票券資料", confirmationNotes: "確認備註",
   } as Record<string, string>,
   values: { flight: "航班", lodging: "住宿", activity: "活動", restaurant: "餐廳", airport: "機場", station: "車站", other: "其他", transport: "交通", start: "開始", end: "結束", confirmed: "已確認", unknown: "未確認", conflicted: "有衝突", walking: "步行", transit: "大眾運輸", driving: "開車", confirm: "確認", reject: "拒絕" } as Record<string, string>,
 };

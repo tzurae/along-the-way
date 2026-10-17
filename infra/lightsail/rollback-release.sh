@@ -53,7 +53,6 @@ compose_for_release() {
     -u GOOGLE_MAPS_API_KEY \
     -u OPENAI_API_KEY \
     -u OPENAI_MODEL \
-    -u RAPIDAPI_KEY \
     -u RELEASE_IMAGE_TAG \
     docker compose \
       --env-file "$environment_file" \

@@ -79,9 +79,10 @@ jobs:
           SMTP_USERNAME: ${{ secrets.STAGING_SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.STAGING_SMTP_PASSWORD }}
           GOOGLE_MAPS_API_KEY: ${{ secrets.STAGING_GOOGLE_MAPS_API_KEY }}
+          GOOGLE_MAPS_BROWSER_KEY: ${{ secrets.STAGING_GOOGLE_MAPS_BROWSER_KEY }}
+          GOOGLE_MAPS_MAP_ID: ${{ vars.STAGING_GOOGLE_MAPS_MAP_ID }}
           OPENAI_API_KEY: ${{ secrets.STAGING_OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.STAGING_OPENAI_MODEL }}
-          RAPIDAPI_KEY: ${{ secrets.STAGING_RAPIDAPI_KEY }}
         run: |
           site_address="$CONFIGURED_SITE_ADDRESS"
           if [ -z "$site_address" ]; then
@@ -125,9 +126,10 @@ jobs:
             printf 'SMTP_PASSWORD=%s\n' "$SMTP_PASSWORD"
             printf 'TOKEN_SECRET=%s\n' "$TOKEN_SECRET"
             printf 'GOOGLE_MAPS_API_KEY=%s\n' "$GOOGLE_MAPS_API_KEY"
+            printf 'GOOGLE_MAPS_BROWSER_KEY=%s\n' "$GOOGLE_MAPS_BROWSER_KEY"
+            printf 'GOOGLE_MAPS_MAP_ID=%s\n' "$GOOGLE_MAPS_MAP_ID"
             printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY"
             printf 'OPENAI_MODEL=%s\n' "$OPENAI_MODEL"
-            printf 'RAPIDAPI_KEY=%s\n' "$RAPIDAPI_KEY"
             printf 'RELEASE_IMAGE_TAG=%s\n' "$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           } >"$RUNNER_TEMP/along-the-way.env"
 

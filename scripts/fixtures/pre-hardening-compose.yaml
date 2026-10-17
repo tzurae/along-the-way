@@ -57,8 +57,6 @@ services:
       GOOGLE_MAPS_API_KEY: "${GOOGLE_MAPS_API_KEY:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENAI_MODEL: "${OPENAI_MODEL:-gpt-5.5}"
-      RAPIDAPI_KEY: "${RAPIDAPI_KEY:-}"
-      FAKE_EXTERNAL_DATA: "${FAKE_EXTERNAL_DATA:-}"
     healthcheck:
       test:
         [

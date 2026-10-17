@@ -333,6 +333,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     });
   }
 
+
   it.each([
     "http://app.example.test", "http://192.0.2.1", "http://localhost.example.test",
     "http://[2001:db8::1]", "ftp://localhost",

@@ -222,9 +222,9 @@ false). Scheduling, rescheduling, reordering and removing scheduled places then
 accept editors; otherwise they return 403 as before. Rejecting AI proposals stays
 owner-only.
 
-The same scheduling gate covers a day's available-time and travel-mode settings,
-plus creating, moving, or deleting timed items whose endpoints use wishlist
-places. Rewriting or deleting a flight or lodging also requires scheduling
+The same scheduling gate covers assigning and ordering a day's wishlist places,
+plus creating, moving, or deleting formal itinerary items whose endpoints use
+wishlist places. Rewriting or deleting a flight or lodging also requires scheduling
 permission even when all of its places are travel-only. Locked itinerary items
 remain read-only and cannot be deleted until the owner unlocks them; only the
 owner is shown and may use the unlock action. Item deletion is permanent; there
@@ -256,9 +256,8 @@ Wishlist details list members' 必買／必吃／必喝 items:
 - AI proposal details show these items read-only once the proposal has been
   added to the wishlist.
 
-The detail panel no longer shows 停留時間 or 預算. The columns, API, and DTO
-fields remain because day drafting still reads `durationMinutes`, and saving a
-reason sends the existing values back unchanged.
+The detail panel no longer shows 停留時間 or 預算. Existing saved values remain
+in the wishlist data model, but day ordering does not use them.
 
 Catalog publication is explicit and operator-only: run the curated manifest CLI
 with reviewed bindings to existing canonical identities. Startup does not match
@@ -270,61 +269,53 @@ for API/reference contracts, source applicability, asset validation, import and
 failure behavior, and current isolated verification status. The acceptance source
 is the [place-details/photo specification](docs/superpowers/specs/2026-10-09-place-details-and-photos-design.md).
 
-## Day planner explanations (#127)
+## Day route ordering
 
-`DayTimetableDto.capacity` reports, from the scheduler itself, the fixed item
-the traveller arrives with (`arrival`), the last day's departure (`departure`)
-and the free gaps places were tried in (`gaps`). The day dialog turns these into
-plain-language reasons when a place does not fit, and hides the re-order actions
-when there is no gap at all. A day with a place left out for lack of time is
-always `packed`. Load levels render as solid badges: 寬鬆 green, 剛好 amber,
-太趕 red (`--load-relaxed|balanced|packed` in `styles.css`).
+「幫我排順路」 is a distance-only draft. It does not calculate clock times,
+travel times, opening-hours waits, capacity, fit, luggage feasibility, or a
+return time. There are no travel-mode or per-day-hours settings.
 
-## Travel modes and the taxi fallback (migration 028)
+`POST /api/trips/:tripId/days/:dayId/route` accepts:
 
-Each day has a way of travel (`trip_days.travel_mode`, default `transit`) and a
-walk limit (`walk_limit_minutes`, 5–60, default 15); a place's assignment can
-override the way it is reached (`trip_place_day_assignments.arrival_mode`,
-null follows the day). Legs back to the lodging use the day's way.
+```json
+{
+  "order": "current | suggested | custom",
+  "orderedTripPlaceIds": ["custom-candidate-place-id"],
+  "insertTripPlaceId": "optional-unassigned-place-id"
+}
+```
 
-- 大眾運輸 `transit`: walk when it takes 15 minutes or less, else transit.
-- 盡量走路 `walk`: walk up to the day's limit, else transit.
-- 計程車 `taxi`: the drive plus 5 minutes to get a cab.
-- With no transit beyond walking distance the leg is unknown (交通時間查不到);
-  a long walk never stands in for it.
+`current` keeps the saved day order. `suggested` uses straight-line distance
+and the day's lodging anchor. `custom` previews the complete candidate list:
+omitting a current-day place previews its removal, and including an unassigned
+place previews its addition. `insertTripPlaceId` asks the server to put one
+additional unassigned place where it adds the least straight-line distance.
+Drafts contain at most 100 stops. Located places are ordered first; places
+without coordinates are appended in saved order.
 
-`POST …/days/:dayId/timetable` with `order: "custom"` accepts `legModes`
-(keyed by the place a leg reaches) and, when a place has just been dropped in,
-`taxiFallbackFor: <tripPlaceId>`. If the place does not fit as the day travels,
-or pushes a placed one out, the server tries taxi for the leg into it, the leg
-out of it, then both, and returns the first that fits as `taxiAlternative`.
-`insertTripPlaceId` instead tries the place in every slot, keeps the best, and
-offers the same taxi fallback for that slot. Taking a place out of a day keeps
-the placed ones in order and moves the unscheduled ones after them; if a placed
-place would still drop out (the new shortcut leg has no transit, say), the
-dialog refuses the removal and says why.
+The response contains the day ID/date/version, the requested order, ordered
+place IDs, morning and night lodging references, per-stop rounded metres from
+the previous point, rounded metres from the last stop to the night's lodging,
+and the sum of all known legs. A missing endpoint or coordinate produces
+`null` for that leg rather than an estimate.
 
-Custom drafts are capped at 100 stops, including `insertTripPlaceId`, matching
-the arrangement writer so saved large days remain editable. Timetable and
-whole-trip planning consume `route_planning` units equal to the number of stops
-or candidates (at most 100 units per request), per account and client IP.
-Every actual outbound request also atomically reserves from provider-specific
-UTC-day budgets: 900 globally, 450 per account, and 600 per client IP for each
-of Google Routes, Google Places, and NAVITIME. A week of day planning makes a few
-hundred lookups, so one account may use half of the day's budget: the owner can
-plan, and no other single account can take all of it. Raising the Google quota
-in the Cloud console is the way to give everyone more.
-Exhaustion prevents the network call. NAVITIME is used only when both endpoints
-are in Japan. Google Places photo-metadata reads are additionally capped at
-300/hour per account and 600/hour per IP. Google/NAVITIME HTTP 429 and a local
-provider-budget refusal surface as `quota`; opening-hours quota displays
-「Google 今日額度已用完，營業時間暫時查不到」.
+Saving remains explicit and version checked:
 
-The rules, fifteen blind-derived scenarios and open questions are in
-[`docs/day-scheduling-scenarios.md`](docs/day-scheduling-scenarios.md).
-`FAKE_EXTERNAL_DATA=1` (local and browser E2E only) replaces route and
-opening-hours providers with deterministic offline data; never set it in
-production.
+- `PUT /api/trips/:tripId/days/:dayId/place-order` stores an order for places
+  already assigned to the day.
+- `PUT /api/trips/:tripId/days/:dayId/arrangement` atomically removes omitted
+  located places, adds eligible unassigned places, and stores the candidate
+  order.
+
+Route ordering itself makes no external provider call. Opening either comparison
+column's Google Map tab first reserves one authenticated `POST /api/maps/load`
+unit, then loads the Maps JavaScript API only after the reservation succeeds.
+The shared database budget allows 310 loads per Los Angeles calendar day—10
+below the Google Cloud Maps JavaScript API quota of 320 loads per day—and
+resets with Google's Pacific-midnight window. Exhaustion returns
+`429 maps_daily_limit`; script, network, and Google
+authentication failures remain inside the map panel so the route list stays
+available. The separate Google Places UTC-day budget is unchanged.
 
 Flights and lodging are reached from the 行程 navigation: on desktop the rail
 shows 總覽／航班／住宿 under 行程; on mobile the same three appear as a segment
@@ -879,7 +870,7 @@ the local itinerary load before publishing the refresh, including Today's
 offline snapshot. Recent changes use the authorized `/history` projection,
 not the removed skeleton event list.
 
-The shared `resolveDayTimeZone` contract preserves the planner's precedence:
+The shared `resolveDayTimeZone` contract uses this precedence:
 located lodging for the night (then the previous night), located wishlist places
 assigned to the day in their saved order, then formal item endpoints. Today
 explicitly falls back to the first country stop's zone. An unresolved zone is
@@ -1039,37 +1030,19 @@ precondition without changing their input. A stale create refreshes that
 precondition for an explicit retry; an uncertain network result retains the
 same request/version/key so retrying cannot duplicate an already saved item.
 
-Daily hours and place order share a `TripDay` version:
+Place assignment and order share a `TripDay` version.
 
-- `GET /api/trips/:tripId/days/:dayId/window` returns
-  `{ window: { startMinute, endMinute, version, travelMode, walkLimitMinutes } }`
-  for active members.
-- `PUT` on that URL requires `{ startMinute, endMinute, expectedVersion }`
-  (optionally `travelMode` and `walkLimitMinutes`) and `Idempotency-Key`, and
-  returns the saved window including its version.
+- `POST /api/trips/:tripId/days/:dayId/route` returns a distance-only draft and
+  checks the day version before and after reading its inputs. A concurrent
+  assignment or order change returns `409`.
 - `PUT /api/trips/:tripId/days/:dayId/place-order` requires
   `{ orderedTripPlaceIds, expectedVersion }` and returns
   `{ orderedTripPlaceIds, version }`.
-- `PUT /api/trips/:tripId/days/:dayId/arrangement` saves the day dialog's
-  candidate in one step: `{ orderedTripPlaceIds, expectedVersion, legModes }`
-  makes exactly those places the day's places, in that order, with each
-  place's way of arrival; places taken out return to 待安排. Schedulers only.
-- Timetable responses include `window.version`. Whole-trip plan application
-  requires `expectedVersion` for each entry in `days`, in addition to its
-  existing `basis`; a changed basis is never automatically rebased.
-  A day draft checks its version before and after reading its inputs; an order
-  change during that read returns `409` rather than attaching a fresh version
-  to stale order data.
-- Window/order/assignment changes advance the day version. A stale window
-  uses the same conflict panel. A stale suggested order remains unsaved and
-  asks the member to regenerate and explicitly confirm the order.
-
-Votes remain the member-owned idempotent set-state operations from #73.
-Invite/accept/revoke/remove membership operations likewise remain idempotent
-state transitions, not editable field snapshots; they do not accept a version
-or silently replace another member's field edits. There is no persisted draft
-aggregate from #26 in this release: generated day/trip plans are read-time
-drafts, with optimistic day checks and the whole-trip basis checked on apply.
+- `PUT /api/trips/:tripId/days/:dayId/arrangement` requires
+  `{ orderedTripPlaceIds, expectedVersion }`; places omitted from the candidate
+  return to 待安排 and eligible unassigned places join the day. Schedulers only.
+- Order and assignment changes advance the day version. A stale suggested order
+  remains unsaved and asks the member to regenerate and explicitly confirm it.
 
 ### Authenticated notifications and history
 

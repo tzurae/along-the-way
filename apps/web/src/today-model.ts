@@ -31,7 +31,7 @@ export interface TodayDay {
   date: string;
   timeZone: string | null;
   itemIds: string[];
-  wishlist: Array<{ id: string; name: string }>;
+  wishlist: Array<{ id: string; name: string; latitude: number | null; longitude: number | null; providerPlaceId: string | null }>;
 }
 export interface TodayModel {
   tripId: string;
@@ -108,7 +108,13 @@ export function createTodayModel(trip: TripDto, skeleton: TripSkeletonDto, place
       }
       return { id: day.id, date: day.date,
         timeZone, itemIds: [...itemIds],
-        wishlist: assigned.map((place) => ({ id: place.id, name: place.name })),
+        wishlist: assigned.map((place) => ({
+          id: place.id,
+          name: place.name,
+          latitude: place.latitude,
+          longitude: place.longitude,
+          providerPlaceId: place.providerPlaceId,
+        })),
       };
     }).sort((a, b) => a.date.localeCompare(b.date)),
   };

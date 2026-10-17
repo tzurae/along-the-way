@@ -33,7 +33,7 @@ describe("Today uses each trip day's zone and the device clock only as an instan
     expect(personalState([first, second], "甲", Date.parse("2026-11-01T08:30Z"))).toMatchObject({ current: [{ id: "first" }], next: { id: "second" }, minutesUntil: 30 });
   });
   it("reuses planner zone precedence with an explicit country fallback", () => {
-    const skeleton: TripSkeletonDto = { tripVersion: 1, places: [], items: [], days: [{ id: "day", date: "2026-10-21", entries: [] }], tripInformationItemIds: [] };
+    const skeleton: TripSkeletonDto = { tripVersion: 1, places: [], items: [], days: [{ id: "day", date: "2026-10-21", entries: [] }] };
     expect(resolveDayTimeZone(skeleton, skeleton.days[0]!, [{ timeZone: "Europe/Paris" }], "Asia/Tokyo")).toBe("Europe/Paris");
     expect(resolveDayTimeZone(skeleton, skeleton.days[0]!, [], "Asia/Tokyo")).toBe("Asia/Tokyo");
     expect(resolveDayTimeZone(skeleton, skeleton.days[0]!, [], null)).toBeNull();
@@ -140,6 +140,6 @@ describe("Today place detail identities", () => {
     const readModel = createTodayModel(trip, skeleton, wishlist, todayUser.id);
 
     expect(readModel.items[0]!.endpoints[0]!.place).toMatchObject({ id: "place", name: "Park" });
-    expect(readModel.days[0]!.wishlist[0]).toEqual({ id: "FIRST", name: "Park" });
+    expect(readModel.days[0]!.wishlist[0]).toEqual({ id: "FIRST", name: "Park", latitude: 34, longitude: 135, providerPlaceId: null });
   });
 });
