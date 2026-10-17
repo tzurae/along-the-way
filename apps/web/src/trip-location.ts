@@ -10,6 +10,22 @@ export const membersSegmentIds = ["people", "profile", "invites", "permissions"]
 export type MembersSegment = (typeof membersSegmentIds)[number];
 export type TripSegment = ItinerarySegment | PlacesSegment | MembersSegment;
 
+export interface TripOverviewFilter {
+  days: string[];
+}
+
+export const TRIP_OVERVIEW_FILTER_CHANGE_EVENT = "trip-overview-filter-change";
+
+function normalizedIsoDates(dates: Iterable<string>) {
+  return [...new Set(dates)]
+    .filter((date) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+      const instant = new Date(`${date}T00:00:00Z`);
+      return !Number.isNaN(instant.valueOf()) && instant.toISOString().slice(0, 10) === date;
+    })
+    .sort();
+}
+
 const legacyLocations: Record<string, { tab: TripTab; segment: TripSegment | null }> = {
   overview: { tab: "itinerary", segment: "flight" },
   discovery: { tab: "places", segment: "discovery" },
@@ -57,6 +73,25 @@ export function readTripLocation() {
   };
 }
 
+export function readTripOverviewFilter(): TripOverviewFilter {
+  const query = new URLSearchParams(window.location.search);
+  return { days: normalizedIsoDates((query.get("days") ?? "").split(",").filter(Boolean)) };
+}
+
+export function writeTripOverviewFilter(days: Iterable<string>) {
+  const url = new URL(window.location.href);
+  const previousDays = url.searchParams.get("days");
+  const normalizedDays = normalizedIsoDates(days);
+  if (normalizedDays.length > 0) url.searchParams.set("days", normalizedDays.join(","));
+  else url.searchParams.delete("days");
+  if (url.href !== window.location.href) {
+    window.history.replaceState({}, "", url);
+    if (url.searchParams.get("days") !== previousDays) {
+      window.dispatchEvent(new Event(TRIP_OVERVIEW_FILTER_CHANGE_EVENT));
+    }
+  }
+}
+
 export function writeTripLocation(
   trip: string,
   tab: TripTab,
@@ -65,7 +100,10 @@ export function writeTripLocation(
   replace = false,
 ) {
   const url = new URL(window.location.href);
+  const previousTrip = url.searchParams.get("trip");
+  const previousDays = url.searchParams.get("days");
   url.searchParams.set("trip", trip);
+  if (previousTrip !== trip) url.searchParams.delete("days");
   url.searchParams.set("tab", tab);
   const normalizedSegment = tab === "itinerary"
     ? (itinerarySegmentIds.includes(segment as ItinerarySegment) ? segment : "daily")
@@ -77,5 +115,10 @@ export function writeTripLocation(
   if (normalizedSegment) url.searchParams.set("segment", normalizedSegment);
   else url.searchParams.delete("segment");
   if (day) url.searchParams.set("day", day); else url.searchParams.delete("day");
-  if (url.href !== window.location.href) window.history[replace ? "replaceState" : "pushState"]({}, "", url);
+  if (url.href !== window.location.href) {
+    window.history[replace ? "replaceState" : "pushState"]({}, "", url);
+    if (url.searchParams.get("days") !== previousDays) {
+      window.dispatchEvent(new Event(TRIP_OVERVIEW_FILTER_CHANGE_EVENT));
+    }
+  }
 }

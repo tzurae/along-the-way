@@ -123,6 +123,7 @@ beforeEach(() => {
     if (input === "/api/trips/A/members/editor-user" && init?.method === "DELETE" && memberActionFailure) {
       return reply({ error: { code: "internal", message: "Database connection failed" } }, 500);
     }
+    if (input === "/api/maps/config") return reply({ browserKey: null, mapId: null });
     const trip = trips.find((entry) => input.startsWith(`/api/trips/${entry.id}`));
     if (!trip) return reply({ error: { code: "trip_not_found", message: "Trip unavailable" } }, 404);
     if (input === `/api/trips/${trip.id}`) return reply({ trip });
@@ -135,27 +136,51 @@ beforeEach(() => {
     if (input.endsWith("/places/legacy-UNSCHEDULED") && init?.method === "DELETE") {
       return reply({ error: { code: "forbidden", message: "server copy" } }, 403);
     }
+    if (input.endsWith("/route") && init?.method === "POST") {
+      const order = JSON.parse(String(init.body)).order as "current" | "suggested";
+      const orderedTripPlaceIds = order === "suggested" ? ["SECOND", "FIRST"] : ["FIRST", "SECOND"];
+      const wishlist = todayWishlist();
+      return reply({ route: {
+        dayId: "day21",
+        date: "2026-10-21",
+        version: dayVersion,
+        order,
+        orderedTripPlaceIds,
+        startsAt: null,
+        endsAt: null,
+        stops: orderedTripPlaceIds.map((id, index) => {
+          const place = wishlist.find((entry) => entry.id === id)!;
+          return {
+            tripPlaceId: id,
+            name: place.name,
+            latitude: place.latitude,
+            longitude: place.longitude,
+            providerPlaceId: place.providerPlaceId,
+            metersFromPrevious: index === 0 ? null : 100,
+          };
+        }),
+        metersToEnd: null,
+        totalMeters: order === "suggested" ? 100 : 200,
+      } });
+    }
+    if (input.endsWith("/place-order") && init?.method === "PUT") {
+      const body: unknown = JSON.parse(String(init.body));
+      expect(body).toEqual({
+        orderedTripPlaceIds: ["SECOND", "FIRST"],
+        expectedVersion: dayVersion,
+      });
+      savedOrder = true;
+      return reply({ orderedTripPlaceIds: ["SECOND", "FIRST"], version: dayVersion + 1 });
+    }
     if (input.endsWith("/arrangement")) {
       const body: unknown = JSON.parse(String(init?.body));
       expect(init?.method).toBe("PUT");
       expect(body).toEqual({
         orderedTripPlaceIds: ["SECOND", "FIRST"],
         expectedVersion: dayVersion,
-        legModes: {},
       });
       savedOrder = true;
       return reply({ tripPlaces: todayWishlist(true) });
-    }
-    if (input.endsWith("/timetable")) {
-      const body: unknown = JSON.parse(String(init?.body));
-      if (!body || typeof body !== "object" || !("order" in body) || typeof body.order !== "string") throw new Error("Missing timetable order");
-      const order = body.order;
-      return reply({ timetable: { dayId: "day21", date: "2026-10-21", window: {
-        startMinute: 540, endMinute: 1140, version: dayVersion, travelMode: "transit", walkLimitMinutes: 15,
-      }, order,
-        orderedTripPlaceIds: order === "suggested" ? ["SECOND", "FIRST"] : ["FIRST", "SECOND"], startsAt: null, endsAt: null, rows: [], unscheduled: [],
-        load: { busyMinutes: 120, windowMinutes: 600, level: "relaxed" },
-        capacity: { arrival: null, departure: null, gaps: [{ startMinute: 540, endMinute: 1140 }] } } });
     }
     if (input.endsWith("/discovery")) return reply({ discovery: { brief: null, latestRun: null, proposals: [], decided: [], modelAvailable: false, placeProviderAvailable: false } });
     throw new Error(`Unexpected request: ${input}`);
@@ -383,8 +408,9 @@ it("keeps the core Today snapshot readable when optional place previews fail", a
 
   expect(snapshot().model.days[0]!.wishlist.map((place) => place.name)).toEqual(["FIRST", "SECOND"]);
   const today = document.getElementById("trip-panel-today");
-  expect(today).toHaveTextContent("這一天還沒有行程");
-  expect(today).toHaveTextContent(/今天想去（未排時間）.*FIRST.*SECOND/);
+  expect(today).toHaveTextContent("FIRST");
+  expect(today).toHaveTextContent("SECOND");
+  expect(today).not.toHaveTextContent("今天想去（未排時間）");
   expect(document.body).not.toHaveTextContent("離線資料");
 });
 
@@ -424,6 +450,53 @@ it("preserves destination dates and forward history while a cross-trip Back read
   await travelHistory("forward");
   expect(new URLSearchParams(location.search).get("trip")).toBe("B");
   expect(document.querySelector("#trip-panel-today select")).toHaveValue("2026-11-21");
+});
+
+it("updates the already-mounted overview when Today opens one day for reordering", async () => {
+  await mount();
+  const overview = document.getElementById("itinerary-segment-panel-daily")!;
+  expect(overview.querySelectorAll(".day-column")).toHaveLength(3);
+
+  await click(button("調整順序", document.getElementById("trip-panel-today")!));
+
+  expect(document.getElementById("itinerary-segment-panel-daily")).toBe(overview);
+  await waitFor(() => expect(overview.querySelectorAll(".day-column")).toHaveLength(1));
+  expect(overview.querySelector('.day-column[data-date="2026-10-21"]')).toBeInTheDocument();
+  expect(new URLSearchParams(location.search).get("days")).toBe("2026-10-21");
+  expect([...overview.querySelectorAll<HTMLButtonElement>(".plan-day-filter button")]
+    .find((entry) => entry.getAttribute("aria-pressed") === "true")).toHaveTextContent("10/21");
+
+  await click(document.querySelector<HTMLButtonElement>('[data-trip-tab="today"]')!);
+  const day = document.querySelector<HTMLSelectElement>("#trip-panel-today select")!;
+  fireEvent.change(day, { target: { value: "2026-10-22" } });
+  await click(button("調整順序", document.getElementById("trip-panel-today")!));
+  await waitFor(() => expect(overview.querySelectorAll(".day-column")).toHaveLength(1));
+  expect(overview.querySelector('.day-column[data-date="2026-10-22"]')).toBeInTheDocument();
+  expect(new URLSearchParams(location.search).get("days")).toBe("2026-10-22");
+});
+
+it("clears a Today overview filter when switching trips", async () => {
+  await mount();
+  await click(button("調整順序", document.getElementById("trip-panel-today")!));
+  expect(new URLSearchParams(location.search).get("days")).toBe("2026-10-21");
+
+  await switchTrip("Trip B");
+
+  expect(new URLSearchParams(location.search).has("days")).toBe(false);
+  await click(document.querySelector<HTMLButtonElement>('[data-trip-tab="itinerary"]')!);
+  await waitFor(() => expect(document.querySelectorAll("#itinerary-segment-panel-daily .day-column")).toHaveLength(3));
+});
+
+it("keeps collapsed desktop rail children inert until their parent tab opens", async () => {
+  await mount();
+  const expander = document.querySelector<HTMLElement>('.atw-railnav__expander [data-itinerary-child="daily"]')!.parentElement!.parentElement!;
+  expect(expander).toHaveAttribute("inert");
+  expect(expander).toHaveAttribute("data-open", "false");
+
+  await click(document.querySelector<HTMLButtonElement>('[data-trip-tab="itinerary"]')!);
+
+  expect(expander).not.toHaveAttribute("inert");
+  expect(expander).toHaveAttribute("data-open", "true");
 });
 
 it("refreshes the itinerary after reconnecting from Today without a reload loop", async () => {
@@ -491,30 +564,15 @@ it("removes editor scheduling entry points while keeping itinerary previews read
   await mount();
 
   const today = document.getElementById("trip-panel-today")!;
-  expect(today).toHaveTextContent("只有旅程擁有者，或擁有者開放的編輯者，可以排入、改期或移出行程");
-  expect([...today.querySelectorAll("button")].some((entry) => entry.textContent?.includes("安排這一天"))).toBe(false);
+  expect([...today.querySelectorAll("button")].some((entry) => entry.textContent?.includes("調整順序"))).toBe(false);
 
   await click(document.querySelector<HTMLButtonElement>('[data-trip-tab="itinerary"]')!);
   const itinerary = document.getElementById("itinerary-segment-panel-daily")!;
   expect(itinerary.textContent?.match(/只有旅程擁有者，或擁有者開放的編輯者，可以排入、改期或移出行程/g)).toHaveLength(1);
-  for (const ownerAction of ["安排日期", "安排這一天", "加入地點", "排整趟行程", "從這天移出並列為待安排"]) {
+  for (const ownerAction of ["安排日期", "安排這一天", "加入地點", "從這天移出並列為待安排"]) {
     expect([...itinerary.querySelectorAll("button")].some((entry) => entry.textContent?.includes(ownerAction))).toBe(false);
   }
 
-  const placeCards = [...itinerary.querySelectorAll<HTMLElement>(".place-card")];
-  const scheduledCard = placeCards.find((card) => card.querySelector("h4")?.textContent === "Scheduled canonical");
-  const unscheduledCard = placeCards.find((card) => card.querySelector("h4")?.textContent === "Unscheduled canonical");
-  expect(scheduledCard).toBeDefined();
-  expect(unscheduledCard).toBeDefined();
-  const scheduledDelete = [...scheduledCard!.querySelectorAll<HTMLButtonElement>("button")]
-    .find((entry) => entry.textContent?.includes("刪除"));
-  const unscheduledDelete = [...unscheduledCard!.querySelectorAll<HTMLButtonElement>("button")]
-    .find((entry) => entry.textContent?.includes("刪除"));
-  expect(scheduledDelete).toBeUndefined();
-  expect(unscheduledDelete).toBeDefined();
-  vi.spyOn(window, "confirm").mockReturnValue(true);
-  await click(unscheduledDelete!);
-  await waitFor(() => expect(itinerary).toHaveTextContent("你目前沒有安排行程的權限；請旅程擁有者在「成員」開放。"));
 
   const assignedPlace = [...itinerary.querySelectorAll<HTMLButtonElement>(".plan-item-row")]
     .find((entry) => entry.textContent?.includes("FIRST"));
@@ -596,8 +654,8 @@ it("handles member action failures with localized feedback instead of an unhandl
   const panel = document.getElementById("trip-panel-members")!;
   await click(button("移除", panel));
 
-  await waitFor(() => expect(panel.querySelector('[role="status"]')).toHaveTextContent("發生未預期的錯誤。"));
-  expect(panel.querySelector('[role="status"]')).not.toHaveTextContent("Database connection failed");
+  await waitFor(() => expect(document.querySelector(".app-toast")).toHaveTextContent("發生未預期的錯誤。"));
+  expect(document.querySelector(".app-toast")).not.toHaveTextContent("Database connection failed");
 });
 
 it("renders an unsafe itinerary item source as text instead of an external link", async () => {
@@ -645,8 +703,8 @@ it("shows localized copy instead of a browser network error for a failed mutatio
   fireEvent.change(input, { target: { value: "companion@example.test" } });
   fireEvent.submit(input.form!);
 
-  await waitFor(() => expect(panel.querySelector('[role="status"]')).toHaveTextContent("無法完成要求。"));
-  expect(panel.querySelector('[role="status"]')).not.toHaveTextContent("Failed to fetch");
+  await waitFor(() => expect(document.querySelector(".app-toast")).toHaveTextContent("無法完成要求。"));
+  expect(document.querySelector(".app-toast")).not.toHaveTextContent("Failed to fetch");
 });
 
 it("clears private state when another tab signs out of the shared browser account", async () => {
@@ -671,6 +729,7 @@ it("clears account-scoped filters and onboarding state when signing out", async 
   localStorage.setItem("along-the-way:place-filters:account:A:wishlist", "{\"query\":\"private search\"}");
   localStorage.setItem("along-the-way:trip-onboarding:account:A", "dismissed");
 
+  await click(document.querySelector<HTMLButtonElement>(".atw-account-trigger")!);
   await click(button("登出"));
 
   await waitFor(() => expect(button("寄送登入連結")).toBeInTheDocument());
@@ -695,6 +754,7 @@ it("clears the previous account's filters and onboarding state when the server s
 it("offers logout everywhere and signs the current browser out after revoking every session", async () => {
   await mount();
 
+  await click(document.querySelector<HTMLButtonElement>(".atw-account-trigger")!);
   await click(button("登出所有裝置"));
 
   await waitFor(() => expect(button("寄送登入連結")).toBeInTheDocument());
@@ -705,6 +765,7 @@ it("keeps a failed server logout pending, warns visibly, and replays the bound a
   await mount();
   logoutNetworkFailure = true;
 
+  await click(document.querySelector<HTMLButtonElement>(".atw-account-trigger")!);
   await click(button("登出"));
 
   await waitFor(() => expect(button("寄送登入連結")).toBeInTheDocument());
@@ -723,6 +784,7 @@ it("queues offline logout for the current account and replays that target after 
   await mount();
   Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
 
+  await click(document.querySelector<HTMLButtonElement>(".atw-account-trigger")!);
   await click(button("登出"));
 
   expect(requests).not.toContain("/api/logout");
@@ -743,6 +805,7 @@ it("still sends online logout when durable pending storage is full", async () =>
     setItem.call(this, key, value);
   });
 
+  await click(document.querySelector<HTMLButtonElement>(".atw-account-trigger")!);
   await click(button("登出"));
 
   await waitFor(() => expect(button("寄送登入連結")).toBeInTheDocument());
@@ -765,7 +828,7 @@ it("drops a deferred target mismatch without signing out the newer account", asy
 
   await mount();
 
-  await waitFor(() => expect(document.body).toHaveTextContent(`登入帳號：${newerUser.email}`));
+  await waitFor(() => expect(document.querySelector(".atw-account-trigger")).toHaveTextContent(newerUser.email));
   expect(logoutBodies).toEqual([{ userId: todayUser.id }]);
   expect(localStorage.getItem("along-the-way:pending-server-logout")).toBeNull();
   expect(localStorage.getItem("along-the-way:locally-signed-out")).toBeNull();
@@ -775,10 +838,11 @@ it("drops a deferred target mismatch without signing out the newer account", asy
 it("restores a newer account after target mismatch even when this tab previously consumed a magic link", async () => {
   history.replaceState({}, "", "/?trip=A&tab=today#magicToken=first-account-token");
   await mount();
-  await waitFor(() => expect(document.body).toHaveTextContent(`登入帳號：${todayUser.email}`));
+  await waitFor(() => expect(document.querySelector(".atw-account-trigger")).toHaveTextContent(todayUser.email));
   expect(requests.filter((url) => url === "/api/auth/magic-links/consume")).toHaveLength(1);
 
   Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+  await click(document.querySelector<HTMLButtonElement>(".atw-account-trigger")!);
   await click(button("登出"));
   await waitFor(() => expect(button("寄送登入連結")).toBeInTheDocument());
 
@@ -797,7 +861,7 @@ it("restores a newer account after target mismatch even when this tab previously
     window.dispatchEvent(new Event("online"));
   });
 
-  await waitFor(() => expect(document.body).toHaveTextContent(`登入帳號：${newerUser.email}`));
+  await waitFor(() => expect(document.querySelector(".atw-account-trigger")).toHaveTextContent(newerUser.email));
   expect(logoutBodies).toEqual([{ userId: todayUser.id }]);
   expect(requests.filter((url) => url === "/api/auth/magic-links/consume")).toHaveLength(1);
   expect(localStorage.getItem("along-the-way:pending-server-logout")).toBeNull();

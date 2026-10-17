@@ -303,6 +303,14 @@
   transform: translate(-50%, 0) scale(1);
 }
 
+/* App-wide success/error toast (AppToaster): above dialogs, wraps long messages. */
+.app-toast { z-index: 200; max-width: min(560px, calc(100vw - 24px)); border-radius: 16px; }
+.app-toast.schedule-toast--visible { pointer-events: auto; }
+.app-toast .schedule-toast__message { overflow: visible; white-space: normal; text-overflow: clip; line-height: 1.45; }
+.app-toast--error { background: #7a2e1f; }
+.app-toast--error .schedule-toast__badge { background: #f3d5c8; color: #7a2e1f; }
+.app-toast .schedule-toast__action { color: inherit; }
+
 .schedule-toast__badge {
   display: grid;
   width: 30px;

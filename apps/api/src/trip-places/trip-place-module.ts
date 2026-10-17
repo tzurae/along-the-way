@@ -1,4 +1,3 @@
-import type { ApplyTripPlanInput } from "@along-the-way/contracts/day-plans";
 import type {
   CreateTripPlaceInput,
   MergeTripPlacesInput,
@@ -71,20 +70,13 @@ export interface TripPlaceModule {
     idempotencyKey: string,
     input: UpdateTripPlaceDayAssignmentsInput,
   ): Promise<TripPlaceDto[]>;
-  /** Uses a trip plan: adds its new places to their days and keeps each day's order. */
-  addPlacesToDays(
-    userId: string,
-    tripId: string,
-    idempotencyKey: string,
-    input: ApplyTripPlanInput,
-  ): Promise<TripPlaceDto[]>;
-  /** Saves a day arranged in the route dialog: drops, adds and orders its located places atomically. */
+  /** Saves the route dialog's complete candidate list atomically. */
   arrangeDay(
     userId: string,
     tripId: string,
     dayId: string,
     idempotencyKey: string,
-    input: { expectedVersion: number; orderedTripPlaceIds: string[]; legModes?: Record<string, "transit" | "taxi" | "walk"> },
+    input: { expectedVersion: number; orderedTripPlaceIds: string[] },
   ): Promise<TripPlaceDto[]>;
   setOwnVote(
     userId: string,

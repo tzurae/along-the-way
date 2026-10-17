@@ -1,12 +1,11 @@
 import { useRef, useState, type ReactNode } from "react";
 import {
   PLACE_TYPES,
-  type CreatePlaceInput,
   type PlaceDto,
   type PlaceType,
   type UpdatePlaceInput,
 } from "@along-the-way/contracts/trip-skeleton";
-import { MapPin, Pencil, Plus } from "lucide-react";
+import { MapPin, Pencil } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -23,15 +22,19 @@ import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "./i18n";
+import { notify } from "./AppToaster";
 import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./ConflictPanel";
 import "./form-sheet.css";
 
+type PlaceValues = Omit<UpdatePlaceInput, "expectedVersion">;
+
 interface PlaceDialogProps {
-  place?: PlaceDto;
-  save(input: CreatePlaceInput | UpdatePlaceInput, conflictBase?: number): Promise<void>;
+  place: PlaceDto;
+  save(input: UpdatePlaceInput, conflictBase?: number): Promise<void>;
   load?(): Promise<PlaceDto | null>;
   editingChanged?(open: boolean): void;
   focusLocationOnOpen?: boolean;
+  initiallyOpen?: boolean;
   triggerLabel?: ReactNode;
   triggerClassName?: string;
   triggerDisabled?: boolean;
@@ -39,7 +42,7 @@ interface PlaceDialogProps {
 
 const placeTypes: readonly PlaceType[] = PLACE_TYPES;
 
-function placeValues(place: PlaceDto): CreatePlaceInput {
+function placeValues(place: PlaceDto): PlaceValues {
   return { name: place.name, type: place.type, address: place.address, latitude: place.latitude, longitude: place.longitude, timeZone: place.timeZone, sourceUrl: place.sourceUrl, notes: place.notes };
 }
 
@@ -48,42 +51,41 @@ export function PlaceDialog({
   save,
   load,
   editingChanged,
+  initiallyOpen = false,
   focusLocationOnOpen = false,
   triggerLabel,
   triggerClassName,
   triggerDisabled = false,
 }: PlaceDialogProps) {
   const { t } = useI18n();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initiallyOpen);
   const addressRef = useRef<HTMLInputElement>(null);
-  const [name, setName] = useState(place?.name ?? "");
-  const [type, setType] = useState<PlaceType>(place?.type ?? "other");
-  const [address, setAddress] = useState(place?.address ?? "");
-  const [latitude, setLatitude] = useState(place?.latitude?.toString() ?? "");
-  const [longitude, setLongitude] = useState(place?.longitude?.toString() ?? "");
-  const [timeZone, setTimeZone] = useState(place?.timeZone ?? "");
-  const [sourceUrl, setSourceUrl] = useState(place?.sourceUrl ?? "");
-  const [notes, setNotes] = useState(place?.notes ?? "");
-  const [expectedVersion, setExpectedVersion] = useState<number | null>(
-    place?.version ?? null,
-  );
+  const [name, setName] = useState(place.name);
+  const [type, setType] = useState<PlaceType>(place.type);
+  const [address, setAddress] = useState(place.address ?? "");
+  const [latitude, setLatitude] = useState(place.latitude?.toString() ?? "");
+  const [longitude, setLongitude] = useState(place.longitude?.toString() ?? "");
+  const [timeZone, setTimeZone] = useState(place.timeZone ?? "");
+  const [sourceUrl, setSourceUrl] = useState(place.sourceUrl ?? "");
+  const [notes, setNotes] = useState(place.notes ?? "");
+  const [expectedVersion, setExpectedVersion] = useState(place.version);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [base, setBase] = useState<EditSnapshot<CreatePlaceInput> | null>(place ? { input: placeValues(place), version: place.version } : null);
-  const resolution = useVersionConflict<CreatePlaceInput>();
+  const [base, setBase] = useState<EditSnapshot<PlaceValues> | null>({ input: placeValues(place), version: place.version });
+  const resolution = useVersionConflict<PlaceValues>();
 
   function resetDraft() {
     resolution.clear();
-    setBase(place ? { input: placeValues(place), version: place.version } : null);
-    setName(place?.name ?? "");
-    setType(place?.type ?? "other");
-    setAddress(place?.address ?? "");
-    setLatitude(place?.latitude?.toString() ?? "");
-    setLongitude(place?.longitude?.toString() ?? "");
-    setTimeZone(place?.timeZone ?? "");
-    setSourceUrl(place?.sourceUrl ?? "");
-    setNotes(place?.notes ?? "");
-    setExpectedVersion(place?.version ?? null);
+    setBase({ input: placeValues(place), version: place.version });
+    setName(place.name);
+    setType(place.type);
+    setAddress(place.address ?? "");
+    setLatitude(place.latitude?.toString() ?? "");
+    setLongitude(place.longitude?.toString() ?? "");
+    setTimeZone(place.timeZone ?? "");
+    setSourceUrl(place.sourceUrl ?? "");
+    setNotes(place.notes ?? "");
+    setExpectedVersion(place.version);
     setError("");
   }
 
@@ -93,11 +95,11 @@ export function PlaceDialog({
     editingChanged?.(nextOpen);
   }
 
-  async function persist(input: CreatePlaceInput, version: number | null, conflictBase = resolution.conflictBaseVersion) {
+  async function persist(input: PlaceValues, version: number, conflictBase = resolution.conflictBaseVersion) {
     setSubmitting(true);
     setError("");
     try {
-      await save(place ? { ...input, expectedVersion: version! } : input, conflictBase);
+      await save({ ...input, expectedVersion: version }, conflictBase);
       resolution.clear();
       changeOpen(false);
     } catch (reason) {
@@ -106,8 +108,8 @@ export function PlaceDialog({
           const current = await load();
           return current ? { input: placeValues(current), version: current.version } : null;
         })) return;
-        setError(reason instanceof Error ? reason.message : t.placeDialog.saveError);
-      } catch (failure) { setError(failure instanceof Error ? failure.message : t.collaboration.loadError); }
+        notify("error", reason instanceof Error ? reason.message : t.placeDialog.saveError);
+      } catch (failure) { notify("error", failure instanceof Error ? failure.message : t.collaboration.loadError); }
     } finally { setSubmitting(false); }
   }
 
@@ -137,7 +139,7 @@ export function PlaceDialog({
     }
     setSubmitting(true);
     try {
-      const input: CreatePlaceInput = {
+      const input: PlaceValues = {
         name,
         type,
         address: address || null,
@@ -147,12 +149,9 @@ export function PlaceDialog({
         sourceUrl: sourceUrl || null,
         notes: notes || null,
       };
-      if (place && expectedVersion === null) {
-        throw new Error(t.placeDialog.unavailableVersion);
-      }
       await persist(input, expectedVersion);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : t.placeDialog.saveError);
+      notify("error", reason instanceof Error ? reason.message : t.placeDialog.saveError);
     } finally {
       setSubmitting(false);
     }
@@ -164,16 +163,16 @@ export function PlaceDialog({
         render={
           <Button
             className={triggerClassName}
-            variant={place ? "outline" : "default"}
-            size={place ? "sm" : "default"}
+            variant="outline"
+            size="sm"
             disabled={triggerDisabled}
           />
         }
       >
         {triggerLabel ?? (
           <>
-            {place ? <Pencil /> : <Plus />}
-            {place ? t.placeDialog.editTrigger(place.name) : t.placeDialog.addPlace}
+            <Pencil />
+            {t.placeDialog.editTrigger(place.name)}
           </>
         )}
       </DialogTrigger>
@@ -183,7 +182,7 @@ export function PlaceDialog({
         placement="sheet"
       >
         <DialogHeader>
-          <DialogTitle>{place ? t.placeDialog.editPlace : t.placeDialog.addPlace}</DialogTitle>
+          <DialogTitle>{t.placeDialog.editPlace}</DialogTitle>
           <DialogDescription>{t.placeDialog.description}</DialogDescription>
         </DialogHeader>
         {resolution.conflict ? (
@@ -195,7 +194,6 @@ export function PlaceDialog({
               onReapply={() => void persist(resolution.conflict!.attempted, resolution.conflict!.current!.version, resolution.conflict!.base.version)}
               onEdit={() => { setBase(resolution.conflict!.current!); setExpectedVersion(resolution.conflict!.current!.version); resolution.resume(); setError(""); }}
             />
-            {error ? <p role="alert" className="text-destructive">{error}</p> : null}
           </div>
         ) : null}
         <form
@@ -206,9 +204,9 @@ export function PlaceDialog({
           <div className="form-sheet__body grid gap-4">
           <div className="grid gap-4 sm:grid-cols-2">
             <Field>
-              <FieldLabel htmlFor={`place-name-${place?.id ?? "new"}`}>{t.placeDialog.placeName}</FieldLabel>
+              <FieldLabel htmlFor={`place-name-${place.id}`}>{t.placeDialog.placeName}</FieldLabel>
               <Input
-                id={`place-name-${place?.id ?? "new"}`}
+                id={`place-name-${place.id}`}
                 required
                 maxLength={200}
                 value={name}
@@ -216,9 +214,9 @@ export function PlaceDialog({
               />
             </Field>
             <Field>
-              <FieldLabel htmlFor={`place-type-${place?.id ?? "new"}`}>{t.placeDialog.placeType}</FieldLabel>
+              <FieldLabel htmlFor={`place-type-${place.id}`}>{t.placeDialog.placeType}</FieldLabel>
               <NativeSelect
-                id={`place-type-${place?.id ?? "new"}`}
+                id={`place-type-${place.id}`}
                 className="w-full rounded-lg border border-input bg-transparent"
                 value={type}
                 onChange={(event) => setType(event.target.value as PlaceType)}
@@ -230,9 +228,9 @@ export function PlaceDialog({
             </Field>
           </div>
           <Field>
-            <FieldLabel htmlFor={`place-address-${place?.id ?? "new"}`}>{t.placeDialog.address}</FieldLabel>
+            <FieldLabel htmlFor={`place-address-${place.id}`}>{t.placeDialog.address}</FieldLabel>
             <Input
-              id={`place-address-${place?.id ?? "new"}`}
+              id={`place-address-${place.id}`}
               ref={addressRef}
               value={address}
               onChange={(event) => setAddress(event.target.value)}
@@ -240,18 +238,18 @@ export function PlaceDialog({
           </Field>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field>
-              <FieldLabel htmlFor={`place-latitude-${place?.id ?? "new"}`}>{t.placeDialog.latitude}</FieldLabel>
+              <FieldLabel htmlFor={`place-latitude-${place.id}`}>{t.placeDialog.latitude}</FieldLabel>
               <Input
-                id={`place-latitude-${place?.id ?? "new"}`}
+                id={`place-latitude-${place.id}`}
                 inputMode="decimal"
                 value={latitude}
                 onChange={(event) => setLatitude(event.target.value)}
               />
             </Field>
             <Field>
-              <FieldLabel htmlFor={`place-longitude-${place?.id ?? "new"}`}>{t.placeDialog.longitude}</FieldLabel>
+              <FieldLabel htmlFor={`place-longitude-${place.id}`}>{t.placeDialog.longitude}</FieldLabel>
               <Input
-                id={`place-longitude-${place?.id ?? "new"}`}
+                id={`place-longitude-${place.id}`}
                 inputMode="decimal"
                 value={longitude}
                 onChange={(event) => setLongitude(event.target.value)}
@@ -259,9 +257,9 @@ export function PlaceDialog({
             </Field>
           </div>
           <Field>
-            <FieldLabel htmlFor={`place-time-zone-${place?.id ?? "new"}`}>{t.placeDialog.ianaTimeZone}</FieldLabel>
+            <FieldLabel htmlFor={`place-time-zone-${place.id}`}>{t.placeDialog.ianaTimeZone}</FieldLabel>
             <Input
-              id={`place-time-zone-${place?.id ?? "new"}`}
+              id={`place-time-zone-${place.id}`}
               placeholder={t.placeDialog.timeZonePlaceholder}
               value={timeZone}
               onChange={(event) => setTimeZone(event.target.value)}
@@ -269,18 +267,18 @@ export function PlaceDialog({
             <FieldDescription>{t.placeDialog.timeZoneDescription}</FieldDescription>
           </Field>
           <Field>
-            <FieldLabel htmlFor={`place-source-${place?.id ?? "new"}`}>{t.placeDialog.sourceUrl}</FieldLabel>
+            <FieldLabel htmlFor={`place-source-${place.id}`}>{t.placeDialog.sourceUrl}</FieldLabel>
             <Input
-              id={`place-source-${place?.id ?? "new"}`}
+              id={`place-source-${place.id}`}
               type="url"
               value={sourceUrl}
               onChange={(event) => setSourceUrl(event.target.value)}
             />
           </Field>
           <Field>
-            <FieldLabel htmlFor={`place-notes-${place?.id ?? "new"}`}>{t.placeDialog.notes}</FieldLabel>
+            <FieldLabel htmlFor={`place-notes-${place.id}`}>{t.placeDialog.notes}</FieldLabel>
             <Textarea
-              id={`place-notes-${place?.id ?? "new"}`}
+              id={`place-notes-${place.id}`}
               value={notes}
               onChange={(event) => setNotes(event.target.value)}
             />

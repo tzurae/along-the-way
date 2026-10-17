@@ -1,10 +1,10 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, CalendarDays, Check, ChevronRight, CircleDot, Clock3, ExternalLink, Lock, MapPin, Navigation, TriangleAlert, Users, WifiOff } from "lucide-react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
+import { ArrowLeft, ArrowRight, BedDouble, BellRing, CalendarDays, Check, ChevronRight, CircleDot, Clock3, ExternalLink, ListOrdered, Lock, MapPin, Navigation, Plane, TriangleAlert, Users, WifiOff } from "lucide-react";
 import type { PlaceDetailReference } from "@along-the-way/contracts/place-details";
 import { useI18n } from "./i18n";
-import { googleMapsCoordinatesUrl, googleMapsNavigationUrl } from "./google-maps";
+import { googleMapsCoordinatesUrl, googleMapsDirectionsUrl, googleMapsNavigationUrl } from "./google-maps";
 import { safeExternalUrl } from "./external-url";
-import { dayItems, localDate, parallelItemIds, personalState, tripClock, type TodayItem, type TodayModel } from "./today-model";
+import { dayItems, localDate, parallelItemIds, personalState, tripClock, type TodayDay, type TodayItem, type TodayModel } from "./today-model";
 import { readTripLocation } from "./trip-location";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest, type PlacePreviewValue } from "./PlaceThumbnail";
@@ -18,21 +18,19 @@ interface TodayDetailSelection {
   date: string;
 }
 
-
-
-function TodayTime({ item, zone }: { item: TodayItem; zone: string | null }) {
-  const { t, locale } = useI18n();
-  const start = item.endpoints.find((endpoint) => endpoint.role === "start");
-  const end = item.endpoints.find((endpoint) => endpoint.role === "end");
-  const startZone = start?.timeZone ?? zone;
-  const endZone = end?.timeZone ?? startZone;
-  if (!item.start || !item.end || !startZone || !endZone) return t.today.timeUnknown;
-  const showZones = startZone !== zone || endZone !== zone;
-  const label = (instant: string, timeZone: string, place: TodayItem["endpoints"][number]["place"]) => {
-    const time = new Intl.DateTimeFormat(locale, { timeZone, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(instant));
-    return showZones ? `${time} · ${place ? `${place.name} · ` : ""}${timeZone}` : time;
-  };
-  return t.today.timeRange(label(item.start, startZone, start?.place ?? null), label(item.end, endZone, end ? end.place : start?.place ?? null));
+function haversineKilometres(
+  from: { latitude: number; longitude: number },
+  to: { latitude: number; longitude: number },
+) {
+  const toRadians = Math.PI / 180;
+  const latitudeDelta = (to.latitude - from.latitude) * toRadians;
+  const longitudeDelta = (to.longitude - from.longitude) * toRadians;
+  const fromLatitude = from.latitude * toRadians;
+  const toLatitude = to.latitude * toRadians;
+  const chord = Math.sin(latitudeDelta / 2) ** 2
+    + Math.cos(fromLatitude) * Math.cos(toLatitude) * Math.sin(longitudeDelta / 2) ** 2;
+  const arc = Math.min(1, chord);
+  return 6_371 * 2 * Math.atan2(Math.sqrt(arc), Math.sqrt(1 - arc));
 }
 
 function TodayItemDetails({ item, now, parallel, memberId, date, previews, previewsLoading, openPlace }: {
@@ -45,7 +43,7 @@ function TodayItemDetails({ item, now, parallel, memberId, date, previews, previ
   previewsLoading: boolean;
   openPlace?: (selection: TodayDetailSelection) => void;
 }) {
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const text = t.today;
   const headingId = useId();
   const current = item.start && item.end && Date.parse(item.start) <= now && now < Date.parse(item.end);
@@ -71,8 +69,7 @@ function TodayItemDetails({ item, now, parallel, memberId, date, previews, previ
             <div className="min-w-0">
               <dt>{endpoint.role === "start" ? startLabel : endLabel}</dt>
               <dd>
-                {new Intl.DateTimeFormat(locale, { timeZone: endpoint.timeZone, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(endpoint.instant))} · {endpoint.timeZone}
-                {endpoint.place ? <> · {detailIdentity && openPlace ? <button
+                {endpoint.place ? <>{detailIdentity && openPlace ? <button
                   type="button"
                   className="min-h-11 max-w-full break-words text-left font-bold underline decoration-ink/30 underline-offset-4 outline-none hover:decoration-ink focus-visible:rounded focus-visible:ring-4 focus-visible:ring-focus/30"
                   aria-label={text.viewPlaceDetail(endpoint.place.name)}
@@ -108,7 +105,6 @@ function TodayItemDetails({ item, now, parallel, memberId, date, previews, previ
       {needsManualCheck ? <div className="text-sm">
         <p className="inline-flex items-center gap-1 font-semibold"><TriangleAlert size={16} aria-hidden="true" />{text.manualChecks}</p>
         <ul className="mt-1 list-inside list-disc">
-          {!item.start || !item.end ? <li>{text.timeUnknown}</li> : null}
           {item.constraints.map((constraint, index) => <li key={index}>{constraint.type === "fixed_time" ? text.fixed : constraint.type === "immovable" ? text.immovable : text.buffer(constraint.minutes)} · {text.constraintStatus[constraint.status]}</li>)}
         </ul>
       </div> : null}
@@ -120,15 +116,7 @@ function TodayItemDetails({ item, now, parallel, memberId, date, previews, previ
 
 type TimelineState = "past" | "current" | "next" | "later" | "unscheduled";
 
-function TodayCard({ item, zone, selectedDate, parallel, state, onOpen }: {
-  item: TodayItem;
-  zone: string | null;
-  selectedDate: string;
-  parallel: boolean;
-  state: TimelineState;
-  onOpen(item: TodayItem): void;
-}) {
-  const { t, locale } = useI18n();
+function itemDisplayOnDay(item: TodayItem, zone: string | null, selectedDate: string) {
   const start = item.endpoints.find((endpoint) => endpoint.role === "start");
   const end = item.endpoints.find((endpoint) => endpoint.role === "end");
   const startZone = start?.timeZone ?? zone;
@@ -137,21 +125,35 @@ function TodayCard({ item, zone, selectedDate, parallel, state, onOpen }: {
   const endLocalDate = item.end && endZone ? localDate(Date.parse(item.end), endZone) : null;
   const startsOnSelectedDay = startLocalDate === selectedDate;
   const endsOnSelectedDay = endLocalDate === selectedDate;
-  const displayedInstant = startsOnSelectedDay ? item.start : endsOnSelectedDay ? item.end : null;
-  const displayedZone = startsOnSelectedDay ? startZone : endsOnSelectedDay ? endZone : null;
-  const displayedTime = displayedInstant && displayedZone ? new Intl.DateTimeFormat(locale, {
-    timeZone: displayedZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-  }).format(new Date(displayedInstant)) : item.start && item.end ? "—" : t.today.timeUnknown;
-  const endTime = item.end && endZone ? new Intl.DateTimeFormat(locale, {
-    timeZone: endZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-  }).format(new Date(item.end)) : null;
-  const continuesFromPreviousDay = Boolean(item.start && item.end && !startsOnSelectedDay);
-  const destination = end?.place ?? start?.place ?? null;
-  const zoneCopy = startZone && (startZone !== zone || endZone !== startZone)
-    ? endZone && endZone !== startZone ? `${startZone} → ${endZone}` : startZone
-    : null;
-  return <li className={`today-stop is-${state}`} data-current={state === "current"}>
-    <time dateTime={displayedInstant ?? undefined}>{displayedTime}</time>
+  return {
+    start,
+    end,
+    startZone,
+    endZone,
+    startsOnSelectedDay,
+    endsOnSelectedDay,
+    displayedEndpoint: startsOnSelectedDay ? start ?? null : endsOnSelectedDay ? end ?? null : null,
+    displayedInstant: startsOnSelectedDay ? item.start : endsOnSelectedDay ? item.end : null,
+  };
+}
+
+
+function TodayCard({ item, zone, selectedDate, parallel, state, onOpen }: {
+  item: TodayItem;
+  zone: string | null;
+  selectedDate: string;
+  parallel: boolean;
+  state: TimelineState;
+  onOpen(item: TodayItem): void;
+}) {
+  const { t } = useI18n();
+  const display = itemDisplayOnDay(item, zone, selectedDate);
+  const continuesFromPreviousDay = Boolean(item.start && item.end && !display.startsOnSelectedDay);
+  const destination = display.end?.place ?? display.start?.place ?? null;
+  // Times are not shown on Today; the left column marks the kind of fixed item instead.
+  const TypeIcon = item.type === "flight" ? Plane : item.type === "lodging" ? BedDouble : CalendarDays;
+  return <li className={`today-stop is-fixed is-${state}`} data-current={state === "current"}>
+    <span className="today-stop-kind" aria-hidden="true"><TypeIcon size={16} /></span>
     <span className="today-stop-track" aria-hidden="true" />
     <button
       type="button"
@@ -161,6 +163,7 @@ function TodayCard({ item, zone, selectedDate, parallel, state, onOpen }: {
       onClick={() => onOpen(item)}
     >
       <span className="today-stop-title">
+        {item.type === "lodging" ? <span className="lodging-mark" aria-hidden="true"><BedDouble /></span> : null}
         <strong>{item.title}</strong>
         <span className="today-chip today-chip-category">{t.today.types[item.type]}</span>
         {state === "current" ? <span className="today-chip"><CircleDot size={14} aria-hidden="true" />{t.today.current}</span> : null}
@@ -170,12 +173,95 @@ function TodayCard({ item, zone, selectedDate, parallel, state, onOpen }: {
       </span>
       <span className="today-stop-meta">
         {continuesFromPreviousDay ? <span>{t.today.continuesFromPreviousDay}</span> : null}
-        {endTime && (!endsOnSelectedDay || startsOnSelectedDay) ? <span>{t.today.endsAt(endTime)}</span> : !endTime ? <span>{t.today.timeUnknown}</span> : null}
-        {zoneCopy ? <span>{zoneCopy}</span> : null}
         {destination ? <span>{destination.name}</span> : null}
         {!destination ? <span>{t.today.locationMissing}</span> : null}
       </span>
     </button>
+  </li>;
+}
+
+type WishlistPlace = TodayDay["wishlist"][number];
+type TimelineEntry =
+  | { kind: "fixed"; item: TodayItem; state: TimelineState }
+  | { kind: "place"; place: WishlistPlace; order: number };
+
+interface TimelineRouteEnd {
+  name: string;
+  latitude: number | null;
+  longitude: number | null;
+  providerPlaceId: string | null;
+}
+
+function routeEnd(entry: TimelineEntry, edge: "before" | "after", zone: string | null, selectedDate: string): TimelineRouteEnd | null {
+  if (entry.kind === "place") return entry.place;
+  const display = itemDisplayOnDay(entry.item, zone, selectedDate);
+  let place;
+  if (entry.item.type === "flight" || entry.item.type === "transport") {
+    place = display.startsOnSelectedDay !== display.endsOnSelectedDay
+      ? display.displayedEndpoint?.place ?? null
+      : edge === "before"
+        ? display.start?.place ?? display.end?.place ?? null
+        : display.end?.place ?? display.start?.place ?? null;
+  } else {
+    place = display.displayedEndpoint?.place ?? display.start?.place ?? display.end?.place ?? null;
+  }
+  return place ? { name: place.name, latitude: place.latitude, longitude: place.longitude, providerPlaceId: null } : null;
+}
+
+function TodayDirectionsLeg({ from, to, zone, selectedDate }: {
+  from: TimelineEntry;
+  to: TimelineEntry;
+  zone: string | null;
+  selectedDate: string;
+}) {
+  const origin = routeEnd(from, "after", zone, selectedDate);
+  const destination = routeEnd(to, "before", zone, selectedDate);
+  const directions = origin && destination ? googleMapsDirectionsUrl(origin, destination) : null;
+  if (!directions || !origin || !destination) return null;
+  return <li className="today-route-leg">
+    <span aria-hidden="true" />
+    <span className="today-route-leg-track" aria-hidden="true" />
+    <span className="today-route-leg-body">
+      <a
+        className="route-leg-directions"
+        href={directions}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={`在 Google Maps 查看「${origin.name}」到「${destination.name}」的交通方式（另開新分頁）`}
+      >
+        <MapPin aria-hidden="true" /> Google Maps
+      </a>
+    </span>
+  </li>;
+}
+
+function TodayPlaceCard({ place, order, date, preview, previewsLoading, openPlace }: {
+  place: WishlistPlace;
+  order: number;
+  date: string;
+  preview: PlacePreviewValue | undefined;
+  previewsLoading: boolean;
+  openPlace?: (selection: TodayDetailSelection) => void;
+}) {
+  const { t } = useI18n();
+  const triggerKey = encodeURIComponent(`wishlist:${place.id}`);
+  return <li className="today-stop is-place">
+    <span className="today-stop-order" aria-hidden="true">{order}</span>
+    <span className="today-stop-track" aria-hidden="true" />
+    <div className="today-stop-body today-place-body">
+      {openPlace ? <PlaceThumbnail photo={preview?.photo} photoCount={preview?.photoCount} loading={previewsLoading} /> : null}
+      <div className="today-place-copy">
+        {openPlace ? <button
+          type="button"
+          aria-label={t.today.viewPlaceDetail(place.name)}
+          data-today-place-detail-trigger={triggerKey}
+          onClick={() => openPlace({ reference: { kind: "trip-place", id: place.id }, name: place.name, triggerKey, date })}
+        >
+          <strong>{place.name}</strong><ChevronRight size={16} aria-hidden="true" />
+        </button> : <strong>{place.name}</strong>}
+        <PlacePhotoCredit photo={preview?.photo} />
+      </div>
+    </div>
   </li>;
 }
 
@@ -218,6 +304,114 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     if (selectedDetail && day?.date !== selectedDetail.date) setSelectedDetail(null);
   }, [day?.date, selectedDetail]);
   useEffect(() => { setSelectedItemId(null); }, [day?.date]);
+  const reminderLines = useMemo(() => {
+    if (!day) return [];
+    const lines: Array<{ key: string; copy: string; emphasis: boolean }> = [];
+    const seen = new Set<string>();
+    const add = (key: string, copy: string, emphasis = false) => {
+      if (seen.has(copy)) return;
+      seen.add(copy);
+      lines.push({ key, copy, emphasis });
+    };
+    const formatters = new Map<string, Intl.DateTimeFormat>();
+    const formatTime = (instant: string | number, timeZone: string) => {
+      let formatter = formatters.get(timeZone);
+      if (!formatter) {
+        formatter = new Intl.DateTimeFormat(locale, {
+          timeZone,
+          hour: "2-digit",
+          minute: "2-digit",
+          hourCycle: "h23",
+        });
+        formatters.set(timeZone, formatter);
+      }
+      return formatter.format(new Date(instant));
+    };
+    const endpointDate = (endpoint: TodayItem["endpoints"][number]) =>
+      localDate(Date.parse(endpoint.instant), endpoint.timeZone);
+    const endpointIsOnDay = (endpoint: TodayItem["endpoints"][number] | undefined) =>
+      Boolean(endpoint && endpointDate(endpoint) === day.date);
+    const firstDay = model.days[0]?.id === day.id;
+    const lastTripDate = model.days.at(-1)?.date ?? null;
+    const lastDay = model.days.at(-1)?.id === day.id;
+    const checkIns: Array<{ item: TodayItem; endpoint: TodayItem["endpoints"][number] }> = [];
+    const checkOuts: Array<{ item: TodayItem; endpoint: TodayItem["endpoints"][number] }> = [];
+    const departures: Array<{ item: TodayItem; endpoint: TodayItem["endpoints"][number]; deadlineInstant: number; deadlineDate: string }> = [];
+
+    for (const item of model.items) {
+      const start = item.endpoints.find((endpoint) => endpoint.role === "start");
+      const end = item.endpoints.find((endpoint) => endpoint.role === "end");
+      if (firstDay && item.type === "lodging" && start && endpointIsOnDay(start)) checkIns.push({ item, endpoint: start });
+      if (lastDay && item.type === "lodging" && end && endpointIsOnDay(end)) checkOuts.push({ item, endpoint: end });
+      if (item.type === "flight" && start && endpointDate(start) === lastTripDate) {
+        const deadlineInstant = Date.parse(start.instant) - 3 * 60 * 60 * 1_000;
+        const deadlineDate = localDate(deadlineInstant, start.timeZone);
+        if (endpointDate(start) === day.date || deadlineDate === day.date) {
+          departures.push({ item, endpoint: start, deadlineInstant, deadlineDate });
+        }
+      }
+    }
+
+    if (clock.phase === "before") {
+      add("departure-countdown", text.reminderDepartureCountdown(clock.daysUntil), true);
+      add("departure-checklist", text.reminderDepartureChecklist);
+    }
+    if (firstDay) {
+      add("first-day-welcome", text.reminderFirstDayWelcome, true);
+      add("first-day-practical", text.reminderFirstDayPractical);
+      for (const { item, endpoint } of checkIns) {
+        add(`check-in:${item.id}`, text.reminderCheckIn(
+          endpoint.place?.name ?? item.title,
+          formatTime(endpoint.instant, endpoint.timeZone),
+        ));
+      }
+    }
+    if (lastDay) {
+      add("last-day-farewell", text.reminderLastDayFarewell, true);
+      for (const { item, endpoint } of checkOuts) {
+        add(`check-out:${item.id}`, text.reminderCheckOut(
+          endpoint.place?.name ?? item.title,
+          formatTime(endpoint.instant, endpoint.timeZone),
+        ));
+      }
+    }
+    for (const { item, endpoint, deadlineInstant, deadlineDate } of departures) {
+      const departureDate = endpointDate(endpoint);
+      const deadlineTime = formatTime(deadlineInstant, endpoint.timeZone);
+      add(`departure:${item.id}`, text.reminderDepartingFlight(
+        item.title,
+        formatTime(endpoint.instant, endpoint.timeZone),
+        deadlineDate === departureDate ? deadlineTime : `${text.previous} ${deadlineTime}`,
+      ));
+    }
+    if (lastDay) add("last-day-checklist", text.reminderLastDayChecklist);
+    if (day.wishlist.length > 0) {
+      let distanceComplete = day.wishlist.length >= 2;
+      let distanceKilometres = 0;
+      for (let placeIndex = 1; placeIndex < day.wishlist.length; placeIndex++) {
+        const previous = day.wishlist[placeIndex - 1]!;
+        const place = day.wishlist[placeIndex]!;
+        if (
+          previous.latitude === null
+          || previous.longitude === null
+          || place.latitude === null
+          || place.longitude === null
+        ) {
+          distanceComplete = false;
+          continue;
+        }
+        distanceKilometres += haversineKilometres(
+          { latitude: previous.latitude, longitude: previous.longitude },
+          { latitude: place.latitude, longitude: place.longitude },
+        );
+      }
+      add("day-review", text.reminderDayReview(
+        day.wishlist.length,
+        distanceComplete ? distanceKilometres : null,
+      ));
+    }
+    return lines;
+  }, [clock.daysUntil, clock.phase, day, locale, model.days, model.items, text]);
   const endpointIds = useMemo(() => [...new Set(model.items.flatMap((item) => item.endpoints.flatMap((endpoint) => endpoint.place?.id ? [endpoint.place.id] : [])))], [model.items]);
   const wishlistIds = useMemo(() => [...new Set(model.days.flatMap((entry) => entry.wishlist.map((place) => place.id)))], [model.days]);
   const endpointPreviews = usePlacePreviews({ tripId: model.tripId, kind: "itinerary-place", ids: endpointIds, request, enabled: Boolean(request) && !offline });
@@ -235,7 +429,6 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     .sort((a, b) => Date.parse(a.start!) - Date.parse(b.start!) || a.id.localeCompare(b.id))[0] ?? null : null;
   const firstFixed = [...model.items].filter((item) => item.start && (item.type === "flight" || item.type === "reservation" || item.locked || item.constraints.some((constraint) => constraint.type === "fixed_time" && constraint.status === "confirmed")))
     .sort((a, b) => Date.parse(a.start!) - Date.parse(b.start!))[0] ?? null;
-  const firstFixedDay = firstFixed ? model.days.find((entry) => entry.itemIds.includes(firstFixed.id)) ?? null : null;
   const snapshotTime = new Intl.DateTimeFormat(locale, { timeZone: day.timeZone ?? "UTC", dateStyle: "medium", timeStyle: "short" }).format(new Date(fetchedAt));
   const openPlace = request && !offline ? (selection: TodayDetailSelection) => {
     detailReturnPosition.current = { x: window.scrollX, y: window.scrollY };
@@ -262,9 +455,6 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     : selectedIsToday
       ? leadCurrent ?? leadNext
       : null;
-  const leadItemDay = leadItem
-    ? (day.itemIds.includes(leadItem.id) ? day : model.days.find((entry) => entry.itemIds.includes(leadItem.id)) ?? day)
-    : day;
   const navigationItem = selectedIsToday ? leadNext : null;
   const navigationPlace = navigationItem?.endpoints.find((endpoint) => endpoint.role === "start")?.place ?? null;
   const navigationUrl = navigationPlace ? googleMapsNavigationUrl(navigationPlace) : null;
@@ -280,7 +470,6 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     : null;
   const leadUsesGroupFallback = leadItem?.participants === null;
   const leadHasUnknownParticipants = leadUsesGroupFallback || navigationItem?.participants === null;
-  const leadMinutesUntil = leadNext?.start ? Math.ceil((Date.parse(leadNext.start) - now) / 60_000) : null;
 
   const timed = items.filter((item) => item.start && item.end);
   const pastItems = selectedIsToday ? timed.filter((item) => Date.parse(item.end!) <= now) : [];
@@ -296,34 +485,33 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     ...laterItems.map((item) => [item.id, "later"] as const),
     ...untimedItems.map((item) => [item.id, "unscheduled"] as const),
   ]);
-  const activeItems = items.filter((item) => stateById[item.id] !== "past");
-  let firstPastInstant: number | null = null;
-  let lastPastInstant: number | null = null;
-  let firstPastZone: string | null = null;
-  let lastPastZone: string | null = null;
-  for (const item of pastItems) {
-    const startZone = item.endpoints.find((endpoint) => endpoint.role === "start")?.timeZone ?? day.timeZone;
-    const endZone = item.endpoints.find((endpoint) => endpoint.role === "end")?.timeZone ?? startZone;
-    const start = Date.parse(item.start!);
-    const end = Date.parse(item.end!);
-    const startsToday = startZone && localDate(start, startZone) === day.date;
-    const endsToday = endZone && localDate(end, endZone) === day.date;
-    const first = startsToday ? start : endsToday ? end : null;
-    if (first !== null && (firstPastInstant === null || first < firstPastInstant)) {
-      firstPastInstant = first;
-      firstPastZone = startsToday ? startZone : endZone;
-    }
-    if (endsToday && (lastPastInstant === null || end > lastPastInstant)) {
-      lastPastInstant = end;
-      lastPastZone = endZone;
-    }
-  }
-  const pastRange = firstPastInstant !== null && lastPastInstant !== null && firstPastZone && lastPastZone
-    ? text.elapsedRange(
-      new Intl.DateTimeFormat(locale, { timeZone: firstPastZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(firstPastInstant)),
-      new Intl.DateTimeFormat(locale, { timeZone: lastPastZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(lastPastInstant)),
-    )
-    : null;
+  const fixedByDisplayTime = items.map((item, originalIndex) => ({
+    item,
+    originalIndex,
+    displayedInstant: itemDisplayOnDay(item, day.timeZone, day.date).displayedInstant,
+  })).sort((a, b) => {
+    if (a.displayedInstant === null) return b.displayedInstant === null ? a.originalIndex - b.originalIndex : 1;
+    if (b.displayedInstant === null) return -1;
+    return Date.parse(a.displayedInstant) - Date.parse(b.displayedInstant) || a.originalIndex - b.originalIndex;
+  });
+  const morningFixedIds = new Set(fixedByDisplayTime.flatMap(({ item, displayedInstant }) => {
+    if (!displayedInstant || !day.timeZone || localDate(Date.parse(displayedInstant), day.timeZone) !== day.date) return [];
+    const hour = Number(new Intl.DateTimeFormat("en-US", {
+      timeZone: day.timeZone,
+      hour: "2-digit",
+      hourCycle: "h23",
+    }).format(new Date(displayedInstant)));
+    return hour < 12 ? [item.id] : [];
+  }));
+  const timelineEntries: TimelineEntry[] = [
+    ...fixedByDisplayTime
+      .filter(({ item }) => morningFixedIds.has(item.id))
+      .map(({ item }) => ({ kind: "fixed" as const, item, state: stateById[item.id] ?? "later" })),
+    ...day.wishlist.map((place, placeIndex) => ({ kind: "place" as const, place, order: placeIndex + 1 })),
+    ...fixedByDisplayTime
+      .filter(({ item }) => !morningFixedIds.has(item.id))
+      .map(({ item }) => ({ kind: "fixed" as const, item, state: stateById[item.id] ?? "later" })),
+  ];
   const selectedItem = selectedItemId
     ? model.items.find((item) => item.id === selectedItemId) ?? null
     : null;
@@ -372,7 +560,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
   const selectedItemParallel = selectedItem
     ? parallelItemIds(dayItems(model, selectedItemDay)).has(selectedItem.id)
     : false;
-  const emptyDay = items.length === 0;
+  const emptyDay = timelineEntries.length === 0;
 
   return <section className="today-workspace" aria-label={text.title}>
     <header className="today-pagehead">
@@ -393,18 +581,16 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     </header>
     {offline ? <aside className="today-notice" role="status"><WifiOff size={20} /><div><strong>{text.offline}</strong><p>{text.offlineHelp}</p><small>{text.fetchedAt(snapshotTime)}</small></div></aside> : null}
     {!persisted ? <p className="today-notice" role="status">{text.storageUnavailable}</p> : null}
-    <div className={`today-grid${emptyDay ? " is-empty" : ""}`}>
+    <div className={`today-grid${emptyDay ? " is-empty" : ""}${reminderLines.length ? " has-reminder" : ""}`}>
       {!emptyDay ? (
       <section className="today-lead" aria-label={leadLabel}>
         <div className="today-lead-label">{clock.phase === "before" || !selectedIsToday ? <CalendarDays size={16} /> : leadCurrent ? <CircleDot size={16} /> : <MapPin size={16} />}{leadLabel}</div>
         <h3>{leadTitle}</h3>
-        {clock.phase === "before" && firstFixed ? <div className="today-before-summary"><strong>{text.firstFixed}</strong><span><TodayTime item={firstFixed} zone={firstFixedDay?.timeZone ?? null} />・{firstFixed.title}</span></div> : null}
+        {clock.phase === "before" && firstFixed ? <div className="today-before-summary"><strong>{text.firstFixed}</strong><span>{firstFixed.title}</span></div> : null}
         {clock.phase === "before" && !firstFixed ? <p className="today-lead-time">{text.noFixed}</p> : null}
         {clock.phase === "unknown" ? <p className="today-lead-time">{text.unknownToday}</p> : null}
         {clock.phase === "after" ? <p className="today-lead-time">{text.finishedHelp}</p> : null}
         {clock.phase !== "before" && clock.phase !== "after" && !selectedIsToday ? <p className="today-lead-time">{text.selectedDayHelp(items.length)}</p> : null}
-        {selectedIsToday && leadItem ? <p className="today-lead-time"><TodayTime item={leadItem} zone={leadItemDay.timeZone} /></p> : null}
-        {selectedIsToday && leadNext && leadCurrent && leadMinutesUntil !== null ? <p className="today-lead-next">{text.nextStop}：{leadNext.title}・{text.until(leadMinutesUntil)}</p> : null}
         {selectedIsToday && (routeCopy || leadHasUnknownParticipants) ? <div className="today-route">{routeCopy ? <><MapPin size={18} aria-hidden="true" /><span>{routeCopy}</span></> : null}{leadHasUnknownParticipants ? <><TriangleAlert size={18} aria-hidden="true" /><span>{text.participantsUnknownTimeline}</span></> : null}</div> : null}
         <div className="today-lead-actions">
           {navigationUrl && navigationPlace ? <a className="today-primary-action" href={navigationUrl} target="_blank" rel="noopener noreferrer"><Navigation size={17} aria-hidden="true" />{text.navigateTo(navigationPlace.name)}</a> : null}
@@ -414,31 +600,39 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
         {navigationUrl && offline ? <span className="today-navnote">{text.navigationOffline}</span> : null}
       </section>
       ) : null}
+      {reminderLines.length ? <aside className="today-reminder" aria-label={text.tripReminder}>
+        <span className="today-reminder-icon" aria-hidden="true"><BellRing size={17} /></span>
+        <ul>{reminderLines.map((line) => <li key={line.key} className={line.emphasis ? "is-emphasis" : undefined}>{line.copy}</li>)}</ul>
+      </aside> : null}
       <section ref={timelineRef} className="today-timeline" aria-label={text.group} tabIndex={-1}>
-        {items.length ? <>
-          <div className="today-sectionhead"><h3>{clock.phase === "before" && index === 0 ? text.firstDayPlan : text.timeline}</h3><span>{text.itemCount(items.length)}</span></div>
-          {pastItems.length ? <>
-            <div className="today-past-label"><Clock3 size={15} aria-hidden="true" />{text.elapsedItems(pastItems.length)}{pastRange ? <span>{pastRange}</span> : null}</div>
-            <ol className="today-timeline-list today-pastlist">{pastItems.map((item) => <TodayCard key={item.id} item={item} zone={day.timeZone} selectedDate={day.date} parallel={parallel.has(item.id)} state="past" onOpen={openItem} />)}</ol>
-          </> : null}
-          <ol className="today-timeline-list">{activeItems.map((item) => <TodayCard key={item.id} item={item} zone={day.timeZone} selectedDate={day.date} parallel={parallel.has(item.id)} state={stateById[item.id] ?? "later"} onOpen={openItem} />)}</ol>
+        {timelineEntries.length ? <>
+          <div className="today-sectionhead">
+            <h3>{clock.phase === "before" && index === 0 ? text.firstDayPlan : text.timeline}</h3>
+            <div className="today-sectionhead-actions">
+              <span>{text.itemCount(timelineEntries.length)}</span>
+              {day.wishlist.length && canArrange && onArrangeDay && !offline ? <button type="button" className="today-adjust-order" onClick={() => onArrangeDay(day.date)}><ListOrdered size={15} aria-hidden="true" />{text.adjustOrder}</button> : null}
+            </div>
+          </div>
+          {pastItems.length ? <div className="today-past-label"><Clock3 size={15} aria-hidden="true" />{text.elapsedItems(pastItems.length)}</div> : null}
+          <ol className="today-timeline-list">{timelineEntries.map((entry, entryIndex) => {
+            const previous = timelineEntries[entryIndex - 1];
+            const key = entry.kind === "fixed" ? `fixed:${entry.item.id}` : `place:${entry.place.id}`;
+            return <Fragment key={key}>
+              {previous ? <TodayDirectionsLeg from={previous} to={entry} zone={day.timeZone} selectedDate={day.date} /> : null}
+              {entry.kind === "fixed"
+                ? <TodayCard item={entry.item} zone={day.timeZone} selectedDate={day.date} parallel={parallel.has(entry.item.id)} state={entry.state} onOpen={openItem} />
+                : <TodayPlaceCard place={entry.place} order={entry.order} date={day.date} preview={wishlistPreviews.previews.get(entry.place.id)} previewsLoading={wishlistPreviews.loading} openPlace={openPlace} />}
+            </Fragment>;
+          })}</ol>
         </> : <>
           <div className="today-empty">
             <CalendarDays size={28} aria-hidden="true" />
             <h3>{text.empty}</h3>
             <p>{text.emptyHelp}</p>
             {canArrange === false ? <p>{t.schedule.ownerOnly}</p> : null}
-            {onArrangeDay && !offline ? <button type="button" className="today-primary-action" onClick={() => onArrangeDay(day.date)}><CalendarDays size={17} aria-hidden="true" />{t.tripSkeleton.arrangeThisDay}</button> : null}
+            {onArrangeDay && !offline ? <button type="button" className="today-primary-action" onClick={() => onArrangeDay(day.date)}><CalendarDays size={17} aria-hidden="true" />{text.adjustOrder}</button> : null}
           </div>
         </>}
-        {day.wishlist.length ? <section className="today-wishlist" aria-label={text.wishlist}><div className="today-sectionhead"><h3>{text.wishlist}</h3><span>{day.wishlist.length}</span></div><p>{text.wishlistHelp}</p><ul>{day.wishlist.map((place) => {
-          const triggerKey = encodeURIComponent(`wishlist:${place.id}`);
-          const preview = wishlistPreviews.previews.get(place.id);
-          return <li key={place.id}>
-            {openPlace ? <PlaceThumbnail photo={preview?.photo} photoCount={preview?.photoCount} loading={wishlistPreviews.loading} /> : null}
-            <div className="today-wishlist-copy">{openPlace ? <button type="button" aria-label={text.viewPlaceDetail(place.name)} data-today-place-detail-trigger={triggerKey} onClick={() => openPlace({ reference: { kind: "trip-place", id: place.id }, name: place.name, triggerKey, date: day.date })}>{place.name}<ChevronRight size={16} /></button> : <span>{place.name}</span>}<PlacePhotoCredit photo={preview?.photo} /></div>
-          </li>;
-        })}</ul></section> : null}
       </section>
     </div>
     <p className="today-last-sync">{text.syncedAt(snapshotTime)}</p>
@@ -446,7 +640,6 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
       appearance="workspace"
       open={Boolean(selectedItem) && !selectedDetail}
       title={selectedItem?.title ?? ""}
-      description={selectedItem ? <TodayTime item={selectedItem} zone={selectedItemDay.timeZone} /> : undefined}
       onClose={closeItem}
     >
       {selectedItem ? <TodayItemDetails item={selectedItem} now={now} parallel={selectedItemParallel} memberId={model.memberId} date={selectedItemDay.date} previews={endpointPreviews.previews} previewsLoading={endpointPreviews.loading} openPlace={openPlace} /> : null}

@@ -1,8 +1,6 @@
 import type { TripFlightInput } from "@along-the-way/contracts/private-trips";
 import type {
   ConstraintInput,
-  CreateItineraryItemInput,
-  CreatePlaceInput,
   ItineraryItemDto,
   PlaceDto,
   TripSkeletonDto,
@@ -20,13 +18,6 @@ export interface TripSkeletonModule {
   updateFlight(userId: string, tripId: string, itemId: string, idempotencyKey: string, expectedVersion: number, input: TripFlightInput): Promise<ItineraryItemDto>;
   createLodging(userId: string, tripId: string, idempotencyKey: string, expectedTripVersion: number, input: TripLodgingInput): Promise<ItineraryItemDto>;
   updateLodging(userId: string, tripId: string, itemId: string, idempotencyKey: string, expectedVersion: number, input: TripLodgingInput): Promise<ItineraryItemDto>;
-  createPlace(
-    userId: string,
-    tripId: string,
-    idempotencyKey: string,
-    expectedTripVersion: number,
-    input: CreatePlaceInput,
-  ): Promise<PlaceDto>;
   updatePlace(
     userId: string,
     tripId: string,
@@ -41,13 +32,6 @@ export interface TripSkeletonModule {
     idempotencyKey: string,
     expectedVersion: number,
   ): Promise<void>;
-  createItem(
-    userId: string,
-    tripId: string,
-    idempotencyKey: string,
-    expectedTripVersion: number,
-    input: CreateItineraryItemInput,
-  ): Promise<ItineraryItemDto>;
   updateItem(
     userId: string,
     tripId: string,

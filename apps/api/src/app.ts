@@ -27,7 +27,8 @@ import type {
   UpdateTripPlaceDayAssignmentsInput,
   UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
-import type { CreateDayTimetableInput, UpdateDayWindowInput } from "@along-the-way/contracts/day-plans";
+import type { CreateDayRouteInput } from "@along-the-way/contracts/day-plans";
+import type { MapsConfigResponse } from "@along-the-way/contracts/maps";
 import type { DiscoveryModule } from "./discovery/discovery-module";
 import type { DayPlanModule } from "./planning/postgres-day-plan-module";
 
@@ -61,6 +62,7 @@ export interface AppDependencies {
   dayPlans: DayPlanModule;
   discovery: DiscoveryModule;
   identityAccess: IdentityAccessModule;
+  mapsConfig?: MapsConfigResponse;
   placeDetails: PlaceDetailModule;
   rateLimiter: RateLimiter;
   readiness: ReadinessProbe;
@@ -105,6 +107,14 @@ function numberField(body: Record<string, unknown>, name: string) {
   const value = body[name];
   if (typeof value !== "number") {
     throw new AppError("validation_error", `${name} must be a number`);
+  }
+  return value;
+}
+
+function booleanField(body: Record<string, unknown>, name: string) {
+  const value = body[name];
+  if (typeof value !== "boolean") {
+    throw new AppError("validation_error", `${name} must be true or false`);
   }
   return value;
 }
@@ -353,6 +363,7 @@ export function createApp({
   dayPlans,
   discovery,
   identityAccess,
+  mapsConfig = { browserKey: null, mapId: null },
   placeDetails,
   rateLimiter,
   readiness,
@@ -362,6 +373,10 @@ export function createApp({
   tripWorkspace,
 }: AppDependencies) {
   const app = new Hono();
+  const exposedMapsConfig: MapsConfigResponse = {
+    browserKey: mapsConfig.browserKey?.trim() || null,
+    mapId: mapsConfig.mapId?.trim() || null,
+  };
   const site = new URL(siteAddress);
   if (site.protocol !== "https:" &&
     !(site.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(site.hostname))) {
@@ -554,6 +569,27 @@ export function createApp({
     return context.json({ user });
   });
 
+  app.get("/api/maps/config", async (context) => {
+    await authenticated(context);
+    return context.json(exposedMapsConfig);
+  });
+
+  app.post("/api/maps/load", async (context) => {
+    const { user } = await authenticated(context);
+    const reserved = await withPaidProviderIdentity(
+      context,
+      user.id,
+      () => rateLimiter.tryConsumePaidProvider("google_maps_js"),
+    );
+    if (!reserved) {
+      throw new AppError(
+        "maps_daily_limit",
+        "The daily Google Maps load limit is reached",
+        429,
+      );
+    }
+    return context.body(null, 204);
+  });
   // A member edits only their own nickname: the target is always the session's user.
   app.put("/api/session/profile", async (context) => {
     const { user } = await authenticated(context);
@@ -563,6 +599,7 @@ export function createApp({
     }
     return context.json({ user: await identityAccess.updateDisplayName(user.id, body.displayName) });
   });
+
 
   app.post("/api/logout", async (context) => {
     const token = getCookie(context, SESSION_COOKIE) ?? "";
@@ -1080,63 +1117,22 @@ export function createApp({
   );
 
   app.post(
-    "/api/trips/:tripId/trip-plan",
-    async (context) => {
-      const { user } = await authenticated(context);
-      const plan = await withPaidProviderIdentity(context, user.id, () => dayPlans.tripPlan(
-        user.id,
-        uuidParam(context, "tripId"),
-        (cost) => rateLimiter.consume("route_planning", clientIp(context), user.id, cost),
-      ));
-      return context.json({ plan });
-    },
-  );
-
-  app.post(
-    "/api/trips/:tripId/trip-plan/apply",
-    async (context) => {
-      const { user } = await authenticated(context);
-      await rateLimiter.consume("trip_content", clientIp(context), user.id);
-      const body = await jsonBody(context);
-      const assigned = await tripPlaces.addPlacesToDays(
-        user.id,
-        uuidParam(context, "tripId"),
-        idempotencyKey(context),
-        {
-          basis: stringField(body, "basis"),
-          days: arrayField(body, "days").map((value) => {
-            const day = objectBody(value);
-            return {
-              tripDayId: stringField(day, "tripDayId"),
-              orderedTripPlaceIds: stringArrayField(day, "orderedTripPlaceIds"),
-              expectedVersion: numberField(day, "expectedVersion"),
-            };
-          }),
-        },
-      );
-      return context.json({ tripPlaces: assigned });
-    },
-  );
-
-  app.post(
-    "/api/trips/:tripId/days/:dayId/timetable",
+    "/api/trips/:tripId/days/:dayId/route",
     async (context) => {
       const { user } = await authenticated(context);
       const body = await jsonBody(context);
-      const timetable = await withPaidProviderIdentity(context, user.id, () => dayPlans.timetable(
+      const route = await dayPlans.route(
         user.id,
         uuidParam(context, "tripId"),
         uuidParam(context, "dayId"),
         {
-          order: stringField(body, "order") as CreateDayTimetableInput["order"],
-          ...(body.orderedTripPlaceIds === undefined ? {} : { orderedTripPlaceIds: stringArrayField(body, "orderedTripPlaceIds") }),
-          ...(body.insertTripPlaceId === undefined ? {} : { insertTripPlaceId: stringField(body, "insertTripPlaceId") }),
-          ...(body.legModes === undefined ? {} : { legModes: objectBody(body.legModes) as CreateDayTimetableInput["legModes"] }),
-          ...(body.taxiFallbackFor === undefined ? {} : { taxiFallbackFor: stringField(body, "taxiFallbackFor") }),
+          order: stringField(body, "order") as CreateDayRouteInput["order"],
+          ...(body.orderedTripPlaceIds === undefined
+            ? {}
+            : { orderedTripPlaceIds: stringArrayField(body, "orderedTripPlaceIds") }),
         },
-        (cost) => rateLimiter.consume("route_planning", clientIp(context), user.id, cost),
-      ));
-      return context.json({ timetable });
+      );
+      return context.json({ route });
     },
   );
 
@@ -1153,40 +1149,11 @@ export function createApp({
         {
           expectedVersion: numberField(body, "expectedVersion"),
           orderedTripPlaceIds: stringArrayField(body, "orderedTripPlaceIds"),
-          ...(body.legModes === undefined ? {} : { legModes: objectBody(body.legModes) as Record<string, "transit" | "taxi" | "walk"> }),
         },
       ),
     });
   });
 
-  app.get("/api/trips/:tripId/days/:dayId/window", async (context) => {
-    const { user } = await authenticated(context);
-    context.header("Cache-Control", "no-store");
-    return context.json({ window: await dayPlans.getWindow(user.id, uuidParam(context, "tripId"), uuidParam(context, "dayId")) });
-  });
-
-  app.put(
-    "/api/trips/:tripId/days/:dayId/window",
-    async (context) => {
-      const { user } = await authenticated(context);
-      await rateLimiter.consume("trip_content", clientIp(context), user.id);
-      const body = await jsonBody(context);
-      const window = await dayPlans.updateWindow(
-        user.id,
-        uuidParam(context, "tripId"),
-        uuidParam(context, "dayId"),
-        idempotencyKey(context),
-        {
-          startMinute: numberField(body, "startMinute"),
-          endMinute: numberField(body, "endMinute"),
-          expectedVersion: numberField(body, "expectedVersion"),
-          ...(body.travelMode === undefined ? {} : { travelMode: stringField(body, "travelMode") as UpdateDayWindowInput["travelMode"] }),
-          ...(body.walkLimitMinutes === undefined ? {} : { walkLimitMinutes: numberField(body, "walkLimitMinutes") }),
-        },
-      );
-      return context.json({ window });
-    },
-  );
 
   app.put(
     "/api/trips/:tripId/days/:dayId/place-order",
@@ -1276,20 +1243,6 @@ export function createApp({
     },
   );
 
-  app.post("/api/trips/:tripId/places", async (context) => {
-    const { user } = await authenticated(context);
-    await rateLimiter.consume("trip_content", clientIp(context), user.id);
-    const body = await jsonBody(context);
-    const place = await tripSkeleton.createPlace(
-      user.id,
-      uuidParam(context, "tripId"),
-      idempotencyKey(context),
-      numberField(body, "expectedTripVersion"),
-      placeInput(body),
-    );
-    return context.json({ place }, 201);
-  });
-
   app.patch("/api/trips/:tripId/places/:placeId", async (context) => {
     const { user } = await authenticated(context);
     await rateLimiter.consume("trip_content", clientIp(context), user.id);
@@ -1355,20 +1308,6 @@ export function createApp({
     const item = await tripSkeleton.updateLodging(user.id, uuidParam(context, "tripId"), uuidParam(context, "itemId"),
       idempotencyKey(context), numberField(body, "expectedVersion"), body as unknown as TripLodgingInput);
     return context.json({ item });
-  });
-
-  app.post("/api/trips/:tripId/items", async (context) => {
-    const { user } = await authenticated(context);
-    await rateLimiter.consume("trip_content", clientIp(context), user.id);
-    const body = await jsonBody(context);
-    const item = await tripSkeleton.createItem(
-      user.id,
-      uuidParam(context, "tripId"),
-      idempotencyKey(context),
-      numberField(body, "expectedTripVersion"),
-      itineraryItemInput(body),
-    );
-    return context.json({ item }, 201);
   });
 
   app.patch("/api/trips/:tripId/items/:itemId", async (context) => {

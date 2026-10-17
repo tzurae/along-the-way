@@ -225,7 +225,6 @@ export interface TripSkeletonDto {
   places: PlaceDto[];
   items: ItineraryItemDto[];
   days: TimelineDayDto[];
-  tripInformationItemIds: string[];
 }
 
 export interface TripSkeletonResponse {
@@ -473,8 +472,7 @@ export function parseTripSkeletonResponse(value: unknown): TripSkeletonResponse 
   if (
     !Array.isArray(skeleton.places) ||
     !Array.isArray(skeleton.items) ||
-    !Array.isArray(skeleton.days) ||
-    !Array.isArray(skeleton.tripInformationItemIds)
+    !Array.isArray(skeleton.days)
   ) {
     return invalidResponse();
   }
@@ -484,7 +482,6 @@ export function parseTripSkeletonResponse(value: unknown): TripSkeletonResponse 
       places: skeleton.places.map(placeValue),
       items: skeleton.items.map(itemValue),
       days: skeleton.days.map(timelineDayValue),
-      tripInformationItemIds: skeleton.tripInformationItemIds.map(stringValue),
     },
   };
 }

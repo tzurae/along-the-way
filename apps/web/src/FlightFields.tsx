@@ -32,7 +32,7 @@ export function emptyFlight(departureZone = "", arrivalZone = ""): TripFlightInp
   };
 }
 
-function validUtcOffsets(localDateTime: string, timeZone: string): string[] | null {
+export function validUtcOffsets(localDateTime: string, timeZone: string): string[] | null {
   if (!localDateTime || !timeZone) return null;
   try {
     const local = Temporal.PlainDateTime.from(localDateTime);
@@ -152,6 +152,8 @@ function AirportPicker({
         autoComplete="off"
         placeholder={t.travel.airportSearchPlaceholder}
         className="w-full"
+        // Search-only field: an empty list behind a dropdown arrow would only say no airport was found.
+        showTrigger={false}
       />
       <ComboboxContent>
         <ComboboxEmpty>

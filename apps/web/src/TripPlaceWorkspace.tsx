@@ -34,6 +34,7 @@ import { placeTypeFilterLabel } from "./locales/zh-TW/place-types";
 import { googleMapsPlaceUrl } from "./google-maps";
 import { safeExternalUrl } from "./external-url";
 import { useI18n, type Messages } from "./i18n";
+import { notify } from "./AppToaster";
 import { VoteControl, VoteVoters } from "./VoteControl";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews } from "./PlaceThumbnail";
@@ -139,6 +140,7 @@ function duplicateReason(reason: string, t: Messages["tripPlaces"]) {
 
 function errorMessage(error: unknown, fallback: string) {
   if (!(error instanceof ApiRequestError)) return fallback;
+  if (error.code === "provider_quota") return "Google 今日額度已用完，台灣時間明天早上 8 點後恢復；也可以改用手動輸入。";
   if (error.code === "provider_unavailable") {
     return "Google 地點服務暫時無法使用，請稍後再試或改用手動輸入。";
   }
@@ -213,7 +215,6 @@ function AddPlacePanel({
   const [attribution, setAttribution] = useState("");
   const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
   const [resultCount, setResultCount] = useState<number | null>(null);
-  const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [pendingProviderPlaceId, setPendingProviderPlaceId] = useState<string | null>(null);
   const retryKeys = useRef<RetryKeys>(new Map());
@@ -221,7 +222,6 @@ function AddPlacePanel({
   async function discover(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
-    setMessage("");
     setCandidates([]);
     setAttribution("");
     setResolvedUrl(null);
@@ -242,10 +242,10 @@ function AddPlacePanel({
       setResolvedUrl(parsed.resolvedUrl ?? null);
       setResultCount(parsed.candidates.length);
       if (parsed.candidates.length === 0) {
-        setMessage(t.errors.noUniquePlace);
+        notify("error", t.errors.noUniquePlace);
       }
     } catch (error) {
-      setMessage(t.errors.discoveryPreserved(errorMessage(error, t.errors.requestFailed)));
+      notify("error", t.errors.discoveryPreserved(errorMessage(error, t.errors.requestFailed)));
     } finally {
       setBusy(false);
     }
@@ -254,7 +254,6 @@ function AddPlacePanel({
   async function confirm(candidate: ProviderPlaceCandidateDto) {
     setBusy(true);
     setPendingProviderPlaceId(candidate.providerPlaceId);
-    setMessage("");
     const operation = `confirm:${candidate.providerPlaceId}`;
     const payload = {
       method: mode === "url" ? "google-maps-url" : "search",
@@ -273,7 +272,7 @@ function AddPlacePanel({
       await changed();
       close();
     } catch (error) {
-      setMessage(error instanceof ApiRequestError && error.code === "already_in_wishlist"
+      notify("error", error instanceof ApiRequestError && error.code === "already_in_wishlist"
         ? t.errors.alreadyInWishlist
         : t.errors.selectionPreserved(errorMessage(error, t.errors.requestFailed)));
     } finally {
@@ -292,7 +291,6 @@ function AddPlacePanel({
     }
     setCoordinateError("");
     setBusy(true);
-    setMessage("");
     const operation = "add-manual";
     const payload = {
       method: "manual",
@@ -319,7 +317,7 @@ function AddPlacePanel({
       const safeMessage = error instanceof ApiRequestError && error.code === "validation_error"
         ? t.errors.requestFailed
         : errorMessage(error, t.errors.requestFailed);
-      setMessage(t.errors.manualPreserved(safeMessage));
+      notify("error", t.errors.manualPreserved(safeMessage));
     } finally {
       setBusy(false);
     }
@@ -348,7 +346,6 @@ function AddPlacePanel({
               setAttribution("");
               setResolvedUrl(null);
               setResultCount(null);
-              setMessage("");
             }}
           >
             {label}
@@ -436,7 +433,6 @@ function AddPlacePanel({
           </ul>
         </section>
       ) : null}
-      {message ? <p className="pd-notice mt-4" role="alert">{message}</p> : null}
       {/* The pressed button keeps its place name as accessible name, so progress is announced here. */}
       <p className="sr-only" role="status" aria-atomic="true">
         {pendingCandidateName ? t.add.addingCandidate(pendingCandidateName) : ""}
@@ -469,7 +465,6 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
   const [draft, setDraft] = useState(base.input);
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
   const resolution = useVersionConflict<PlanningInput>();
   const retryKeys = useRef<RetryKeys>(new Map());
 
@@ -485,7 +480,6 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
     setBase(next);
     setDraft(next.input);
     setEditing(false);
-    setMessage("");
     resolution.clear();
     editingChanged(false);
   }
@@ -494,7 +488,6 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
     const normalized = attempted ?? { ...base.input, notes: draft.notes?.trim() || null };
     const operation = `planning:${place.id}`;
     const payload = { ...normalized, expectedVersion: version };
-    setMessage("");
     setBusy(true);
     try {
       const response = await request<{ tripPlace: TripPlaceDto }>(`/api/trips/${tripId}/trip-places/${place.id}/planning`, {
@@ -520,9 +513,9 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
           editingChanged(true);
           return;
         }
-        setMessage(t.errors.editsPreserved(errorMessage(error, t.errors.requestFailed)));
+        notify("error", t.errors.editsPreserved(errorMessage(error, t.errors.requestFailed)));
       } catch (reason) {
-        setMessage(t.errors.editsPreserved(errorMessage(reason, t.errors.requestFailed)));
+        notify("error", t.errors.editsPreserved(errorMessage(reason, t.errors.requestFailed)));
       }
     } finally {
       setBusy(false);
@@ -554,7 +547,6 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
           if (!conflict.current) {
             setEditing(false);
             resolution.clear();
-            setMessage("");
             editingChanged(false);
             void changed();
             return;
@@ -569,7 +561,6 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
           setDraft({ ...current.input, notes: conflict.attempted.notes });
           resolution.resume();
           setEditing(true);
-          setMessage("");
         }}
       /> : editing ? (
         <form className="pd-reason-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
@@ -580,13 +571,11 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
               setDraft(base.input);
               setEditing(false);
               editingChanged(false);
-              setMessage("");
             }}>{t.workspace.cancelReason}</button>
             <button type="submit" className="pd-primary" disabled={busy}><CircleCheck aria-hidden="true" className="size-4" />{busy ? t.workspace.savingReason : t.workspace.saveReason}</button>
           </div>
         </form>
       ) : <p className={base.input.notes ? "pd-reason-copy" : "pd-reason-copy pd-muted"}>{base.input.notes ?? t.workspace.noReasonDetail}</p>}
-      {message ? <p className="pd-notice mt-3" role="alert">{message}</p> : null}
     </section>
   );
 }
@@ -606,7 +595,6 @@ export function TripPlaceWorkspace({
   // (aiProposalId set) live in 行程 only.
   const places = readModel.current.filter((place) => place.aiProposalId === null);
   const [adding, setAdding] = useState(false);
-  const [message, setMessage] = useState("");
   const [readError, setReadError] = useState("");
   const [loading, setLoading] = useState(true);
   const [voteDrafts, setVoteDrafts] = useState<Record<string, boolean>>({});
@@ -797,7 +785,6 @@ export function TripPlaceWorkspace({
     setPendingVotes((current) => ({ ...current, [place.id]: true }));
     setOptimisticVotes((current) => ({ ...current, [place.id]: optimisticVote }));
     setVoteAnnouncement(t.vote.saving(place.name, voted));
-    setMessage("");
     const operation = `vote:${place.id}`;
     const payload = { voted };
     setVoteDrafts((current) => ({ ...current, [place.id]: voted }));
@@ -854,7 +841,7 @@ export function TripPlaceWorkspace({
         return next;
       });
       setVoteAnnouncement("");
-      setMessage(t.vote.updateFailed(place.name));
+      notify("error", t.vote.updateFailed(place.name));
       setFailedVotes((current) => ({ ...current, [place.id]: true }));
     } finally {
       pendingVoteIds.current.delete(place.id);
@@ -869,7 +856,6 @@ export function TripPlaceWorkspace({
   async function remove(place: TripPlaceDto) {
     if (removing || (!canSchedule && isScheduledForRemovalPolicy(place))) return;
     setRemoving(true);
-    setMessage("");
     const operation = `remove:${place.id}`;
     const payload = { expectedVersion: place.version };
     try {
@@ -883,7 +869,7 @@ export function TripPlaceWorkspace({
       await load();
       onPlacesChanged();
     } catch (error) {
-      setMessage(error instanceof ApiRequestError && (error.code === "forbidden" || error.status === 403)
+      notify("error", error instanceof ApiRequestError && (error.code === "forbidden" || error.status === 403)
         ? schedule.ownerOnlyAction
         : errorMessage(error, t.errors.requestFailed));
     } finally {
@@ -893,7 +879,7 @@ export function TripPlaceWorkspace({
 
   async function merge(source: TripPlaceDto, target: TripPlaceDto) {
     if (!canSchedule && (isScheduledForRemovalPolicy(source) || isScheduledForRemovalPolicy(target))) {
-      setMessage(schedule.ownerOnlyAction);
+      notify("error", schedule.ownerOnlyAction);
       return;
     }
 
@@ -917,7 +903,7 @@ export function TripPlaceWorkspace({
       await load();
       onPlacesChanged();
     } catch (error) {
-      setMessage(error instanceof ApiRequestError && (error.code === "forbidden" || error.status === 403)
+      notify("error", error instanceof ApiRequestError && (error.code === "forbidden" || error.status === 403)
         ? schedule.ownerOnlyAction
         : errorMessage(error, t.errors.requestFailed));
     } finally {
@@ -935,7 +921,7 @@ export function TripPlaceWorkspace({
       clearRetryKey(retryKeys.current, operation);
       await load();
     } catch (error) {
-      setMessage(errorMessage(error, t.errors.requestFailed));
+      notify("error", errorMessage(error, t.errors.requestFailed));
     }
   }
 
@@ -1058,7 +1044,7 @@ export function TripPlaceWorkspace({
   }
   function placeDetail(place: TripPlaceDto) {
     const available = placesById.has(place.id);
-    const manageLocationHref = `?${new URLSearchParams({ trip: trip.id, tab: "itinerary", segment: "daily", manage: "places" })}`;
+    const repairLocationHref = `?${new URLSearchParams({ trip: trip.id, tab: "itinerary", segment: "daily", repair: place.id })}`;
     const duplicateSuggestions = duplicateSuggestionsByPlace.get(place.id) ?? [];
     const sourceIsGoogleMaps = place.sourceUrl !== null
       && /google\.[a-z.]+\/maps|maps\.google\.|goo\.gl\/maps|maps\.app\.goo\.gl/i.test(place.sourceUrl);
@@ -1091,7 +1077,7 @@ export function TripPlaceWorkspace({
           <section className="pd-detail-section">
             <h3>地點</h3>
             <p className="pd-detail-meta"><MapPin aria-hidden="true" className="size-4" /><span>{place.address ?? t.workspace.unknownAddress}</span></p>
-            {place.latitude === null || place.longitude === null ? <a className="pd-secondary mt-3" href={manageLocationHref}><MapPinOff aria-hidden="true" className="size-4" />{schedule.addLocation}</a> : null}
+            {place.latitude === null || place.longitude === null ? <a className="pd-secondary mt-3" href={repairLocationHref}><MapPinOff aria-hidden="true" className="size-4" />{schedule.addLocation}</a> : null}
             {/* One way out to Google Maps; a source link that is itself Google Maps would only repeat it. */}
             <div className="pd-source-links mt-3">
               {place.provider === "google" && place.providerPlaceId ? <a className="pd-secondary" href={googleMapsPlaceUrl(place.name, place.providerPlaceId)} target="_blank" rel="noreferrer"><MapPin aria-hidden="true" className="size-4" />{t.workspace.viewPhotos}</a> : null}
@@ -1208,7 +1194,6 @@ export function TripPlaceWorkspace({
       </div>
       {!canSchedule ? <p className="pd-subhead">{schedule.ownerOnly}</p> : null}
       {readError ? <div className="pd-notice pd-read-error" role="alert"><p>{readError}</p><button type="button" className="pd-secondary" disabled={loading} onClick={() => void load()}>{t.workspace.reload}</button></div> : null}
-      {message ? <p className="pd-notice" role="alert">{message}</p> : null}
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{voteAnnouncement}</p>
       {loading && places.length === 0 ? <p className="pd-subhead" role="status">{t.workspace.loading}</p> : null}
       {!loading && !readError && places.length === 0 && readModel.retained.length === 0 ? (
@@ -1323,7 +1308,7 @@ export function TripPlaceWorkspace({
           titleRef={detailTitleRef}
           onClose={requestCloseDetail}
           // The detail only shows the place: like, scheduling and removal live on the list row.
-          footer={message ? <p className="pd-notice" role="alert">{message}</p> : undefined}>
+        >
           {placeDetail(selectedPlace)}
         </PlaceDetailSheet>
       ) : null}

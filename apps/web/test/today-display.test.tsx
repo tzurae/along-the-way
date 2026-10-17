@@ -42,25 +42,35 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-it("shows each cross-zone flight endpoint's local time and zone in the card and personal current/next", () => {
+it("keeps cross-zone flight state and navigation while omitting clocks from rows, lead, and detail", async () => {
   const start = { ...todayActivity().endpoints[0]!, instant: "2026-10-21T01:00:00Z", localDateTime: "2026-10-21T09:00", timeZone: "Asia/Taipei", utcOffset: "+08:00" };
   const flight = { ...todayActivity("跨時區航班"), type: "flight" as const, details: { carrier: "Test airline", serviceNumber: "T123", confirmationNotes: null },
     endpoints: [start, { ...start, role: "end" as const, placeId: "arrival", instant: "2026-10-21T03:30:00Z", localDateTime: "2026-10-21T12:30", timeZone: "Asia/Tokyo", utcOffset: "+09:00" }] };
   const skeleton = todaySkeleton(trip, [flight]);
   skeleton.places[0]!.name = "台北";
-  skeleton.places.push({ ...skeleton.places[0]!, id: "arrival", name: "東京" });
+  skeleton.places.push({ ...skeleton.places[0]!, id: "arrival", name: "東京", latitude: 35, longitude: 139 });
   const model = createTodayModel(trip, skeleton, [], todayUser.id);
   model.days[0]!.timeZone = "Asia/Tokyo";
-  vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-21T01:30:00Z"));
+  const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-21T01:30:00Z"));
+
   const current = display(model);
-  expect(current.querySelector('[data-today-item-trigger="跨時區航班"]')?.closest("li")).toHaveTextContent(/09:00.*至 12:30.*Asia\/Taipei.*Asia\/Tokyo.*東京/);
-  expect(current.querySelector('[aria-label="進行中"] .today-lead-time')).toHaveTextContent(/09:00.*台北.*Asia\/Taipei.*12:30.*東京.*Asia\/Tokyo/);
-  vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-21T00:30:00Z"));
-  expect(display(model).querySelector('[aria-label="下一站"] .today-lead-time')).toHaveTextContent(/09:00.*Asia\/Taipei.*12:30.*Asia\/Tokyo/);
-  model.items[0]!.endpoints[1]!.place = null;
-  const missingDestination = display(model).querySelector('[aria-label="下一站"] .today-lead-time');
-  expect(missingDestination).toHaveTextContent(/12:30 · Asia\/Tokyo/);
-  expect(missingDestination).not.toHaveTextContent(/12:30.*台北/);
+  const currentRow = current.querySelector('[data-today-item-trigger="跨時區航班"]')?.closest("li");
+  expect(currentRow).toHaveClass("is-current");
+  expect(currentRow).toHaveTextContent(/跨時區航班.*航班.*進行中.*東京/);
+  expect(currentRow).not.toHaveTextContent(/09:00|12:30|Asia\/Taipei|Asia\/Tokyo/);
+  expect(current.querySelector(".today-lead")).toHaveTextContent("跨時區航班");
+  expect(current.querySelector(".today-lead")).not.toHaveTextContent(/09:00|12:30|Asia\/Taipei|Asia\/Tokyo/);
+
+  now.mockReturnValue(Date.parse("2026-10-21T00:30:00Z"));
+  const upcoming = display(model);
+  expect(upcoming.querySelector('[data-today-item-trigger="跨時區航班"]')?.closest("li")).toHaveClass("is-next");
+  expect(upcoming.querySelector(".today-route")).toHaveTextContent("目的地：台北");
+  const navigation = upcoming.querySelector<HTMLAnchorElement>(".today-primary-action");
+  expect(new URL(navigation!.href).searchParams.get("destination")).toBe("34,135");
+
+  const details = await openDetails(model);
+  expect(details).toHaveTextContent(/台北.*東京/);
+  expect(details).not.toHaveTextContent(/09:00|12:30|Asia\/Taipei|Asia\/Tokyo/);
 });
 
 it("uses an email fallback instead of an opaque participant ID", async () => {

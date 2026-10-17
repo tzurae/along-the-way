@@ -25,6 +25,25 @@ export function googleMapsCoordinatesUrl(destination: Coordinates, origin?: Coor
   return url.toString();
 }
 
+type DirectionsEnd = Coordinates & { providerPlaceId: string | null };
+
+/**
+ * Google Maps directions between two route points, leaving the travel mode to the reader. Each end
+ * is sent as coordinates, so Google never guesses a place from a name; a Google place ID, when
+ * known, rides along so Maps shows the place's name (the ID needs that coordinate companion).
+ * https://developers.google.com/maps/documentation/urls/get-started#directions
+ */
+export function googleMapsDirectionsUrl(origin: DirectionsEnd, destination: DirectionsEnd) {
+  if (!validCoordinates(origin) || !validCoordinates(destination)) return null;
+  const url = new URL("https://www.google.com/maps/dir/");
+  url.searchParams.set("api", "1");
+  for (const [role, end] of [["origin", origin], ["destination", destination]] as const) {
+    url.searchParams.set(role, `${end.latitude},${end.longitude}`);
+    if (end.providerPlaceId) url.searchParams.set(`${role}_place_id`, end.providerPlaceId);
+  }
+  return url.toString();
+}
+
 /** Maps supplies the device origin or asks for it; never invent coordinates.
  * https://developers.google.com/maps/documentation/urls/get-started#directions
  */

@@ -3,10 +3,7 @@ import { PostgresCollaborationModule } from "./private-trips/postgres-collaborat
 import { createDatabase, requireDatabaseUrl } from "./database/database";
 import { OpenAiResponsesDiscoveryModel } from "./discovery/openai-responses-discovery-model";
 import { PostgresDiscoveryModule } from "./discovery/postgres-discovery-module";
-import { GoogleRoutesProvider } from "./planning/google-routes-provider";
-import { NavitimeRoutesProvider } from "./planning/navitime-routes-provider";
 import { PostgresDayPlanModule } from "./planning/postgres-day-plan-module";
-import { FakePlaceHours, FakeRouteProvider } from "./planning/fake-route-providers";
 import { PostgresIdentityAccessModule } from "./private-trips/postgres-identity-access-module";
 import { PostgresRateLimiter } from "./private-trips/postgres-rate-limiter";
 import { PostgresReadinessProbe } from "./private-trips/postgres-readiness-probe";
@@ -29,7 +26,10 @@ function requireSetting(name: string) {
 const database = createDatabase(requireDatabaseUrl());
 const siteAddress = requireSetting("SITE_ADDRESS");
 const tokenSecret = requireSetting("TOKEN_SECRET");
-const fakeExternalData = process.env.FAKE_EXTERNAL_DATA === "1";
+const mapsConfig = {
+  browserKey: process.env.GOOGLE_MAPS_BROWSER_KEY?.trim() || null,
+  mapId: process.env.GOOGLE_MAPS_MAP_ID?.trim() || null,
+};
 const identityAccess = new PostgresIdentityAccessModule({
   database,
   tokenIssuer: new TokenIssuer(tokenSecret),
@@ -64,18 +64,6 @@ const dayPlans = new PostgresDayPlanModule({
   database,
   tripSkeleton,
   tripPlaces,
-  // NAVITIME first: Google Routes has no transit in Japan.
-  routeProviders: fakeExternalData ? [new FakeRouteProvider()] : [
-    new NavitimeRoutesProvider({
-      apiKey: process.env.RAPIDAPI_KEY,
-      consumeBudget: () => rateLimiter.tryConsumePaidProvider("navitime"),
-    }),
-    new GoogleRoutesProvider({
-      apiKey: process.env.GOOGLE_MAPS_API_KEY,
-      consumeBudget: () => rateLimiter.tryConsumePaidProvider("google_routes"),
-    }),
-  ],
-  placeHours: fakeExternalData ? new FakePlaceHours() : placeProvider,
 });
 const readiness = new PostgresReadinessProbe(database);
 const app = createApp({
@@ -83,6 +71,7 @@ const app = createApp({
   dayPlans,
   discovery,
   identityAccess,
+  mapsConfig,
   placeDetails: new PostgresPlaceDetailModule({
     database,
     assetRoot: packagedPhotoRoot,
@@ -106,9 +95,6 @@ const server = Bun.serve({
   fetch: app.fetch,
 });
 
-if (fakeExternalData) {
-  console.info(JSON.stringify({ event: "fake_external_data_enabled", status: "ok" }));
-}
 
 console.info(
   JSON.stringify({ event: "api_started", port: server.port, status: "ok" }),

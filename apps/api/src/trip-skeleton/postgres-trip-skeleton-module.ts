@@ -407,37 +407,7 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       places,
       items,
       days,
-      tripInformationItemIds: items
-        .filter(
-          (item) =>
-            item.type === "flight" ||
-            item.type === "lodging" ||
-            item.type === "transport",
-        )
-        .map((item) => item.id),
     };
-  }
-
-  async createPlace(
-    userId: string,
-    tripId: string,
-    rawKey: string,
-    expectedTripVersion: number,
-    input: CreatePlaceInput,
-  ) {
-    const key = requireIdempotencyKey(rawKey);
-    const place = validatePlace(input);
-    const operation = `create_place:${tripId}`;
-    return this.database.transaction().execute(async (transaction) => {
-      await this.requireMemberForMutation(transaction, userId, tripId);
-      await lockMutation(transaction, userId, operation, key);
-      const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replayedPlace(replay);
-      await this.incrementTripVersion(transaction, tripId, expectedTripVersion);
-      const response = await this.createPlaceInTransaction(transaction, userId, tripId, place, false);
-      await remember(transaction, userId, operation, key, response);
-      return response;
-    });
   }
 
   private async createPlaceInTransaction(
@@ -951,33 +921,6 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     });
   }
 
-  async createItem(
-    userId: string,
-    tripId: string,
-    rawKey: string,
-    expectedTripVersion: number,
-    input: CreateItineraryItemInput,
-  ) {
-    const key = requireIdempotencyKey(rawKey);
-    const operation = `create_itinerary_item:${tripId}`;
-    return this.database.transaction().execute(async (transaction) => {
-      await this.requireMemberForMutation(transaction, userId, tripId);
-      await this.requireSchedulerForNonTravelEndpoints(
-        transaction,
-        userId,
-        tripId,
-        this.inputEndpointPlaceIds(input.endpoints),
-      );
-      await lockMutation(transaction, userId, operation, key);
-      const replay = await replayed(transaction, userId, operation, key);
-      if (replay) return replayedItem(replay);
-      await this.incrementTripVersion(transaction, tripId, expectedTripVersion);
-      const response = await this.createItemInTransaction(transaction, userId, tripId, input);
-      await remember(transaction, userId, operation, key, response);
-      return response;
-    });
-  }
-
   async createItemInTransaction(
     transaction: Transaction<AlongTheWayDatabase>,
     userId: string,
@@ -1471,7 +1414,11 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       throw new AppError("validation_error", `${type} has invalid endpoint roles`);
     }
     const [trip, placeRows, stopRows, assignedPlace] = await Promise.all([
-      executor.selectFrom("trips").select(["start_date", "end_date"]).where("id", "=", tripId).executeTakeFirst(),
+      type === "lodging"
+        ? executor.selectFrom("trips").select(["start_date", "end_date"]).where("id", "=", tripId)
+          .forUpdate().executeTakeFirst()
+        : executor.selectFrom("trips").select(["start_date", "end_date"]).where("id", "=", tripId)
+          .executeTakeFirst(),
       executor.selectFrom("places").select(["id", "time_zone"]).where("trip_id", "=", tripId)
         .where("id", "in", endpoints.map((endpoint) => endpoint.placeId))
         .forUpdate()
@@ -1533,6 +1480,34 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     }
     const start = endpoints.find((endpoint) => endpoint.role === "start")!;
     const end = endpoints.find((endpoint) => endpoint.role === "end");
+    if (type === "lodging" && end) {
+      const checkInDate = start.localDateTime.slice(0, 10);
+      const checkOutDate = end.localDateTime.slice(0, 10);
+      let conflictsQuery = executor.selectFrom("itinerary_endpoints as endpoint")
+        .innerJoin("itinerary_items as item", "item.id", "endpoint.itinerary_item_id")
+        .select("endpoint.endpoint_role")
+        .where("endpoint.trip_id", "=", tripId)
+        .where("item.trip_id", "=", tripId)
+        .where("item.item_type", "=", "lodging")
+        .where((expression) => expression.or([
+          expression.and([
+            expression("endpoint.endpoint_role", "=", "start"),
+            expression("endpoint.local_date_time", "like", `${checkInDate}T%`),
+          ]),
+          expression.and([
+            expression("endpoint.endpoint_role", "=", "end"),
+            expression("endpoint.local_date_time", "like", `${checkOutDate}T%`),
+          ]),
+        ]));
+      if (itemId) conflictsQuery = conflictsQuery.where("item.id", "!=", itemId);
+      const conflicts = await conflictsQuery.execute();
+      if (conflicts.some((endpoint) => endpoint.endpoint_role === "start")) {
+        throw new AppError("validation_error", "Another lodging already checks in on this date");
+      }
+      if (conflicts.some((endpoint) => endpoint.endpoint_role === "end")) {
+        throw new AppError("validation_error", "Another lodging already checks out on this date");
+      }
+    }
     if (
       type === "lodging" &&
       end &&

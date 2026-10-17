@@ -2,13 +2,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-import type { DayTimetableDto, TripPlanDto } from "@along-the-way/contracts/day-plans";
+import type { DayRouteDto } from "@along-the-way/contracts/day-plans";
 import { ApiRequestError } from "../src/api-error";
+import { AppToaster } from "../src/AppToaster";
 import { DayPlanDialog } from "../src/DayPlanDialog";
 import { SchedulePlacesSheet } from "../src/SchedulePlacesSheet";
 import { TodayWorkspace } from "../src/TodayWorkspace";
 import { TripOnboardingChecklist } from "../src/TripOnboardingChecklist";
-import { TripPlanDialog } from "../src/TripPlanDialog";
 import { createTodayModel } from "../src/today-model";
 import { TripSkeletonWorkspace } from "../src/TripSkeletonWorkspace";
 import { todayActivity, todaySkeleton, todayTrip, todayUser } from "./today-fixtures";
@@ -62,73 +62,12 @@ describe("owner-only schedule surfaces", () => {
     await waitFor(() => expect(screen.queryByText("排入行程")).not.toBeInTheDocument());
   });
 
-  it("keeps the whole-trip draft viewable but hides its apply action from editors", async () => {
-    const plan: TripPlanDto = {
-      basis: "basis",
-      days: [{
-        timetable: timetable("suggested"),
-        addedTripPlaceIds: ["place"],
-        orderedTripPlaceIds: ["place"],
-      }],
-      unplaced: [],
-    };
-    const request = async <T,>() => ({ plan } as T);
-    const props = {
-      tripId: "A",
-      open: true,
-      dayLabels: new Map([["day21", "第 1 天"]]),
-      request,
-      onClose: () => {},
-      onApplied: () => {},
-    };
-    const { rerender } = render(<TripPlanDialog {...props} canArrange={false} />);
-
-    expect(await screen.findByText(ownerOnly)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "套用這個規劃" })).not.toBeInTheDocument();
-
-    rerender(<TripPlanDialog {...props} canArrange />);
-    expect(await screen.findByRole("button", { name: "套用這個規劃" })).toBeInTheDocument();
-    expect(screen.queryByText(ownerOnly)).not.toBeInTheDocument();
-  });
-
-  it("maps a forbidden whole-trip apply to the shared owner action message", async () => {
-    const plan: TripPlanDto = {
-      basis: "basis",
-      days: [{
-        timetable: timetable("suggested"),
-        addedTripPlaceIds: ["place"],
-        orderedTripPlaceIds: ["place"],
-      }],
-      unplaced: [],
-    };
-    const request = async <T,>(url: string) => {
-      if (url.endsWith("/apply")) {
-        throw new ApiRequestError("forbidden", "server copy", undefined, undefined, undefined, 403);
-      }
-      return { plan } as T;
-    };
-    render(
-      <TripPlanDialog
-        tripId="A"
-        open
-        dayLabels={new Map([["day21", "第 1 天"]])}
-        canArrange
-        request={request}
-        onClose={() => {}}
-        onApplied={() => {}}
-      />,
-    );
-
-    const applyPlan = await screen.findByRole("button", { name: "套用這個規劃" });
-    await waitFor(() => expect(applyPlan).toBeEnabled());
-    fireEvent.click(applyPlan);
-    expect(await screen.findByRole("alert")).toHaveTextContent("你目前沒有安排行程的權限；請旅程擁有者在「成員」開放。");
-  });
 
   it("keeps day-order previews viewable but hides the order apply action from editors", async () => {
-    const request = async <T,>(_url: string, options?: RequestInit) => {
+    const request = async <T,>(url: string, options?: RequestInit) => {
+      if (url === "/api/maps/config") return { browserKey: null, mapId: null } as T;
       const input = options?.body ? JSON.parse(String(options.body)) as { order?: "current" | "suggested" } : {};
-      return { timetable: timetable(input.order ?? "current") } as T;
+      return { route: route(input.order ?? "current") } as T;
     };
     const props = {
       tripId: "A",
@@ -136,20 +75,12 @@ describe("owner-only schedule surfaces", () => {
       request,
       onClose: () => {},
       onOrderSaved: async () => {},
-      addablePlaces: [],
-      coordinates: new Map(),
-      stays: new Map(),
     };
     const { rerender } = render(<DayPlanDialog {...props} canArrange={false} />);
 
     expect(await screen.findByText(ownerOnly)).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole("button", { name: "儲存為第 1 天的安排" })).not.toBeInTheDocument());
-    expect(screen.getByRole("tab", { name: /依距離排/ })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText("可安排時間・交通方式"));
-    expect(screen.queryByLabelText("開始")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("結束")).not.toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: "這天怎麼移動" })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /依直線距離排/ })).toBeInTheDocument();
 
     rerender(<DayPlanDialog {...props} canArrange />);
     expect(await screen.findByRole("button", { name: "儲存為第 1 天的安排" })).toBeInTheDocument();
@@ -159,24 +90,25 @@ describe("owner-only schedule surfaces", () => {
 
   it("maps a forbidden day-order apply to the shared owner action message", async () => {
     const request = async <T,>(url: string, options?: RequestInit) => {
-      if (url.endsWith("/arrangement")) {
+      if (url === "/api/maps/config") return { browserKey: null, mapId: null } as T;
+      if (url.endsWith("/place-order")) {
         throw new ApiRequestError("forbidden", "server copy", undefined, undefined, undefined, 403);
       }
       const input = options?.body ? JSON.parse(String(options.body)) as { order?: "current" | "suggested" } : {};
-      return { timetable: timetable(input.order ?? "current") } as T;
+      return { route: route(input.order ?? "current") } as T;
     };
     render(
-      <DayPlanDialog
-        tripId="A"
-        day={{ id: "day21", date: "2026-10-21", label: "第 1 天" }}
-        canArrange
-        request={request}
-        onClose={() => {}}
-        onOrderSaved={async () => {}}
-        addablePlaces={[]}
-        coordinates={new Map()}
-        stays={new Map()}
-      />,
+      <>
+        <DayPlanDialog
+          tripId="A"
+          day={{ id: "day21", date: "2026-10-21", label: "第 1 天" }}
+          canArrange
+          request={request}
+          onClose={() => {}}
+          onOrderSaved={async () => {}}
+        />
+        <AppToaster />
+      </>,
     );
 
     const applyOrder = await screen.findByRole("button", { name: "儲存為第 1 天的安排" });
@@ -198,10 +130,10 @@ describe("owner-only schedule surfaces", () => {
     const { rerender } = render(<TodayWorkspace {...common} canArrange={false} />);
 
     expect(screen.getByText(ownerOnly)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "安排這一天" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "調整順序" })).not.toBeInTheDocument();
 
     rerender(<TodayWorkspace {...common} canArrange onArrangeDay={() => {}} />);
-    expect(screen.getByRole("button", { name: "安排這一天" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "調整順序" })).toBeInTheDocument();
     expect(screen.queryByText(ownerOnly)).not.toBeInTheDocument();
   });
 
@@ -303,21 +235,25 @@ describe("owner-only schedule surfaces", () => {
   });
 });
 
-function timetable(order: "current" | "suggested"): DayTimetableDto {
+function route(order: "current" | "suggested"): DayRouteDto {
+  const orderedTripPlaceIds = order === "suggested" ? ["b", "a"] : ["a", "b"];
   return {
     dayId: "day21",
     date: "2026-10-21",
-    window: { startMinute: 540, endMinute: 1140, version: 1, travelMode: "transit", walkLimitMinutes: 15 },
-    legModes: {},
-    taxiAlternative: null,
+    version: 1,
     order,
-    // The straight-line order differs from the saved one, so there is something to save.
-    orderedTripPlaceIds: order === "suggested" ? ["b", "a"] : ["a", "b"],
+    orderedTripPlaceIds,
     startsAt: null,
     endsAt: null,
-    rows: [],
-    capacity: { arrival: null, departure: null, gaps: [{ startMinute: 540, endMinute: 1140 }] },
-    unscheduled: [],
-    load: { busyMinutes: 60, windowMinutes: 600, level: "relaxed" },
+    stops: orderedTripPlaceIds.map((tripPlaceId, index) => ({
+      tripPlaceId,
+      name: tripPlaceId === "a" ? "清水寺" : "二年坂",
+      latitude: 34.99 + index * 0.01,
+      longitude: 135.78 + index * 0.01,
+      providerPlaceId: null,
+      metersFromPrevious: index === 0 ? null : 1_000,
+    })),
+    metersToEnd: null,
+    totalMeters: 1_000,
   };
 }

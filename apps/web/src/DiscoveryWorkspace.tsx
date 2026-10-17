@@ -21,6 +21,7 @@ import { ApiRequestError } from "./api-error";
 import { googleMapsPlaceUrl } from "./google-maps";
 import { safeExternalUrl } from "./external-url";
 import { useI18n, type Messages } from "./i18n";
+import { notify } from "./AppToaster";
 import { VoteControl, VoteVoters } from "./VoteControl";
 import { ConflictPanel, useVersionConflict } from "./ConflictPanel";
 import { PlaceDetailContent } from "./PlaceDetailContent";
@@ -259,7 +260,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
   const [scheduleError, setScheduleError] = useState("");
   const [changedProposalIds, setChangedProposalIds] = useState<Set<string>>(() => new Set());
   const changedRowsTimer = useRef<number | null>(null);
-  const [notice, setNotice] = useState<{ area: NoticeArea; text: string } | null>(null);
   const [selectedProposalId, setSelectedProposalId] = useState<string | null>(null);
   const [detailFocusSection, setDetailFocusSection] = useState<DetailFocusSection | null>(null);
   const [proposalAnnouncement, setProposalAnnouncement] = useState("");
@@ -378,10 +378,9 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
       apply(discovery);
       draftsInitialized.current = true;
       setTripPlaces(parseTripPlaceListResponse(places).tripPlaces);
-      setNotice(null);
     } catch (error) {
       if (generation === workspaceReadGeneration.current) {
-        setNotice({ area: "general", text: errorMessage(error, t.errors.failed) });
+        notify("error", errorMessage(error, t.errors.failed));
       }
     } finally {
       if (generation === workspaceReadGeneration.current) setLoading(false);
@@ -411,7 +410,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
       setTripPlaces(parseTripPlaceListResponse(places).tripPlaces);
     }).catch((error: unknown) => {
       if (generation === workspaceReadGeneration.current) {
-        setNotice({ area: "general", text: errorMessage(error, t.errors.failed) });
+        notify("error", errorMessage(error, t.errors.failed));
       }
     }).finally(() => {
       // This read may supersede the initial load, which then skips clearing `loading`;
@@ -441,7 +440,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
   ) {
     if (pending) return;
     setPending(operation);
-    setNotice(null);
     try {
       const next = apply(await request(path, {
         method: method ?? (operation === "save-brief" || operation === "save-questions" ? "PUT" : "POST"),
@@ -473,22 +471,19 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
           });
           if (captured) { conflictAction.current = { operation, path, payload, area, after, method }; return; }
         } catch (failure) {
-          setNotice({ area, text: errorMessage(failure, t.errors.failed) });
+          notify("error", errorMessage(failure, t.errors.failed));
           return;
         }
       }
       if (shouldStartFreshRequest(error)) clearRetryKey(retryKeys.current, operation);
-      setNotice({
-        area,
-        text: operation.startsWith("reject:")
-          && error instanceof ApiRequestError
-          && (error.code === "forbidden" || error.status === 403)
-          ? t.errors.ownerOnly
-          // Answers refused because the brief's questions changed: explain it in zh-TW, not "要求內容有誤".
-          : operation === "save-questions" && error instanceof ApiRequestError && error.code === "validation_error"
-            ? t.errors.questionsChanged
-            : errorMessage(error, t.errors.failed),
-      });
+      notify("error", operation.startsWith("reject:")
+        && error instanceof ApiRequestError
+        && (error.code === "forbidden" || error.status === 403)
+        ? t.errors.ownerOnly
+        // Answers refused because the brief's questions changed: explain it in zh-TW, not "要求內容有誤".
+        : operation === "save-questions" && error instanceof ApiRequestError && error.code === "validation_error"
+          ? t.errors.questionsChanged
+          : errorMessage(error, t.errors.failed));
     } finally {
       setPending(null);
     }
@@ -500,10 +495,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
     if (pending || !workspace) return;
     const missing = missingServices(workspace, true, t);
     if (missing.length > 0) {
-      setNotice({
-        area,
-        text: t.errors.researchUnavailable(missing.join(t.services.separator)),
-      });
+      notify("error", t.errors.researchUnavailable(missing.join(t.services.separator)));
       return;
     }
     // Generation uses the saved aggregate; each editable field keeps its own base.
@@ -570,7 +562,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
         body: JSON.stringify({ voted }),
       });
     } catch {
-      setNotice({ area: "general", text: tripPlacesT.vote.updateFailed(tripPlacesById.get(placeId)?.name ?? "") });
+      notify("error", tripPlacesT.vote.updateFailed(tripPlacesById.get(placeId)?.name ?? ""));
     } finally {
       placeVoteBusy.current.delete(placeId);
       void refresh();
@@ -587,7 +579,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
     setOptimisticVotes((current) => ({ ...current, [proposal.id]: optimisticVote }));
     setPendingProposalVotes((current) => ({ ...current, [proposal.id]: true }));
     setVoteAnnouncement(tripPlacesT.vote.saving(proposal.name, voted));
-    setNotice(null);
     const operation = `vote:${proposal.id}`;
     const payload = { voted };
     try {
@@ -631,7 +622,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
         return next;
       });
       setVoteAnnouncement("");
-      setNotice({ area: "general", text: tripPlacesT.vote.updateFailed(proposal.name) });
+      notify("error", tripPlacesT.vote.updateFailed(proposal.name));
     } finally {
       pendingProposalVoteIds.current.delete(proposal.id);
       setPendingProposalVotes((current) => {
@@ -905,7 +896,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
     }
     setBulkBusy(true);
     setScheduleError("");
-    setNotice(null);
     try {
       let nextWorkspace = workspace;
       const detailProposal = scheduleFromDetail && proposals.length === 1 ? proposals[0]! : null;
@@ -1011,10 +1001,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
           resolution.resume();
         }}
       /> : null}
-      {resolution.conflict && notice && notice.area !== "again" && notice.area !== "general" ? <p className="mt-4 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
 
-      {notice?.area === "again" ? <p className="mt-4 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
-      {notice?.area === "general" ? <p className="mt-4 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
       {loading ? <p className="mt-6" role="status">{t.header.loading}</p> : null}
 
       {!loading ? (
@@ -1059,7 +1046,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
                   >
                     {pending === "save-questions" ? t.progress.saving : t.brief.saveAnswers}
                   </button>
-                  {notice?.area === "questions" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface-subtle p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
             </section>
           ) : null}
           <ResearchPanel
@@ -1084,7 +1070,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
                   />
                 </label>
                 <p className="pd-field-help">{t.brief.suggestionOnly}</p>
-                {notice?.area === "find" || notice?.area === "again" ? <p className="mt-3 rounded-xl border border-accent-strong/30 bg-surface p-4 text-accent-strong" role="alert">{notice.text}</p> : null}
                 {!workspace?.latestRun && !workspace?.modelAvailable ? <p className="mt-3 text-sm text-muted-foreground">{t.brief.modelUnavailable}</p> : null}
                 {!workspace?.latestRun && !workspace?.placeProviderAvailable ? <p className="mt-2 text-sm text-muted-foreground">{t.brief.placesUnavailable}</p> : null}
               </section>
@@ -1279,11 +1264,25 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
               </div>}
               titleRef={detailTitleRef}
               onClose={closeProposalDetail}
-              footer={
-              rejectConfirmation && trip.role === "owner" ? <div className="pd-confirm-footer"><p>{t.proposal.rejectConfirmTitle(rejectConfirmation.name)}</p><p>{t.proposal.rejectConfirmDescription}</p>{notice?.area === "general" ? <p role="alert">{notice.text}</p> : null}<div><button className="pd-secondary" disabled={pending !== null} onClick={() => setRejectConfirmation(null)}>{t.proposal.cancel}</button><button className="pd-danger-button" disabled={pending !== null} onClick={() => { const proposal = rejectConfirmation; void rejectProposal(proposal).then((next) => { if (next) { setRejectConfirmation(null); closeProposalDetail(); } }); }}>{t.proposal.rejectConfirm}</button></div></div>
-              // The detail only describes the place; liking and scheduling happen on the list row.
-              : notice?.area === "general" ? <p className="pd-notice" role="alert">{notice.text}</p> : undefined
-            }>
+              footer={rejectConfirmation && trip.role === "owner" ? (
+                <div className="pd-confirm-footer">
+                  <p>{t.proposal.rejectConfirmTitle(rejectConfirmation.name)}</p>
+                  <p>{t.proposal.rejectConfirmDescription}</p>
+                  <div>
+                    <button className="pd-secondary" disabled={pending !== null} onClick={() => setRejectConfirmation(null)}>{t.proposal.cancel}</button>
+                    <button className="pd-danger-button" disabled={pending !== null} onClick={() => {
+                      const proposal = rejectConfirmation;
+                      void rejectProposal(proposal).then((next) => {
+                        if (next) {
+                          setRejectConfirmation(null);
+                          closeProposalDetail();
+                        }
+                      });
+                    }}>{t.proposal.rejectConfirm}</button>
+                  </div>
+                </div>
+              ) : undefined}
+            >
               {proposalDetail(selectedProposal)}
             </PlaceDetailSheet>
           ) : null}
@@ -1294,7 +1293,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
               <h3 className="font-display text-2xl">{t.decided.title}</h3>
               <p className="mt-1 text-sm text-muted-foreground">{t.decided.description}</p>
               <ul className="mt-3 grid gap-2">{decisions.map((decision) => <li key={decision.proposalId} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-surface-subtle p-3"><strong>{decision.name}</strong><span className="flex items-center gap-2 text-sm">{decision.status === "accepted" ? t.decided.accepted : t.decided.rejected}{decision.decidedAt ? `・${t.decided.decidedAt(new Date(decision.decidedAt).toLocaleDateString(locale))}` : null}{decision.status === "rejected" && trip.role === "owner" ? <button type="button" className="pd-secondary" disabled={pending !== null} aria-label={t.decided.restoreLabel(decision.name)} onClick={() => void restoreProposal(decision)}>{t.decided.restore}</button> : null}</span></li>)}</ul>
-              {notice?.area === "decided" ? <p className="mt-2 text-sm" role="alert">{notice.text}</p> : null}
             </section>
           ) : null}
 
