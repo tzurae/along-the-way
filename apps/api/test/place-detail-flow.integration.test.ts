@@ -15,6 +15,8 @@ import { PostgresPlaceDetailModule } from "../src/place-details/postgres-place-d
 import { PostgresCollaborationModule } from "../src/private-trips/postgres-collaboration-module";
 import { PostgresIdentityAccessModule } from "../src/private-trips/postgres-identity-access-module";
 import { PostgresRateLimiter } from "../src/private-trips/postgres-rate-limiter";
+import { PostgresRapidApiKeysModule } from "../src/private-trips/postgres-rapidapi-keys-module";
+import { RapidApiKeyCipher } from "../src/private-trips/rapidapi-key-cipher";
 import { PostgresReadinessProbe } from "../src/private-trips/postgres-readiness-probe";
 import { PostgresTripWorkspaceModule } from "../src/private-trips/postgres-trip-workspace-module";
 import { hashToken, TokenIssuer } from "../src/private-trips/token-issuer";
@@ -212,6 +214,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
       photoCapabilitySecret,
     });
     app = createApp({
+      rapidApiKeys: new PostgresRapidApiKeysModule(database, new RapidApiKeyCipher(Buffer.alloc(32, 7).toString("base64"))),
       collaboration: new PostgresCollaborationModule(database), dayPlans: unrelatedDayPlanModule, discovery: unrelatedDiscoveryModule,
       identityAccess: new PostgresIdentityAccessModule({ database, now, tokenIssuer: new TokenIssuer("place-detail-integration-secret-at-least-32-bytes") }),
       placeDetails: new PostgresPlaceDetailModule({

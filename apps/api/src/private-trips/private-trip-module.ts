@@ -104,6 +104,7 @@ export class AppError extends Error {
       | "invalid_local_time"
       | "ambiguous_local_time"
       | "place_not_found"
+      | "rapidapi_key_not_found"
       | "item_not_found"
       | "constraint_not_found"
       | "item_locked"

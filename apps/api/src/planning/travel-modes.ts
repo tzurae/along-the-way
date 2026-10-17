@@ -23,13 +23,15 @@ export function walkLimitFor(mode: TravelMode, dayWalkLimit: number) {
   return mode === "walk" ? dayWalkLimit : PREFERRED_WALK_MINUTES;
 }
 
-/** Why a provider gave no transit answer this time, when asking again later may succeed. */
-const TEMPORARY_TRANSIT_FAILURES: ReadonlySet<string> = new Set(["quota", "timeout", "provider_unavailable"]);
+/** Missing provider data that permits a clearly labelled straight-line estimate. */
+const TEMPORARY_TRANSIT_FAILURES: Record<string, true> = {
+  provider_not_configured: true, quota: true, timeout: true, provider_unavailable: true,
+};
 
 /**
  * One leg from what the providers observed. Taxi is the drive plus time to get a cab.
  * Otherwise walk within the limit, else transit. A long walk never stands in for missing transit.
- * When transit is missing only because a provider is out of quota or failing for now and
+ * When transit is missing because the user's key is absent, quota is exhausted or a provider fails and
  * `straightLineMinutes` is given, the leg takes it as an estimated train ride, keeping why the real
  * time is missing in `unavailableReason`; a provider that found no route leaves the leg unknown.
  */
@@ -59,7 +61,7 @@ export function legFor(
   const chosen = walking && walking.durationMinutes <= walkLimit ? walking : transit;
   const transitFailures = observations.flatMap((entry) =>
     entry.mode === "transit" && entry.status === "unavailable" ? [entry.reason] : []);
-  const temporary = transitFailures.filter((reason) => TEMPORARY_TRANSIT_FAILURES.has(reason));
+  const temporary = transitFailures.filter((reason) => TEMPORARY_TRANSIT_FAILURES[reason] === true);
   if (!chosen && straightLineMinutes !== undefined && temporary.length > 0 && !transitFailures.includes("no_route")) {
     return {
       ...names,

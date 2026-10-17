@@ -60,6 +60,7 @@ interface TripSkeletonWorkspaceProps {
   placesRevision: number;
   onPlacesChanged(): void;
   onTravelEdit(type: "flight" | "lodging"): void;
+  openRapidApiKeys(): void;
   arrangeDate?: string | null;
   onArrangeOpened?(): void;
 }
@@ -386,6 +387,7 @@ export function TripSkeletonWorkspace({
   placesRevision,
   onPlacesChanged,
   onTravelEdit,
+  openRapidApiKeys,
   arrangeDate,
   onArrangeOpened,
 }: TripSkeletonWorkspaceProps) {
@@ -1715,6 +1717,7 @@ export function TripSkeletonWorkspace({
           tripId={trip.id}
           day={planningDay}
           request={request}
+          openRapidApiKeys={openRapidApiKeys}
           onClose={() => setPlanningDay(null)}
           canArrange={canArrange}
           // 待安排 first (already chosen for the itinerary), then wishlist places with no day.

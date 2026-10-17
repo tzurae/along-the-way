@@ -41,6 +41,7 @@ import {
   type TripWorkspaceModule,
 } from "./private-trips/private-trip-module";
 import type { RateLimiter } from "./private-trips/postgres-rate-limiter";
+import type { PostgresRapidApiKeysModule } from "./private-trips/postgres-rapidapi-keys-module";
 import {
   MAX_ITINERARY_ITEM_CONSTRAINTS,
   MAX_ITINERARY_ITEM_PARTICIPANTS,
@@ -63,6 +64,7 @@ export interface AppDependencies {
   identityAccess: IdentityAccessModule;
   placeDetails: PlaceDetailModule;
   rateLimiter: RateLimiter;
+  rapidApiKeys: PostgresRapidApiKeysModule;
   readiness: ReadinessProbe;
   siteAddress: string;
   tripWorkspace: TripWorkspaceModule;
@@ -355,6 +357,7 @@ export function createApp({
   identityAccess,
   placeDetails,
   rateLimiter,
+  rapidApiKeys,
   readiness,
   siteAddress,
   tripPlaces,
@@ -377,7 +380,7 @@ export function createApp({
     context: Context,
     userId: string,
     work: () => Promise<T>,
-  ) => rateLimiter.withPaidProviderIdentity(clientIp(context), userId, work);
+  ) => rateLimiter.withPaidProviderIdentity(clientIp(context), userId, () => rapidApiKeys.withUser(userId, work));
 
   function acquireEventStream(userId: string) {
     const active = activeEventStreams.get(userId) ?? 0;
@@ -562,6 +565,27 @@ export function createApp({
       throw new AppError("validation_error", "displayName must be a string or null");
     }
     return context.json({ user: await identityAccess.updateDisplayName(user.id, body.displayName) });
+  });
+
+  app.get("/api/session/rapidapi-keys", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("rapidapi_keys", clientIp(context), user.id);
+    return context.json(await rapidApiKeys.list(user.id));
+  });
+
+  app.post("/api/session/rapidapi-keys", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("rapidapi_keys", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json(await rapidApiKeys.add(user.id, stringField(body, "key")), 201);
+  });
+
+  app.delete("/api/session/rapidapi-keys/:position", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("rapidapi_keys", clientIp(context), user.id);
+    const value = context.req.param("position");
+    const position = /^[1-9][0-9]*$/.test(value) ? Number(value) : Number.NaN;
+    return context.json(await rapidApiKeys.remove(user.id, position));
   });
 
   app.post("/api/logout", async (context) => {

@@ -27,6 +27,11 @@ import { SmtpEmailSender } from "../src/private-trips/smtp-email-sender";
 import { PostgresEmailWorker } from "../src/private-trips/postgres-email-worker";
 import { PostgresIdentityAccessModule } from "../src/private-trips/postgres-identity-access-module";
 import { PostgresRateLimiter } from "../src/private-trips/postgres-rate-limiter";
+import { PostgresRapidApiKeysModule } from "../src/private-trips/postgres-rapidapi-keys-module";
+import { RapidApiKeyCipher } from "../src/private-trips/rapidapi-key-cipher";
+import { parseRapidApiKeysResponse } from "@along-the-way/contracts/rapidapi-keys";
+import { NavitimeRoutesProvider } from "../src/planning/navitime-routes-provider";
+import { legFor } from "../src/planning/travel-modes";
 import { PostgresReadinessProbe } from "../src/private-trips/postgres-readiness-probe";
 import { PostgresTripWorkspaceModule } from "../src/private-trips/postgres-trip-workspace-module";
 import { TokenIssuer } from "../src/private-trips/token-issuer";
@@ -181,6 +186,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       now: () => new Date(now),
     });
     appDependencies = {
+      rapidApiKeys: new PostgresRapidApiKeysModule(database, new RapidApiKeyCipher(Buffer.alloc(32, 7).toString("base64"))),
       placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
       collaboration: new PostgresCollaborationModule(database),
       dayPlans: unrelatedDayPlanModule,
@@ -332,6 +338,217 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       body: body(payload),
     });
   }
+
+  it("exposes only the session user's key suffixes and cannot delete another user's keys", async () => {
+    const owner = await login("owner@example.test");
+    await database.insertInto("users").values({ email: "key-other@example.test", display_name: null, status: "active" }).execute();
+    const other = await login("key-other@example.test");
+    const endpoint = "/api/session/rapidapi-keys";
+    const key = "syntheticRapidApiKey000001";
+    const added = await authPost(endpoint, { key }, owner.cookie);
+    expect(added.status).toBe(201);
+    expect(parseRapidApiKeysResponse(await added.json())).toEqual({ keys: [{ position: 1, last4: "0001" }] });
+    const ownerId = (await database.selectFrom("users").select("id").where("email", "=", "owner@example.test").executeTakeFirstOrThrow()).id;
+    const read = await app.request(`${endpoint}?userId=${ownerId}`, { headers: { cookie: other.cookie } });
+    expect(read.status).toBe(200);
+    expect(await read.json()).toEqual({ keys: [] });
+    const deleted = await app.request(`${endpoint}/1?userId=${ownerId}`, {
+      method: "DELETE", headers: { cookie: other.cookie, origin: "https://app.example.test", "content-type": "application/json" },
+      body: body({ userId: ownerId }),
+    });
+    expect(deleted.status).toBe(404);
+    const own = await app.request(endpoint, { headers: { cookie: owner.cookie } });
+    const text = await own.text();
+    expect(text).not.toContain(key);
+    expect(JSON.parse(text)).toEqual({ keys: [{ position: 1, last4: "0001" }] });
+    expect((await app.request(endpoint)).status).toBe(401);
+    expect((await app.request(`${endpoint}/1`, { method: "DELETE", headers: { cookie: owner.cookie } })).status).toBe(403);
+    expect((await app.request(endpoint, {
+      method: "POST", headers: { cookie: owner.cookie, origin: "https://other.example.test", "content-type": "application/json" },
+      body: body({ key }),
+    })).status).toBe(403);
+  });
+
+  it("validates keys, rejects duplicates and the eleventh key, and renumbers deletions", async () => {
+    const owner = await login("owner@example.test");
+    const endpoint = "/api/session/rapidapi-keys";
+    for (const key of ["short", "a".repeat(101), "a".repeat(19) + ",", 42]) {
+      const invalid = await authPost(endpoint, { key }, owner.cookie);
+      expect(invalid.status).toBe(400);
+      expect(await invalid.json()).toMatchObject({ error: { code: "validation_error" } });
+    }
+    const keys = Array.from({ length: 10 }, (_, index) => `syntheticRapidApiKey${String(index).padStart(6, "0")}`);
+    for (const key of keys) expect((await authPost(endpoint, { key }, owner.cookie)).status).toBe(201);
+    for (const key of [keys[0], "syntheticRapidApiKey999999"]) {
+      const invalid = await authPost(endpoint, { key }, owner.cookie);
+      expect(invalid.status).toBe(400);
+      expect(await invalid.json()).toMatchObject({ error: { code: "validation_error" } });
+    }
+    const removed = await app.request(`${endpoint}/1`, {
+      method: "DELETE", headers: { cookie: owner.cookie, origin: "https://app.example.test" },
+    });
+    expect(removed.status).toBe(200);
+    const result = parseRapidApiKeysResponse(await removed.json());
+    expect(result.keys).toHaveLength(9);
+    expect(result.keys[0]).toEqual({ position: 1, last4: "0001" });
+    expect(result.keys[8]).toEqual({ position: 9, last4: "0009" });
+    expect((await app.request(`${endpoint}/10`, {
+      method: "DELETE", headers: { cookie: owner.cookie, origin: "https://app.example.test" },
+    })).status).toBe(404);
+  });
+
+  it("serializes concurrent first writes without losing keys and deletes the final key", async () => {
+    const owner = await login("owner@example.test");
+    const endpoint = "/api/session/rapidapi-keys";
+    const results = await Promise.all(["000001", "000002"].map((suffix) =>
+      authPost(endpoint, { key: `syntheticRapidApiKey${suffix}` }, owner.cookie)));
+    expect(results.map((result) => result.status)).toEqual([201, 201]);
+    const list = parseRapidApiKeysResponse(await (await app.request(endpoint, { headers: { cookie: owner.cookie } })).json());
+    expect(list.keys.map((key) => key.last4).sort()).toEqual(["0001", "0002"]);
+    for (let index = 0; index < 2; index++) {
+      const removed = await app.request(`${endpoint}/1`, {
+        method: "DELETE", headers: { cookie: owner.cookie, origin: "https://app.example.test" },
+      });
+      expect(removed.status).toBe(200);
+      expect(parseRapidApiKeysResponse(await removed.json()).keys).toHaveLength(1 - index);
+    }
+  });
+
+  it("cannot decrypt credentials transplanted to another database user's row", async () => {
+    const owner = await login("owner@example.test");
+    await authPost("/api/session/rapidapi-keys", { key: "syntheticRapidApiKey000001" }, owner.cookie);
+    const other = await database.insertInto("users").values({ email: "copy-target@example.test", display_name: null, status: "active" })
+      .returning("id").executeTakeFirstOrThrow();
+    const encrypted = await database.selectFrom("user_rapidapi_keys").selectAll().executeTakeFirstOrThrow();
+    await database.insertInto("user_rapidapi_keys").values({ ...encrypted, user_id: other.id }).execute();
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    await expect(appDependencies.rapidApiKeys.list(other.id)).resolves.toEqual({ keys: [] });
+    expect(log).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ event: "rapidapi_keys_unreadable", userId: other.id }));
+    expect(encrypted.ciphertext.toString("utf8")).not.toContain("syntheticRapidApiKey000001");
+  });
+
+  it.each(["rotated encryption key", "corrupt ciphertext"])(
+    "treats an unreadable row as empty and replaces it only on POST: %s", async (failure) => {
+      const owner = await login("owner@example.test");
+      const endpoint = "/api/session/rapidapi-keys";
+      for (const key of ["syntheticRapidApiKey000001", "syntheticRapidApiKey000002"]) {
+        expect((await authPost(endpoint, { key }, owner.cookie)).status).toBe(201);
+      }
+      const encrypted = await database.selectFrom("user_rapidapi_keys").selectAll().executeTakeFirstOrThrow();
+      if (failure === "rotated encryption key") {
+        appDependencies.rapidApiKeys = new PostgresRapidApiKeysModule(
+          database, new RapidApiKeyCipher(Buffer.alloc(32, 8).toString("base64")),
+        );
+        app = createApp(appDependencies);
+      } else {
+        const ciphertext = Buffer.from(encrypted.ciphertext);
+        ciphertext[0] = ciphertext[0]! ^ 1;
+        await database.updateTable("user_rapidapi_keys").set({ ciphertext })
+          .where("user_id", "=", encrypted.user_id).execute();
+      }
+      const unreadable = await database.selectFrom("user_rapidapi_keys").selectAll()
+        .where("user_id", "=", encrypted.user_id).executeTakeFirstOrThrow();
+      const log = vi.spyOn(console, "info").mockImplementation(() => {});
+      const listed = await app.request(endpoint, { headers: { cookie: owner.cookie } });
+      expect(listed.status).toBe(200);
+      expect(await listed.json()).toEqual({ keys: [] });
+      expect(log).toHaveBeenCalledTimes(1);
+      for (const position of ["1", "10", "0", "invalid"]) {
+        const removed = await app.request(`${endpoint}/${position}`, {
+          method: "DELETE", headers: { cookie: owner.cookie, origin: "https://app.example.test" },
+        });
+        expect(removed.status).toBe(404);
+        expect(await removed.json()).toMatchObject({ error: { code: "rapidapi_key_not_found" } });
+      }
+      const credentials = appDependencies.rapidApiKeys;
+      const fetch = vi.fn(async () => Response.json({ items: [] }));
+      const provider = new NavitimeRoutesProvider({ keysForRequest: () => credentials.keysForRequest(), fetch });
+      const query = {
+        origin: { placeId: "a", latitude: 34.9858, longitude: 135.7588 },
+        destination: { placeId: "b", latitude: 34.9671, longitude: 135.7727 },
+        departureTime: "2026-10-04T09:00:00+09:00",
+      };
+      const observations = await credentials.withUser(encrypted.user_id,
+        () => Promise.all(Array.from({ length: 5 }, () => provider.observe(query))));
+      for (const result of observations) {
+        expect(result[1]).toMatchObject({ status: "unavailable", reason: "provider_not_configured" });
+        expect(legFor(result, { fromName: "A", toName: "B" }, "transit", 15, 23)).toMatchObject({
+          estimated: true, durationMinutes: 23, unavailableReason: "provider_not_configured",
+        });
+      }
+      expect(fetch).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledTimes(6);
+      expect(await database.selectFrom("user_rapidapi_keys").selectAll()
+        .where("user_id", "=", encrypted.user_id).executeTakeFirstOrThrow()).toEqual(unreadable);
+      const replacement = "syntheticRapidApiKey000003";
+      const added = await authPost(endpoint, { key: replacement }, owner.cookie);
+      expect(added.status).toBe(201);
+      expect(parseRapidApiKeysResponse(await added.json())).toEqual({ keys: [{ position: 1, last4: "0003" }] });
+      const reloaded = await app.request(endpoint, { headers: { cookie: owner.cookie } });
+      expect(reloaded.status).toBe(200);
+      expect(parseRapidApiKeysResponse(await reloaded.json())).toEqual({ keys: [{ position: 1, last4: "0003" }] });
+      await expect(credentials.withUser(encrypted.user_id, () => credentials.keysForRequest())).resolves.toEqual([replacement]);
+      expect(log.mock.calls).toEqual(Array.from({ length: 7 },
+        () => [JSON.stringify({ event: "rapidapi_keys_unreadable", userId: encrypted.user_id })]));
+    },
+  );
+
+  it("keeps concurrent provider requests isolated and reloads keys on the next request", async () => {
+    const users = await database.insertInto("users").values([
+      { email: "keys-a@example.test", display_name: null, status: "active" },
+      { email: "keys-b@example.test", display_name: null, status: "active" },
+    ]).returning("id").execute();
+    const keys = ["syntheticRapidApiKey000001", "syntheticRapidApiKey000002"];
+    const credentials = appDependencies.rapidApiKeys;
+    await credentials.add(users[0]!.id, keys[0]!);
+    await credentials.add(users[1]!.id, keys[1]!);
+    const sent: string[] = [];
+    const provider = new NavitimeRoutesProvider({
+      keysForRequest: () => credentials.keysForRequest(),
+      fetch: async (_url, init) => {
+        sent.push(new Headers(init?.headers).get("X-RapidAPI-Key")!);
+        return Response.json({ items: [] });
+      },
+    });
+    const query = {
+      origin: { placeId: "a", latitude: 34.9858, longitude: 135.7588 },
+      destination: { placeId: "b", latitude: 34.9671, longitude: 135.7727 },
+      departureTime: "2026-10-04T09:00:00+09:00",
+    };
+    await Promise.all(users.map((user) => credentials.withUser(user.id, () => provider.observe(query))));
+    expect(sent.sort()).toEqual(keys);
+    await credentials.remove(users[0]!.id, 1);
+    expect((await credentials.withUser(users[0]!.id, () => provider.observe(query)))[1])
+      .toMatchObject({ status: "unavailable", reason: "provider_not_configured" });
+    expect((await provider.observe(query))[1]).toMatchObject({ reason: "provider_not_configured" });
+    expect(sent).toHaveLength(2);
+  });
+
+  it("reserves exactly fifteen NAVITIME calls per hashed key across users and resets at UTC midnight", async () => {
+    const limiter = new PostgresRateLimiter(database, "test-budget-secret-at-least-thirty-two-bytes", () => new Date(now));
+    const hashA = createHash("sha256").update("syntheticRapidApiKey000001").digest("hex");
+    const hashB = createHash("sha256").update("syntheticRapidApiKey000002").digest("hex");
+    const reserve = (account: string, hash: string) => limiter.withPaidProviderIdentity("198.51.100.4", account,
+      () => limiter.tryConsumePaidProvider("navitime", hash));
+    const results = await Promise.all(Array.from({ length: 18 }, (_, index) => reserve(`account-${index}`, hashA)));
+    expect(results.filter(Boolean)).toHaveLength(15);
+    expect(await reserve("account-0", hashB)).toBe(true);
+    expect(await reserve("account-new", hashA)).toBe(false);
+    now = new Date("2026-09-28T00:00:00Z");
+    expect(await reserve("account-0", hashA)).toBe(true);
+    const windows = await database.selectFrom("rate_limit_windows").select(["scope", "key_hash"]).execute();
+    expect(windows.every((window) => window.scope === "paid_provider:navitime:key")).toBe(true);
+    expect(JSON.stringify(windows)).not.toContain("syntheticRapidApiKey");
+  });
+
+  it("rate limits key management independently of trip content", async () => {
+    const owner = await login("owner@example.test");
+    const user = await database.selectFrom("users").select("id").where("email", "=", "owner@example.test").executeTakeFirstOrThrow();
+    for (let index = 0; index < 3; index++) await appDependencies.rateLimiter.consume("rapidapi_keys", "unknown", user.id, 100);
+    const response = await app.request("/api/session/rapidapi-keys", { headers: { cookie: owner.cookie } });
+    expect(response.status).toBe(429);
+    expect(await response.json()).toMatchObject({ error: { code: "rate_limited" } });
+  });
 
   it.each([
     "http://app.example.test", "http://192.0.2.1", "http://localhost.example.test",

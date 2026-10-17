@@ -29,6 +29,30 @@ describe("a leg travelled the day's way", () => {
     expect(leg).toMatchObject({ mode: null, durationMinutes: null, walkingMinutes: 40, unavailableReason: "no_route" });
   });
 
+  it.each(["provider_not_configured", "quota", "timeout", "provider_unavailable"] as const)
+    ("estimates missing transit for %s without inventing a provider duration", (reason) => {
+      const missing: RouteObservation = {
+        ...observed("transit", null), status: "unavailable", reason,
+        durationMinutes: null, distanceMeters: null, walkingLegMinutes: null,
+      };
+      expect(legFor([observed("walking", 40), missing], names, "transit", 15, 23)).toMatchObject({
+        mode: "transit", durationMinutes: 23, estimated: true, transitMinutes: null,
+        attribution: null, unavailableReason: reason,
+      });
+      expect(legFor([observed("walking", 10), missing], names, "transit", 15, 23)).toMatchObject({
+        mode: "walking", durationMinutes: 10, estimated: false, unavailableReason: null,
+      });
+    });
+
+  it("preserves joined missing-data reasons in an estimate", () => {
+    const missing = (reason: "quota" | "provider_not_configured"): RouteObservation => ({
+      ...observed("transit", null), status: "unavailable", reason,
+      durationMinutes: null, distanceMeters: null, walkingLegMinutes: null,
+    });
+    expect(legFor([missing("quota"), missing("provider_not_configured"), missing("quota")], names, "transit", 15, 23).unavailableReason)
+      .toBe("quota, provider_not_configured");
+  });
+
   it("is a taxi ride: the drive plus time to get a cab, unknown without a drive", () => {
     expect(legFor([observed("drive", 10)], names, "taxi", 15)).toMatchObject({ mode: "taxi", durationMinutes: 15 });
     expect(legFor([observed("drive", null)], names, "taxi", 15)).toMatchObject({ mode: null, durationMinutes: null });

@@ -24,6 +24,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Button } from "@/components/ui/button";
 import { countryStopLabel } from "./country-stop-label";
 import { CreateTripDialog } from "./CreateTripDialog";
+import { RapidApiKeysDialog } from "./RapidApiKeysDialog";
 import { FirstTripOnboarding } from "./FirstTripOnboarding";
 import { LoginExperience, LoginConfirmation, AuthProgress, type AuthProgressPhase } from "./LoginExperience";
 import { auth } from "./locales/zh-TW/auth";
@@ -444,12 +445,13 @@ function TripMembersWorkspace({ trip, currentUser, segment, onChanged, onProfile
   );
 }
 
-function TripSwitcher({ layout, trips, selectedTrip, signedInEmail, openCreateTrip, selectTrip, signOut, signOutEverywhere, signingOutEverywhere }: {
+function TripSwitcher({ layout, trips, selectedTrip, signedInEmail, openCreateTrip, openRapidApiKeys, selectTrip, signOut, signOutEverywhere, signingOutEverywhere }: {
   layout: "mobile" | "desktop";
   trips: TripSummaryDto[];
   selectedTrip: TripDto | null;
   signedInEmail: string;
   openCreateTrip(returnFocus?: HTMLElement | null): void;
+  openRapidApiKeys(returnFocus?: HTMLElement | null): void;
   selectTrip(tripId: string): void;
   signOut(): void;
   signOutEverywhere(): void;
@@ -512,6 +514,11 @@ function TripSwitcher({ layout, trips, selectedTrip, signedInEmail, openCreateTr
         {layout === "mobile" ? (
           <div className="grid gap-2 border-t border-ink/10 pt-4">
             <p className="text-sm text-muted-foreground">{t.app.signedInAs(signedInEmail)}</p>
+            <button type="button" className="min-h-11 w-full rounded-lg border px-4 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={() => {
+              const returnFocus = switcherTrigger.current;
+              setOpen(false);
+              window.requestAnimationFrame(() => openRapidApiKeys(returnFocus));
+            }}>{t.rapidApiKeys.title}</button>
             <button type="button" className="min-h-11 w-full rounded-lg border px-4 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={signOut}>{t.app.signOut}</button>
             <button type="button" className="min-h-11 w-full rounded-lg border border-accent-strong px-4 font-bold text-accent-strong outline-none hover:bg-surface focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={signingOutEverywhere} onClick={() => {
               setOpen(false);
@@ -788,6 +795,8 @@ export function App() {
   const [shellEntering, setShellEntering] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const createDialogReturnFocus = useRef<HTMLElement | null>(null);
+  const [rapidApiKeysOpen, setRapidApiKeysOpen] = useState(false);
+  const rapidApiKeysReturnFocus = useRef<HTMLElement | null>(null);
   const [onboardingFacts, setOnboardingFacts] = useState<OnboardingFacts | null>(null);
   const [createdTripId, setCreatedTripId] = useState<string | null>(null);
   const [placesRevision, setPlacesRevision] = useState(0);
@@ -853,6 +862,22 @@ export function App() {
     setCreateDialogOpen(open);
     if (!open) {
       window.requestAnimationFrame(() => createDialogReturnFocus.current?.focus());
+    }
+  }, []);
+
+  const openRapidApiKeys = useCallback((returnFocus?: HTMLElement | null) => {
+    rapidApiKeysReturnFocus.current = returnFocus instanceof HTMLElement
+      ? returnFocus
+      : document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    setRapidApiKeysOpen(true);
+  }, []);
+
+  const changeRapidApiKeysOpen = useCallback((open: boolean) => {
+    setRapidApiKeysOpen(open);
+    if (!open) {
+      window.requestAnimationFrame(() => rapidApiKeysReturnFocus.current?.focus());
     }
   }, []);
 
@@ -1505,7 +1530,7 @@ export function App() {
       <header className="atw-topbar">
         <div className="atw-topbar-content">
           <div className="min-w-0 flex-1">
-            <TripSwitcher layout="mobile" trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} openCreateTrip={openCreateTrip} selectTrip={selectTrip} signOut={() => void logout()} signOutEverywhere={() => void logoutEverywhere()} signingOutEverywhere={signingOutEverywhere} />
+            <TripSwitcher layout="mobile" trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} openCreateTrip={openCreateTrip} openRapidApiKeys={openRapidApiKeys} selectTrip={selectTrip} signOut={() => void logout()} signOutEverywhere={() => void logoutEverywhere()} signingOutEverywhere={signingOutEverywhere} />
           </div>
           {selectedTrip ? (
             <span
@@ -1521,7 +1546,7 @@ export function App() {
 
       <div className="atw-frame">
         <aside className="atw-rail">
-          <TripSwitcher layout="desktop" trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} openCreateTrip={openCreateTrip} selectTrip={selectTrip} signOut={() => void logout()} signOutEverywhere={() => void logoutEverywhere()} signingOutEverywhere={signingOutEverywhere} />
+          <TripSwitcher layout="desktop" trips={trips} selectedTrip={selectedTrip} signedInEmail={user.email} openCreateTrip={openCreateTrip} openRapidApiKeys={openRapidApiKeys} selectTrip={selectTrip} signOut={() => void logout()} signOutEverywhere={() => void logoutEverywhere()} signingOutEverywhere={signingOutEverywhere} />
           {selectedTrip ? <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} /> : null}
           <div className="mt-2 border-t border-ink/10 pt-4">
             {selectedTrip && liveConnected ? (
@@ -1532,6 +1557,7 @@ export function App() {
             ) : null}
             <p className="atw-wrap-two-lines text-sm text-muted-foreground" title={user.email}>{t.app.signedInAs(user.email)}</p>
             <div className="mt-2 grid gap-2">
+              <button className="min-h-11 w-full rounded-lg border px-4 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={(event) => openRapidApiKeys(event.currentTarget)}>{t.rapidApiKeys.title}</button>
               <button className="min-h-11 w-full rounded-lg border px-4 font-bold outline-none hover:bg-surface-subtle focus:ring-4 focus:ring-focus/30" onClick={() => void logout()}>{t.app.signOut}</button>
               <button className="min-h-11 w-full rounded-lg border border-accent-strong px-4 font-bold text-accent-strong outline-none hover:bg-surface focus:ring-4 focus:ring-focus/30 disabled:opacity-60" disabled={signingOutEverywhere} onClick={() => void logoutEverywhere()}>{signingOutEverywhere ? t.app.signingOutEverywhere : t.app.signOutEverywhere}</button>
             </div>
@@ -1617,6 +1643,7 @@ export function App() {
                       onPlacesChanged={placesChanged}
                       arrangeDate={arrangeDate}
                       onArrangeOpened={() => setArrangeDate(null)}
+                      openRapidApiKeys={() => openRapidApiKeys()}
                       onTravelEdit={(type) => {
                         const segment: ItinerarySegment = type === "flight" ? "flight" : "lodging";
                         selectSegment("itinerary", segment);
@@ -1698,6 +1725,11 @@ export function App() {
         open={createDialogOpen}
         onOpenChange={changeCreateDialogOpen}
         createTrip={createTrip}
+      />
+      <RapidApiKeysDialog
+        open={rapidApiKeysOpen}
+        onOpenChange={changeRapidApiKeysOpen}
+        request={request}
       />
     </main>
   );

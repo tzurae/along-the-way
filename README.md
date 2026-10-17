@@ -15,6 +15,7 @@ This repository currently contains two deliberately separate surfaces:
 ```sh
 cp .env.example .env
 # Replace both database passwords, set TOKEN_SECRET, and set BOOTSTRAP_OWNER_EMAIL.
+# Add CREDENTIALS_ENCRYPTION_KEY: base64 of 32 random bytes (openssl rand -base64 32).
 docker compose --profile local up --detach --build --wait
 ```
 
@@ -292,8 +293,9 @@ null follows the day). Legs back to the lodging use the day's way.
 - 計程車 `taxi`: the drive plus 5 minutes to get a cab.
 - With no transit beyond walking distance the leg is unknown (交通時間查不到);
   a long walk never stands in for it.
-- When transit is missing only because a provider is out of quota, timed out or
-  failed, the leg is a train ride estimated from the straight-line distance
+- When transit is missing because the user has no key (`provider_not_configured`),
+  or a provider is out of quota, timed out or failed, the leg is a train ride
+  estimated from the straight-line distance
   (15 minutes plus 2 per km; walking pace up to 1.2 km), shown as
   「電車約 N 分（估計：交通時間查不到，依直線距離）」 with `unavailableReason`
   kept. A provider that found no route still leaves the leg unknown.
@@ -318,10 +320,12 @@ UTC-day budgets: 900 globally, 450 per account, and 600 per client IP for each
 of Google Routes and Google Places. A week of day planning makes a few
 hundred lookups, so one account may use half of the day's budget: the owner can
 plan, and no other single account can take all of it. Raising the Google quota
-in the Cloud console is the way to give everyone more. NAVITIME's RapidAPI
-BASIC plan allows 500 requests a month per key, so its budget is 15 a day per
-key in total. `RAPIDAPI_KEY` may list several keys separated by commas; they are
-tried in order. Exhaustion prevents the network call. NAVITIME is used only when
+in the Cloud console is the way to give everyone more. Each user who plans
+supplies their own RapidAPI keys subscribed to NAVITIME Route (totalnavi);
+there is no server-wide NAVITIME key. RapidAPI BASIC allows 500 requests a month
+per key, so NAVITIME reserves 15 outbound requests per key per UTC day, keyed by
+a hash, without global/account/IP NAVITIME budgets. Keys are tried in the user's
+saved order. Exhaustion skips that key before the network call. NAVITIME is used only when
 both endpoints are in Japan. After a key answers 429 for its plan quota, the API
 process sends it nothing more until the next UTC day (any other 429: one
 minute) and the same leg goes to the next key.
@@ -334,15 +338,43 @@ The rules, fifteen blind-derived scenarios and open questions are in
 [`docs/day-scheduling-scenarios.md`](docs/day-scheduling-scenarios.md).
 `FAKE_EXTERNAL_DATA=1` (local and browser E2E only) replaces route and
 opening-hours providers with deterministic offline data; never set it in
-production. Automated tests and CI never reach Google or NAVITIME, but a local
-stack with real keys does: give it its own RapidAPI key, never the production
-one, and run browser verification with `FAKE_EXTERNAL_DATA=1` unless real
-routes are what is being verified.
+production. Automated tests, CI and local browser verification must never reach
+real Google or NAVITIME/RapidAPI endpoints. Use `FAKE_EXTERNAL_DATA=1` for browser
+verification and synthetic keys with mocked fetches in tests; never borrow a
+production key for local verification.
 
 A leg asks for transit only after its walk is longer than the walk limit (or
-unknown). The API process remembers each NAVITIME answer (route or no route)
-for 24 hours by endpoints and departure, so redrafting a day reuses it; quota
-refusals and failures are not remembered.
+unknown). NAVITIME answers are never cached across requests (terms article 5(5));
+observation freshness is 15 minutes.
+
+### Per-user RapidAPI credentials (migration 032)
+
+`GET /api/session/rapidapi-keys` returns only
+`{ keys: [{ position: 1, last4: "abcd" }] }`. `POST` to the same path accepts
+`{ key: "..." }` and returns the updated list with status 201.
+`DELETE /api/session/rapidapi-keys/:position` returns the updated list with
+status 200, renumbering the remaining keys; an unknown position returns
+404 `rapidapi_key_not_found`. Every endpoint targets only the session user.
+Mutations use the same same-origin checks and no idempotency-key requirement
+as profile updates. A key must match `^[A-Za-z0-9]{20,100}$`; invalid, duplicate
+or over-limit entries return 400 `validation_error`. At most ten keys are allowed.
+The separate `rapidapi_keys` limiter follows the neighbouring `trip_content`
+limit: 300 requests/account/hour and 600/IP/hour across reads and mutations.
+
+The API requires `CREDENTIALS_ENCRYPTION_KEY`, canonical base64 of exactly 32
+random bytes, independently of `TOKEN_SECRET`; malformed or missing values
+fail startup. The email worker does not require this setting. Migration
+`032_user_rapidapi_keys` is discovered by the existing file migration loader.
+Each user has one encrypted row: UTF-8 comma-joined keys encrypted with
+AES-256-GCM, a fresh random 12-byte nonce per write, and a 16-byte authentication
+tag appended to the ciphertext. Version is 1; authenticated additional data is
+`user_rapidapi_keys:v1:<user_id>`, so copying a row to another user fails authentication.
+Full keys are never returned or logged. Request-local async context binds the
+authenticated user to lazy credential decryption shared only by that request's
+provider calls; no plaintext key or NAVITIME answer is retained across requests.
+The 429 pause map stores only SHA-256 key hashes, and the durable per-key budget
+uses the existing rate limiter's HMAC of that hash. Backups require the same
+encryption key to restore saved credentials.
 
 Flights and lodging are reached from the 行程 navigation: on desktop the rail
 shows 總覽／航班／住宿 under 行程; on mobile the same three appear as a segment

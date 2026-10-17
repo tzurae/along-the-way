@@ -20,6 +20,14 @@ export interface UserTable {
   updated_at: Timestamp;
 }
 
+export interface UserRapidApiKeysTable {
+  user_id: string;
+  ciphertext: Buffer;
+  nonce: Buffer;
+  encryption_key_version: number;
+  updated_at: Timestamp;
+}
+
 export interface MagicLinkTokenTable {
   id: Generated<string>;
   user_id: string;
@@ -489,6 +497,7 @@ export interface CommonsPlacePhotoTable {
 
 export interface AlongTheWayDatabase {
   users: UserTable;
+  user_rapidapi_keys: UserRapidApiKeysTable;
   magic_link_tokens: MagicLinkTokenTable;
   sessions: SessionTable;
   trips: TripTable;

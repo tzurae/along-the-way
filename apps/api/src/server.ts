@@ -9,6 +9,8 @@ import { PostgresDayPlanModule } from "./planning/postgres-day-plan-module";
 import { FakePlaceHours, FakeRouteProvider } from "./planning/fake-route-providers";
 import { PostgresIdentityAccessModule } from "./private-trips/postgres-identity-access-module";
 import { PostgresRateLimiter } from "./private-trips/postgres-rate-limiter";
+import { PostgresRapidApiKeysModule } from "./private-trips/postgres-rapidapi-keys-module";
+import { RapidApiKeyCipher } from "./private-trips/rapidapi-key-cipher";
 import { PostgresReadinessProbe } from "./private-trips/postgres-readiness-probe";
 import { PostgresTripWorkspaceModule } from "./private-trips/postgres-trip-workspace-module";
 import { TokenIssuer } from "./private-trips/token-issuer";
@@ -29,6 +31,7 @@ function requireSetting(name: string) {
 const database = createDatabase(requireDatabaseUrl());
 const siteAddress = requireSetting("SITE_ADDRESS");
 const tokenSecret = requireSetting("TOKEN_SECRET");
+const rapidApiKeys = new PostgresRapidApiKeysModule(database, new RapidApiKeyCipher(requireSetting("CREDENTIALS_ENCRYPTION_KEY")));
 const fakeExternalData = process.env.FAKE_EXTERNAL_DATA === "1";
 const identityAccess = new PostgresIdentityAccessModule({
   database,
@@ -67,8 +70,8 @@ const dayPlans = new PostgresDayPlanModule({
   // NAVITIME first: Google Routes has no transit in Japan.
   routeProviders: fakeExternalData ? [new FakeRouteProvider()] : [
     new NavitimeRoutesProvider({
-      apiKey: process.env.RAPIDAPI_KEY,
-      consumeBudget: (keyCount) => rateLimiter.tryConsumePaidProvider("navitime", keyCount),
+      keysForRequest: () => rapidApiKeys.keysForRequest(),
+      consumeBudget: (keyHash) => rateLimiter.tryConsumePaidProvider("navitime", keyHash),
     }),
     new GoogleRoutesProvider({
       apiKey: process.env.GOOGLE_MAPS_API_KEY,
@@ -90,6 +93,7 @@ const app = createApp({
     photoCapabilitySecret: tokenSecret,
   }),
   rateLimiter,
+  rapidApiKeys,
   readiness,
   siteAddress,
   tripSkeleton,

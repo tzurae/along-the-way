@@ -26,6 +26,8 @@ import { PostgresCollaborationModule } from "../src/private-trips/postgres-colla
 import { replayed } from "../src/private-trips/postgres-private-trip-store";
 import { PostgresIdentityAccessModule } from "../src/private-trips/postgres-identity-access-module";
 import { PostgresRateLimiter } from "../src/private-trips/postgres-rate-limiter";
+import { PostgresRapidApiKeysModule } from "../src/private-trips/postgres-rapidapi-keys-module";
+import { RapidApiKeyCipher } from "../src/private-trips/rapidapi-key-cipher";
 import { PostgresReadinessProbe } from "../src/private-trips/postgres-readiness-probe";
 import { PostgresTripWorkspaceModule } from "../src/private-trips/postgres-trip-workspace-module";
 import { hashToken, TokenIssuer } from "../src/private-trips/token-issuer";
@@ -88,6 +90,7 @@ describe("trip-place must-items through HTTP and PostgreSQL", () => {
     };
     const tripPlaces = new PostgresTripPlaceModule({ database, provider, now });
     app = createApp({
+      rapidApiKeys: new PostgresRapidApiKeysModule(database, new RapidApiKeyCipher(Buffer.alloc(32, 7).toString("base64"))),
       collaboration: new PostgresCollaborationModule(database),
       dayPlans: unrelatedDayPlanModule,
       discovery: unrelatedDiscoveryModule,

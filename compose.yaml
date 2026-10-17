@@ -176,7 +176,7 @@ services:
       GOOGLE_MAPS_API_KEY: "${GOOGLE_MAPS_API_KEY:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENAI_MODEL: "${OPENAI_MODEL:-gpt-5.5}"
-      RAPIDAPI_KEY: "${RAPIDAPI_KEY:-}"
+      CREDENTIALS_ENCRYPTION_KEY: "${CREDENTIALS_ENCRYPTION_KEY:?Set CREDENTIALS_ENCRYPTION_KEY to base64 of 32 random bytes}"
       FAKE_EXTERNAL_DATA: "${FAKE_EXTERNAL_DATA:-}"
     depends_on:
       provision-app-role:

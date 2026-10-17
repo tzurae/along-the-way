@@ -63,6 +63,7 @@ function renderDialog(saved: string[], answer: (body: { order: DayTimetableDto["
       day={{ id: "day21", date: "2026-10-21", label: "第 1 天" }}
       canArrange
       request={request}
+      openRapidApiKeys={() => {}}
       onClose={() => {}}
       onOrderSaved={async () => {}}
       addablePlaces={[]}

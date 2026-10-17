@@ -30,6 +30,8 @@ import {
 } from "@along-the-way/contracts/trip-skeleton";
 
 import { createApp } from "../src/app";
+import { PostgresRapidApiKeysModule } from "../src/private-trips/postgres-rapidapi-keys-module";
+import { RapidApiKeyCipher } from "../src/private-trips/rapidapi-key-cipher";
 import { PostgresPlaceDetailModule } from "../src/place-details/postgres-place-detail-module";
 import { packagedPhotoRoot } from "../src/place-details/photo-assets";
 import { PostgresCollaborationModule } from "../src/private-trips/postgres-collaboration-module";
@@ -378,6 +380,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     hours.consumeBudget = () => rateLimiter.tryConsumePaidProvider("google_places");
     routes.consumeBudget = () => rateLimiter.tryConsumePaidProvider("google_routes");
     app = createApp({
+      rapidApiKeys: new PostgresRapidApiKeysModule(database, new RapidApiKeyCipher(Buffer.alloc(32, 7).toString("base64"))),
       placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
       collaboration,
       dayPlans: new PostgresDayPlanModule({

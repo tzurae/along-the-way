@@ -83,6 +83,7 @@ Add these environment values:
 | Secret | `STAGING_POSTGRES_ADMIN_PASSWORD` | Long URL-safe random value |
 | Secret | `STAGING_APP_DATABASE_PASSWORD` | A different long URL-safe random value |
 | Secret | `STAGING_TOKEN_SECRET` | Random value of at least 32 bytes used to derive one-time tokens |
+| Secret | `STAGING_CREDENTIALS_ENCRYPTION_KEY` | Required canonical base64 of exactly 32 random bytes; separate from `STAGING_TOKEN_SECRET`, encrypts per-user RapidAPI keys (generate with `openssl rand -base64 32`) |
 | Optional variable | `STAGING_SITE_ADDRESS` | A custom `https://` hostname |
 | Variable | `STAGING_BOOTSTRAP_OWNER_EMAIL` | Initial private Beta Owner email |
 | Optional variable | `STAGING_SMTP_HOST` | Gmail SMTP host; defaults to `smtp.gmail.com` |
@@ -95,7 +96,6 @@ Add these environment values:
 | Optional secret | `STAGING_GOOGLE_MAPS_API_KEY` | Server-side Google key with Places API (New) and Routes API enabled; without it place search and Google routes are unavailable |
 | Optional secret | `STAGING_OPENAI_API_KEY` | OpenAI API key for AI 建議; without it AI research is unavailable |
 | Optional variable | `STAGING_OPENAI_MODEL` | OpenAI model ID for AI 建議; defaults to the Compose default when unset |
-| Optional secret | `STAGING_RAPIDAPI_KEY` | RapidAPI key subscribed to NAVITIME Route (totalnavi), or several separated by commas (each on its own plan quota, tried in order); without it Japan transit routes are unavailable |
 
 Get the SSH host key from a trusted Lightsail console session on the instance,
 not from an unauthenticated network scan:
@@ -165,6 +165,14 @@ jitter, writes compressed custom-format `pg_dump` files under
 The backup is on the same server and protects against application/operator
 mistakes, not loss of the instance; enable Lightsail snapshots or encrypted
 off-host copies separately.
+
+Saved per-user RapidAPI credentials are encrypted in database backups. Retain
+the same `CREDENTIALS_ENCRYPTION_KEY` separately and securely for every backup
+you may restore; changing or losing it makes those credentials unreadable.
+Restore that key before starting the API. There is no server-wide NAVITIME key:
+each signed-in user supplies their own subscribed RapidAPI keys. Missing keys,
+quota exhaustion, timeouts and provider outages use explicitly labelled
+straight-line transit estimates; a confirmed no-route stays unknown.
 
 ### Owner action: enable off-instance snapshots
 

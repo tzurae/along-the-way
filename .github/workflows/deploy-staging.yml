@@ -69,6 +69,7 @@ jobs:
           POSTGRES_ADMIN_PASSWORD: ${{ secrets.STAGING_POSTGRES_ADMIN_PASSWORD }}
           APP_DATABASE_PASSWORD: ${{ secrets.STAGING_APP_DATABASE_PASSWORD }}
           TOKEN_SECRET: ${{ secrets.STAGING_TOKEN_SECRET }}
+          CREDENTIALS_ENCRYPTION_KEY: ${{ secrets.STAGING_CREDENTIALS_ENCRYPTION_KEY }}
           CONFIGURED_SITE_ADDRESS: ${{ vars.STAGING_SITE_ADDRESS }}
           BOOTSTRAP_OWNER_EMAIL: ${{ vars.STAGING_BOOTSTRAP_OWNER_EMAIL }}
           SMTP_HOST: ${{ vars.STAGING_SMTP_HOST }}
@@ -81,7 +82,6 @@ jobs:
           GOOGLE_MAPS_API_KEY: ${{ secrets.STAGING_GOOGLE_MAPS_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.STAGING_OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.STAGING_OPENAI_MODEL }}
-          RAPIDAPI_KEY: ${{ secrets.STAGING_RAPIDAPI_KEY }}
         run: |
           site_address="$CONFIGURED_SITE_ADDRESS"
           if [ -z "$site_address" ]; then
@@ -90,6 +90,7 @@ jobs:
           fi
           test -n "$BOOTSTRAP_OWNER_EMAIL"
           test -n "$TOKEN_SECRET"
+          test -n "$CREDENTIALS_ENCRYPTION_KEY"
           smtp_host="${SMTP_HOST:-smtp.gmail.com}"
           smtp_port="${SMTP_PORT:-587}"
           smtp_secure="${SMTP_SECURE:-false}"
@@ -124,10 +125,10 @@ jobs:
             printf 'SMTP_USERNAME=%s\n' "$SMTP_USERNAME"
             printf 'SMTP_PASSWORD=%s\n' "$SMTP_PASSWORD"
             printf 'TOKEN_SECRET=%s\n' "$TOKEN_SECRET"
+            printf 'CREDENTIALS_ENCRYPTION_KEY=%s\n' "$CREDENTIALS_ENCRYPTION_KEY"
             printf 'GOOGLE_MAPS_API_KEY=%s\n' "$GOOGLE_MAPS_API_KEY"
             printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY"
             printf 'OPENAI_MODEL=%s\n' "$OPENAI_MODEL"
-            printf 'RAPIDAPI_KEY=%s\n' "$RAPIDAPI_KEY"
             printf 'RELEASE_IMAGE_TAG=%s\n' "$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           } >"$RUNNER_TEMP/along-the-way.env"
 

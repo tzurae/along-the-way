@@ -15,6 +15,7 @@ export type RateLimitedAction =
   | "trip_invite"
   | "trip_create"
   | "trip_content"
+  | "rapidapi_keys"
   | "place_photo"
   | "place_photo_metadata"
   | "discovery_ai"
@@ -41,6 +42,7 @@ const RULES: Record<RateLimitedAction, Rule> = {
   trip_invite: { windowSeconds: 24 * 60 * 60, ipLimit: 100, accountLimit: 10 },
   trip_create: { windowSeconds: 24 * 60 * 60, ipLimit: 100, accountLimit: 5 },
   trip_content: { windowSeconds: 60 * 60, ipLimit: 600, accountLimit: 300 },
+  rapidapi_keys: { windowSeconds: 60 * 60, ipLimit: 600, accountLimit: 300 },
   place_photo: { windowSeconds: 60 * 60, ipLimit: 1_200, accountLimit: 600 },
   place_photo_metadata: { windowSeconds: 60 * 60, ipLimit: 600, accountLimit: 300 },
   discovery_ai: { windowSeconds: 60 * 60, ipLimit: 6, accountLimit: 10 },
@@ -50,12 +52,10 @@ const RULES: Record<RateLimitedAction, Rule> = {
 // Google: below the project's 1000/day quota. One planning session (a week of days, a few drafts
 // and drops each) makes several hundred lookups, so an account may use half of the day's budget:
 // enough for the owner to plan, while one other account cannot take all of it.
-// NAVITIME: each RapidAPI BASIC key allows 500 requests a month, so about 15 a day per key for
-// everyone; past it, transit legs fall back to a straight-line estimate.
-const PAID_PROVIDER_DAILY_LIMITS: Record<PaidProvider, { global: number; account: number; ip: number }> = {
+// NAVITIME reserves 15 requests per UTC day for each hashed key, not per account or IP.
+const PAID_PROVIDER_DAILY_LIMITS: Record<Exclude<PaidProvider, "navitime">, { global: number; account: number; ip: number }> = {
   google_places: { global: 900, account: 450, ip: 600 },
   google_routes: { global: 900, account: 450, ip: 600 },
-  navitime: { global: 15, account: 15, ip: 15 },
 };
 const PAID_PROVIDER_WINDOW_SECONDS = 24 * 60 * 60;
 const DISCOVERY_AI_REFUSED = Symbol("discovery AI budget refused");
@@ -213,23 +213,25 @@ export class PostgresRateLimiter implements RateLimiter {
   }
 
   /**
-   * Atomically reserves one real outbound request from the UTC-day provider budgets. Each request
-   * consumes global, account and IP capacity together; a refusal rolls all three reservations back.
-   * `quotaShares`: how many separate plan quotas (keys) serve the provider; the budgets scale with it.
+   * Reserves one outbound request per UTC day. NAVITIME has only a per-key budget;
+   * Google reserves global, account and IP capacity atomically.
    */
-  async tryConsumePaidProvider(provider: PaidProvider, quotaShares = 1) {
+  async tryConsumePaidProvider(provider: "navitime", keyHash: string): Promise<boolean>;
+  async tryConsumePaidProvider(provider: Exclude<PaidProvider, "navitime">): Promise<boolean>;
+  async tryConsumePaidProvider(provider: PaidProvider, keyHash?: string) {
     const identity = this.paidProviderIdentity.getStore();
     // Production entrypoints establish the identity in createApp. Fail closed if a new caller does not.
     if (!identity) return false;
     const now = this.now();
     const windowMilliseconds = PAID_PROVIDER_WINDOW_SECONDS * 1_000;
     const windowStart = new Date(Math.floor(now.valueOf() / windowMilliseconds) * windowMilliseconds);
-    const limits = PAID_PROVIDER_DAILY_LIMITS[provider];
-    const attempts = [
-      { scope: `paid_provider:${provider}:global`, key: "global", limit: limits.global * quotaShares },
-      { scope: `paid_provider:${provider}:account`, key: identity.account, limit: limits.account * quotaShares },
-      { scope: `paid_provider:${provider}:ip`, key: identity.clientIp, limit: limits.ip * quotaShares },
-    ];
+    if (provider === "navitime" && !keyHash) return false;
+    const limits = provider === "navitime" ? null : PAID_PROVIDER_DAILY_LIMITS[provider];
+    const attempts = limits ? [
+      { scope: `paid_provider:${provider}:global`, key: "global", limit: limits.global },
+      { scope: `paid_provider:${provider}:account`, key: identity.account, limit: limits.account },
+      { scope: `paid_provider:${provider}:ip`, key: identity.clientIp, limit: limits.ip },
+    ] : [{ scope: "paid_provider:navitime:key", key: keyHash!, limit: 15 }];
     try {
       await this.database.transaction().execute(async (transaction) => {
         for (const attempt of attempts) {

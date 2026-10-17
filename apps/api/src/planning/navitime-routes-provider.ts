@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Temporal } from "@js-temporal/polyfill";
 import type {
   RouteLocation,
@@ -11,23 +12,16 @@ import { isRecord } from "@along-the-way/contracts/private-trips";
 import { inJapan } from "./japan";
 
 interface NavitimeRoutesProviderOptions {
-  /** One RapidAPI key, or several separated by commas, each on its own plan quota. */
-  apiKey?: string;
+  keysForRequest?: () => Promise<readonly string[]>;
   fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   now?: () => Date;
   timeoutMs?: number;
-  /** Reserves one unit immediately before each paid outbound request; given how many keys share the work. */
-  consumeBudget?: (keyCount: number) => Promise<boolean>;
+  /** Reserves one outbound request against this key's hashed daily budget. */
+  consumeBudget?: (keyHash: string) => Promise<boolean>;
 }
 
 const HOST = "navitime-route-totalnavi.p.rapidapi.com";
-/**
- * How long an answer stands. Legs are asked as leaving at the day's start and rail times are
- * averages, so the same request gets the same answer; it is reused for this long instead of asked again.
- */
-const FRESHNESS_MS = 24 * 60 * 60 * 1_000;
-/** Remembered answers kept at most; the oldest is forgotten first. */
-const MAX_REMEMBERED_ANSWERS = 5_000;
+const FRESHNESS_MS = 15 * 60 * 1_000;
 const NANOSECONDS_PER_MINUTE = 60_000_000_000n;
 const DAY_MS = 24 * 60 * 60 * 1_000;
 /** A 429 that is not the plan's quota (a burst limit) holds requests back this long. */
@@ -50,27 +44,18 @@ function validateLocation(value: RouteLocation) {
 }
 
 export class NavitimeRoutesProvider implements RouteObservationProvider {
-  /**
-   * RapidAPI keys, each on its own plan quota, tried in order. `refusedUntil` (ms): the key answered
-   * 429 and is not used before then. The plan quota is monthly with a reset date this API does not
-   * report, so a quota refusal waits for the next UTC day: one request a day finds out whether it
-   * has reset, instead of one per leg being refused.
-   */
-  private readonly keys: Array<{ value: string; refusedUntil: number }>;
+  private readonly keysForRequest: () => Promise<readonly string[]>;
+  /** Only hashes survive a request; a quota refusal pauses until the next UTC day. */
+  private readonly refusedUntil = new Map<string, number>();
+  private readonly probes = new Map<string, Promise<void>>();
+  private readonly confirmedKeys = new Set<string>();
   private readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   private readonly now: () => Date;
   private readonly timeoutMs: number;
-  private readonly consumeBudget: (keyCount: number) => Promise<boolean>;
-  /** Answers by request URL (endpoints and departure): a route, or null when NAVITIME found none. */
-  private readonly answers = new Map<string, {
-    observedAt: Date;
-    route: { durationMinutes: number; distanceMeters: number } | null;
-  }>();
+  private readonly consumeBudget: (keyHash: string) => Promise<boolean>;
 
   constructor(options: NavitimeRoutesProviderOptions = {}) {
-    // RAPIDAPI_KEY may list several keys separated by commas.
-    this.keys = (options.apiKey ?? "").split(",").map((key) => key.trim()).filter(Boolean)
-      .map((value) => ({ value, refusedUntil: 0 }));
+    this.keysForRequest = options.keysForRequest ?? (async () => []);
     this.fetch = options.fetch ?? ((input, init) => fetch(input, init));
     this.now = options.now ?? (() => new Date());
     this.timeoutMs = options.timeoutMs ?? 3_000;
@@ -114,7 +99,6 @@ export class NavitimeRoutesProvider implements RouteObservationProvider {
       return failed("location_unknown");
     }
     if (!inJapan(query.origin) || !inJapan(query.destination)) return failed("unsupported_mode");
-    if (this.keys.length === 0) return failed("provider_not_configured");
     const url = new URL(`https://${HOST}/route_transit`);
     url.searchParams.set("start", `${query.origin.latitude},${query.origin.longitude}`);
     url.searchParams.set("goal", `${query.destination.latitude},${query.destination.longitude}`);
@@ -138,34 +122,56 @@ export class NavitimeRoutesProvider implements RouteObservationProvider {
         ],
       }]
       : [walking, { ...unavailable("transit", "no_route"), ...source("transit", observedAt) }];
-    const cacheKey = url.toString();
-    const known = this.answers.get(cacheKey);
-    if (known && this.now().getTime() < known.observedAt.getTime() + FRESHNESS_MS) return answer(known.route, known.observedAt);
-    const remember = (route: { durationMinutes: number; distanceMeters: number } | null) => {
-      const observedAt = this.now();
-      this.answers.delete(cacheKey);
-      if (this.answers.size >= MAX_REMEMBERED_ANSWERS) this.answers.delete(this.answers.keys().next().value!);
-      this.answers.set(cacheKey, { observedAt, route });
-      return answer(route, observedAt);
-    };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
+      const keys = await this.keysForRequest();
+      if (keys.length === 0) return failed("provider_not_configured");
+      for (const [hash, until] of this.refusedUntil) {
+        if (until <= this.now().getTime()) this.refusedUntil.delete(hash);
+      }
       let response: Response | null = null;
-      for (const key of this.keys) {
-        if (this.now().getTime() < key.refusedUntil) continue;
-        if (!(await this.consumeBudget(this.keys.length))) return failed("quota");
-        const answer = await this.fetch(url, {
-          method: "GET", signal: controller.signal,
-          headers: { "X-RapidAPI-Key": key.value, "X-RapidAPI-Host": HOST },
-        });
-        if (answer.status !== 429) {
-          response = answer;
-          break;
+      for (const key of keys) {
+        const keyHash = createHash("sha256").update(key).digest("hex");
+        // Unconfirmed keys get one probe; waiters re-check the pause it establishes.
+        while (this.probes.has(keyHash)) await this.probes.get(keyHash);
+        controller.signal.throwIfAborted();
+        if (this.now().getTime() < (this.refusedUntil.get(keyHash) ?? 0)) continue;
+        let completeProbe: (() => void) | undefined;
+        if (!this.confirmedKeys.has(keyHash)) {
+          this.probes.set(keyHash, new Promise<void>((resolve) => { completeProbe = resolve; }));
         }
-        const body = await answer.text().catch(() => "");
-        const now = this.now().getTime();
-        key.refusedUntil = /quota/i.test(body) ? (Math.floor(now / DAY_MS) + 1) * DAY_MS : now + RATE_LIMIT_PAUSE_MS;
+        try {
+          if (!(await this.consumeBudget(keyHash))) continue;
+          controller.signal.throwIfAborted();
+          // A previously confirmed concurrent request may have paused this key.
+          if (this.now().getTime() < (this.refusedUntil.get(keyHash) ?? 0)) continue;
+          const answer = await this.fetch(url, {
+            method: "GET", signal: controller.signal,
+            headers: { "X-RapidAPI-Key": key, "X-RapidAPI-Host": HOST },
+          });
+          if (answer.status !== 429) {
+            // An older concurrent success must not undo a newer pause.
+            if (completeProbe && this.now().getTime() >= (this.refusedUntil.get(keyHash) ?? 0)) {
+              this.confirmedKeys.add(keyHash);
+            }
+            response = answer;
+            break;
+          }
+          this.confirmedKeys.delete(keyHash);
+          // Pause immediately, before awaiting the body that distinguishes quota.
+          const now = this.now().getTime();
+          const nextDay = (Math.floor(now / DAY_MS) + 1) * DAY_MS;
+          const burstPause = now + RATE_LIMIT_PAUSE_MS;
+          this.refusedUntil.set(keyHash, Math.max(this.refusedUntil.get(keyHash) ?? 0, Math.min(nextDay, burstPause)));
+          const body = await answer.text().catch(() => "");
+          this.refusedUntil.set(keyHash, Math.max(this.refusedUntil.get(keyHash) ?? 0, /quota/i.test(body) ? nextDay : burstPause));
+        } finally {
+          if (completeProbe) {
+            this.probes.delete(keyHash);
+            completeProbe();
+          }
+        }
       }
       // Every key is out of quota or held back.
       if (!response) return failed("quota");
@@ -177,7 +183,7 @@ export class NavitimeRoutesProvider implements RouteObservationProvider {
         return failed(controller.signal.aborted ? "timeout" : "invalid_response");
       }
       if (!isRecord(value) || !Array.isArray(value.items)) return failed("invalid_response");
-      if (value.items.length === 0) return remember(null);
+      if (value.items.length === 0) return answer(null, this.now());
       if (value.items.length !== 1 || !isRecord(value.items[0])) return failed("invalid_response");
       const route = value.items[0];
       if (!isRecord(route.summary) || !isRecord(route.summary.move)) return failed("invalid_response");
@@ -191,7 +197,7 @@ export class NavitimeRoutesProvider implements RouteObservationProvider {
       if (!Array.isArray(modes) || modes.length === 0 || !modes.every((mode) => typeof mode === "string" && (mode === "walk" || TRANSIT_MODES[mode] === true))) {
         return failed("invalid_response");
       }
-      if (!modes.some((mode) => TRANSIT_MODES[mode] === true)) return remember(null);
+      if (!modes.some((mode) => TRANSIT_MODES[mode] === true)) return answer(null, this.now());
       let durationMinutes: number;
       try {
         const from = Temporal.Instant.from(move.from_time as string);
@@ -205,7 +211,7 @@ export class NavitimeRoutesProvider implements RouteObservationProvider {
       } catch {
         return failed("invalid_response");
       }
-      return remember({ durationMinutes, distanceMeters: move.distance as number });
+      return answer({ durationMinutes, distanceMeters: move.distance as number }, this.now());
     } catch {
       return failed(controller.signal.aborted ? "timeout" : "provider_unavailable");
     } finally {

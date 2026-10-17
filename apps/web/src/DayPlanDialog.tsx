@@ -68,9 +68,9 @@ function minuteOf(value: string) {
 
 const TRAVEL_MODE_LABEL: Record<TravelMode, string> = { transit: "大眾運輸", taxi: "計程車", walk: "盡量走路" };
 const TRAVEL_MODE_NOTE: Record<TravelMode, string> = {
-  transit: "走路 15 分鐘內就走路，其他搭電車或公車；查不到大眾運輸的路段會標成查不到，不會改成走很久。",
+  transit: "走路 15 分鐘內就走路，其他搭電車或公車；查不到大眾運輸時間的路段會改用直線距離估算，可能與實際差很多。",
   taxi: `每段都算計程車車程，再多留 ${TAXI_BUFFER_MINUTES} 分鐘等車。`,
-  walk: "在上限內走路，超過就搭大眾運輸；查不到大眾運輸的路段會標成查不到。",
+  walk: "在上限內走路，超過就搭大眾運輸；查不到大眾運輸時間的路段會改用直線距離估算，可能與實際差很多。",
 };
 
 const placedIds = (version: DayTimetableDto) =>
@@ -84,9 +84,6 @@ function dayEnd(version: DayTimetableDto) {
   return ends.length ? Math.max(...ends) : null;
 }
 
-/** A walk stands in for a train time that could not be found. */
-const walkEstimated = (version: DayTimetableDto) => version.rows.some((row) =>
-  row.kind !== "start" && row.travel?.mode === "walking" && row.travel.transitMinutes === null && (row.travel.durationMinutes ?? 0) > 15);
 
 /** Color follows meaning, never the sign: worse travel is amber, a dropped place red, the member's own choices neutral. */
 type Tone = "good" | "warn" | "bad" | "neutral";
@@ -121,7 +118,8 @@ function compareToSaved(candidate: DayTimetableDto, saved: DayTimetableDto, name
     return notes;
   }
   const sum = (values: Array<number | null>) => values.reduce<number>((total, value) => total + (value ?? 0), 0);
-  const estimated = walkEstimated(candidate) || walkEstimated(saved);
+  const estimated = [candidate, saved].some((version) => version.rows.some((row) =>
+    row.kind !== "start" && row.travel !== null && row.travel.mode === "transit" && row.travel.unavailableReason !== null));
   const mark = estimated ? "（估）" : "";
   // An estimate never looks certain: an estimated difference is shown without a good/worse color.
   const judged = (delta: number): Tone => (estimated ? "neutral" : delta < 0 ? "good" : "warn");
@@ -157,6 +155,7 @@ export function DayPlanDialog({
   coordinates,
   stays,
   onClose,
+  openRapidApiKeys,
   onOrderSaved,
 }: {
   tripId: string;
@@ -171,6 +170,7 @@ export function DayPlanDialog({
   /** Each place's stay as the scheduler counts it, shown in 待選區 and used in the drag estimate. */
   stays: Map<string, PlaceStay>;
   onClose(): void;
+  openRapidApiKeys(): void;
   onOrderSaved(): Promise<void>;
 }) {
   const { t } = useI18n();
@@ -682,7 +682,7 @@ export function DayPlanDialog({
   const unknownLegCount = shown?.rows.filter((row) =>
     row.kind !== "start" && row.travel?.durationMinutes === null).length ?? 0;
   const estimatedLegCount = shown?.rows.filter((row) =>
-    row.kind !== "start" && row.travel?.mode === "walking" && row.travel.transitMinutes === null && (row.travel.durationMinutes ?? 0) > 15).length ?? 0;
+    row.kind !== "start" && row.travel !== null && row.travel.mode === "transit" && row.travel.unavailableReason !== null).length ?? 0;
 
   /**
    * Plain-language account of the day's room, from the scheduler's own capacity facts: what fixes
@@ -814,9 +814,6 @@ export function DayPlanDialog({
               <li key={note.text} className={`route-compare-${note.tone}`}>{note.text}</li>
             ))}
           </ul>
-          {estimatedLegCount > 0 && view === "candidate" ? (
-            <p className="route-diff-estimate">{`交通時間未取得；其中 ${estimatedLegCount} 段暫以步行估算。`}</p>
-          ) : null}
         </div>
         {arranged ? (
           <button type="button" className="route-link-button route-reset" disabled={busy !== null} onClick={() => {
@@ -983,6 +980,17 @@ export function DayPlanDialog({
                 </span>
               </div>
             </section>
+
+            {estimatedLegCount > 0 ? (
+              <aside className="route-unknown">
+                <TriangleAlert aria-hidden="true" />
+                <p>
+                  {`有 ${estimatedLegCount} 段交通時間是依直線距離估算，可能與實際差很多（例：估約 27 分，實際 68 分）。要精確時間，請到`}
+                  <button type="button" className="route-link-button text-sm" onClick={openRapidApiKeys}>〈交通時間金鑰〉</button>
+                  新增你自己的 NAVITIME key。
+                </p>
+              </aside>
+            ) : null}
 
             {unknownLegCount > 0 ? (
               <aside className="route-unknown">

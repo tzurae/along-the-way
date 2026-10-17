@@ -134,6 +134,7 @@ describe("owner-only schedule surfaces", () => {
       tripId: "A",
       day: { id: "day21", date: "2026-10-21", label: "第 1 天" },
       request,
+      openRapidApiKeys: () => {},
       onClose: () => {},
       onOrderSaved: async () => {},
       addablePlaces: [],
@@ -171,6 +172,7 @@ describe("owner-only schedule surfaces", () => {
         day={{ id: "day21", date: "2026-10-21", label: "第 1 天" }}
         canArrange
         request={request}
+        openRapidApiKeys={() => {}}
         onClose={() => {}}
         onOrderSaved={async () => {}}
         addablePlaces={[]}
@@ -266,6 +268,7 @@ describe("owner-only schedule surfaces", () => {
       placesRevision: 0,
       onPlacesChanged: () => {},
       onTravelEdit: () => {},
+      openRapidApiKeys: () => {},
     };
     const { rerender } = render(
       <TripSkeletonWorkspace {...props} trip={{ ...ownerTrip, role: "editor" }} />,
