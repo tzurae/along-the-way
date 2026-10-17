@@ -49,13 +49,13 @@ const RULES: Record<RateLimitedAction, Rule> = {
   route_planning: { windowSeconds: 60 * 60, ipLimit: 600, accountLimit: 300 },
 };
 
-// Google: below the project's 1000/day quota. One planning session (a week of days, a few drafts
-// and drops each) makes several hundred lookups, so an account may use half of the day's budget:
-// enough for the owner to plan, while one other account cannot take all of it.
+// Google budgets match the Cloud project's own daily quotas (owner's choice): Places GetPlace 1000,
+// Routes ComputeRoutes 2000. The project is shared with other environments, whose use these
+// counters do not see; past the project quota Google refuses with 429.
 // NAVITIME reserves 15 requests per UTC day for each hashed key, not per account or IP.
 const PAID_PROVIDER_DAILY_LIMITS: Record<Exclude<PaidProvider, "navitime">, { global: number; account: number; ip: number }> = {
-  google_places: { global: 900, account: 450, ip: 600 },
-  google_routes: { global: 900, account: 450, ip: 600 },
+  google_places: { global: 1000, account: 1000, ip: 1000 },
+  google_routes: { global: 2000, account: 2000, ip: 2000 },
 };
 const PAID_PROVIDER_WINDOW_SECONDS = 24 * 60 * 60;
 const DISCOVERY_AI_REFUSED = Symbol("discovery AI budget refused");

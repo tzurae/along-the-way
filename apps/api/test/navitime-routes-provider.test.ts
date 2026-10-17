@@ -244,6 +244,35 @@ describe("NAVITIME route observation adapter", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("moves past a key RapidAPI rejects and stops sending to it for a while", async () => {
+    let now = NOW;
+    const sent: string[] = [];
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const key = (init?.headers as Record<string, string>)["X-RapidAPI-Key"]!;
+      sent.push(key);
+      return key === "syntheticUnsubscribed"
+        ? Response.json({ message: "You are not subscribed to this API." }, { status: 403 })
+        : Response.json({ items: [route] });
+    });
+    const provider = new NavitimeRoutesProvider({
+      keysForRequest: async () => ["syntheticUnsubscribed", "syntheticKeyB"], now: () => now, fetch,
+    });
+    expect((await provider.observe(query))[1]).toMatchObject({ status: "available" });
+    expect((await provider.observe(query))[1]).toMatchObject({ status: "available" });
+    expect(sent).toEqual(["syntheticUnsubscribed", "syntheticKeyB", "syntheticKeyB"]);
+    now = new Date(NOW.getTime() + 10 * 60 * 1_000);
+    await provider.observe(query);
+    expect(sent.at(-2)).toBe("syntheticUnsubscribed");
+  });
+
+  it("reports the provider unavailable, not out of quota, when every key is rejected", async () => {
+    const provider = new NavitimeRoutesProvider({
+      keysForRequest: async () => ["syntheticRevoked"], now: () => NOW,
+      fetch: async () => Response.json({ message: "Invalid API key." }, { status: 401 }),
+    });
+    expect((await provider.observe(query))[1]).toMatchObject({ status: "unavailable", reason: "provider_unavailable" });
+  });
+
   it("retains total elapsed time rather than summing sections and marks average travel times", async () => {
     const observations = await providerWithResponse({ items: [route] }).observe(query);
     expect(observations[0]).toMatchObject({

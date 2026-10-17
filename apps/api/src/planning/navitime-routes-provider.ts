@@ -26,6 +26,8 @@ const NANOSECONDS_PER_MINUTE = 60_000_000_000n;
 const DAY_MS = 24 * 60 * 60 * 1_000;
 /** A 429 that is not the plan's quota (a burst limit) holds requests back this long. */
 const RATE_LIMIT_PAUSE_MS = 60 * 1_000;
+/** A key RapidAPI rejects (401/403: revoked, or not subscribed to this API) is skipped this long. */
+const REJECTED_KEY_PAUSE_MS = 10 * 60 * 1_000;
 const TRANSIT_MODES: Record<string, true> = {
   domestic_flight: true, ferry: true, superexpress_train: true, sleeper_ultraexpress: true,
   ultraexpress_train: true, express_train: true, rapid_train: true, semiexpress_train: true,
@@ -131,6 +133,7 @@ export class NavitimeRoutesProvider implements RouteObservationProvider {
         if (until <= this.now().getTime()) this.refusedUntil.delete(hash);
       }
       let response: Response | null = null;
+      let rejected = false;
       for (const key of keys) {
         const keyHash = createHash("sha256").update(key).digest("hex");
         // Unconfirmed keys get one probe; waiters re-check the pause it establishes.
@@ -150,7 +153,7 @@ export class NavitimeRoutesProvider implements RouteObservationProvider {
             method: "GET", signal: controller.signal,
             headers: { "X-RapidAPI-Key": key, "X-RapidAPI-Host": HOST },
           });
-          if (answer.status !== 429) {
+          if (answer.status !== 429 && answer.status !== 401 && answer.status !== 403) {
             // An older concurrent success must not undo a newer pause.
             if (completeProbe && this.now().getTime() >= (this.refusedUntil.get(keyHash) ?? 0)) {
               this.confirmedKeys.add(keyHash);
@@ -159,6 +162,11 @@ export class NavitimeRoutesProvider implements RouteObservationProvider {
             break;
           }
           this.confirmedKeys.delete(keyHash);
+          if (answer.status !== 429) {
+            rejected = true;
+            this.refusedUntil.set(keyHash, Math.max(this.refusedUntil.get(keyHash) ?? 0, this.now().getTime() + REJECTED_KEY_PAUSE_MS));
+            continue;
+          }
           // Pause immediately, before awaiting the body that distinguishes quota.
           const now = this.now().getTime();
           const nextDay = (Math.floor(now / DAY_MS) + 1) * DAY_MS;
@@ -173,8 +181,8 @@ export class NavitimeRoutesProvider implements RouteObservationProvider {
           }
         }
       }
-      // Every key is out of quota or held back.
-      if (!response) return failed("quota");
+      // Every key is out of quota, rejected or held back.
+      if (!response) return failed(rejected ? "provider_unavailable" : "quota");
       if (!response.ok) return failed("provider_unavailable");
       let value: unknown;
       try {

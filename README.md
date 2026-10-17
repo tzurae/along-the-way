@@ -316,10 +316,11 @@ the arrangement writer so saved large days remain editable. Timetable and
 whole-trip planning consume `route_planning` units equal to the number of stops
 or candidates (at most 100 units per request), per account and client IP.
 Every actual outbound request also atomically reserves from provider-specific
-UTC-day budgets: 900 globally, 450 per account, and 600 per client IP for each
-of Google Routes and Google Places. A week of day planning makes a few
-hundred lookups, so one account may use half of the day's budget: the owner can
-plan, and no other single account can take all of it. Raising the Google quota
+UTC-day budgets that match the Cloud project's own daily quotas: Google Places
+1000 and Google Routes (walking and driving) 2000, each globally, per account
+and per client IP. The project is shared with other environments whose use
+these counters do not see; past the project quota Google answers 429
+regardless. Raising the Google quota
 in the Cloud console is the way to give everyone more. Each user who plans
 supplies their own RapidAPI keys subscribed to NAVITIME Route (totalnavi);
 there is no server-wide NAVITIME key. RapidAPI BASIC allows 500 requests a month
