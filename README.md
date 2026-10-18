@@ -156,24 +156,28 @@ commands, persistent data, and rollback are documented in
 Pocket-list, discovery and Today previews return only curated or Commons photos;
 they never request Google photo metadata or media. Detail pages show the first available of:
 
-1. **Curated photos**: packaged, individually reviewed Wikimedia Commons works with
-   per-work attribution, licence/version, verification revision and derivative notices.
-2. **Commons representative photo** (#121): when a Google place is added, its Google
-   Maps CID (from `googleMapsUri`) is looked up once on Wikidata (`P3749`). Only when
-   exactly one item matches, that item has a representative image (`P18`), and the
-   work is CC0, CC BY or CC BY-SA, the API downloads Commons' 1280px and 330px
-   renditions into PostgreSQL (`place_photo_blobs`, `commons_place_photos`). Reads
-   never contact Wikimedia. Any other outcome, including a Wikimedia failure,
-   leaves only the detail page eligible for Google fallback; the CID is not stored.
-3. **Google Places photos**, fetched only for details because Google's terms forbid
-   storing them. Signed, user-bound photo resource URLs let the image route fetch
-   media directly without a second GetPlace call. Detail responses use `Vary: Cookie`.
+1. **Google Places photos**: provider-backed places request up to two photos for the
+   detail gallery because Google's terms forbid storing them. Signed, user-bound
+   photo resource URLs let the image route fetch media directly without a second
+   GetPlace call. Detail responses use `Vary: Cookie`.
+2. **Curated photos**: when Google returns no photos, fails or is rate-limited, use
+   packaged, individually reviewed Wikimedia Commons works with per-work attribution,
+   licence/version, verification revision and derivative notices.
+3. **Commons representative photo** (#121): when the Google and curated sources above
+   yield no photo, use the stored representative photo. When a Google place is added,
+   its Google Maps CID (from `googleMapsUri`) is looked up once on Wikidata (`P3749`).
+   Only when exactly one item matches, that item has a representative image (`P18`),
+   and the work is CC0, CC BY or CC BY-SA, the API downloads Commons' 1280px and
+   330px renditions into PostgreSQL (`place_photo_blobs`, `commons_place_photos`).
+   Reads never contact Wikimedia; misses and Wikimedia failures do not store the CID.
 
 Name and coordinate searches also produce Commons candidates (see below). Every
 place without a Commons photo automatically takes the nearest name-related
 licensed P18 work, or otherwise the nearest licensed P18 work within 1 km.
-A list row without a photo shows its place-type icon. Detail fallback failures show
-「照片暫時無法載入」 (`photosUnavailable`) rather than claiming the place has no photos.
+A list row without a photo shows its place-type icon. `photosUnavailable` is true
+only when the Google lookup failed and neither curated nor Commons fallback exists;
+showing either fallback keeps it false. A failed or rate-limited Google lookup still
+makes the detail response `private, no-store`, so a temporary failure is not cached.
 Gallery loading uses a shimmer and thumbnail blur-up; initial lists use `PlaceListSkeleton`.
 
 ### Lists and must-items (#123)

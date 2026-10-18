@@ -928,7 +928,7 @@ export function createApp({
       date,
       includeGooglePhoto,
     ));
-    context.header("Cache-Control", result.detail.photosUnavailable ? "private, no-store" : "private, max-age=3600");
+    context.header("Cache-Control", result.googleFallbackFailed ? "private, no-store" : "private, max-age=3600");
     // Google photo URLs are signed for this user; another member in the same browser must not reuse them.
     context.header("Vary", "Cookie");
     return context.json({ detail: result.detail });

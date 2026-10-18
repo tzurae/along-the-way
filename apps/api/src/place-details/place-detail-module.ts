@@ -7,6 +7,7 @@ import type {
 
 export interface PlaceDetailReadResult {
   detail: PlaceDetailDto;
+  googleFallbackFailed: boolean;
 }
 
 export interface PlacePreviewReadResult {

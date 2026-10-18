@@ -86,21 +86,22 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
           .where("place_id", "=", place!.canonicalPlaceId).executeTakeFirst()
       : undefined;
     if (!content) {
-      const commons = place!.canonicalPlaceId ? (await this.commonsPhotos([place!.canonicalPlaceId])).get(place!.canonicalPlaceId) : undefined;
-      if (commons) {
-        return { detail: {
-          ...empty,
-          photos: [this.photoDto(tripId, reference, commons, "commons")],
-        } };
-      }
-      const fallback = includeGooglePhoto
+      const google = includeGooglePhoto && place!.providerPlaceId !== null
         ? await this.googlePhotos(userId, tripId, place!.providerPlaceId)
-        : { photos: [], failed: place!.providerPlaceId !== null };
+        : { photos: [], failed: !includeGooglePhoto && place!.providerPlaceId !== null };
+      const commons = google.photos.length === 0 && place!.canonicalPlaceId
+        ? (await this.commonsPhotos([place!.canonicalPlaceId])).get(place!.canonicalPlaceId)
+        : undefined;
+      const photos = commons
+        ? [this.photoDto(tripId, reference, commons, "commons")]
+        : [];
       return {
+        googleFallbackFailed: google.failed,
         detail: {
           ...empty,
-          googlePhotos: fallback.photos,
-          photosUnavailable: fallback.failed,
+          photos,
+          googlePhotos: google.photos,
+          photosUnavailable: google.failed && photos.length === 0,
         },
       };
     }
@@ -115,15 +116,18 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
       || (date !== null && source.validFrom !== null && date < source.validFrom)
       || (date !== null && source.validUntil !== null && date > source.validUntil),
     ).map((source) => source.id));
-    const curatedPhotos = curated.photos.map((photo) => this.photoDto(tripId, reference, photo, "curated"));
-    const commons = curatedPhotos.length === 0 ? (await this.commonsPhotos([place!.canonicalPlaceId!])).get(place!.canonicalPlaceId!) : undefined;
+    const google = includeGooglePhoto && place!.providerPlaceId !== null
+      ? await this.googlePhotos(userId, tripId, place!.providerPlaceId)
+      : { photos: [], failed: !includeGooglePhoto && place!.providerPlaceId !== null };
+    const curatedPhotos = google.photos.length === 0
+      ? curated.photos.map((photo) => this.photoDto(tripId, reference, photo, "curated"))
+      : [];
+    const commons = curatedPhotos.length === 0 && google.photos.length === 0
+      ? (await this.commonsPhotos([place!.canonicalPlaceId!])).get(place!.canonicalPlaceId!)
+      : undefined;
     const photos = commons ? [this.photoDto(tripId, reference, commons, "commons")] : curatedPhotos;
-    const fallback = photos.length === 0
-      ? includeGooglePhoto
-        ? await this.googlePhotos(userId, tripId, place!.providerPlaceId)
-        : { photos: [], failed: place!.providerPlaceId !== null }
-      : null;
     return {
+      googleFallbackFailed: google.failed,
       detail: {
         ...empty,
         sources: curated.sources,
@@ -131,8 +135,8 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
           ...block, needsRecheck: block.sourceIds.some((id) => staleIds.has(id)),
         })) })),
         photos,
-        googlePhotos: fallback?.photos ?? [],
-        photosUnavailable: fallback?.failed ?? false,
+        googlePhotos: google.photos,
+        photosUnavailable: google.failed && photos.length === 0,
       },
     };
   }
@@ -324,7 +328,8 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
       return { photos: [], failed: true };
     }
     try {
-      const photos = (await this.provider.getPhotos(providerPlaceId)).slice(0, 3);
+      // Owner decision 2026-10-18: the detail gallery shows at most two Google photos.
+      const photos = (await this.provider.getPhotos(providerPlaceId)).slice(0, 2);
       return {
         photos: photos.map((photo, index) =>
           googlePlacePhotoDto(
