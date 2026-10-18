@@ -492,11 +492,13 @@
 .today-pagehead h2 { font-family: var(--font-display); font-size: 26px; font-weight: 700; line-height: 1.2; letter-spacing: -.015em; text-wrap: balance; }
 .today-pagehead > div > p { margin-top: 5px; color: var(--muted-foreground); font-size: 13px; line-height: 1.4; }
 .today-headnav { width: min(100%, 320px); min-width: 0; }
-.today-dayrow { display: grid; grid-template-columns: 70px minmax(0, 1fr) 70px; gap: 8px; align-items: center; }
-.today-dayrow button, .today-dayrow select { width: 100%; height: 44px; min-width: 0; border: 1px solid var(--border); border-radius: 14px; background: var(--card); }
-.today-dayrow button { display: flex; align-items: center; justify-content: center; gap: 4px; padding: 0 6px; font-size: 12px; font-weight: 700; line-height: 1; white-space: nowrap; }
-.today-dayrow button:disabled { opacity: .38; }
-.today-dayrow select { overflow: hidden; font-size: 14px; font-weight: 700; text-overflow: ellipsis; }
+/* Option D: one light row — quiet text arrows either side of the date, no boxes. */
+.today-dayrow { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 4px; align-items: center; }
+.today-dayrow button, .today-dayrow select { width: 100%; height: 44px; min-width: 0; border: 0; border-radius: 12px; background: transparent; }
+.today-dayrow button { display: flex; align-items: center; justify-content: center; gap: 4px; padding: 0 8px; color: var(--muted-foreground); font-size: 13px; font-weight: 600; line-height: 1; white-space: nowrap; }
+.today-dayrow button:hover:not(:disabled) { color: var(--color-ink); background: color-mix(in srgb, var(--color-ink) 6%, transparent); }
+.today-dayrow button:disabled { opacity: .3; }
+.today-dayrow select { overflow: hidden; font-size: 16px; font-weight: 700; text-align: center; text-align-last: center; text-overflow: ellipsis; }
 .today-zone { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 5px 2px 0; color: var(--muted-foreground); font-size: 12px; }
 .today-zone > span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
 .today-zone button { min-height: 32px; flex: none; font-weight: 600; white-space: nowrap; }
@@ -677,9 +679,9 @@ span.today-sync-status { flex: none; font-weight: 600; white-space: nowrap; }
   .today-pagehead h2 { font-size: 21px; }
   .today-pagehead > div > p { display: none; }
   .today-headnav { width: 300px; flex: none; }
-  .today-dayrow { grid-template-columns: 66px minmax(0, 1fr) 66px; gap: 6px; }
-  .today-dayrow button, .today-dayrow .native-select > select { height: 38px; min-height: 38px; }
-  .today-dayrow button { padding-inline: 4px; }
+  .today-dayrow { gap: 2px; }
+  .today-dayrow button, .today-dayrow .native-select > select { height: 40px; min-height: 40px; }
+  .today-dayrow button { padding-inline: 6px; }
   .today-zone { margin-top: 2px; }
   .today-notice { margin-bottom: 6px; padding: 5px 9px; gap: 7px; font-size: 12px; line-height: 1.25; }
   .today-notice p { display: none; }
