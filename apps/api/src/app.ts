@@ -54,12 +54,14 @@ import {
   parsePlacePreviewIds,
 } from "@along-the-way/contracts/place-details";
 import type { PlaceDetailModule } from "./place-details/place-detail-module";
+import type { CommonsCandidateModule } from "./place-details/commons-photo-candidates";
 
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
 export interface AppDependencies {
   collaboration: PostgresCollaborationModule;
   dayPlans: DayPlanModule;
+  commonsCandidates?: CommonsCandidateModule;
   discovery: DiscoveryModule;
   identityAccess: IdentityAccessModule;
   mapsConfig?: MapsConfigResponse;
@@ -360,6 +362,7 @@ async function jsonBody(context: Context) {
 
 export function createApp({
   collaboration,
+  commonsCandidates,
   dayPlans,
   discovery,
   identityAccess,
@@ -746,6 +749,57 @@ export function createApp({
     });
   });
 
+  app.get("/api/trips/:tripId/commons-candidates", async (context) => {
+    const { user } = await authenticated(context);
+    if (!commonsCandidates) throw new AppError("service_unavailable", "Commons candidate review is unavailable", 503);
+    const candidates = await commonsCandidates.list(user.id, uuidParam(context, "tripId"));
+    context.header("Cache-Control", "private, no-store");
+    return context.json({ candidates });
+  });
+
+  app.post("/api/trips/:tripId/commons-candidates/:candidateId/decision", async (context) => {
+    const { user } = await authenticated(context);
+    if (!commonsCandidates) throw new AppError("service_unavailable", "Commons candidate review is unavailable", 503);
+    const body = await jsonBody(context);
+    const decision = stringField(body, "decision");
+    if (decision !== "confirm" && decision !== "reject") {
+      throw new AppError("validation_error", "decision must be confirm or reject");
+    }
+    return context.json(await commonsCandidates.decide(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "candidateId"),
+      decision,
+    ));
+  });
+
+  app.post("/api/trips/:tripId/trip-places/:tripPlaceId/commons-photo/report", async (context) => {
+    const { user } = await authenticated(context);
+    if (!commonsCandidates) throw new AppError("service_unavailable", "Commons candidate review is unavailable", 503);
+    return context.json(await commonsCandidates.report(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "tripPlaceId"),
+    ));
+  });
+
+  app.get("/api/trips/:tripId/commons-candidates/:candidateId/assets/:filename", async (context) => {
+    const { user } = await authenticated(context);
+    if (!commonsCandidates) throw new AppError("service_unavailable", "Commons candidate review is unavailable", 503);
+    const asset = await commonsCandidates.getAsset(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "candidateId"),
+      context.req.param("filename"),
+    );
+    return new Response(asset.bytes, { headers: {
+      "Content-Type": asset.mediaType,
+      "Content-Length": String(asset.bytes.byteLength),
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+    } });
+  });
+
   app.get("/api/trips/:tripId/place-details", async (context) => {
     const { user } = await authenticated(context);
     let reference;
@@ -771,8 +825,9 @@ export function createApp({
       date,
       includeGooglePhoto,
     ));
-    context.header("Cache-Control",
-      includeGooglePhoto && !result.googleFallbackFailed ? "private, max-age=3600" : "private, no-store");
+    context.header("Cache-Control", result.detail.photosUnavailable ? "private, no-store" : "private, max-age=3600");
+    // Google photo URLs are signed for this user; another member in the same browser must not reuse them.
+    context.header("Vary", "Cookie");
     return context.json({ detail: result.detail });
   });
 
@@ -786,22 +841,13 @@ export function createApp({
     } catch {
       throw new AppError("validation_error", "Invalid place preview references");
     }
-    let includeGooglePhoto = true;
-    try {
-      await rateLimiter.consume("place_photo_metadata", clientIp(context), user.id, ids.length);
-    } catch (error) {
-      if (!(error instanceof AppError) || error.code !== "rate_limited") throw error;
-      includeGooglePhoto = false;
-    }
-    const result = await withPaidProviderIdentity(context, user.id, () => placeDetails.getPreviews(
+    const result = await placeDetails.getPreviews(
       user.id,
       uuidParam(context, "tripId"),
       kind,
       ids,
-      includeGooglePhoto,
-    ));
-    context.header("Cache-Control",
-      includeGooglePhoto && !result.googleFallbackFailed ? "private, max-age=3600" : "private, no-store");
+    );
+    context.header("Cache-Control", "private, max-age=3600");
     return context.json({ previews: result.previews });
   });
 
@@ -842,6 +888,7 @@ export function createApp({
       context.req.param("providerPlaceId"),
       index,
       context.req.query("photo") ?? "",
+      context.req.query("resource") ?? "",
       maxWidth,
       context.req.query("exp") ?? null,
       context.req.query("sig") ?? null,

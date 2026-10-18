@@ -2,6 +2,7 @@ import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   CalendarCheck,
   CalendarClock,
+  ChevronRight,
   CalendarPlus,
   Check,
   CircleAlert,
@@ -26,6 +27,13 @@ import {
   type TripPlaceDto,
   type UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
+import {
+  parseCommonsCandidatesResponse,
+  type CommonsCandidateDecisionInput,
+  type CommonsCandidateDto,
+  type CommonsCandidatesResponse,
+  type PlacePhotoDto,
+} from "@along-the-way/contracts/place-details";
 import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./ConflictPanel";
 import { ApiRequestError } from "./api-error";
 import { PLACE_TYPES, type PlaceType } from "@along-the-way/contracts/trip-skeleton";
@@ -39,6 +47,7 @@ import { VoteControl, VoteVoters } from "./VoteControl";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews } from "./PlaceThumbnail";
 import { PlaceListRow } from "./PlaceListRow";
+import { PlaceListSkeleton } from "./PlaceListSkeleton";
 import { RowMenu } from "./RowMenu";
 import { PlaceFilterBar, PlaceFilterEmpty, placeArea, usePlaceFilters } from "./PlaceFilters";
 import { canArrangeItinerary } from "./trip-permissions";
@@ -50,6 +59,7 @@ import { SchedulePlacesSheet } from "./SchedulePlacesSheet";
 import { SelectionBar } from "./SelectionBar";
 import { useScheduleToast } from "./ScheduleToast";
 import { assignPlacesToDay } from "./schedule-assignments";
+import { CommonsCandidateReviewSheet } from "./CommonsCandidateReviewSheet";
 import "./pocket-discovery.css";
 import {
   Dialog,
@@ -404,7 +414,7 @@ function AddPlacePanel({
               const isPending = pendingProviderPlaceId === candidate.providerPlaceId;
               return (
                 <li key={candidate.providerPlaceId}>
-                  <PlaceThumbnail photo={candidate.photo} />
+                  <PlaceThumbnail photo={candidate.photo} placeType={candidate.type} />
                   <span className="pd-result-copy">
                     <span className="pd-result-title"><strong>{candidate.name}</strong>{candidate.typeLabel ? <span className="pd-result-type">· {candidate.typeLabel}</span> : null}</span>
                     <small>{candidate.address ?? t.add.addressUnavailable}</small>
@@ -619,8 +629,19 @@ export function TripPlaceWorkspace({
   const [mergeConfirmation, setMergeConfirmation] = useState<{ source: TripPlaceDto; target: TripPlaceDto } | null>(null);
   const [merging, setMerging] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const candidateReadGeneration = useRef(0);
+  const candidateReadInFlight = useRef<Promise<void> | null>(null);
+  const candidateRefreshTimer = useRef<number | null>(null);
+  const [commonsCandidates, setCommonsCandidates] = useState<CommonsCandidateDto[]>([]);
+  const [candidateReviewOpen, setCandidateReviewOpen] = useState(false);
+  const [candidateReviewPlaceId, setCandidateReviewPlaceId] = useState<string | null>(null);
+  const [candidatePhotoRevision, setCandidatePhotoRevision] = useState(0);
+  const [confirmedCandidatePhotos, setConfirmedCandidatePhotos] = useState<Map<string, PlacePhotoDto>>(() => new Map());
+
 
   const canSchedule = canArrangeItinerary(trip);
+  // Pocket-place mutations are available to both trip roles; editorsCanSchedule only gates itinerary arrangement.
+  const canEditPlaces = trip.role === "owner" || trip.role === "editor";
 
   useEffect(() => {
     if (canSchedule) return;
@@ -667,7 +688,38 @@ export function TripPlaceWorkspace({
   }
 
 
+  const refreshCommonsCandidates = useCallback((invalidateInFlight = false): Promise<void> => {
+    if (!canEditPlaces) {
+      candidateReadGeneration.current += 1;
+      candidateReadInFlight.current = null;
+      setCommonsCandidates([]);
+      setCandidateReviewOpen(false);
+      setCandidateReviewPlaceId(null);
+      return Promise.resolve();
+    }
+    if (invalidateInFlight) {
+      candidateReadGeneration.current += 1;
+      candidateReadInFlight.current = null;
+    } else if (candidateReadInFlight.current) {
+      return candidateReadInFlight.current;
+    }
+    const generation = ++candidateReadGeneration.current;
+    const pending = request<CommonsCandidatesResponse>(
+      `/api/trips/${encodeURIComponent(trip.id)}/commons-candidates`,
+      { cache: "no-cache", parse: parseCommonsCandidatesResponse },
+    ).then((response) => {
+      if (generation === candidateReadGeneration.current) {
+        setCommonsCandidates(response.candidates);
+      }
+    });
+    const tracked = pending.finally(() => {
+      if (candidateReadGeneration.current === generation) candidateReadInFlight.current = null;
+    });
+    candidateReadInFlight.current = tracked;
+    return tracked;
+  }, [canEditPlaces, request, trip.id]);
   const refreshPlaces = useCallback(async (generation = ++readGeneration.current) => {
+    void refreshCommonsCandidates().catch(() => undefined);
     try {
       const response = await request<unknown>(`/api/trips/${trip.id}/trip-places`);
       if (generation !== readGeneration.current) return false;
@@ -685,7 +737,50 @@ export function TripPlaceWorkspace({
       setLoading(false);
       throw error;
     }
-  }, [request, trip.id]);
+  }, [refreshCommonsCandidates, request, trip.id]);
+
+
+  const resolveCommonsCandidate = useCallback((
+    candidate: CommonsCandidateDto,
+    resolution: CommonsCandidateDecisionInput["decision"] | "skip",
+  ) => {
+    setCommonsCandidates((current) => resolution === "confirm"
+      ? current.filter((entry) => entry.tripPlaceId !== candidate.tripPlaceId)
+      : current.filter((entry) => entry.id !== candidate.id));
+  }, []);
+
+  const confirmCommonsCandidate = useCallback((candidate: CommonsCandidateDto) => {
+    setConfirmedCandidatePhotos((current) => {
+      const next = new Map(current);
+      next.set(candidate.tripPlaceId, candidate.photo);
+      return next;
+    });
+    setCandidatePhotoRevision((current) => current + 1);
+    void refreshPlaces().catch(() => undefined).finally(onPlacesChanged);
+  }, [onPlacesChanged, refreshPlaces]);
+
+  const handleCommonsPhotoReported = useCallback(async (tripPlaceId: string, remainingCandidates: number) => {
+    setConfirmedCandidatePhotos((current) => {
+      if (!current.has(tripPlaceId)) return current;
+      const next = new Map(current);
+      next.delete(tripPlaceId);
+      return next;
+    });
+    setCandidatePhotoRevision((current) => current + 1);
+    if (remainingCandidates > 0) {
+      try {
+        await refreshCommonsCandidates(true);
+        setCandidateReviewPlaceId(tripPlaceId);
+        setCandidateReviewOpen(true);
+        return;
+      } catch {
+        // The report already succeeded. Leave the detail refresh visible instead of calling it a failed removal.
+      }
+    } else {
+      void refreshCommonsCandidates(true).catch(() => undefined);
+    }
+    showScheduleToast(t.commonsCandidates.photoRemoved);
+  }, [refreshCommonsCandidates, showScheduleToast, t.commonsCandidates.photoRemoved]);
 
   const load = useCallback(async () => {
     const generation = ++readGeneration.current;
@@ -706,6 +801,27 @@ export function TripPlaceWorkspace({
   useEffect(() => {
     void load();
   }, [load, placesRevision, trip.members.length]);
+
+  useEffect(() => {
+    const refreshOnFocus = () => {
+      void refreshCommonsCandidates().catch(() => undefined);
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refreshOnFocus();
+    };
+    window.addEventListener("focus", refreshOnFocus);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      candidateReadGeneration.current += 1;
+      candidateReadInFlight.current = null;
+      window.removeEventListener("focus", refreshOnFocus);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      if (candidateRefreshTimer.current !== null) {
+        window.clearTimeout(candidateRefreshTimer.current);
+        candidateRefreshTimer.current = null;
+      }
+    };
+  }, [refreshCommonsCandidates]);
 
   useEffect(() => {
     const retained = readModel.retained[0];
@@ -750,6 +866,19 @@ export function TripPlaceWorkspace({
   async function changedPlaces() {
     await load();
     onPlacesChanged();
+  }
+
+  async function addedPlace() {
+    await changedPlaces();
+    if (candidateRefreshTimer.current !== null) {
+      window.clearTimeout(candidateRefreshTimer.current);
+    }
+    candidateRefreshTimer.current = window.setTimeout(() => {
+      candidateRefreshTimer.current = null;
+      // Auto-applied photos leave no pending candidate; refresh previews and any open detail too.
+      setCandidatePhotoRevision((current) => current + 1);
+      void refreshCommonsCandidates().catch(() => undefined);
+    }, 16_000);
   }
 
   const placesById = useMemo(
@@ -951,11 +1080,22 @@ export function TripPlaceWorkspace({
   const scheduledPlace = schedulePlaces.length === 1 ? schedulePlaces[0]! : null;
   const missingLocationCount = listedPlaces.filter((place) => place.latitude === null || place.longitude === null).length;
   const hasSchedulablePlaces = canSchedule && listedPlaces.some((place) => canSelectForSchedule(place, placesById.has(place.id)));
+  const commonsCandidatePlaceCount = new Set(commonsCandidates.map((candidate) => candidate.tripPlaceId)).size;
+  const visibleCommonsCandidates = candidateReviewPlaceId
+    ? commonsCandidates.filter((candidate) => candidate.tripPlaceId === candidateReviewPlaceId)
+    : commonsCandidates;
+  const previewRequest = useCallback(
+    <T,>(url: string, options?: RequestOptions) => request<T>(
+      url,
+      candidatePhotoRevision === 0 ? options : { ...options, cache: "no-cache" },
+    ),
+    [candidatePhotoRevision, request],
+  );
   const previews = usePlacePreviews({
     tripId: trip.id,
     kind: "trip-place",
     ids: listedPlaces.map((place) => place.id),
-    request,
+    request: previewRequest,
   });
 
   function dayLabel(dayId: string | null) {
@@ -1053,7 +1193,8 @@ export function TripPlaceWorkspace({
       <PlaceDetailContent
         tripId={trip.id}
         reference={{ kind: "trip-place", id: place.id }}
-        request={request}
+        request={previewRequest}
+        onCommonsPhotoReported={handleCommonsPhotoReported}
         collapsible
         disclosureLabel="旅遊資訊與資料來源"
         interlude={<div className="pd-detail">
@@ -1192,10 +1333,26 @@ export function TripPlaceWorkspace({
           </>
         )}
       </div>
+      {canEditPlaces && commonsCandidatePlaceCount > 0 ? (
+        <button
+          type="button"
+          className="commons-candidate-banner"
+          aria-haspopup="dialog"
+          aria-expanded={candidateReviewOpen}
+          onClick={() => {
+            setCandidateReviewPlaceId(null);
+            setCandidateReviewOpen(true);
+          }}
+        >
+          <span className="commons-candidate-banner__icon"><Images aria-hidden="true" /></span>
+          <span>{t.commonsCandidates.banner(commonsCandidatePlaceCount)}</span>
+          <ChevronRight aria-hidden="true" className="commons-candidate-banner__arrow" />
+        </button>
+      ) : null}
       {!canSchedule ? <p className="pd-subhead">{schedule.ownerOnly}</p> : null}
       {readError ? <div className="pd-notice pd-read-error" role="alert"><p>{readError}</p><button type="button" className="pd-secondary" disabled={loading} onClick={() => void load()}>{t.workspace.reload}</button></div> : null}
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{voteAnnouncement}</p>
-      {loading && places.length === 0 ? <p className="pd-subhead" role="status">{t.workspace.loading}</p> : null}
+      {loading && places.length === 0 ? <PlaceListSkeleton label={t.workspace.loading} /> : null}
       {!loading && !readError && places.length === 0 && readModel.retained.length === 0 ? (
         <section className="pd-empty">
           <div>
@@ -1219,6 +1376,7 @@ export function TripPlaceWorkspace({
             const eligible = canSelectForSchedule(place, available);
             const repeatedName = (placeNameCounts.get(place.name) ?? 0) > 1;
             const preview = previews.previews.get(place.id);
+            const confirmedPhoto = confirmedCandidatePhotos.get(place.id);
             const status = !located ? (
               <span className="pd-schedule-meta pd-schedule-meta--missing"><MapPinOff aria-hidden="true" />{t.workspace.missingLocationForSchedule}</span>
             ) : scheduled ? (
@@ -1235,15 +1393,16 @@ export function TripPlaceWorkspace({
                 variant="wishlist"
                 name={place.name}
                 typeLabel={t.placeType[place.type]}
+                placeType={place.type}
                 secondary={place.notes
                   ? <span>{t.workspace.reason(place.notes)}</span>
                   : addressArea(place.address)
                     ? <span className="list-place-row__area"><MapPin aria-hidden="true" />{addressArea(place.address)}</span>
                     : undefined}
                 status={status}
-                photo={preview?.photo}
-                photoCount={preview?.photoCount ?? 0}
-                loadingPhoto={previews.loading}
+                photo={confirmedPhoto ?? preview?.photo}
+                photoCount={confirmedPhoto ? 1 : preview?.photoCount ?? 0}
+                loadingPhoto={!confirmedPhoto && previews.loading}
                 voteAction={voteActions(place)}
                 menu={selecting ? undefined : (
                   <RowMenu
@@ -1312,6 +1471,25 @@ export function TripPlaceWorkspace({
           {placeDetail(selectedPlace)}
         </PlaceDetailSheet>
       ) : null}
+      {canEditPlaces ? (
+        <CommonsCandidateReviewSheet
+          open={candidateReviewOpen}
+          tripId={trip.id}
+          candidates={visibleCommonsCandidates}
+          request={request}
+          onClose={() => {
+            setCandidateReviewOpen(false);
+            setCandidateReviewPlaceId(null);
+            window.requestAnimationFrame(() => {
+              if (selectedPlaceId) detailTitleRef.current?.focus();
+              else document.querySelector<HTMLElement>(".commons-candidate-banner")?.focus();
+            });
+          }}
+          onCandidateResolved={resolveCommonsCandidate}
+          onConfirmed={confirmCommonsCandidate}
+          refreshCandidates={refreshCommonsCandidates}
+        />
+      ) : null}
       {canSchedule ? (
         <>
           <SchedulePlacesSheet
@@ -1351,7 +1529,7 @@ export function TripPlaceWorkspace({
         </DialogContent>
       </Dialog>
 
-      {adding ? <AddPlacePanel tripId={trip.id} request={request} close={() => setAdding(false)} changed={changedPlaces} /> : null}
+      {adding ? <AddPlacePanel tripId={trip.id} request={request} close={() => setAdding(false)} changed={addedPlace} /> : null}
     </section>
   );
 }

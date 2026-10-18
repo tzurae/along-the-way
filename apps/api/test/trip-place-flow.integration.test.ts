@@ -254,6 +254,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       database,
       provider,
       now,
+      photoCapabilitySecret: "trip-place-photo-capability-secret-at-least-32-bytes",
       urlResolver: {
         fetch: async () => new Response(null, {
           status: 302,
@@ -1717,7 +1718,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       photo: {
         source: "google",
         id: `google:${provider.branch.providerPlaceId}:0:ab695b0da15727f7`,
-        thumbnailUrl: `/api/trips/${trip.id}/google-place-photos/${provider.branch.providerPlaceId}?index=0&photo=ab695b0da15727f7&maxWidth=192`,
+        thumbnailUrl: expect.stringContaining(`/api/trips/${trip.id}/google-place-photos/${provider.branch.providerPlaceId}?index=0&photo=ab695b0da15727f7&resource=controlled&maxWidth=192&exp=`),
       },
     });
     expect(provider.searchRequests.at(-1)).toEqual({
@@ -1766,7 +1767,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         typeLabel: "佛寺",
         photo: {
           id: `google:${provider.kyoto.providerPlaceId}:0:ab695b0da15727f7`,
-          thumbnailUrl: `/api/trips/${firstTrip.id}/google-place-photos/${provider.kyoto.providerPlaceId}?index=0&photo=ab695b0da15727f7&maxWidth=192`,
+          thumbnailUrl: expect.stringContaining(`/api/trips/${firstTrip.id}/google-place-photos/${provider.kyoto.providerPlaceId}?index=0&photo=ab695b0da15727f7&resource=controlled&maxWidth=192&exp=`),
         },
       }],
       attribution: "Google Maps",

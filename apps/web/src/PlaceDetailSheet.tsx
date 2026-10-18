@@ -13,8 +13,8 @@ export interface PlaceDetailSheetProps {
   titleRef?: RefObject<HTMLHeadingElement | null>;
   children: ReactNode;
   footer?: ReactNode;
-  /** Surface variant hook; both variants share the approved responsive sheet shell. */
-  appearance?: "photo" | "workspace";
+  /** Surface variant hook; all variants share the approved responsive sheet shell. */
+  appearance?: "photo" | "workspace" | "comparison";
 }
 
 export function PlaceDetailSheet({ open, title, description, onClose, titleRef, children, footer, appearance = "photo" }: PlaceDetailSheetProps) {

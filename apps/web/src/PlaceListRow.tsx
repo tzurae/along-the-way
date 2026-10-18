@@ -1,19 +1,21 @@
 import type { ReactNode } from "react";
 
-import { PlaceThumbnail, type PlaceDisplayPhoto } from "./PlaceThumbnail";
+import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
+import { PlacePhotoCredit, PlaceThumbnail, type PlacePreviewValue } from "./PlaceThumbnail";
 import "./list-place-card.css";
 
 export interface PlaceListRowProps {
   variant: "wishlist" | "proposal";
   name: string;
   typeLabel: string;
+  placeType: PlaceType;
   stateLabel?: string;
   secondary?: ReactNode;
   status?: ReactNode;
   evidence?: ReactNode;
   caution?: ReactNode;
   cautionAction?: ReactNode;
-  photo: PlaceDisplayPhoto | null | undefined;
+  photo: PlacePreviewValue["photo"] | undefined;
   photoCount: number;
   loadingPhoto?: boolean;
   voteAction?: ReactNode;
@@ -46,6 +48,7 @@ export function PlaceListRow({
   variant,
   name,
   typeLabel,
+  placeType,
   stateLabel,
   secondary,
   status,
@@ -109,7 +112,7 @@ export function PlaceListRow({
         onClick={onOpen}
         {...(selecting ? openDataProps : {})}
       >
-        <PlaceThumbnail photo={photo} photoCount={photoCount} loading={loadingPhoto} />
+        <PlaceThumbnail photo={photo} photoCount={photoCount} loading={loadingPhoto} placeType={placeType} />
       </button>
       <div className="list-place-row__body">
         <div className="list-place-row__heading">
@@ -120,6 +123,7 @@ export function PlaceListRow({
           {stateLabel ? <span className="list-place-row__state">{stateLabel}</span> : null}
         </div>
         {secondary ? <div className="list-place-row__secondary">{secondary}</div> : null}
+        <PlacePhotoCredit photo={photo} />
         {status ? <div className="list-place-row__status list-place-row__status--mobile">{status}</div> : null}
         {evidence ? <div className="list-place-row__evidence">{evidence}</div> : null}
         {caution ? <div className="list-place-row__caution"><span className="list-place-row__caution-text">{caution}</span>{cautionAction}</div> : null}

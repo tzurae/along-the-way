@@ -5,11 +5,11 @@ import { TodayWorkspace } from "../src/TodayWorkspace";
 import type { TodayDay, TodayItem, TodayModel, TodayPlace } from "../src/today-model";
 
 function place(name: string, latitude: number | null, longitude: number | null, providerPlaceId: string | null = null) {
-  return { id: name, name, latitude, longitude, providerPlaceId };
+  return { id: name, name, type: "activity" as const, latitude, longitude, providerPlaceId };
 }
 
 function endpoint(role: "start" | "end", instant: string, timeZone: string, name: string, latitude: number | null, longitude: number | null) {
-  const endpointPlace: TodayPlace = { id: `${name}-id`, name, address: null, latitude, longitude };
+  const endpointPlace: TodayPlace = { id: `${name}-id`, name, type: "activity", address: null, latitude, longitude };
   return { role, instant, timeZone, place: endpointPlace };
 }
 

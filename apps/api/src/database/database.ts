@@ -479,6 +479,23 @@ export interface CommonsPlacePhotoTable {
   checked_at: Timestamp;
 }
 
+export interface CommonsPhotoCandidateTable {
+  id: Generated<string>;
+  place_id: string;
+  wikidata_id: string;
+  label: string;
+  names: unknown;
+  instance_of: unknown;
+  description: string | null;
+  distance_meters: number | null;
+  metadata: unknown;
+  status: Generated<"pending" | "confirmed" | "rejected">;
+  auto_applied: Generated<boolean>;
+  decided_by_user_id: string | null;
+  decided_at: Timestamp | null;
+  created_at: Generated<Timestamp>;
+}
+
 export interface AlongTheWayDatabase {
   users: UserTable;
   magic_link_tokens: MagicLinkTokenTable;
@@ -494,6 +511,7 @@ export interface AlongTheWayDatabase {
   curated_place_photos: CuratedPlacePhotoTable;
   place_photo_blobs: PlacePhotoBlobTable;
   commons_place_photos: CommonsPlacePhotoTable;
+  commons_photo_candidates: CommonsPhotoCandidateTable;
   trip_places: TripPlaceTable;
   trip_place_must_items: TripPlaceMustItemTable;
   trip_place_contributions: TripPlaceContributionTable;

@@ -61,20 +61,23 @@ export function googlePlacePhotoDto(
   providerPlaceId: string,
   index: 0 | 1 | 2,
   photo: GoogleProviderPhoto,
-  capability?: { exp: number; sig: string },
+  issueCapability?: (fingerprint: string) => { exp: number; sig: string } | undefined,
 ): GooglePlacePhotoDto {
   const prefixName = `places/${providerPlaceId}/photos/`;
   const providerToken = photo.name.startsWith(prefixName) ? photo.name.slice(prefixName.length) : "";
   if (!/^[A-Za-z0-9_-]{1,1000}$/.test(providerToken)) throw new TypeError("Invalid Google photo identity");
   const fingerprint = googlePlacePhotoFingerprint(photo);
+  const capability = issueCapability?.(fingerprint);
+  if (!capability) throw new TypeError("Google photo capability is required");
   const prefix = `/api/trips/${tripId}/google-place-photos/${providerPlaceId}`;
-  const capabilityQuery = capability ? `&exp=${capability.exp}&sig=${capability.sig}` : "";
+  const query = `index=${index}&photo=${fingerprint}&resource=${providerToken}`;
+  const capabilityQuery = `&exp=${capability.exp}&sig=${capability.sig}`;
   return {
     source: "google",
     index,
     id: `google:${providerPlaceId}:${index}:${fingerprint}`,
-    thumbnailUrl: `${prefix}?index=${index}&photo=${fingerprint}&maxWidth=192${capabilityQuery}`,
-    imageUrl: `${prefix}?index=${index}&photo=${fingerprint}&maxWidth=1024${capabilityQuery}`,
+    thumbnailUrl: `${prefix}?${query}&maxWidth=192${capabilityQuery}`,
+    imageUrl: `${prefix}?${query}&maxWidth=1024${capabilityQuery}`,
     width: photo.width,
     height: photo.height,
     authors: photo.authors,

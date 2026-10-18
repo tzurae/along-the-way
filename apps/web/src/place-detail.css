@@ -81,6 +81,7 @@
 .place-detail-sheet__close,
 .place-gallery__control,
 .place-gallery__open,
+.place-gallery__report button,
 .place-photo-viewer__close {
   border: 0;
   color: inherit;
@@ -106,6 +107,7 @@
 .place-detail-sheet__close:focus-visible,
 .place-gallery__control:focus-visible,
 .place-gallery__open:focus-visible,
+.place-gallery__report button:focus-visible,
 .place-photo-viewer__close:focus-visible {
   outline: 3px solid var(--color-focus);
   outline-offset: 2px;
@@ -219,6 +221,55 @@
   scroll-snap-stop: always;
 }
 
+/* While a photo downloads without a cached thumbnail, a soft light band sweeps across the slide.
+   Own keyframes: the shared `pulse` is not guaranteed in the build. */
+@keyframes place-gallery-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+/* Darker base than the page and a bright band, so the sweep reads as "loading", not blank. */
+.place-gallery__slide--loading {
+  color: color-mix(in srgb, var(--color-ink) 35%, transparent);
+  background:
+    linear-gradient(100deg,
+      transparent 30%,
+      color-mix(in srgb, white 70%, transparent) 50%,
+      transparent 70%)
+    color-mix(in srgb, var(--color-ink) 10%, var(--color-surface-subtle));
+  background-size: 200% 100%;
+  animation: place-gallery-shimmer 1.2s linear infinite;
+}
+
+/* Centered over the slide without taking layout space from the still-hidden image. */
+.place-gallery__loading-icon {
+  position: absolute;
+  inset: 0;
+  width: 32px;
+  height: 32px;
+  margin: auto;
+}
+
+/* Blur-up: the cached list thumbnail, enlarged and blurred, under the downloading photo. */
+.place-gallery__blur {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: blur(14px);
+  transform: scale(1.08);
+}
+
+/* The full photo fades in over the blur or shimmer once it has loaded. */
+.place-gallery__slide[aria-busy="true"] .place-gallery__image {
+  opacity: 0;
+}
+
+.place-detail__photo-skeleton {
+  border-radius: 12px;
+}
+
 .place-gallery__image-button {
   position: relative;
   display: block;
@@ -237,6 +288,9 @@
 }
 
 .place-gallery__image {
+  /* Positioned so it paints above the absolutely positioned blur preview. */
+  position: relative;
+  transition: opacity 240ms ease-out;
   display: block;
   width: 100%;
   height: 100%;
@@ -331,10 +385,10 @@
 
 .place-gallery__caption {
   display: grid;
-  height: 56px;
+  min-height: 56px;
   min-width: 0;
   grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-rows: 28px 28px;
+  grid-template-rows: 28px 28px auto auto;
   align-items: center;
   column-gap: 8px;
   overflow: hidden;
@@ -384,6 +438,38 @@
   background: transparent;
   padding: 0 4px;
   white-space: nowrap;
+}
+
+.place-gallery__report {
+  display: grid;
+  min-width: 0;
+  grid-column: 1 / -1;
+  justify-items: start;
+}
+
+.place-gallery__report button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  border-radius: 4px;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.place-gallery__report button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.place-gallery__report-error {
+  margin: -8px 0 4px;
+  color: var(--destructive);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 /* One-line Google credit: hug its text instead of reserving the two-line Commons height. */
@@ -1001,6 +1087,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .place-gallery__slide--loading {
+    animation: none;
+  }
   .place-detail__disclosure > summary svg {
     transition: none;
   }
@@ -1008,11 +1097,13 @@
 
 .place-detail-sheet__footer { flex: none; min-height: 64px; padding: 10px 20px calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--card); }
 .place-detail-sheet__full-title { margin: 0 20px 16px; overflow-wrap: anywhere; font-weight: 700; line-height: 1.5; }
-[data-slot="dialog-content"].place-detail-sheet[data-appearance="workspace"] { inset: 16dvh 0 0; height: 84dvh; max-height: 84dvh; width: 100%; border-radius: 22px 22px 0 0; }
+[data-slot="dialog-content"].place-detail-sheet[data-appearance="workspace"],
+[data-slot="dialog-content"].place-detail-sheet[data-appearance="comparison"] { inset: 16dvh 0 0; height: 84dvh; max-height: 84dvh; width: 100%; border-radius: 22px 22px 0 0; }
 @media (min-width: 1024px) {
   .place-detail-sheet__grab { display: none; }
   [data-slot="dialog-content"].place-detail-sheet,
   [data-slot="dialog-content"].place-detail-sheet[data-appearance="workspace"] { inset: 20px 20px 20px auto; width: 440px; height: auto; max-height: none; border-radius: 22px; }
+  [data-slot="dialog-content"].place-detail-sheet[data-appearance="comparison"] { inset: 20px; width: min(900px, calc(100vw - 40px)); height: auto; max-height: none; margin: auto; border-radius: 22px; }
   .place-detail-sheet__head { padding: 22px 20px 12px 24px; }
   .place-detail-sheet__body { padding: 4px 24px 24px; }
   .place-detail-sheet__footer { padding-right: 24px; padding-left: 24px; border-radius: 0 0 22px 22px; }

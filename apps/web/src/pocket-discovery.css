@@ -126,11 +126,27 @@
   font-weight: 700;
 }
 
+/* No overflow clipping: the 「⋯」 row menu must be able to extend past the list's bottom edge.
+   The first and last rows carry the rounded corners instead. */
 .pd-list {
-  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 1.125rem;
   background: var(--color-surface);
+}
+
+.pd-list > :first-child {
+  border-top-left-radius: calc(1.125rem - 1px);
+  border-top-right-radius: calc(1.125rem - 1px);
+}
+
+.pd-list > :last-child {
+  border-bottom-left-radius: calc(1.125rem - 1px);
+  border-bottom-right-radius: calc(1.125rem - 1px);
+}
+
+/* The row whose menu is open paints above its later siblings, even while a row animates. */
+.pd-list > :has(.row-menu__trigger[aria-expanded="true"]) {
+  z-index: 3;
 }
 
 

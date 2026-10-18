@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Kysely } from "kysely";
+import type { Kysely, Transaction } from "kysely";
 import { parseCuratedPhoto, type CuratedPhotoAssetInput, type CuratedPhotoInput } from "@along-the-way/contracts/place-details";
 import type { AlongTheWayDatabase } from "../database/database";
 
@@ -9,6 +9,22 @@ export interface PreparedCommonsPhoto {
   photo: CuratedPhotoInput;
   renditions: Array<{ asset: CuratedPhotoAssetInput; bytes: Uint8Array }>;
 }
+export type CommonsPhotoLookupOutcome =
+  | "matched"
+  | "no_cid"
+  | "no_item"
+  | "multiple_items"
+  | "no_p18"
+  | "licence_rejected"
+  | "error";
+
+export interface CommonsPhotoLookupRecord {
+  outcome: CommonsPhotoLookupOutcome;
+  providerPlaceId: string | null;
+  googleMapsCid: string | null;
+  wikidataId: string | null;
+}
+
 
 /**
  * The network lookup and the write are separate so the caller can store the photo in
@@ -17,9 +33,22 @@ export interface PreparedCommonsPhoto {
  */
 export interface RepresentativePhotoSource {
   /** Null for anything but a confident, freely licensed match, including any Wikimedia failure. Never throws. */
-  prepare(googleMapsUri: string | null): Promise<PreparedCommonsPhoto | null>;
-  store(executor: Kysely<AlongTheWayDatabase>, placeIdentityId: string, prepared: PreparedCommonsPhoto): Promise<void>;
+  prepare(googleMapsUri: string | null, providerPlaceId?: string | null): Promise<PreparedCommonsPhoto | null>;
+  /** Locks the identity and stores only if this QID has not previously been rejected. */
+  store(executor: Transaction<AlongTheWayDatabase>, placeIdentityId: string, prepared: PreparedCommonsPhoto): Promise<boolean>;
 }
+export interface CommonsCandidatePhotoSource {
+  /** Resolves one reviewed-candidate QID through the same P18, licence and rendition checks as strict CID matching. */
+  prepareWikidataCandidate(wikidataId: string, signal?: AbortSignal): Promise<PreparedCommonsPhoto | null>;
+  storeRenditions(executor: Kysely<AlongTheWayDatabase>, prepared: PreparedCommonsPhoto): Promise<void>;
+  storeConfirmed(
+    executor: Kysely<AlongTheWayDatabase>,
+    placeIdentityId: string,
+    wikidataId: string,
+    photo: CuratedPhotoInput,
+  ): Promise<boolean>;
+}
+
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -137,66 +166,156 @@ function metadataValue(metadata: Record<string, unknown> | null, key: string): s
  * Finds the Wikidata representative image (P18) for a place whose Google CID is
  * registered on exactly one Wikidata item (P3749), with its licence and renditions.
  */
-export class CommonsPlacePhotos implements RepresentativePhotoSource {
+export class CommonsPlacePhotos implements RepresentativePhotoSource, CommonsCandidatePhotoSource {
   private readonly fetch: FetchLike;
   private readonly userAgent: string;
   private readonly budgetMs: number;
   private readonly now: () => Date;
+  private readonly onLookup: ((record: CommonsPhotoLookupRecord) => void) | undefined;
 
   constructor(options: {
     userAgent: string;
     fetch?: FetchLike;
     budgetMs?: number;
     now?: () => Date;
+    onLookup?: (record: CommonsPhotoLookupRecord) => void;
   }) {
     this.userAgent = options.userAgent;
     this.fetch = options.fetch ?? ((input, init) => fetch(input, init));
     this.budgetMs = options.budgetMs ?? 6_000;
     this.now = options.now ?? (() => new Date());
+    this.onLookup = options.onLookup;
   }
 
-  async prepare(googleMapsUri: string | null): Promise<PreparedCommonsPhoto | null> {
+  async prepare(googleMapsUri: string | null, providerPlaceId: string | null = null): Promise<PreparedCommonsPhoto | null> {
     const cid = googleMapsCid(googleMapsUri);
-    if (!cid) return null;
+    if (!cid) {
+      this.recordLookup({ outcome: "no_cid", providerPlaceId, googleMapsCid: null, wikidataId: null });
+      return null;
+    }
     const signal = AbortSignal.timeout(this.budgetMs);
+    let itemId: string | null = null;
     try {
-      const itemId = await this.uniqueItem(cid, signal);
-      const fileName = itemId ? await this.representativeImage(itemId, signal) : null;
-      const work = fileName ? await this.licensedWork(fileName, signal) : null;
-      if (!itemId || !work) return null;
+      const item = await this.uniqueItem(cid, signal);
+      if (item.outcome !== "matched") {
+        this.recordLookup({ outcome: item.outcome, providerPlaceId, googleMapsCid: cid, wikidataId: null });
+        return null;
+      }
+      itemId = item.itemId;
+      const fileName = await this.representativeImage(itemId, signal);
+      if (!fileName) {
+        this.recordLookup({ outcome: "no_p18", providerPlaceId, googleMapsCid: cid, wikidataId: itemId });
+        return null;
+      }
+      const work = await this.licensedWork(fileName, signal);
+      if (!work) {
+        this.recordLookup({ outcome: "licence_rejected", providerPlaceId, googleMapsCid: cid, wikidataId: itemId });
+        return null;
+      }
       const renditions = await Promise.all([
         this.download(work.image, work.mediaType, signal),
         this.download(work.thumbnail, work.mediaType, signal),
       ]);
-      return { wikidataId: itemId, photo: this.photoMetadata(itemId, work, renditions[0].asset, renditions[1].asset), renditions };
+      const prepared = {
+        wikidataId: itemId,
+        photo: this.photoMetadata(itemId, work, renditions[0].asset, renditions[1].asset),
+        renditions,
+      };
+      this.recordLookup({ outcome: "matched", providerPlaceId, googleMapsCid: cid, wikidataId: itemId });
+      return prepared;
+    } catch {
+      this.recordLookup({ outcome: "error", providerPlaceId, googleMapsCid: cid, wikidataId: itemId });
+      return null;
+    }
+  }
+  async prepareWikidataCandidate(wikidataId: string, signal?: AbortSignal): Promise<PreparedCommonsPhoto | null> {
+    if (!/^Q[1-9][0-9]*$/.test(wikidataId)) return null;
+    signal ??= AbortSignal.timeout(this.budgetMs);
+    try {
+      const fileName = await this.representativeImage(wikidataId, signal);
+      if (!fileName) return null;
+      const work = await this.licensedWork(fileName, signal);
+      if (!work) return null;
+      const renditions = await Promise.all([
+        this.download(work.image, work.mediaType, signal),
+        this.download(work.thumbnail, work.mediaType, signal),
+      ]);
+      return {
+        wikidataId,
+        photo: this.photoMetadata(
+          wikidataId,
+          work,
+          renditions[0].asset,
+          renditions[1].asset,
+          `Wikidata ${wikidataId} 將本作品列為代表圖片（P18）；地點關聯由嚴格名稱、類型與距離規則判定，或由旅程成員確認。`,
+        ),
+        renditions,
+      };
     } catch {
       return null;
     }
   }
 
-  async store(executor: Kysely<AlongTheWayDatabase>, placeIdentityId: string, prepared: PreparedCommonsPhoto) {
+
+  async store(
+    executor: Transaction<AlongTheWayDatabase>,
+    placeIdentityId: string,
+    prepared: PreparedCommonsPhoto,
+  ) {
+    // Serialize strict CID writes with candidate decisions and reports so a rejection cannot race a reinsert.
+    await executor.selectFrom("place_identities").select("id")
+      .where("id", "=", placeIdentityId)
+      .forUpdate()
+      .executeTakeFirstOrThrow();
+    const rejected = await executor.selectFrom("commons_photo_candidates")
+      .select("id")
+      .where("place_id", "=", placeIdentityId)
+      .where("wikidata_id", "=", prepared.wikidataId)
+      .where("status", "=", "rejected")
+      .executeTakeFirst();
+    if (rejected) return false;
+    await this.storeRenditions(executor, prepared);
+    return this.storeConfirmed(executor, placeIdentityId, prepared.wikidataId, prepared.photo);
+  }
+
+  async storeRenditions(executor: Kysely<AlongTheWayDatabase>, prepared: PreparedCommonsPhoto) {
     await executor.insertInto("place_photo_blobs")
       .values(prepared.renditions.map((item) => ({ filename: item.asset.filename, media_type: item.asset.mediaType, bytes: item.bytes })))
       .onConflict((conflict) => conflict.column("filename").doNothing())
       .execute();
-    await executor.insertInto("commons_place_photos").values({
-      place_id: placeIdentityId,
-      wikidata_id: prepared.wikidataId,
-      metadata: JSON.stringify(prepared.photo),
-      image_filename: prepared.photo.image.filename,
-      thumbnail_filename: prepared.photo.thumbnail.filename,
-      checked_at: prepared.photo.checkedAt,
-    }).onConflict((conflict) => conflict.column("place_id").doNothing()).execute();
   }
 
-  private async uniqueItem(cid: string, signal: AbortSignal): Promise<string | null> {
+  async storeConfirmed(
+    executor: Kysely<AlongTheWayDatabase>,
+    placeIdentityId: string,
+    wikidataId: string,
+    photo: CuratedPhotoInput,
+  ) {
+    const inserted = await executor.insertInto("commons_place_photos").values({
+      place_id: placeIdentityId,
+      wikidata_id: wikidataId,
+      metadata: JSON.stringify(photo),
+      image_filename: photo.image.filename,
+      thumbnail_filename: photo.thumbnail.filename,
+      checked_at: photo.checkedAt,
+    }).onConflict((conflict) => conflict.column("place_id").doNothing())
+      .returning("place_id").executeTakeFirst();
+    return inserted !== undefined;
+  }
+
+  private async uniqueItem(cid: string, signal: AbortSignal): Promise<
+    { outcome: "matched"; itemId: string } | { outcome: "no_item" | "multiple_items" }
+  > {
     const response = record(await this.json(WIKIDATA_API, {
       action: "query", list: "search", srsearch: `haswbstatement:P3749=${cid}`, srnamespace: "0", srlimit: "2",
     }, signal));
     const hits = record(response?.query)?.search;
-    if (!Array.isArray(hits) || hits.length !== 1) return null;
+    if (!Array.isArray(hits)) throw new Error("Invalid Wikidata search response");
+    if (hits.length === 0) return { outcome: "no_item" };
+    if (hits.length !== 1) return { outcome: "multiple_items" };
     const title = record(hits[0])?.title;
-    return typeof title === "string" && /^Q[1-9][0-9]*$/.test(title) ? title : null;
+    if (typeof title !== "string" || !/^Q[1-9][0-9]*$/.test(title)) throw new Error("Invalid Wikidata item");
+    return { outcome: "matched", itemId: title };
   }
 
   private async representativeImage(itemId: string, signal: AbortSignal): Promise<string | null> {
@@ -220,7 +339,9 @@ export class CommonsPlacePhotos implements RepresentativePhotoSource {
     const metadata = record(info?.extmetadata);
     const mediaType = info?.mime;
     if (!info || !revisionId || !pageId || typeof page?.title !== "string"
-      || (mediaType !== "image/jpeg" && mediaType !== "image/png" && mediaType !== "image/webp")) return null;
+      || (mediaType !== "image/jpeg" && mediaType !== "image/png" && mediaType !== "image/webp")) {
+      throw new Error("Commons image metadata is unavailable");
+    }
     const license = metadataValue(metadata, "License")?.toLowerCase() ?? "";
     if (!ALLOWED_LICENSE.test(license) || metadataValue(metadata, "NonFree") === "true") return null;
     const licenseUrl = httpsLicenseUrl(metadataValue(metadata, "LicenseUrl"), license);
@@ -232,7 +353,7 @@ export class CommonsPlacePhotos implements RepresentativePhotoSource {
       || typeof info.descriptionurl !== "string" || typeof info.url !== "string") return null;
     const [image, thumbnail] = await Promise.all([IMAGE_LONG_SIDE, THUMBNAIL_LONG_SIDE].map((longSide) =>
       this.rendition(title, originalWidth, originalHeight, longSide, signal)));
-    if (!image || !thumbnail) return null;
+    if (!image || !thumbnail) throw new Error("Commons rendition metadata is unavailable");
     return {
       pageId,
       title: page.title,
@@ -303,7 +424,13 @@ export class CommonsPlacePhotos implements RepresentativePhotoSource {
     return { asset, bytes };
   }
 
-  private photoMetadata(itemId: string, work: CommonsWork, image: CuratedPhotoAssetInput, thumbnail: CuratedPhotoAssetInput): CuratedPhotoInput {
+  private photoMetadata(
+    itemId: string,
+    work: CommonsWork,
+    image: CuratedPhotoAssetInput,
+    thumbnail: CuratedPhotoAssetInput,
+    locationEvidence = `Wikidata ${itemId} 以 Google Maps Customer ID（P3749）對應此地點，並以本作品為代表圖片（P18）。`,
+  ): CuratedPhotoInput {
     const shareAlike = work.license.startsWith("cc-by-sa-");
     const attribution = work.license !== "cc0";
     const notices = [
@@ -327,7 +454,7 @@ export class CommonsPlacePhotos implements RepresentativePhotoSource {
       capturedAt: work.capturedAt,
       checkedAt: this.now().toISOString(),
       verificationUrl: `https://commons.wikimedia.org/w/index.php?title=${verificationTitle}&oldid=${work.revisionId}`,
-      locationEvidence: `Wikidata ${itemId} 以 Google Maps Customer ID（P3749）對應此地點，並以本作品為代表圖片（P18）。`,
+      locationEvidence,
       changes: `採用 Wikimedia Commons 產生的 ${image.width}×${image.height} 與 ${thumbnail.width}×${thumbnail.height} 等比例縮放版本，下載後未再編修。`,
       notices,
       originalWidth: work.originalWidth,
@@ -335,6 +462,15 @@ export class CommonsPlacePhotos implements RepresentativePhotoSource {
       image,
       thumbnail,
     });
+  }
+
+  private recordLookup(record: CommonsPhotoLookupRecord) {
+    console.info(JSON.stringify({ event: "commons_place_photo_lookup", ...record }));
+    try {
+      this.onLookup?.(record);
+    } catch {
+      // Observability must not change whether a photo is accepted.
+    }
   }
 
   private async json(endpoint: string, parameters: Record<string, string>, signal: AbortSignal): Promise<unknown> {

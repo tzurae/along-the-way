@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import type { TripDto } from "@along-the-way/contracts/private-trips";
-import type { GooglePlacePhotoDto, PlacePhotoDto } from "@along-the-way/contracts/place-details";
+import type { PlacePhotoDto } from "@along-the-way/contracts/place-details";
 import { DiscoveryWorkspace } from "../src/DiscoveryWorkspace";
 import { AppToaster } from "../src/AppToaster";
 import type { PlaceDetailRequestOptions } from "../src/PlaceThumbnail";
@@ -63,16 +63,31 @@ const proposal = {
   endorsements: [],
 };
 
-const googlePhoto: GooglePlacePhotoDto = {
-  source: "google",
-  index: 0,
-  id: "google:ChIJ-Nishiki:0:abcdef1234567890",
-  thumbnailUrl: `/api/trips/${trip.id}/google-place-photos/ChIJ-Nishiki?index=0&photo=abcdef1234567890&maxWidth=192`,
-  imageUrl: `/api/trips/${trip.id}/google-place-photos/ChIJ-Nishiki?index=0&photo=abcdef1234567890&maxWidth=1024`,
+const previewPhoto: PlacePhotoDto = {
+  source: "curated",
+  id: "nishiki-market",
+  title: "錦市場",
+  description: "錦市場入口",
+  sourceName: "Wikimedia Commons",
+  sourceUrl: "https://commons.wikimedia.org/wiki/File:Nishiki_Market.jpg",
+  fileSourceUrl: "https://upload.wikimedia.org/nishiki-market.jpg",
+  author: "市場攝影者",
+  authorUrl: null,
+  creditText: "錦市場，市場攝影者",
+  licenseName: "CC BY-SA 4.0",
+  licenseUrl: "https://creativecommons.org/licenses/by-sa/4.0/",
+  capturedAt: null,
+  checkedAt: "2026-10-18T00:00:00Z",
+  verificationUrl: "https://commons.wikimedia.org/w/index.php?title=File:Nishiki_Market.jpg&oldid=1234",
+  locationEvidence: "作品頁標示錦市場。",
+  changes: "縮圖裁切。",
+  notices: [],
+  originalWidth: 1200,
+  originalHeight: 800,
+  imageUrl: `/api/trips/${trip.id}/place-photo-assets/${"a".repeat(64)}.jpg?kind=proposal&id=${proposal.id}`,
+  thumbnailUrl: `/api/trips/${trip.id}/place-photo-assets/${"b".repeat(64)}.jpg?kind=proposal&id=${proposal.id}`,
   width: 1200,
   height: 800,
-  authors: [{ displayName: "市場攝影者", uri: "https://maps.google.com/contrib/market-author" }],
-  googleMapsUri: "https://maps.google.com/?cid=123",
 };
 
 beforeEach(() => {
@@ -158,6 +173,7 @@ it("renders an unsafe discovery citation as text instead of an external link", a
     else if (path.includes("/place-details?")) value = { detail: {
       reference: { kind: "proposal", id: proposal.id }, canonicalPlaceId: null, name: proposal.name,
       asOfDate: null, sections: [], sources: [], photos: [], googlePhotos: [],
+      photosUnavailable: false, commonsPhotoReportable: false,
     } };
     else throw new Error(`Unexpected request: ${path}`);
     return (init?.parse ? init.parse(value) : value) as T;
@@ -200,6 +216,8 @@ it("shows an accepted proposal's detail as reasons then location, without wishli
         sources: [],
         photos: [],
         googlePhotos: [],
+        photosUnavailable: false,
+        commonsPhotoReportable: false,
       } };
     } else {
       throw new Error(`Unexpected request: ${path}`);
@@ -223,9 +241,9 @@ it("shows an accepted proposal's detail as reasons then location, without wishli
   expect(headings).not.toEqual(expect.arrayContaining(["佐證與景點資訊"]));
 });
 
-it("opens proposal thumbnails during normal and selection modes without per-row credits", async () => {
+it("opens proposal thumbnails during normal and selection modes with licensed row attribution", async () => {
   const selectableProposal = { ...proposal, latitude: 35.005, longitude: 135.765 };
-  const requestWithPhoto = (photo: GooglePlacePhotoDto | PlacePhotoDto) => async <T,>(
+  const requestWithPhoto = (photo: PlacePhotoDto) => async <T,>(
     path: string,
     init?: PlaceDetailRequestOptions,
   ): Promise<T> => {
@@ -257,6 +275,8 @@ it("opens proposal thumbnails during normal and selection modes without per-row 
         sources: [],
         photos: [],
         googlePhotos: [],
+        photosUnavailable: false,
+        commonsPhotoReportable: false,
       } };
     } else {
       throw new Error(`Unexpected request: ${path}`);
@@ -265,14 +285,14 @@ it("opens proposal thumbnails during normal and selection modes without per-row 
   };
 
   const rendered = render(
-    <DiscoveryWorkspace accountId="account" trip={trip} request={requestWithPhoto(googlePhoto)} placesRevision={0} onPlacesChanged={vi.fn()} />,
+    <DiscoveryWorkspace accountId="account" trip={trip} request={requestWithPhoto(previewPhoto)} placesRevision={0} onPlacesChanged={vi.fn()} />,
   );
   const row = await waitFor(() => {
     const element = rendered.container.querySelector<HTMLElement>(`[data-discovery-proposal="${selectableProposal.name}"]`);
     expect(element?.querySelector("img")).toBeInTheDocument();
     return element!;
   });
-  expect(row.querySelector(".place-photo-credit")).not.toBeInTheDocument();
+  expect(row.querySelector(".place-photo-credit")).toHaveTextContent("市場攝影者・CC BY-SA 4.0");
 
   fireEvent.click(row.querySelector(".list-place-row__media")!);
   let detail = await screen.findByRole("dialog", { name: selectableProposal.name });

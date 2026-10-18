@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
-import { ChevronLeft, ChevronRight, CircleAlert, ExternalLink, Maximize2, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, CircleAlert, ExternalLink, Image as ImageIcon, Maximize2, X } from "lucide-react";
 
 import {
+  parseCommonsPhotoReportResponse,
   parsePlaceDetailResponse,
+  type CommonsPhotoReportResponse,
   type GooglePlacePhotoDto,
   type PlaceDetailBlockDto,
   type PlaceDetailDto,
@@ -196,7 +198,23 @@ function GoogleGalleryCredit({ photo }: { photo: GooglePlacePhotoDto }) {
   );
 }
 
-function Gallery({ identity, placeName, photos }: { identity: string; placeName: string; photos: PlaceDisplayPhoto[] }) {
+function Gallery({
+  identity,
+  placeName,
+  photos,
+  photosUnavailable,
+  commonsPhotoReportable,
+  reportingCommonsPhoto,
+  onReportCommonsPhoto,
+}: {
+  identity: string;
+  placeName: string;
+  photos: PlaceDisplayPhoto[];
+  photosUnavailable: boolean;
+  commonsPhotoReportable: boolean;
+  reportingCommonsPhoto: boolean;
+  onReportCommonsPhoto(): void;
+}) {
   const { t } = useI18n();
   const trackRef = useRef<HTMLDivElement>(null);
   const fingerprint = photos.map((photo) => `${photo.id}\u0000${photo.imageUrl}`).join("\u0001");
@@ -205,6 +223,8 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
   const [selection, setSelection] = useState<{ identity: string; photoId: string | null }>({ identity, photoId: firstPhotoId ?? null });
   const [failed, setFailed] = useState<Set<string>>(() => new Set());
   const [reloadRevisions, setReloadRevisions] = useState<Map<string, number>>(() => new Map());
+  // Keyed by photo and reload revision, so a retried photo shows the loading state again.
+  const [loaded, setLoaded] = useState<Set<string>>(() => new Set());
   const [activation, setActivation] = useState<{ resetKey: string; ids: Set<string> }>(() => ({
     resetKey,
     ids: new Set(firstPhotoId ? [firstPhotoId] : []),
@@ -227,6 +247,28 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
   const activatedIds = activation.resetKey === resetKey
     ? activation.ids
     : new Set(firstPhotoId ? [firstPhotoId] : []);
+
+  // Blur-up for the first photo: reuse its small list thumbnail, but only from the browser's HTTP
+  // cache. A cache miss must not become another paid Google request; that slide shimmers instead.
+  const firstThumbnailUrl = photos[0]?.thumbnailUrl;
+  const [blurPreview, setBlurPreview] = useState<{ url: string; src: string } | null>(null);
+  useEffect(() => {
+    if (!firstThumbnailUrl) return;
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    void fetch(firstThumbnailUrl, { cache: "only-if-cached", mode: "same-origin" })
+      .then((response) => (response.ok ? response.blob() : null))
+      .then((blob) => {
+        if (cancelled || !blob) return;
+        objectUrl = URL.createObjectURL(blob);
+        setBlurPreview({ url: firstThumbnailUrl, src: objectUrl });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [firstThumbnailUrl]);
 
   useEffect(() => {
     if (trackRef.current) trackRef.current.scrollLeft = 0;
@@ -262,7 +304,7 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
   }, [firstPhotoId, resetKey]);
 
   if (photos.length === 0) {
-    return <div className="place-gallery__empty" data-place-gallery="empty">{t.placeDetail.noPhoto}</div>;
+    return <div className="place-gallery__empty" data-place-gallery={photosUnavailable ? "unavailable" : "empty"}>{photosUnavailable ? t.placeDetail.photosUnavailable : t.placeDetail.noPhoto}</div>;
   }
   const selectedIndex = Math.max(0, photos.findIndex((photo) => photo.id === selection.photoId));
   const selected = photos[selectedIndex]!;
@@ -329,9 +371,13 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
           const photoKey = `${photo.id}\u0000${photo.imageUrl}`;
           const imageFailed = failed.has(photoKey);
           const activated = index === 0 || activatedIds.has(photo.id);
+          const loadKey = `${photoKey}:${reloadRevisions.get(photoKey) ?? 0}`;
+          const imageLoading = activated && !imageFailed && !loaded.has(loadKey);
+          const blurSrc = index === 0 && !imageFailed && blurPreview?.url === photo.thumbnailUrl ? blurPreview.src : null;
+          const slideClass = imageLoading && !blurSrc ? "place-gallery__slide place-gallery__slide--loading" : "place-gallery__slide";
           const image = activated ? (
             <img
-              key={`${photoKey}:${reloadRevisions.get(photoKey) ?? 0}`}
+              key={loadKey}
               className="place-gallery__image"
               src={photo.imageUrl}
               width={photo.width}
@@ -341,11 +387,14 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
                 : t.placeDetail.googlePhotoAlt(placeName, index + 1, photos.length)}
               loading={index > 0 ? "lazy" : undefined}
               decoding="async"
+              onLoad={() => setLoaded((current) => new Set(current).add(loadKey))}
               onError={() => setFailed((current) => new Set(current).add(photoKey))}
             />
           ) : <span className="place-gallery__placeholder" aria-hidden="true" />;
           return (
-            <div key={photoKey} className="place-gallery__slide" data-photo-slide={photo.id}>
+            <div key={photoKey} className={slideClass} data-photo-slide={photo.id} aria-busy={imageLoading || undefined}>
+              {blurSrc ? <img className="place-gallery__blur" src={blurSrc} alt="" aria-hidden="true" /> : null}
+              {imageLoading && !blurSrc ? <ImageIcon aria-hidden="true" className="place-gallery__loading-icon" /> : null}
               {imageFailed ? (
                 <div className="place-gallery__unavailable">
                   <p>{t.placeDetail.photoUnavailable}</p>
@@ -379,6 +428,16 @@ function Gallery({ identity, placeName, photos }: { identity: string; placeName:
             {sourceHref ? <a href={sourceHref} target="_blank" rel="noreferrer">來源</a> : <span>{selected.sourceName}</span>}
             <span aria-hidden="true">·</span>
             {licenseHref ? <a href={licenseHref} title={selected.licenseName} target="_blank" rel="noreferrer">{t.placeDetail.license}</a> : <span>{selected.licenseName}</span>}
+          </p>
+          {commonsPhotoReportable && selected.source === "commons" ? (
+            <div className="place-gallery__report">
+              <button type="button" disabled={reportingCommonsPhoto} onClick={onReportCommonsPhoto}>
+                {reportingCommonsPhoto ? t.placeDetail.reportingCommonsPhoto : t.placeDetail.reportCommonsPhoto}
+              </button>
+            </div>
+          ) : null}
+          <p className="sr-only" role="status" aria-live="polite">
+            {reportingCommonsPhoto ? t.placeDetail.reportingCommonsPhoto : ""}
           </p>
           <button type="button" className="place-gallery__open" aria-label={t.placeDetail.photoInformationFor(selected.title)} onClick={() => setViewerOpen(true)}>{t.placeDetail.photoInformation}</button>
         </figcaption>
@@ -448,7 +507,7 @@ function DetailArticle({ detail, collapsible, disclosureLabel, disclosureHeading
   ) : article;
 }
 
-export function PlaceDetailContent({ tripId, reference, date, request, interlude, collapsible = false, disclosureLabel, disclosureHeadingId, disclosureOpen, articlePrelude, focusHeadingId, showArticle = true }: {
+export function PlaceDetailContent({ tripId, reference, date, request, interlude, collapsible = false, disclosureLabel, disclosureHeadingId, disclosureOpen, articlePrelude, focusHeadingId, showArticle = true, onCommonsPhotoReported }: {
   tripId: string;
   reference: PlaceDetailReference;
   date?: string | null;
@@ -462,11 +521,19 @@ export function PlaceDetailContent({ tripId, reference, date, request, interlude
   focusHeadingId?: string;
   /** False shows only the gallery and the caller's sections (AI 建議 cite sources inline instead). */
   showArticle?: boolean;
+  onCommonsPhotoReported?(tripPlaceId: string, remainingCandidates: number): void | Promise<void>;
 }) {
   const { t } = useI18n();
   const identity = `${reference.kind}:${reference.id}`;
   const [state, setState] = useState<{ identity: string; loading: boolean; detail: PlaceDetailDto | null; error: unknown }>({ identity, loading: true, detail: null, error: null });
   const [requestRevision, setRequestRevision] = useState(0);
+  const [reportingCommonsPhoto, setReportingCommonsPhoto] = useState(false);
+  const [commonsPhotoReportError, setCommonsPhotoReportError] = useState("");
+
+  useEffect(() => {
+    setReportingCommonsPhoto(false);
+    setCommonsPhotoReportError("");
+  }, [identity]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -475,6 +542,7 @@ export function PlaceDetailContent({ tripId, reference, date, request, interlude
     if (date) query.set("date", date);
     void request<PlaceDetailResponse>(`/api/trips/${encodeURIComponent(tripId)}/place-details?${query}`, {
       signal: controller.signal,
+      cache: requestRevision > 0 ? "no-cache" : undefined,
       parse: parsePlaceDetailResponse,
     }).then((response) => {
       if (controller.signal.aborted) return;
@@ -508,9 +576,49 @@ export function PlaceDetailContent({ tripId, reference, date, request, interlude
         : t.placeDetail.unavailable
     : null;
 
+  async function reportCommonsPhoto() {
+    if (reportingCommonsPhoto || !detail?.commonsPhotoReportable || reference.kind !== "trip-place") return;
+    if (!window.confirm(t.placeDetail.confirmReportCommonsPhoto)) return;
+    setReportingCommonsPhoto(true);
+    setCommonsPhotoReportError("");
+    let response: CommonsPhotoReportResponse;
+    try {
+      response = await request<CommonsPhotoReportResponse>(
+        `/api/trips/${encodeURIComponent(tripId)}/trip-places/${encodeURIComponent(reference.id)}/commons-photo/report`,
+        { method: "POST", parse: parseCommonsPhotoReportResponse },
+      );
+    } catch (reason) {
+      if (reason instanceof ApiRequestError
+        && (reason.status === 409 || reason.code === "commons_photo_not_found")) {
+        setCommonsPhotoReportError(t.placeDetail.reportCommonsPhotoMissing);
+        setRequestRevision((current) => current + 1);
+      } else {
+        setCommonsPhotoReportError(t.placeDetail.reportCommonsPhotoError);
+      }
+      setReportingCommonsPhoto(false);
+      return;
+    }
+    if (!onCommonsPhotoReported) setRequestRevision((current) => current + 1);
+    try {
+      await onCommonsPhotoReported?.(reference.id, response.remainingCandidates);
+    } catch {
+      setRequestRevision((current) => current + 1);
+    } finally {
+      setReportingCommonsPhoto(false);
+    }
+  }
+
   return (
     <div className="place-detail-content" data-place-detail-content={detail ? `${detail.reference.kind}:${detail.reference.id}` : undefined}>
-      {loading ? <p className="place-detail__loading" role="status">{t.placeDetail.loading}</p> : null}
+      {loading ? (
+        <>
+          {/* The detail request is the slow part; show where the photos will appear while it runs. */}
+          <div className="place-gallery__slide place-gallery__slide--loading place-detail__photo-skeleton" aria-hidden="true">
+            <ImageIcon className="place-gallery__loading-icon" />
+          </div>
+          <p className="place-detail__loading" role="status">{t.placeDetail.loading}</p>
+        </>
+      ) : null}
       {errorMessage ? (
         <div className="place-detail__error" role="alert">
           <p>{errorMessage}</p>
@@ -521,7 +629,12 @@ export function PlaceDetailContent({ tripId, reference, date, request, interlude
         identity={`${detail.reference.kind}:${detail.reference.id}`}
         placeName={detail.name}
         photos={detail.photos.length > 0 ? detail.photos : detail.googlePhotos}
+        photosUnavailable={detail.photosUnavailable}
+        commonsPhotoReportable={detail.commonsPhotoReportable && detail.reference.kind === "trip-place"}
+        reportingCommonsPhoto={reportingCommonsPhoto}
+        onReportCommonsPhoto={() => void reportCommonsPhoto()}
       /> : null}
+      {commonsPhotoReportError ? <p className="place-gallery__report-error" role="alert">{commonsPhotoReportError}</p> : null}
       {interlude}
       {detail && showArticle ? <DetailArticle
         detail={detail}
