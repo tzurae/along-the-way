@@ -1,3 +1,4 @@
+import { MessageSquareText, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -11,6 +12,9 @@ interface AccountSettingsDialogProps {
   open: boolean;
   onOpenChange(open: boolean): void;
   email: string;
+  isAdmin: boolean;
+  openFeedback(): void;
+  openAdmin(): void;
   signOut(): void;
   signOutEverywhere(): void;
   signingOutEverywhere: boolean;
@@ -20,6 +24,9 @@ export function AccountSettingsDialog({
   open,
   onOpenChange,
   email,
+  isAdmin,
+  openFeedback,
+  openAdmin,
   signOut,
   signOutEverywhere,
   signingOutEverywhere,
@@ -42,6 +49,21 @@ export function AccountSettingsDialog({
                 <dd>{email}</dd>
               </div>
             </dl>
+          </section>
+          <section className="account-settings-section" aria-labelledby="account-settings-services">
+            <h3 id="account-settings-services" className="sr-only">{t.accountSettings.services}</h3>
+            <div className="account-settings-menu">
+              <button type="button" onClick={openFeedback}>
+                <MessageSquareText aria-hidden="true" />
+                <span>{t.feedback.entry}</span>
+              </button>
+              {isAdmin ? (
+                <button type="button" onClick={openAdmin}>
+                  <ShieldCheck aria-hidden="true" />
+                  <span>{t.admin.entry}</span>
+                </button>
+              ) : null}
+            </div>
           </section>
         </div>
 

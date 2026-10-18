@@ -22,9 +22,11 @@ import { CalendarDays, ChevronRight, ChevronsUpDown, MapPin, Route, Users } from
 
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { AdminView } from "./AdminView";
 import { AccountSettingsDialog } from "./AccountSettingsDialog";
 import { CreateTripDialog } from "./CreateTripDialog";
 import { AppToaster, notify } from "./AppToaster";
+import { FeedbackDialog } from "./FeedbackDialog";
 import { FirstTripOnboarding } from "./FirstTripOnboarding";
 import { LoginExperience, LoginConfirmation, AuthProgress, type AuthProgressPhase } from "./LoginExperience";
 import { auth } from "./locales/zh-TW/auth";
@@ -157,6 +159,11 @@ function removeTokenFragment(remove: "magicToken" | "inviteToken") {
   fragment.delete(remove);
   url.hash = fragment.toString();
   window.history.replaceState({}, "", url);
+}
+type GlobalView = "admin" | null;
+
+function readGlobalView(): GlobalView {
+  return new URL(window.location.href).searchParams.get("view") === "admin" ? "admin" : null;
 }
 
 
@@ -699,10 +706,12 @@ export function App() {
     }
   }, [replayPendingLogout, store, t.errors, t.today.mutationDisabled]);
   const [user, setUser] = useState<UserDto | null | undefined>(undefined);
+  const [globalView, setGlobalView] = useState<GlobalView>(readGlobalView);
   const [signingOutEverywhere, setSigningOutEverywhere] = useState(false);
   const [trips, setTrips] = useState<TripSummaryDto[]>([]);
   const [selectedTrip, setSelectedTrip] = useState<TripDto | null>(null);
   const [error, setError] = useState("");
+  const [adminRouteError, setAdminRouteError] = useState("");
   const [accepting, setAccepting] = useState(false);
   const inviteKey = useRef<string | null>(null);
   const createTripKey = useRef<string | null>(null);
@@ -748,6 +757,7 @@ export function App() {
   const createDialogReturnFocus = useRef<HTMLElement | null>(null);
   const [accountSettingsOpen, setAccountSettingsOpen] = useState(false);
   const accountSettingsReturnFocus = useRef<HTMLElement | null>(null);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [onboardingFacts, setOnboardingFacts] = useState<OnboardingFacts | null>(null);
   const [createdTripId, setCreatedTripId] = useState<string | null>(null);
   const [placesRevision, setPlacesRevision] = useState(0);
@@ -830,6 +840,34 @@ export function App() {
       window.requestAnimationFrame(() => accountSettingsReturnFocus.current?.focus());
     }
   }, []);
+  const openFeedback = useCallback(() => {
+    setAccountSettingsOpen(false);
+    setFeedbackOpen(true);
+  }, []);
+
+  const changeFeedbackOpen = useCallback((open: boolean) => {
+    setFeedbackOpen(open);
+    if (!open) {
+      window.requestAnimationFrame(() => accountSettingsReturnFocus.current?.focus());
+    }
+  }, []);
+
+  const openAdmin = useCallback(() => {
+    if (!user?.isAdmin) return;
+    setAdminRouteError("");
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", "admin");
+    for (const key of ["trip", "tab", "segment", "day", "days", "repair"]) {
+      url.searchParams.delete(key);
+    }
+    window.history.pushState({}, "", url);
+    ++loadSequence.current;
+    setGlobalView("admin");
+    setSelectedTrip(null);
+    setTodaySnapshot(null);
+    setOnboardingFacts(null);
+    setAccountSettingsOpen(false);
+  }, [user?.isAdmin]);
 
 
 
@@ -879,6 +917,12 @@ export function App() {
     setActiveTripTab(tab);
     setActiveSegment(segment);
     setSelectedDate(date);
+    if (readGlobalView() === "admin") {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("view");
+      window.history.replaceState({}, "", url);
+    }
+    setGlobalView(null);
     writeTripLocation(tripId, tab, segment, date, true);
     setOnboardingFacts({
       tripId,
@@ -893,6 +937,12 @@ export function App() {
   }, [request, store, t.today.unavailable]);
 
   const restoreSnapshot = useCallback(() => {
+    if (readGlobalView() === "admin") {
+      readOnly.current = false;
+      setOffline(false);
+      setAdminRouteError(t.admin.unavailable);
+      return false;
+    }
     if (signedOut.current || store?.isLocallySignedOut()) return false;
     const owner = accountId.current ?? store?.lastAccount();
     if (!owner) return false;
@@ -912,16 +962,17 @@ export function App() {
     setSelectedDate(location.day);
     writeTripLocation(snapshot.model.tripId, "today", null, location.day, true);
     return true;
-  }, [store]);
+  }, [store, t.admin.unavailable]);
 
   const reconnect = useCallback(async () => {
     if (signedOut.current || store?.isLocallySignedOut() || reconnecting.current) return;
     reconnecting.current = true;
     setRetrying(true);
     const epoch = sessionEpoch.current;
+    const navigationSequence = loadSequence.current;
     try {
       const session = await request<{ user: UserDto }>("/api/session", { parse: parseSessionResponse });
-      if (epoch !== sessionEpoch.current) return;
+      if (epoch !== sessionEpoch.current || navigationSequence !== loadSequence.current) return;
       const previousAccount = accountId.current ?? store?.lastAccount();
       if (previousAccount && previousAccount !== session.user.id) {
         store?.clearAccount(previousAccount);
@@ -929,16 +980,31 @@ export function App() {
       }
       accountId.current = session.user.id;
       setUser(session.user);
+      const requestedView = readGlobalView();
+      const adminView = requestedView === "admin" && session.user.isAdmin;
+      setGlobalView(adminView ? "admin" : null);
+      if (requestedView === "admin" && !adminView) {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("view");
+        window.history.replaceState({}, "", url);
+      }
       const available = await refreshTrips();
-      if (epoch !== sessionEpoch.current) return;
-      const tripId = readTripLocation().trip ?? available[0]?.id;
+      if (epoch !== sessionEpoch.current || navigationSequence !== loadSequence.current) return;
+      setAdminRouteError("");
+      const tripId = adminView ? undefined : readTripLocation().trip ?? available[0]?.id;
       if (tripId) {
         await loadTrip(tripId);
         // Read synchronization refreshes mounted panels without triggering the mutation-to-Today effect.
         if (epoch === sessionEpoch.current) setSyncRevision((revision) => revision + 1);
+      } else {
+        setTodaySnapshot(null);
+        setSelectedTrip(null);
+        setOnboardingFacts(null);
+        setOffline(false);
+        readOnly.current = false;
       }
-      else { setTodaySnapshot(null); setOffline(false); readOnly.current = false; }
     } catch (reason) {
+      if (epoch !== sessionEpoch.current || navigationSequence !== loadSequence.current) return;
       if (!(reason instanceof ApiRequestError) || ![401, 403, 404].includes(reason.status ?? 0)) restoreSnapshot();
       setError(reason instanceof Error ? reason.message : t.today.unavailable);
     } finally { reconnecting.current = false; setRetrying(false); }
@@ -1003,6 +1069,25 @@ export function App() {
       }
     };
     const navigate = () => {
+      const requestedView = readGlobalView();
+      if (requestedView === "admin" && user?.isAdmin) {
+        ++loadSequence.current;
+        setGlobalView("admin");
+        readOnly.current = false;
+        setOffline(false);
+        setAdminRouteError(navigator.onLine ? "" : t.admin.unavailable);
+        setTodaySnapshot(null);
+        setSelectedTrip(null);
+        setOnboardingFacts(null);
+        return;
+      }
+      setGlobalView(null);
+      setAdminRouteError("");
+      if (requestedView === "admin") {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("view");
+        window.history.replaceState({}, "", url);
+      }
       const location = readTripLocation();
       const tab = location.tab ?? "itinerary";
       setActiveTripTab(tab);
@@ -1048,7 +1133,7 @@ export function App() {
       window.removeEventListener("popstate", navigate);
       window.removeEventListener("hashchange", fragmentChanged);
     };
-  }, [loadTrip, reconnect, restoreSnapshot, t.today.unavailable]);
+  }, [loadTrip, reconnect, restoreSnapshot, t.admin.unavailable, t.today.unavailable, user?.isAdmin]);
 
   useEffect(() => {
     if (!offline) return;
@@ -1211,9 +1296,18 @@ export function App() {
           store?.clearAccount(previousAccount);
         }
         accountId.current = session.user.id;
+        const requestedView = readGlobalView();
+        const adminView = !acceptedTripId && requestedView === "admin" && session.user.isAdmin;
+        setGlobalView(adminView ? "admin" : null);
+        if (requestedView === "admin" && !adminView) {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("view");
+          window.history.replaceState({}, "", url);
+        }
         const available = await refreshTrips();
         if (!active || epoch !== sessionEpoch.current) return;
-        const tripId = acceptedTripId ?? readTripLocation().trip ?? available[0]?.id;
+        setAdminRouteError("");
+        const tripId = adminView ? undefined : acceptedTripId ?? readTripLocation().trip ?? available[0]?.id;
         if (tripId) await loadTrip(tripId);
         else {
           setTodaySnapshot(null);
@@ -1471,12 +1565,14 @@ export function App() {
   const selectTrip = (tripId: string) => {
     if (createdTripId && createdTripId !== tripId) setCreatedTripId(null);
     const url = new URL(window.location.href);
+    url.searchParams.delete("view");
     url.searchParams.set("trip", tripId);
     url.searchParams.delete("tab");
     url.searchParams.delete("segment");
     url.searchParams.delete("day");
     url.searchParams.delete("days");
     url.searchParams.delete("repair");
+    setGlobalView(null);
     window.history.pushState({}, "", url);
     void loadTrip(tripId).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : t.today.unavailable));
   };
@@ -1485,12 +1581,25 @@ export function App() {
   const accountInitialSource = user.displayName?.trim() || user.email.trim();
   const accountInitial = accountInitialSource.charAt(0).toLocaleUpperCase("zh-TW");
   const accountAccessibleLabel = `${t.accountSettings.title}，${user.email}`;
+  const feedbackSegment = activeTripTab === "itinerary"
+    ? t.app.itinerarySegments[itinerarySegment]
+    : activeTripTab === "places"
+      ? t.app.placesSegments[placesSegment]
+      : activeTripTab === "members"
+        ? t.app.membersSegments[membersSegment]
+        : null;
+  const feedbackPage = (globalView === "admin"
+    ? t.admin.title
+    : selectedTrip
+      ? [selectedTrip.name, t.app.tabs[activeTripTab], feedbackSegment].filter(Boolean).join("・")
+      : t.accountSettings.title
+  ).slice(0, 200);
 
   return (
     <main
       className={`atw-shell min-w-0${shellEntering ? " is-entering" : ""}`}
-      data-active-tab={activeTripTab}
-      data-has-trip={selectedTrip ? "true" : "false"}
+      data-active-tab={globalView === "admin" ? "admin" : activeTripTab}
+      data-has-trip={globalView !== "admin" && selectedTrip ? "true" : "false"}
     >
       <header className="atw-topbar">
         <div className="atw-topbar-content">
@@ -1511,7 +1620,7 @@ export function App() {
       <div className="atw-frame">
         <aside className="atw-rail">
           <TripSwitcher trips={trips} selectedTrip={selectedTrip} openCreateTrip={openCreateTrip} selectTrip={selectTrip} />
-          {selectedTrip ? <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} /> : <div />}
+          {globalView !== "admin" && selectedTrip ? <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} /> : <div />}
           <div className="atw-account-footer">
             <button
               type="button"
@@ -1537,7 +1646,9 @@ export function App() {
             </section>
           ) : null}
 
-          {selectedTrip ? (
+          {globalView === "admin" && user.isAdmin ? (
+            <AdminView request={request} routeError={adminRouteError} />
+          ) : selectedTrip ? (
             <>
               {onboardingFacts?.tripId === selectedTrip.id ? (
                 <TripOnboardingChecklist
@@ -1670,16 +1781,26 @@ export function App() {
           )}
         </div>
       </div>
-      {selectedTrip ? <TripNavigation layout="mobile" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} /> : null}
+      {globalView !== "admin" && selectedTrip ? <TripNavigation layout="mobile" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} /> : null}
       <CreateTripDialog
         open={createDialogOpen}
         onOpenChange={changeCreateDialogOpen}
         createTrip={createTrip}
       />
+      <FeedbackDialog
+        open={feedbackOpen}
+        onOpenChange={changeFeedbackOpen}
+        prefilledPage={feedbackPage}
+        tripId={globalView === "admin" ? null : selectedTrip?.id ?? null}
+        request={request}
+      />
       <AccountSettingsDialog
         open={accountSettingsOpen}
         onOpenChange={changeAccountSettingsOpen}
         email={user.email}
+        isAdmin={user.isAdmin}
+        openFeedback={openFeedback}
+        openAdmin={openAdmin}
         signOut={() => void logout()}
         signOutEverywhere={() => void logoutEverywhere()}
         signingOutEverywhere={signingOutEverywhere}

@@ -405,6 +405,38 @@
   font-size: 15px;
   font-weight: 650;
 }
+.account-settings-menu {
+  display: grid;
+  gap: 6px;
+}
+.account-settings-menu button {
+  display: flex;
+  width: 100%;
+  min-height: 48px;
+  align-items: center;
+  gap: 11px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
+  padding: 10px 13px;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 700;
+  text-align: left;
+}
+.account-settings-menu button:hover {
+  background: color-mix(in srgb, var(--muted) 75%, var(--card));
+}
+.account-settings-menu button:active { transform: translateY(1px); }
+.account-settings-menu button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.account-settings-menu svg {
+  width: 18px;
+  height: 18px;
+  color: var(--color-accent-strong);
+}
 .account-settings-actions {
   display: grid;
   grid-template-columns: repeat(2, max-content);

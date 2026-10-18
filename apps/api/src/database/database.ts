@@ -6,6 +6,7 @@ import {
 } from "kysely";
 import { Pool } from "pg";
 import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
+import type { FeedbackStatus, FeedbackType } from "@along-the-way/contracts/admin";
 
 type Timestamp = ColumnType<Date, Date | string | undefined, Date | string>;
 type DateOnly = ColumnType<Date, string, string>;
@@ -420,6 +421,23 @@ export interface EmailJobTable {
   created_at: Timestamp;
 }
 
+export interface FeedbackTable {
+  id: Generated<string>;
+  user_id: string;
+  trip_id: string | null;
+  type: FeedbackType;
+  body: string;
+  page: string | null;
+  contact_allowed: boolean;
+  app_version: string;
+  user_agent: string | null;
+  viewport: string | null;
+  status: Generated<FeedbackStatus>;
+  admin_note: string | null;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
 export interface RateLimitWindowTable {
   scope: string;
   key_hash: string;
@@ -536,6 +554,7 @@ export interface AlongTheWayDatabase {
   mutation_requests: MutationRequestTable;
   change_events: ChangeEventTable;
   email_jobs: EmailJobTable;
+  feedback: FeedbackTable;
   rate_limit_windows: RateLimitWindowTable;
   worker_heartbeats: WorkerHeartbeatTable;
 }

@@ -16,6 +16,8 @@ import { PostgresPlaceDetailModule } from "./place-details/postgres-place-detail
 import { packagedPhotoRoot } from "./place-details/photo-assets";
 import { CommonsPlacePhotos } from "./place-details/commons-place-photos";
 import { PostgresCommonsCandidateModule } from "./place-details/commons-photo-candidates";
+import { PostgresFeedbackModule } from "./admin/postgres-feedback-module";
+import { DefaultGoogleUsageModule } from "./admin/google-usage-module";
 import packageJson from "../../../package.json";
 
 function requireSetting(name: string) {
@@ -31,13 +33,27 @@ const mapsConfig = {
   browserKey: process.env.GOOGLE_MAPS_BROWSER_KEY?.trim() || null,
   mapId: process.env.GOOGLE_MAPS_MAP_ID?.trim() || null,
 };
+const adminEmails = new Set(
+  (process.env.ADMIN_EMAILS ?? "")
+    .split(",")
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean),
+);
 const identityAccess = new PostgresIdentityAccessModule({
   database,
   tokenIssuer: new TokenIssuer(tokenSecret),
+  adminEmails,
 });
 const tripWorkspace = new PostgresTripWorkspaceModule({ database });
 const tripSkeleton = new PostgresTripSkeletonModule({ database });
 const rateLimiter = new PostgresRateLimiter(database, tokenSecret);
+const feedback = new PostgresFeedbackModule(database);
+const googleUsage = new DefaultGoogleUsageModule({
+  credentialsFile: process.env.GCP_MONITORING_CREDENTIALS_FILE,
+  projects: process.env.GCP_MONITORING_PROJECTS,
+  environment: process.env.NODE_ENV,
+  rateLimiter,
+});
 const placeProvider = new GooglePlacesProvider({
   apiKey: process.env.GOOGLE_MAPS_API_KEY,
   consumeBudget: () => rateLimiter.tryConsumePaidProvider("google_places"),
@@ -73,10 +89,13 @@ const dayPlans = new PostgresDayPlanModule({
 });
 const readiness = new PostgresReadinessProbe(database);
 const app = createApp({
+  appVersion: packageJson.version,
   collaboration: new PostgresCollaborationModule(database),
   commonsCandidates,
   dayPlans,
   discovery,
+  feedback,
+  googleUsage,
   identityAccess,
   mapsConfig,
   placeDetails: new PostgresPlaceDetailModule({

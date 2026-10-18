@@ -143,6 +143,7 @@ export class AppError extends Error {
       | "place_photo_not_found"
       | "commons_photo_not_found"
       | "service_unavailable"
+      | "feedback_not_found"
       | "candidate_not_found"
       | "candidate_asset_not_found"
       | "candidate_already_decided"

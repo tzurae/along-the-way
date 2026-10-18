@@ -42,6 +42,7 @@ const SESSION_STORED_LIFETIME_MS =
 interface ModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
   tokenIssuer: TokenIssuer;
+  adminEmails?: ReadonlySet<string>;
   now?: () => Date;
   randomSessionToken?: () => string;
   randomIdentifier?: () => string;
@@ -83,10 +84,12 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
   private readonly randomSessionToken: () => string;
   private readonly randomIdentifier: () => string;
   private readonly emailBudgetSecret: string;
+  private readonly adminEmails: ReadonlySet<string>;
 
   constructor(options: ModuleOptions) {
     this.database = options.database;
     this.tokenIssuer = options.tokenIssuer;
+    this.adminEmails = options.adminEmails ?? new Set();
     this.now = options.now ?? (() => new Date());
     this.randomSessionToken = options.randomSessionToken ?? defaultSessionToken;
     this.randomIdentifier = options.randomIdentifier ?? randomUUID;
@@ -420,6 +423,7 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
           id: link.userId,
           email: link.email,
           displayName: link.displayName,
+          isAdmin: this.adminEmails.has(normalizeEmail(link.email)),
         },
         ...(acceptedTripId ? { acceptedTripId } : {}),
         ...(inviteOutcome ? { inviteOutcome } : {}),
@@ -477,6 +481,7 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
       id: session.userId,
       email: session.email,
       displayName: session.displayName,
+      isAdmin: this.adminEmails.has(normalizeEmail(session.email)),
     };
   }
 
@@ -491,7 +496,12 @@ export class PostgresIdentityAccessModule implements IdentityAccessModule {
       .returning(["id", "email", "display_name"])
       .executeTakeFirst();
     if (!updated) throw new AppError("unauthenticated", "Sign in to continue", 401);
-    return { id: updated.id, email: updated.email, displayName: updated.display_name };
+    return {
+      id: updated.id,
+      email: updated.email,
+      displayName: updated.display_name,
+      isAdmin: this.adminEmails.has(normalizeEmail(updated.email)),
+    };
   }
 
   async logout(sessionToken: string, targetUserId?: string) {

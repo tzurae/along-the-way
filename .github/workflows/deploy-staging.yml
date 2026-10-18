@@ -71,6 +71,7 @@ jobs:
           TOKEN_SECRET: ${{ secrets.STAGING_TOKEN_SECRET }}
           CONFIGURED_SITE_ADDRESS: ${{ vars.STAGING_SITE_ADDRESS }}
           BOOTSTRAP_OWNER_EMAIL: ${{ vars.STAGING_BOOTSTRAP_OWNER_EMAIL }}
+          ADMIN_EMAILS: ${{ vars.STAGING_ADMIN_EMAILS }}
           SMTP_HOST: ${{ vars.STAGING_SMTP_HOST }}
           SMTP_PORT: ${{ vars.STAGING_SMTP_PORT }}
           EMAIL_FROM: ${{ vars.STAGING_EMAIL_FROM }}
@@ -81,6 +82,8 @@ jobs:
           GOOGLE_MAPS_API_KEY: ${{ secrets.STAGING_GOOGLE_MAPS_API_KEY }}
           GOOGLE_MAPS_BROWSER_KEY: ${{ secrets.STAGING_GOOGLE_MAPS_BROWSER_KEY }}
           GOOGLE_MAPS_MAP_ID: ${{ vars.STAGING_GOOGLE_MAPS_MAP_ID }}
+          GCP_MONITORING_PROJECTS: ${{ vars.STAGING_GCP_MONITORING_PROJECTS }}
+          GCP_MONITORING_CREDENTIALS: ${{ secrets.STAGING_GCP_MONITORING_CREDENTIALS }}
           OPENAI_API_KEY: ${{ secrets.STAGING_OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.STAGING_OPENAI_MODEL }}
         run: |
@@ -109,6 +112,15 @@ jobs:
           fi
           email_from="${EMAIL_FROM:-Along the Way <$SMTP_USERNAME>}"
           umask 077
+          gcp_monitoring_credentials_file="$RUNNER_TEMP/gcp-monitoring.json"
+          if [ -n "$GCP_MONITORING_CREDENTIALS" ]; then
+            printf '%s' "$GCP_MONITORING_CREDENTIALS" >"$gcp_monitoring_credentials_file"
+          else
+            printf '{}\n' >"$gcp_monitoring_credentials_file"
+          fi
+          chmod 600 "$gcp_monitoring_credentials_file"
+          release_id="$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          gcp_monitoring_host_file="/opt/along-the-way/shared/env/$release_id.gcp-monitoring.json"
           {
             printf 'POSTGRES_DB=along_the_way\n'
             printf 'POSTGRES_ADMIN_USER=along_the_way_admin\n'
@@ -117,6 +129,7 @@ jobs:
             printf 'APP_DATABASE_PASSWORD=%s\n' "$APP_DATABASE_PASSWORD"
             printf 'SITE_ADDRESS=%s\n' "$site_address"
             printf 'BOOTSTRAP_OWNER_EMAIL=%s\n' "$BOOTSTRAP_OWNER_EMAIL"
+            printf 'ADMIN_EMAILS=%s\n' "$ADMIN_EMAILS"
             printf 'SMTP_HOST=%s\n' "$smtp_host"
             printf 'SMTP_PORT=%s\n' "$smtp_port"
             printf 'EMAIL_FROM=%s\n' "$email_from"
@@ -128,6 +141,8 @@ jobs:
             printf 'GOOGLE_MAPS_API_KEY=%s\n' "$GOOGLE_MAPS_API_KEY"
             printf 'GOOGLE_MAPS_BROWSER_KEY=%s\n' "$GOOGLE_MAPS_BROWSER_KEY"
             printf 'GOOGLE_MAPS_MAP_ID=%s\n' "$GOOGLE_MAPS_MAP_ID"
+            printf 'GCP_MONITORING_PROJECTS=%s\n' "${GCP_MONITORING_PROJECTS:-test-along:正式站,along-the-way-dev:開發}"
+            printf 'GCP_MONITORING_CREDENTIALS_HOST_FILE=%s\n' "$gcp_monitoring_host_file"
             printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY"
             printf 'OPENAI_MODEL=%s\n' "$OPENAI_MODEL"
             printf 'RELEASE_IMAGE_TAG=%s\n' "$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
@@ -138,6 +153,7 @@ jobs:
         env:
           RELEASE_ID: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           STAGING_ENV_FILE: ${{ runner.temp }}/along-the-way.env
+          STAGING_GCP_MONITORING_CREDENTIALS_FILE: ${{ runner.temp }}/gcp-monitoring.json
         run: sh ./scripts/deploy-staging.sh
 
       - name: Roll back
