@@ -85,6 +85,7 @@ Add these environment values:
 | Secret | `STAGING_TOKEN_SECRET` | Random value of at least 32 bytes used to derive one-time tokens |
 | Optional variable | `STAGING_SITE_ADDRESS` | A custom `https://` hostname |
 | Variable | `STAGING_BOOTSTRAP_OWNER_EMAIL` | Initial private Beta Owner email |
+| Variable | `STAGING_ADMIN_EMAILS` | Comma-separated email allowlist for the global admin view; matching is trimmed and case-insensitive |
 | Optional variable | `STAGING_SMTP_HOST` | Gmail SMTP host; defaults to `smtp.gmail.com` |
 | Optional variable | `STAGING_SMTP_PORT` | Gmail SMTP port; defaults to `587` |
 | Optional variable | `STAGING_SMTP_SECURE` | `true` for implicit TLS; defaults to `false` for STARTTLS |
@@ -95,6 +96,8 @@ Add these environment values:
 | Optional secret | `STAGING_GOOGLE_MAPS_API_KEY` | Server-side Google key with Places API (New) enabled; without it provider-backed place search and details are unavailable |
 | Optional secret | `STAGING_GOOGLE_MAPS_BROWSER_KEY` | Browser key for map rendering; it must be HTTP-referrer restricted to the deployed hostname and API-restricted to Maps JavaScript API |
 | Optional variable | `STAGING_GOOGLE_MAPS_MAP_ID` | Google Cloud Map ID used by the browser map |
+| Optional variable | `STAGING_GCP_MONITORING_PROJECTS` | Comma-separated `project-id:label` pairs; defaults to `test-along:正式站,along-the-way-dev:開發` |
+| Optional secret | `STAGING_GCP_MONITORING_CREDENTIALS` | Complete JSON key for the read-only Monitoring service account; without it the cloud dashboard reports that Monitoring is not configured |
 | Optional secret | `STAGING_OPENAI_API_KEY` | OpenAI API key for AI 建議; without it AI research is unavailable |
 | Optional variable | `STAGING_OPENAI_MODEL` | OpenAI model ID for AI 建議; defaults to the Compose default when unset |
 

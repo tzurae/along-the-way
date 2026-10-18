@@ -106,7 +106,7 @@ it("names the submitted address and focuses the sent-state heading", async () =>
 
   const heading = await screen.findByRole("heading", { name: "查看你的電子郵件" });
   expect(screen.getByText(/如果 owner@example\.test 可以登入/)).toBeInTheDocument();
-  expect(heading).toHaveFocus();
+  await waitFor(() => expect(heading).toHaveFocus());
 });
 
 it("returns to the editable form without discarding the email", async () => {

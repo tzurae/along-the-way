@@ -1,6 +1,6 @@
 import { sql, type Kysely } from "kysely";
 
-// Expand-only: existing candidates receive empty facts and remain manually reviewable.
+// Additive facts let later releases rank existing candidates without rewriting them.
 export async function up(database: Kysely<unknown>) {
   await sql`
     alter table commons_photo_candidates

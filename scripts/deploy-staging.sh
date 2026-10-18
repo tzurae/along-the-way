@@ -5,6 +5,7 @@ staging_host="${STAGING_HOST:?Set STAGING_HOST}"
 ssh_key_file="${STAGING_SSH_KEY_FILE:?Set STAGING_SSH_KEY_FILE}"
 release_id="${RELEASE_ID:?Set RELEASE_ID}"
 staging_env_file="${STAGING_ENV_FILE:?Set STAGING_ENV_FILE}"
+gcp_monitoring_credentials_file="${STAGING_GCP_MONITORING_CREDENTIALS_FILE:?Set STAGING_GCP_MONITORING_CREDENTIALS_FILE}"
 ssh_user="${STAGING_SSH_USER:-ubuntu}"
 
 case "$release_id" in
@@ -16,18 +17,25 @@ esac
 
 archive=$(mktemp "${TMPDIR:-/tmp}/along-the-way.XXXXXX.tar.gz")
 archive_name="along-the-way-$release_id.tar.gz"
+remote_credentials="/opt/along-the-way/shared/env/$release_id.gcp-monitoring.json"
 remote="${ssh_user}@${staging_host}"
 
 cleanup() {
-  rm -f "$archive"
+  rm -f "$archive" "$gcp_monitoring_credentials_file"
 }
 trap cleanup EXIT
+
+[ -f "$gcp_monitoring_credentials_file" ] || {
+  echo "GCP Monitoring credentials file does not exist" >&2
+  exit 1
+}
 
 git archive --format=tar.gz --output "$archive" HEAD
 
 ssh -i "$ssh_key_file" "$remote" \
   "test ! -e '/opt/along-the-way/releases/$release_id' && \
    test ! -e '/opt/along-the-way/shared/env/$release_id.env' && \
+   test ! -e '/opt/along-the-way/shared/env/$release_id.gcp-monitoring.json' && \
    install -d '/opt/along-the-way/releases/$release_id' '/opt/along-the-way/shared/env'"
 
 scp -i "$ssh_key_file" "$archive" "$remote:/tmp/$archive_name"
@@ -36,5 +44,9 @@ scp -i "$ssh_key_file" "$staging_env_file" "$remote:/tmp/along-the-way.env"
 ssh -i "$ssh_key_file" "$remote" \
   "tar -xzf '/tmp/$archive_name' -C '/opt/along-the-way/releases/$release_id' && \
    install -m 600 '/tmp/along-the-way.env' '/opt/along-the-way/shared/env/$release_id.env' && \
-   rm -f '/tmp/$archive_name' '/tmp/along-the-way.env' && \
+   rm -f '/tmp/$archive_name' '/tmp/along-the-way.env'"
+
+scp -i "$ssh_key_file" "$gcp_monitoring_credentials_file" "$remote:$remote_credentials"
+ssh -i "$ssh_key_file" "$remote" \
+  "chmod 600 '$remote_credentials' && \
    sh '/opt/along-the-way/releases/$release_id/infra/lightsail/activate-release.sh' '$release_id'"

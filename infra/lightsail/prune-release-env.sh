@@ -37,6 +37,6 @@ LC_ALL=C ls -1t -- "$@" | while IFS= read -r env_file; do
   if [ "$kept" -lt 3 ]; then
     kept=$((kept + 1))
   else
-    rm -f -- "$env_file"
+    rm -f -- "$env_file" "${env_file%.env}.gcp-monitoring.json"
   fi
 done

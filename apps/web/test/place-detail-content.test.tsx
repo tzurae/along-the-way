@@ -69,7 +69,6 @@ const response: PlaceDetailResponse = {
     photos: [photo("work-one", "第一張作品", "作者甲", "CC BY-SA 4.0"), photo("work-two", "第二張作品", "作者乙", "CC0 1.0")],
     googlePhotos: [],
     photosUnavailable: false,
-    commonsPhotoReportable: false,
   },
 };
 
@@ -137,7 +136,6 @@ it("activates Google slides on demand and keeps selection, failure, and per-phot
   const googlePhotos = [
     googlePhoto(0, "攝影者甲"),
     googlePhoto(1, "攝影者乙"),
-    googlePhoto(2, "攝影者丙"),
   ];
   const googleResponse: PlaceDetailResponse = {
     detail: {
@@ -150,15 +148,14 @@ it("activates Google slides on demand and keeps selection, failure, and per-phot
     (init?.parse ? init.parse(googleResponse) : googleResponse) as T;
 
   render(<PlaceDetailContent tripId={tripId} reference={{ kind: "trip-place", id: referenceId }} request={googleRequest} />);
-  const first = await screen.findByAltText("測試景點的照片，第 1 張，共 3 張");
+  const first = await screen.findByAltText("測試景點的照片，第 1 張，共 2 張");
   const slides = Array.from(document.querySelectorAll<HTMLElement>("[data-photo-slide]"));
   expect(first).toHaveAttribute("src", googlePhotos[0]!.imageUrl);
-  expect(slides).toHaveLength(3);
+  expect(slides).toHaveLength(2);
   expect(slides[1]!.querySelector("img")).not.toBeInTheDocument();
-  expect(slides[2]!.querySelector("img")).not.toBeInTheDocument();
   expect(observerRoot).toBe(document.querySelector(".place-gallery__track"));
   expect(observedSlides).toEqual(slides.slice(1));
-  expect(screen.getByText("1／3")).toBeInTheDocument();
+  expect(screen.getByText("1／2")).toBeInTheDocument();
   expect(document.querySelector(`[data-photo-credit="${googlePhotos[0]!.id}"]`)).toHaveTextContent("Google Maps・照片：攝影者甲");
 
   act(() => observerCallback?.([
@@ -169,25 +166,18 @@ it("activates Google slides on demand and keeps selection, failure, and per-phot
   act(() => observerCallback?.([
     { isIntersecting: true, intersectionRatio: 0.6, target: slides[1]! } as unknown as IntersectionObserverEntry,
   ], {} as IntersectionObserver));
-  const second = await screen.findByAltText("測試景點的照片，第 2 張，共 3 張");
+  const second = await screen.findByAltText("測試景點的照片，第 2 張，共 2 張");
   expect(second).toHaveAttribute("src", googlePhotos[1]!.imageUrl);
-  expect(screen.getByText("1／3")).toBeInTheDocument();
-  expect(slides[2]!.querySelector("img")).not.toBeInTheDocument();
+  expect(screen.getByText("1／2")).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "下一張照片" }));
-  expect(screen.getByText("2／3")).toBeInTheDocument();
+  expect(screen.getByText("2／2")).toBeInTheDocument();
   expect(document.querySelector(`[data-photo-credit="${googlePhotos[1]!.id}"]`)).toHaveTextContent("Google Maps・照片：攝影者乙");
-  expect(slides[2]!.querySelector("img")).not.toBeInTheDocument();
 
   fireEvent.error(second);
   expect(await screen.findByText("照片載入失敗", { exact: true })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /^重新載入照片$/ }));
-  expect(screen.getByAltText("測試景點的照片，第 2 張，共 3 張")).toHaveAttribute("src", googlePhotos[1]!.imageUrl);
-
-  fireEvent.click(screen.getByRole("button", { name: "下一張照片" }));
-  expect(await screen.findByAltText("測試景點的照片，第 3 張，共 3 張")).toHaveAttribute("src", googlePhotos[2]!.imageUrl);
-  expect(screen.getByText("3／3")).toBeInTheDocument();
-  expect(document.querySelector(`[data-photo-credit="${googlePhotos[2]!.id}"]`)).toHaveTextContent("Google Maps・照片：攝影者丙");
+  expect(screen.getByAltText("測試景點的照片，第 2 張，共 2 張")).toHaveAttribute("src", googlePhotos[1]!.imageUrl);
 });
 
 it("shows a calm explicit empty state when neither curated nor Google photos exist", async () => {

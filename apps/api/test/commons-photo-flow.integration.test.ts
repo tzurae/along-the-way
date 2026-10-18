@@ -3,15 +3,16 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Hono } from "hono";
 import { sql, type Kysely } from "kysely";
-import { parseCommonsCandidatesResponse, parseCommonsPhotoReportResponse, parsePlaceDetailResponse, parsePlacePreviewResponse } from "@along-the-way/contracts/place-details";
+import { parsePlaceDetailResponse, parsePlacePreviewResponse } from "@along-the-way/contracts/place-details";
+import { parseFeedbackAdminResponse, parseCreatePhotoFeedbackResponse } from "@along-the-way/contracts/admin";
 import { parseTripResponse } from "@along-the-way/contracts/private-trips";
 import { parseTripPlaceListResponse, parseTripPlaceResponse, type ProviderPlaceCandidateDto, type TripPlaceDto } from "@along-the-way/contracts/trip-places";
 import { createApp } from "../src/app";
+import { PostgresFeedbackModule } from "../src/admin/postgres-feedback-module";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
 import { runMigrations } from "../src/database/migrate";
 import { CommonsPlacePhotos } from "../src/place-details/commons-place-photos";
-import { PostgresCommonsCandidateModule } from "../src/place-details/commons-photo-candidates";
-import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
+import { PostgresCommonsCandidateModule, type CommonsCandidateGenerationResult } from "../src/place-details/commons-photo-candidates";
 import { PostgresPlaceDetailModule } from "../src/place-details/postgres-place-detail-module";
 import { PostgresCollaborationModule } from "../src/private-trips/postgres-collaboration-module";
 import { PostgresIdentityAccessModule } from "../src/private-trips/postgres-identity-access-module";
@@ -83,11 +84,13 @@ function wikimedia(scenarios: Map<string, WikimediaScenario>, requests: string[]
   };
 }
 
-describe("Commons representative photos chosen by Google CID at intake", () => {
+describe("Commons intake, automatic selection, and admin photo feedback", () => {
   let database: Kysely<AlongTheWayDatabase>;
   let app: Hono;
   let assetRoot: string;
   let cookie: string;
+  let adminCookie: string;
+  let memberId: string;
   let tripId: string;
   let googlePhotoReads: number;
   let wikimediaRequests: string[];
@@ -95,6 +98,7 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
   let duringDownload: (() => Promise<void>) | null;
   let commonsPhotos: CommonsPlacePhotos;
   let commonsCandidates: PostgresCommonsCandidateModule;
+  let generation: Promise<CommonsCandidateGenerationResult> | null;
   let candidateFacts: Array<{ id: string; name: string; typeId: string; latitude: number | null }>;
   const createdTrips: string[] = [];
   const createdUsers: string[] = [];
@@ -112,6 +116,9 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
     scenarios = new Map();
     duringDownload = null;
     candidateFacts = [];
+    generation = null;
+    const adminToken = randomUUID();
+    const adminEmail = `${adminToken}@example.test`;
     commonsPhotos = new CommonsPlacePhotos({
       now, userAgent: "AlongTheWayTest/0 (https://example.test)",
       fetch: wikimedia(scenarios, wikimediaRequests, () => duringDownload?.()),
@@ -157,27 +164,43 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
         googlePhotoReads++;
         return [];
       },
+      async fetchPhotoMedia() { throw new Error("No Google photos in this scenario"); },
     };
     const tripPlaces = new PostgresTripPlaceModule({
       database, provider, now,
       commonsPhotos,
+      commonsCandidates: {
+        generate(placeIdentityId) {
+          generation = commonsCandidates.generate(placeIdentityId);
+          return generation;
+        },
+      },
     });
     app = createApp({
-      commonsCandidates,
+      feedback: new PostgresFeedbackModule(database, now),
       collaboration: new PostgresCollaborationModule(database), dayPlans: unrelatedDayPlanModule, discovery: unrelatedDiscoveryModule,
-      identityAccess: new PostgresIdentityAccessModule({ database, now, tokenIssuer: new TokenIssuer("commons-photo-integration-secret-at-least-32-bytes") }),
-      placeDetails: new PostgresPlaceDetailModule({ database, assetRoot, provider, now }),
+      identityAccess: new PostgresIdentityAccessModule({
+        database, now, adminEmails: new Set([adminEmail]),
+        tokenIssuer: new TokenIssuer("commons-photo-integration-secret-at-least-32-bytes"),
+      }),
+      placeDetails: new PostgresPlaceDetailModule({
+        database, assetRoot, provider, now, photoCapabilitySecret: "commons-photo-capability-secret-at-least-32-bytes",
+      }),
       rateLimiter: new PostgresRateLimiter(database, "commons-photo-rate-secret-at-least-32-bytes", now),
       readiness: new PostgresReadinessProbe(database, now), siteAddress: "https://app.example.test",
       tripWorkspace: new PostgresTripWorkspaceModule({ database, now }), tripSkeleton: new PostgresTripSkeletonModule({ database, now }), tripPlaces,
     });
     const token = randomUUID();
-    const user = await database.insertInto("users").values({ email: `${token}@example.test`, display_name: "測試成員", status: "active" })
-      .returning("id").executeTakeFirstOrThrow();
-    createdUsers.push(user.id);
-    await database.insertInto("sessions").values({ user_id: user.id, token_hash: hashToken(token),
-      expires_at: "2026-11-01T00:00:00Z", last_seen_at: now(), revoked_at: null }).execute();
+    for (const sessionToken of [token, adminToken]) {
+      const user = await database.insertInto("users").values({ email: `${sessionToken}@example.test`, display_name: "測試成員", status: "active" })
+        .returning("id").executeTakeFirstOrThrow();
+      createdUsers.push(user.id);
+      if (sessionToken === token) memberId = user.id;
+      await database.insertInto("sessions").values({ user_id: user.id, token_hash: hashToken(sessionToken),
+        expires_at: "2026-11-01T00:00:00Z", last_seen_at: now(), revoked_at: null }).execute();
+    }
     cookie = `__Host-along_the_way_session=${token}`;
+    adminCookie = `__Host-along_the_way_session=${adminToken}`;
     const response = await app.request("/api/trips", { method: "POST", headers: {
       cookie, "content-type": "application/json", origin: "https://app.example.test", "idempotency-key": randomUUID(),
     }, body: JSON.stringify({ name: `Commons 照片驗證 ${randomUUID()}`, startDate: "2026-10-20", endDate: "2026-10-22",
@@ -188,6 +211,7 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
   });
 
   afterEach(async () => {
+    if (createdUsers.length) await database.deleteFrom("feedback").where("user_id", "in", createdUsers).execute();
     if (createdTrips.length) await database.deleteFrom("itinerary_items").where("trip_id", "in", createdTrips).execute();
     if (createdTrips.length) await database.deleteFrom("trips").where("id", "in", createdTrips.splice(0)).execute();
     if (canonicalIds.length) await database.deleteFrom("place_identities").where("id", "in", canonicalIds.splice(0)).execute();
@@ -206,6 +230,7 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
     expect(response.status).toBe(201);
     const place = parseTripPlaceResponse(await response.json()).tripPlace;
     canonicalIds.push(place.placeId);
+    await generation;
     return place;
   }
 
@@ -215,7 +240,7 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
     return parsePlacePreviewResponse(await response.json()).previews[0]!;
   }
 
-  it("stores a uniquely matched, freely licensed photo and serves it without any Google photo call", async () => {
+  it("serves Commons previews without Google and uses Commons detail when Google returns no photos", async () => {
     const cid = `${Date.now()}1`;
     scenarios.set(cid, { items: ["Q714828"], license: "cc0" });
     const place = await addPlace(cid);
@@ -224,6 +249,7 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
     const thumbnail = await preview(place);
     expect(thumbnail.photo).toMatchObject({ source: "commons", author: "Tester", licenseName: "CC0", width: 1280, height: 960 });
     expect(thumbnail.photoCount).toBe(1);
+    expect(googlePhotoReads).toBe(0);
     const detailResponse = await app.request(`/api/trips/${tripId}/place-details?kind=trip-place&id=${place.id}`, { headers: { cookie } });
     const detail = parsePlaceDetailResponse(await detailResponse.json()).detail;
     expect(detail.photos.map((photo) => photo.source)).toEqual(["commons"]);
@@ -233,8 +259,8 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
     const asset = await app.request(thumbnail.photo!.thumbnailUrl, { headers: { cookie } });
     expect(asset.status).toBe(200);
     expect(await asset.text()).toBe("controlled bytes /wikipedia/commons/thumb/a/ab/Controlled_shrine.jpg/330px-Controlled_shrine.jpg");
-    expect(googlePhotoReads).toBe(0);
-    // Reads come from PostgreSQL: neither Wikimedia nor Google is contacted after intake.
+    expect(googlePhotoReads).toBe(1);
+    // Commons bytes and metadata come from PostgreSQL, not another Wikimedia request.
     expect(wikimediaRequests).toEqual([]);
   });
 
@@ -272,86 +298,121 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
   });
 
   it.each([
-    { reason: "single exact worship match at 300 m", type: "worship", typeId: "Q34627", name: "受控神社", latitude: 35.002698, count: 1, auto: true },
-    { reason: "single exact nature match", type: "nature", typeId: "Q23397", name: "受控神社", latitude: 35, count: 1, auto: true },
-    { reason: "single exact museum match", type: "museum", typeId: "Q33506", name: "受控神社", latitude: 35, count: 1, auto: true },
-    { reason: "two eligible matches", type: "worship", typeId: "Q34627", name: "受控神社", latitude: 35, count: 2, auto: false },
-    { reason: "related but not exact name", type: "worship", typeId: "Q34627", name: "受控神社庭園", latitude: 35, count: 1, auto: false },
-    { reason: "incompatible type", type: "worship", typeId: "Q55488", name: "受控神社", latitude: 35, count: 1, auto: false },
-    { reason: "distance beyond 300 m", type: "worship", typeId: "Q34627", name: "受控神社", latitude: 35.00271, count: 1, auto: false },
-    { reason: "unknown distance", type: "worship", typeId: "Q34627", name: "受控神社", latitude: null, count: 1, auto: false },
-    { reason: "station always requires manual review", type: "station", typeId: "Q55488", name: "受控神社", latitude: 35, count: 1, auto: false },
-    { reason: "activity always requires manual review", type: "activity", typeId: "Q34627", name: "受控神社", latitude: 35, count: 1, auto: false },
-  ] as const)("applies the auto-photo rule: $reason", async ({ type, typeId, name, latitude, count, auto }) => {
+    {
+      reason: "nearest name-related match ahead of a closer unrelated match",
+      facts: [
+        { id: "Q714828", name: "受控神社庭園", latitude: 35.02 },
+        { id: "Q714829", name: "受控神社", latitude: 35.004 },
+        { id: "Q714830", name: "別座公園", latitude: 35 },
+      ],
+      expected: "Q714829",
+    },
+    {
+      reason: "nearest unrelated match within 1 km",
+      facts: [
+        { id: "Q714828", name: "遠方公園", latitude: 35.01 },
+        { id: "Q714829", name: "近處車站", latitude: 35.00899 },
+        { id: "Q714830", name: "附近博物館", latitude: 35.004 },
+      ],
+      expected: "Q714830",
+    },
+    {
+      reason: "no unrelated match beyond 1 km or with unknown distance",
+      facts: [
+        { id: "Q714828", name: "遠方公園", latitude: 35.00901 },
+        { id: "Q714829", name: "沒有座標", latitude: null },
+      ],
+      expected: null,
+    },
+  ])("auto-selects at intake: $reason", async ({ facts, expected }) => {
+    candidateFacts = facts.map((candidate) => ({ ...candidate, typeId: "Q34627" }));
     const place = await addPlace(`${Date.now()}6`);
-    await database.updateTable("trip_places").set({ place_type: type as PlaceType }).where("id", "=", place.id).execute();
-    candidateFacts = Array.from({ length: count }, (_, index) => ({ id: `Q${714828 + index}`, name, typeId, latitude }));
-    const result = await commonsCandidates.generate(place.placeId);
-    expect(result.outcome).toBe(auto ? "auto_applied" : "generated");
-    expect((await preview(place)).photo?.source ?? null).toBe(auto ? "commons" : null);
-    const response = await app.request(`/api/trips/${tripId}/commons-candidates`, { headers: { cookie } });
-    expect(response.status).toBe(200);
-    expect(parseCommonsCandidatesResponse(await response.json()).candidates).toHaveLength(auto ? 0 : count);
-    // Refresh follows the same public rule, not a second weaker auto-apply path.
-    await commonsCandidates.refresh(place.placeId);
-    expect((await preview(place)).photo?.source ?? null).toBe(auto ? "commons" : null);
+    const selected = await database.selectFrom("commons_place_photos").select("wikidata_id")
+      .where("place_id", "=", place.placeId).executeTakeFirst();
+    expect(selected?.wikidata_id ?? null).toBe(expected);
+    expect((await preview(place)).photo?.source ?? null).toBe(expected === null ? null : "commons");
+    expect(googlePhotoReads).toBe(0);
   });
 
-  it("applies a previously pending photo when refreshed facts become a unique exact match", async () => {
-    const place = await addPlace(`${Date.now()}8`);
-    await database.updateTable("trip_places").set({ place_type: "worship" }).where("id", "=", place.id).execute();
-    candidateFacts = [{ id: "Q714828", name: "受控神社庭園", typeId: "Q34627", latitude: 35 }];
-    expect((await commonsCandidates.generate(place.placeId)).outcome).toBe("generated");
-    expect((await preview(place)).photo).toBeNull();
-    candidateFacts[0]!.name = "受控神社";
-    expect((await commonsCandidates.refresh(place.placeId)).outcome).toBe("auto_applied");
-    expect((await preview(place)).photo?.source).toBe("commons");
-    const listed = await app.request(`/api/trips/${tripId}/commons-candidates`, { headers: { cookie } });
-    expect(parseCommonsCandidatesResponse(await listed.json()).candidates).toEqual([]);
-  });
-
-  it.each(["strict", "auto", "manual"] as const)("report removes a %s photo and prevents its rejected candidate from reappearing", async (origin) => {
-    const cid = `${Date.now()}7`;
-    if (origin === "strict") scenarios.set(cid, { items: ["Q714828"], license: "cc0" });
-    const place = await addPlace(cid);
-    candidateFacts = [{ id: "Q714828", name: "受控神社", typeId: "Q34627", latitude: 35 }];
-    if (origin !== "strict") {
-      await database.updateTable("trip_places").set({ place_type: origin === "auto" ? "worship" : "activity" })
-        .where("id", "=", place.id).execute();
-      await commonsCandidates.generate(place.placeId);
-      if (origin === "manual") {
-        const listed = await app.request(`/api/trips/${tripId}/commons-candidates`, { headers: { cookie } });
-        const candidate = parseCommonsCandidatesResponse(await listed.json()).candidates[0]!;
-        const decision = await app.request(`/api/trips/${tripId}/commons-candidates/${candidate.id}/decision`, {
-          method: "POST", headers: { cookie, origin: "https://app.example.test", "content-type": "application/json" },
-          body: JSON.stringify({ decision: "confirm" }),
-        });
-        expect(decision.status).toBe(200);
-      }
-    }
-    const before = await app.request(`/api/trips/${tripId}/place-details?kind=trip-place&id=${place.id}`, { headers: { cookie } });
-    expect(parsePlaceDetailResponse(await before.json()).detail.commonsPhotoReportable).toBe(true);
-    const oldAssetUrl = (await preview(place)).photo!.imageUrl;
-    const reportUrl = `/api/trips/${tripId}/trip-places/${place.id}/commons-photo/report`;
-    const report = await app.request(reportUrl, {
-      method: "POST", headers: { cookie, origin: "https://app.example.test" },
+  it.each([
+    { method: "GET", path: "/api/admin/feedback" },
+    { method: "PATCH", path: `/api/admin/feedback/${randomUUID()}` },
+    { method: "POST", path: `/api/admin/feedback/${randomUUID()}/remove-photo` },
+    { method: "GET", path: "/api/admin/google-usage" },
+  ])("returns 403 to a non-admin for $method $path", async ({ method, path }) => {
+    const response = await app.request(path, {
+      method, headers: { cookie, origin: "https://app.example.test", "content-type": "application/json" },
+      ...(method === "PATCH" ? { body: JSON.stringify({ status: "done" }) } : {}),
     });
-    expect(report.status).toBe(200);
-    expect(parseCommonsPhotoReportResponse(await report.json())).toEqual({ remainingCandidates: 0 });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: { code: "forbidden" } });
+  });
+
+  async function photoFeedback(place: TripPlaceDto, body: unknown) {
+    return app.request(`/api/trips/${tripId}/trip-places/${place.id}/photo-feedback`, {
+      method: "POST",
+      headers: { cookie, origin: "https://app.example.test", "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it.each([
+    { reason: "unknown", note: null },
+    { reason: "wrong_place" },
+    { reason: "poor_quality", note: 123 },
+    { reason: "other", note: "字".repeat(501) },
+  ])("rejects invalid photo feedback %# without storing it", async (body) => {
+    const place = await addPlace(`${Date.now()}8`);
+    const response = await photoFeedback(place, body);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "validation_error" } });
+    expect(await database.selectFrom("feedback").select("id").where("user_id", "=", memberId).execute()).toEqual([]);
+  });
+
+  it.each(["wrong_place", "poor_quality", "other"] as const)("accepts photo feedback reason %s with a 500-character Unicode note", async (reason) => {
+    const place = await addPlace(`${Date.now()}8`);
+    const note = "𠮷".repeat(500);
+    const response = await photoFeedback(place, { reason, note });
+    expect(response.status).toBe(201);
+    const { id } = parseCreatePhotoFeedbackResponse(await response.json());
+    expect(await database.selectFrom("feedback").select(["type", "photo_reason", "body", "trip_place_id"])
+      .where("id", "=", id).executeTakeFirstOrThrow()).toMatchObject({
+        type: "photo", photo_reason: reason, body: `照片有問題：地點「${place.name}」\n備註：${note}`, trip_place_id: place.id,
+      });
+  });
+
+  it("removes a reported Commons photo idempotently and never selects its rejected QID again", async () => {
+    const cid = `${Date.now()}7`;
+    scenarios.set(cid, { items: ["Q714828"], license: "cc0" });
+    const place = await addPlace(cid);
+    const oldAssetUrl = (await preview(place)).photo!.imageUrl;
+    const report = await photoFeedback(place, { reason: "wrong_place", note: null });
+    expect(report.status).toBe(201);
+    const { id } = parseCreatePhotoFeedbackResponse(await report.json());
+    expect((await preview(place)).photo?.source).toBe("commons");
+    const remove = () => app.request(`/api/admin/feedback/${id}/remove-photo`, {
+      method: "POST", headers: { cookie: adminCookie, origin: "https://app.example.test" },
+    });
+    const first = await remove();
+    expect(first.status).toBe(200);
+    const removed = parseFeedbackAdminResponse(await first.json());
+    expect(removed).toMatchObject({ id, status: "done", photoWikidataId: "Q714828" });
+    const repeated = await remove();
+    expect(repeated.status).toBe(200);
+    expect(parseFeedbackAdminResponse(await repeated.json())).toEqual(removed);
     expect((await preview(place)).photo).toBeNull();
     expect((await app.request(oldAssetUrl, { headers: { cookie } })).status).toBe(404);
-    expect((await app.request(reportUrl, {
-      method: "POST", headers: { cookie, origin: "https://app.example.test" },
-    })).status).toBe(409);
+    candidateFacts = [
+      { id: "Q714828", name: "受控神社", typeId: "Q34627", latitude: 35 },
+      { id: "Q714829", name: "附近公園", typeId: "Q34627", latitude: 35.004 },
+    ];
     await commonsCandidates.refresh(place.placeId);
-    const prepared = await commonsPhotos.prepareWikidataCandidate("Q714828");
-    expect(prepared).not.toBeNull();
-    await database.transaction().execute((transaction) => commonsPhotos.store(transaction, place.placeId, prepared!));
-    expect((await preview(place)).photo).toBeNull();
-    const remaining = await app.request(`/api/trips/${tripId}/commons-candidates`, { headers: { cookie } });
-    expect(parseCommonsCandidatesResponse(await remaining.json()).candidates).toEqual([]);
-    const after = await app.request(`/api/trips/${tripId}/place-details?kind=trip-place&id=${place.id}`, { headers: { cookie } });
-    expect(parsePlaceDetailResponse(await after.json()).detail.commonsPhotoReportable).toBe(false);
+    expect(await database.selectFrom("commons_place_photos").select("wikidata_id")
+      .where("place_id", "=", place.placeId).executeTakeFirstOrThrow()).toEqual({ wikidata_id: "Q714829" });
+    expect((await preview(place)).photo?.source).toBe("commons");
+    expect((await remove()).status).toBe(409);
+    expect(await database.selectFrom("commons_place_photos").select("wikidata_id")
+      .where("place_id", "=", place.placeId).executeTakeFirstOrThrow()).toEqual({ wikidata_id: "Q714829" });
   });
 
   it("does not serve another place's Commons file through this place's reference", async () => {

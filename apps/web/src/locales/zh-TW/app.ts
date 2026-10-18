@@ -50,6 +50,7 @@ export const app = {
     dismiss: "略過",
   },
   tripSections: "旅程主要功能",
+  feedbackNav: "反饋",
   tabs: {
     today: "今天",
     itinerary: "行程",

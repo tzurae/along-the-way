@@ -16,21 +16,32 @@ export type RateLimitedAction =
   | "trip_invite"
   | "trip_create"
   | "trip_content"
+  | "feedback"
   | "place_photo"
   | "place_photo_metadata"
   | "discovery_ai";
 export type PaidProvider = "google_places" | "google_maps_js";
+export interface AppRateLimitUsage {
+  googlePlacesToday: number;
+  googlePlacesLimit: number;
+  googleMapsJsToday: number;
+  googleMapsJsLimit: number;
+  photoMetadataThisHour: number;
+  photoMetadataLimit: number;
+}
 export interface RateLimiter {
   consume(action: RateLimitedAction, clientIp: string, account?: string, cost?: number): Promise<void>;
   claimDiscoveryAiRun(account: string, tripId: string): Promise<void>;
   withPaidProviderIdentity<T>(clientIp: string, account: string, work: () => Promise<T>): Promise<T>;
   tryConsumePaidProvider(provider: PaidProvider): Promise<boolean>;
+  appUsage(): Promise<AppRateLimitUsage>;
 }
 
 interface Rule {
   windowSeconds: number;
   ipLimit: number;
   accountLimit?: number;
+  globalLimit?: number;
 }
 
 const RULES: Record<RateLimitedAction, Rule> = {
@@ -42,8 +53,14 @@ const RULES: Record<RateLimitedAction, Rule> = {
   trip_invite: { windowSeconds: 24 * 60 * 60, ipLimit: 100, accountLimit: 10 },
   trip_create: { windowSeconds: 24 * 60 * 60, ipLimit: 100, accountLimit: 5 },
   trip_content: { windowSeconds: 60 * 60, ipLimit: 600, accountLimit: 300 },
+  feedback: { windowSeconds: 60 * 60, ipLimit: 200, accountLimit: 10 },
   place_photo: { windowSeconds: 60 * 60, ipLimit: 1_200, accountLimit: 600 },
-  place_photo_metadata: { windowSeconds: 60 * 60, ipLimit: 600, accountLimit: 300 },
+  place_photo_metadata: {
+    windowSeconds: 60 * 60,
+    ipLimit: 600,
+    accountLimit: 300,
+    globalLimit: 600,
+  },
   discovery_ai: { windowSeconds: 60 * 60, ipLimit: 6, accountLimit: 10 },
 };
 
@@ -126,6 +143,9 @@ export class PostgresRateLimiter implements RateLimiter {
       Math.floor(now.valueOf() / windowMilliseconds) * windowMilliseconds,
     );
     const attempts = [
+      ...(rule.globalLimit === undefined
+        ? []
+        : [{ scope: `${action}:global`, key: "global", limit: rule.globalLimit }]),
       {
         scope: `${action}:ip`,
         key: clientIp || "unknown",
@@ -275,6 +295,40 @@ export class PostgresRateLimiter implements RateLimiter {
       throw error;
     }
   }
+  async appUsage(): Promise<AppRateLimitUsage> {
+    const now = this.now();
+    const placesWindow = paidProviderWindowStart("google_places", now);
+    const mapsWindow = paidProviderWindowStart("google_maps_js", now);
+    const photoRule = RULES.place_photo_metadata;
+    const photoWindow = new Date(
+      Math.floor(now.valueOf() / (photoRule.windowSeconds * 1_000))
+        * photoRule.windowSeconds * 1_000,
+    );
+    const counters = [
+      { scope: "paid_provider:google_places:global", window: placesWindow },
+      { scope: "paid_provider:google_maps_js:global", window: mapsWindow },
+      { scope: "place_photo_metadata:global", window: photoWindow },
+    ] as const;
+    const [googlePlacesToday = 0, googleMapsJsToday = 0, photoMetadataThisHour = 0] =
+      await Promise.all(counters.map(async ({ scope, window }) => {
+        const row = await this.database.selectFrom("rate_limit_windows")
+          .select("request_count")
+          .where("scope", "=", scope)
+          .where("key_hash", "=", this.keyHash(scope, "global"))
+          .where("window_start", "=", window)
+          .executeTakeFirst();
+        return row?.request_count ?? 0;
+      }));
+    return {
+      googlePlacesToday,
+      googlePlacesLimit: PAID_PROVIDER_DAILY_LIMITS.google_places.global,
+      googleMapsJsToday,
+      googleMapsJsLimit: PAID_PROVIDER_DAILY_LIMITS.google_maps_js.global,
+      photoMetadataThisHour,
+      photoMetadataLimit: photoRule.globalLimit!,
+    };
+  }
+
   /**
    * Makes the authenticated account and request IP available to every provider call in `work`.
    */

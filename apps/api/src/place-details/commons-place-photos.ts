@@ -38,7 +38,7 @@ export interface RepresentativePhotoSource {
   store(executor: Transaction<AlongTheWayDatabase>, placeIdentityId: string, prepared: PreparedCommonsPhoto): Promise<boolean>;
 }
 export interface CommonsCandidatePhotoSource {
-  /** Resolves one reviewed-candidate QID through the same P18, licence and rendition checks as strict CID matching. */
+  /** Resolves one automatic-candidate QID through the same P18, licence and rendition checks as strict CID matching. */
   prepareWikidataCandidate(wikidataId: string, signal?: AbortSignal): Promise<PreparedCommonsPhoto | null>;
   storeRenditions(executor: Kysely<AlongTheWayDatabase>, prepared: PreparedCommonsPhoto): Promise<void>;
   storeConfirmed(
@@ -247,7 +247,7 @@ export class CommonsPlacePhotos implements RepresentativePhotoSource, CommonsCan
           work,
           renditions[0].asset,
           renditions[1].asset,
-          `Wikidata ${wikidataId} 將本作品列為代表圖片（P18）；地點關聯由嚴格名稱、類型與距離規則判定，或由旅程成員確認。`,
+          `Wikidata ${wikidataId} 將本作品列為代表圖片（P18）；系統依名稱關聯優先、否則取 1 公里內最近候選的規則自動選取。`,
         ),
         renditions,
       };
@@ -262,7 +262,7 @@ export class CommonsPlacePhotos implements RepresentativePhotoSource, CommonsCan
     placeIdentityId: string,
     prepared: PreparedCommonsPhoto,
   ) {
-    // Serialize strict CID writes with candidate decisions and reports so a rejection cannot race a reinsert.
+    // Serialize strict CID writes with automatic selection and admin removal so rejection cannot race a reinsert.
     await executor.selectFrom("place_identities").select("id")
       .where("id", "=", placeIdentityId)
       .forUpdate()

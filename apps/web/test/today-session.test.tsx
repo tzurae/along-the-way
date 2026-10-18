@@ -130,7 +130,6 @@ beforeEach(() => {
     if (input.endsWith("/version")) return reply({ tripVersion: liveVersion, lastEventId: liveVersion ? "latest-event" : null });
     if (input.endsWith("/skeleton")) return reply({ skeleton: trip.id === "A" ? skeleton : todaySkeleton(trip) });
     if (input.endsWith("/trip-places")) return reply({ tripPlaces: trip.id === "A" ? (tripPlacesOverride ?? todayWishlist(savedOrder)) : [] });
-    if (input.endsWith("/commons-candidates")) return reply({ candidates: [] });
     if (input.includes("/place-previews?")) return previewFails
       ? reply({ error: { code: "provider_unavailable", message: "Preview unavailable" } }, 503)
       : reply({ previews: [] });

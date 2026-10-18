@@ -7,6 +7,7 @@ export interface UserDto {
   id: string;
   email: string;
   displayName: string | null;
+  isAdmin: boolean;
 }
 
 export interface TripMemberDto {
@@ -216,11 +217,12 @@ function countryStopValue(value: unknown): CountryStopDto {
 }
 
 function userValue(value: unknown): UserDto {
-  if (!isRecord(value)) return invalidResponse();
+  if (!isRecord(value) || typeof value.isAdmin !== "boolean") return invalidResponse();
   return {
     id: stringValue(value.id),
     email: stringValue(value.email),
     displayName: nullableString(value.displayName),
+    isAdmin: value.isAdmin,
   };
 }
 

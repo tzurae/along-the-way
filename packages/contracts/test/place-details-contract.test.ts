@@ -106,13 +106,12 @@ describe("curated place detail contract boundaries", () => {
     const photo = { source: "curated" as const, ...metadata, imageUrl: url, thumbnailUrl: url, width: 800, height: 600 };
     const response = { detail: { reference: { kind: "trip-place", id }, canonicalPlaceId: id, name: place.name,
       asOfDate: "2026-11-01", sources: place.sources, photos: [photo], googlePhotos: [],
-      photosUnavailable: false, commonsPhotoReportable: false,
+      photosUnavailable: false,
       sections: place.sections.map((section) => ({ ...section, blocks: section.blocks.map((block) => ({ ...block, needsRecheck: true })) })),
     } };
     expect(parsePlaceDetailResponse(response).detail.sections[0]?.blocks[0]?.needsRecheck).toBe(true);
     expect(() => parsePlaceDetailResponse({ detail: { ...response.detail, sources: [] } })).toThrow();
     expect(() => parsePlaceDetailResponse({ detail: { ...response.detail, photosUnavailable: undefined } })).toThrow();
-    expect(() => parsePlaceDetailResponse({ detail: { ...response.detail, commonsPhotoReportable: undefined } })).toThrow();
     expect(() => parsePlacePreviewResponse({ previews: [{ reference: response.detail.reference,
       photo: { ...photo, imageUrl: "https://other.test/photo.jpg" }, photoCount: 1 }] })).toThrow();
     expect(parsePlacePreviewResponse({ previews: [{ reference: response.detail.reference, photo: null, photoCount: 0 }] }).previews[0]?.photo).toBeNull();
@@ -157,7 +156,7 @@ describe("curated place detail contract boundaries", () => {
     const detail = {
       reference: { kind: "trip-place", id }, canonicalPlaceId: id, name: place.name, asOfDate: null,
       sources: place.sources, sections: [], photos: [photo], googlePhotos: [],
-      photosUnavailable: false, commonsPhotoReportable: false,
+      photosUnavailable: false,
     };
     expect(parsePlaceDetailResponse({ detail }).detail.photos[0]?.source).toBe("curated");
     expect(() => parsePlaceDetailResponse({ detail: { ...detail, photos: [{ ...photo, source: undefined }] } })).toThrow();

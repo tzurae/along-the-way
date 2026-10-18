@@ -1,19 +1,11 @@
 import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, BedDouble, BellRing, CalendarDays, Check, ChevronRight, CircleDot, Clock3, ExternalLink, ListOrdered, Lock, MapPin, Navigation, Plane, TriangleAlert, Users, WifiOff } from "lucide-react";
-import {
-  parseCommonsCandidatesResponse,
-  type CommonsCandidateDecisionInput,
-  type CommonsCandidateDto,
-  type CommonsCandidatesResponse,
-  type PlaceDetailReference,
-} from "@along-the-way/contracts/place-details";
+import type { PlaceDetailReference } from "@along-the-way/contracts/place-details";
 import { useI18n } from "./i18n";
 import { googleMapsCoordinatesUrl, googleMapsDirectionsUrl, googleMapsNavigationUrl } from "./google-maps";
 import { safeExternalUrl } from "./external-url";
 import { dayItems, localDate, parallelItemIds, personalState, tripClock, type TodayDay, type TodayItem, type TodayModel } from "./today-model";
 import { readTripLocation } from "./trip-location";
-import { notify } from "./AppToaster";
-import { CommonsCandidateReviewSheet } from "./CommonsCandidateReviewSheet";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest, type PlaceDetailRequestOptions, type PlacePreviewValue } from "./PlaceThumbnail";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
@@ -273,7 +265,7 @@ function TodayPlaceCard({ place, order, date, preview, previewsLoading, openPlac
   </li>;
 }
 
-export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, onArrangeDay, offline = false, fetchedAt, retry, retrying = false, persisted = true, request }: {
+export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, onArrangeDay, offline = false, fetchedAt, retry, retrying = false, persisted = true, request, photoRevision = 0 }: {
   model: TodayModel;
   selectedDate: string | null;
   onDayChanged(date: string, replace?: boolean): void;
@@ -286,6 +278,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
   retrying?: boolean;
   persisted?: boolean;
   request?: PlaceDetailRequest;
+  photoRevision?: number;
 }) {
   const { t, locale } = useI18n();
   const text = t.today;
@@ -296,57 +289,10 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
   const itemReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const timelineRef = useRef<HTMLElement | null>(null);
   const detailTitleRef = useRef<HTMLHeadingElement>(null);
-  const candidateReadGeneration = useRef(0);
-  const [candidatePhotoRevision, setCandidatePhotoRevision] = useState(0);
-  const [commonsCandidates, setCommonsCandidates] = useState<CommonsCandidateDto[]>([]);
-  const [candidateReviewPlaceId, setCandidateReviewPlaceId] = useState<string | null>(null);
-  const [candidateReviewOpen, setCandidateReviewOpen] = useState(false);
-  const refreshedRequest = useCallback(async <T,>(url: string, options?: PlaceDetailRequestOptions): Promise<T> => {
+  const detailRequest = useCallback(async <T,>(url: string, options?: PlaceDetailRequestOptions): Promise<T> => {
     if (!request) throw new Error("Place detail request is unavailable");
-    return request<T>(
-      url,
-      candidatePhotoRevision === 0 ? options : { ...options, cache: "no-cache" },
-    );
-  }, [candidatePhotoRevision, request]);
-  const refreshCommonsCandidates = useCallback(async (): Promise<void> => {
-    if (!request) {
-      setCommonsCandidates([]);
-      return;
-    }
-    const generation = ++candidateReadGeneration.current;
-    const response = await request<CommonsCandidatesResponse>(
-      `/api/trips/${encodeURIComponent(model.tripId)}/commons-candidates`,
-      { cache: "no-cache", parse: parseCommonsCandidatesResponse },
-    );
-    if (generation === candidateReadGeneration.current) setCommonsCandidates(response.candidates);
-  }, [model.tripId, request]);
-  const resolveCommonsCandidate = useCallback((
-    candidate: CommonsCandidateDto,
-    resolution: CommonsCandidateDecisionInput["decision"] | "skip",
-  ) => {
-    setCommonsCandidates((current) => resolution === "confirm"
-      ? current.filter((entry) => entry.tripPlaceId !== candidate.tripPlaceId)
-      : current.filter((entry) => entry.id !== candidate.id));
-  }, []);
-  const handleCommonsPhotoReported = useCallback(async (tripPlaceId: string, remainingCandidates: number) => {
-    setCandidatePhotoRevision((current) => current + 1);
-    if (remainingCandidates > 0) {
-      try {
-        await refreshCommonsCandidates();
-        setCandidateReviewPlaceId(tripPlaceId);
-        setCandidateReviewOpen(true);
-        return;
-      } catch {
-        // The report succeeded; the refreshed detail remains the source of truth.
-      }
-    } else {
-      void refreshCommonsCandidates().catch(() => undefined);
-    }
-    notify("success", t.tripPlaces.commonsCandidates.photoRemoved);
-  }, [refreshCommonsCandidates, t.tripPlaces.commonsCandidates.photoRemoved]);
-  useEffect(() => () => {
-    candidateReadGeneration.current += 1;
-  }, []);
+    return request<T>(url, photoRevision === 0 ? options : { ...options, cache: "no-cache" });
+  }, [photoRevision, request]);
   useEffect(() => {
     const tick = () => setNow(Date.now());
     const timer = window.setInterval(tick, 15_000);
@@ -474,11 +420,8 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
   }, [clock.daysUntil, clock.phase, day, locale, model.days, model.items, text]);
   const endpointIds = useMemo(() => [...new Set(model.items.flatMap((item) => item.endpoints.flatMap((endpoint) => endpoint.place?.id ? [endpoint.place.id] : [])))], [model.items]);
   const wishlistIds = useMemo(() => [...new Set(model.days.flatMap((entry) => entry.wishlist.map((place) => place.id)))], [model.days]);
-  const endpointPreviews = usePlacePreviews({ tripId: model.tripId, kind: "itinerary-place", ids: endpointIds, request, enabled: Boolean(request) && !offline });
-  const wishlistPreviews = usePlacePreviews({ tripId: model.tripId, kind: "trip-place", ids: wishlistIds, request: request ? refreshedRequest : undefined, enabled: Boolean(request) && !offline });
-  const visibleCommonsCandidates = candidateReviewPlaceId
-    ? commonsCandidates.filter((candidate) => candidate.tripPlaceId === candidateReviewPlaceId)
-    : [];
+  const endpointPreviews = usePlacePreviews({ tripId: model.tripId, kind: "itinerary-place", ids: endpointIds, request: request ? detailRequest : undefined, enabled: Boolean(request) && !offline });
+  const wishlistPreviews = usePlacePreviews({ tripId: model.tripId, kind: "trip-place", ids: wishlistIds, request: request ? detailRequest : undefined, enabled: Boolean(request) && !offline });
 
   if (!day) return <p>{text.empty}</p>;
   const index = model.days.indexOf(day);
@@ -516,8 +459,8 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
       tripId={model.tripId}
       reference={selectedDetail.reference}
       date={selectedDetail.date}
-      request={refreshedRequest}
-      onCommonsPhotoReported={handleCommonsPhotoReported}
+      photoRevision={photoRevision}
+      request={detailRequest}
     />
   ) : null;
   const formattedDay = new Intl.DateTimeFormat(locale, { timeZone: "UTC", month: "long", day: "numeric", weekday: "short" }).format(new Date(`${day.date}T12:00:00Z`));
@@ -723,21 +666,5 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     >
       {detail}
     </PlaceDetailSheet>
-    {request ? (
-      <CommonsCandidateReviewSheet
-        open={candidateReviewOpen}
-        tripId={model.tripId}
-        candidates={visibleCommonsCandidates}
-        request={refreshedRequest}
-        onClose={() => {
-          setCandidateReviewOpen(false);
-          setCandidateReviewPlaceId(null);
-          window.requestAnimationFrame(() => detailTitleRef.current?.focus());
-        }}
-        onCandidateResolved={resolveCommonsCandidate}
-        onConfirmed={() => setCandidatePhotoRevision((current) => current + 1)}
-        refreshCandidates={refreshCommonsCandidates}
-      />
-    ) : null}
   </section>;
 }
