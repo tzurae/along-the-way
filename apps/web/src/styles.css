@@ -476,7 +476,7 @@
     padding-bottom: calc(16px + env(safe-area-inset-bottom));
   }
 }
-.atw-bottomnav { position: fixed; inset: auto 0 0; z-index: 40; padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: #fbf8f2f0; backdrop-filter: blur(12px); }
+.atw-bottomnav { position: fixed; inset: auto 0 0; z-index: 40; display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 1fr); padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: #fbf8f2f0; backdrop-filter: blur(12px); }
 .atw-bottomnav > div { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .atw-bottomnav button { display: grid; justify-items: center; gap: 4px; min-height: 56px; padding: 6px 0; border-radius: 14px; font-size: 13px; font-weight: 700; }
 .atw-bottomnav button.is-active { color: #9a4a2c; background: var(--card); }
@@ -611,6 +611,9 @@ span.today-sync-status { flex: none; font-weight: 600; white-space: nowrap; }
   .atw-railnav { display: block; }
   .atw-railnav > div { display: grid; gap: 6px; }
   .atw-railnav button { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 10px 12px; border-radius: 14px; text-align: left; font-size: 15px; font-weight: 700; }
+  /* 反饋 sits under the destinations, separated so it reads as an action, not another page. */
+  .atw-railnav .atw-nav-feedback { width: 100%; margin-top: 12px; padding-top: 14px; border-top: 1px solid var(--border); border-radius: 0 0 14px 14px; color: var(--muted-foreground); }
+  .atw-railnav .atw-nav-feedback:hover { color: var(--color-ink); background: color-mix(in srgb, var(--card) 60%, transparent); }
   .atw-railnav button.is-active { background: var(--card); color: #9a4a2c; }
   /* Child bars under 行程 and 成員: indented, quieter than the parent destinations, active = accent
      text. They expand and collapse instead of popping in: the row grows from 0fr to 1fr while the

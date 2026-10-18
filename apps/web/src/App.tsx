@@ -18,7 +18,7 @@ import {
   type UserDto,
 } from "@along-the-way/contracts/private-trips";
 
-import { CalendarDays, ChevronRight, ChevronsUpDown, MapPin, Route, Users } from "lucide-react";
+import { CalendarDays, ChevronRight, ChevronsUpDown, MapPin, MessageSquareText, Route, Users } from "lucide-react";
 
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -479,7 +479,7 @@ function TripSwitcher({ trips, selectedTrip, openCreateTrip, selectTrip }: {
   );
 }
 
-function TripNavigation({ layout, activeTab, selectTab, itinerarySegment, selectItinerarySegment, membersSegment, membersSegments, selectMembersSegment }: {
+function TripNavigation({ layout, activeTab, selectTab, itinerarySegment, selectItinerarySegment, membersSegment, membersSegments, selectMembersSegment, openFeedback }: {
   layout: "mobile" | "desktop";
   activeTab: TripTab;
   selectTab(tab: TripTab): void;
@@ -489,6 +489,8 @@ function TripNavigation({ layout, activeTab, selectTab, itinerarySegment, select
   /** The 成員 sub-pages this member can open (邀請 is owner-only). */
   membersSegments: readonly MembersSegment[];
   selectMembersSegment(segment: MembersSegment): void;
+  /** Opens the 反饋 dialog; an action next to the tabs, not a destination. */
+  openFeedback(trigger: HTMLElement): void;
 }) {
   const { t } = useI18n();
   const destinations = [
@@ -577,6 +579,16 @@ function TripNavigation({ layout, activeTab, selectTab, itinerarySegment, select
           </Fragment>
         ))}
       </div>
+      <button
+        type="button"
+        className="atw-nav-feedback"
+        data-layout={layout}
+        aria-haspopup="dialog"
+        onClick={(event) => openFeedback(event.currentTarget)}
+      >
+        <MessageSquareText aria-hidden="true" className={layout === "mobile" ? "size-[22px]" : "size-5"} />
+        <span>{t.app.feedbackNav}</span>
+      </button>
     </nav>
   );
 }
@@ -758,6 +770,7 @@ export function App() {
   const [accountSettingsOpen, setAccountSettingsOpen] = useState(false);
   const accountSettingsReturnFocus = useRef<HTMLElement | null>(null);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const feedbackReturnFocus = useRef<HTMLElement | null>(null);
   const [onboardingFacts, setOnboardingFacts] = useState<OnboardingFacts | null>(null);
   const [createdTripId, setCreatedTripId] = useState<string | null>(null);
   const [placesRevision, setPlacesRevision] = useState(0);
@@ -840,7 +853,9 @@ export function App() {
       window.requestAnimationFrame(() => accountSettingsReturnFocus.current?.focus());
     }
   }, []);
-  const openFeedback = useCallback(() => {
+  const openFeedback = useCallback((trigger: HTMLElement) => {
+    // The 反饋 button is passed in: Safari does not focus a clicked button, so activeElement is unreliable.
+    feedbackReturnFocus.current = trigger;
     setAccountSettingsOpen(false);
     setFeedbackOpen(true);
   }, []);
@@ -848,7 +863,7 @@ export function App() {
   const changeFeedbackOpen = useCallback((open: boolean) => {
     setFeedbackOpen(open);
     if (!open) {
-      window.requestAnimationFrame(() => accountSettingsReturnFocus.current?.focus());
+      window.requestAnimationFrame(() => feedbackReturnFocus.current?.focus());
     }
   }, []);
 
@@ -1620,7 +1635,7 @@ export function App() {
       <div className="atw-frame">
         <aside className="atw-rail">
           <TripSwitcher trips={trips} selectedTrip={selectedTrip} openCreateTrip={openCreateTrip} selectTrip={selectTrip} />
-          {globalView !== "admin" && selectedTrip ? <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} /> : <div />}
+          {globalView !== "admin" && selectedTrip ? <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} openFeedback={openFeedback} /> : <div />}
           <div className="atw-account-footer">
             <button
               type="button"
@@ -1781,7 +1796,7 @@ export function App() {
           )}
         </div>
       </div>
-      {globalView !== "admin" && selectedTrip ? <TripNavigation layout="mobile" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} /> : null}
+      {globalView !== "admin" && selectedTrip ? <TripNavigation layout="mobile" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} openFeedback={openFeedback} /> : null}
       <CreateTripDialog
         open={createDialogOpen}
         onOpenChange={changeCreateDialogOpen}
@@ -1799,7 +1814,6 @@ export function App() {
         onOpenChange={changeAccountSettingsOpen}
         email={user.email}
         isAdmin={user.isAdmin}
-        openFeedback={openFeedback}
         openAdmin={openAdmin}
         signOut={() => void logout()}
         signOutEverywhere={() => void logoutEverywhere()}

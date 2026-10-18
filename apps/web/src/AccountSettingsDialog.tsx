@@ -1,4 +1,4 @@
-import { MessageSquareText, ShieldCheck } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -13,7 +13,6 @@ interface AccountSettingsDialogProps {
   onOpenChange(open: boolean): void;
   email: string;
   isAdmin: boolean;
-  openFeedback(): void;
   openAdmin(): void;
   signOut(): void;
   signOutEverywhere(): void;
@@ -25,7 +24,6 @@ export function AccountSettingsDialog({
   onOpenChange,
   email,
   isAdmin,
-  openFeedback,
   openAdmin,
   signOut,
   signOutEverywhere,
@@ -50,21 +48,17 @@ export function AccountSettingsDialog({
               </div>
             </dl>
           </section>
-          <section className="account-settings-section" aria-labelledby="account-settings-services">
-            <h3 id="account-settings-services" className="sr-only">{t.accountSettings.services}</h3>
-            <div className="account-settings-menu">
-              <button type="button" onClick={openFeedback}>
-                <MessageSquareText aria-hidden="true" />
-                <span>{t.feedback.entry}</span>
-              </button>
-              {isAdmin ? (
+          {isAdmin ? (
+            <section className="account-settings-section" aria-labelledby="account-settings-services">
+              <h3 id="account-settings-services" className="sr-only">{t.accountSettings.services}</h3>
+              <div className="account-settings-menu">
                 <button type="button" onClick={openAdmin}>
                   <ShieldCheck aria-hidden="true" />
                   <span>{t.admin.entry}</span>
                 </button>
-              ) : null}
-            </div>
-          </section>
+              </div>
+            </section>
+          ) : null}
         </div>
 
         <section className="account-settings-actions" aria-labelledby="account-settings-actions">
