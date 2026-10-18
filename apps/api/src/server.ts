@@ -18,6 +18,9 @@ import { CommonsPlacePhotos } from "./place-details/commons-place-photos";
 import { PostgresCommonsCandidateModule } from "./place-details/commons-photo-candidates";
 import { PostgresFeedbackModule } from "./admin/postgres-feedback-module";
 import { DefaultGoogleUsageModule } from "./admin/google-usage-module";
+import { OpenAiPlaceGuideModel } from "./place-guides/openai-place-guide-model";
+import { PlaceGuideSourceFetcher } from "./place-guides/place-guide-sources";
+import { PostgresPlaceGuideModule } from "./place-guides/postgres-place-guide-module";
 import packageJson from "../../../package.json";
 
 function requireSetting(name: string) {
@@ -65,6 +68,14 @@ const commonsCandidates = new PostgresCommonsCandidateModule({
   photos: commonsPhotos,
   userAgent: wikimediaUserAgent,
 });
+const placeGuides = new PostgresPlaceGuideModule({
+  database,
+  model: new OpenAiPlaceGuideModel({
+    apiKey: process.env.OPENAI_API_KEY,
+    model: process.env.OPENAI_MODEL,
+  }),
+  sources: new PlaceGuideSourceFetcher({ userAgent: wikimediaUserAgent }),
+});
 const tripPlaces = new PostgresTripPlaceModule({
   database,
   provider: placeProvider,
@@ -103,6 +114,7 @@ const app = createApp({
     ...(placeProvider.available ? { provider: placeProvider } : {}),
     photoCapabilitySecret: tokenSecret,
   }),
+  placeGuides,
   rateLimiter,
   readiness,
   siteAddress,

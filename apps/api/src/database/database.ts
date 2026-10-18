@@ -522,6 +522,22 @@ export interface CommonsPhotoCandidateTable {
   created_at: Generated<Timestamp>;
 }
 
+export interface PlaceGuideTable {
+  place_id: string;
+  language: string;
+  history: string | null;
+  see: unknown;
+  do: unknown;
+  eat: unknown;
+  sources: unknown;
+  model: string | null;
+  status: "generating" | "ready" | "no_sources" | "failed";
+  claim_token: string | null;
+  claimed_at: Timestamp | null;
+  generated_at: Timestamp;
+}
+
+
 export interface AlongTheWayDatabase {
   users: UserTable;
   magic_link_tokens: MagicLinkTokenTable;
@@ -538,6 +554,7 @@ export interface AlongTheWayDatabase {
   place_photo_blobs: PlacePhotoBlobTable;
   commons_place_photos: CommonsPlacePhotoTable;
   commons_photo_candidates: CommonsPhotoCandidateTable;
+  place_guides: PlaceGuideTable;
   trip_places: TripPlaceTable;
   trip_place_must_items: TripPlaceMustItemTable;
   trip_place_contributions: TripPlaceContributionTable;

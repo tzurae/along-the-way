@@ -19,7 +19,8 @@ export type RateLimitedAction =
   | "feedback"
   | "place_photo"
   | "place_photo_metadata"
-  | "discovery_ai";
+  | "discovery_ai"
+  | "place_guide_generation";
 export type PaidProvider = "google_places" | "google_maps_js";
 export interface AppRateLimitUsage {
   googlePlacesToday: number;
@@ -39,7 +40,7 @@ export interface RateLimiter {
 
 interface Rule {
   windowSeconds: number;
-  ipLimit: number;
+  ipLimit?: number;
   accountLimit?: number;
   globalLimit?: number;
 }
@@ -62,6 +63,7 @@ const RULES: Record<RateLimitedAction, Rule> = {
     globalLimit: 600,
   },
   discovery_ai: { windowSeconds: 60 * 60, ipLimit: 6, accountLimit: 10 },
+  place_guide_generation: { windowSeconds: 60 * 60, accountLimit: 30 },
 };
 
 // Paid-provider budgets deliberately leave headroom below their Google Cloud project quotas.
@@ -146,11 +148,13 @@ export class PostgresRateLimiter implements RateLimiter {
       ...(rule.globalLimit === undefined
         ? []
         : [{ scope: `${action}:global`, key: "global", limit: rule.globalLimit }]),
-      {
-        scope: `${action}:ip`,
-        key: clientIp || "unknown",
-        limit: rule.ipLimit,
-      },
+      ...(rule.ipLimit === undefined
+        ? []
+        : [{
+            scope: `${action}:ip`,
+            key: clientIp || "unknown",
+            limit: rule.ipLimit,
+          }]),
       ...(rule.accountLimit === undefined
         ? []
         : [{
@@ -214,7 +218,7 @@ export class PostgresRateLimiter implements RateLimiter {
     const windowStart = new Date(Math.floor(now.valueOf() / windowMilliseconds) * windowMilliseconds);
     const attempts = [
       { scope: "discovery_ai:account", key: account.trim().toLowerCase(), limit: rule.accountLimit! },
-      { scope: "discovery_ai:trip", key: tripId.trim().toLowerCase(), limit: rule.ipLimit },
+      { scope: "discovery_ai:trip", key: tripId.trim().toLowerCase(), limit: rule.ipLimit! },
     ];
     if (!attempts[0]!.key || !attempts[1]!.key) {
       throw new Error("Discovery AI accounting requires an account and trip");

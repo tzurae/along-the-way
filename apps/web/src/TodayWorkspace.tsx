@@ -1,6 +1,5 @@
 import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, BedDouble, BellRing, CalendarDays, ChevronRight, CircleDot, Clock3, ExternalLink, ListOrdered, Lock, MapPin, Navigation, Plane, TriangleAlert, Users, WifiOff } from "lucide-react";
-import type { PlaceDetailReference } from "@along-the-way/contracts/place-details";
 import { useI18n } from "./i18n";
 import { googleMapsCoordinatesUrl, googleMapsDirectionsUrl, googleMapsNavigationUrl } from "./google-maps";
 import { safeExternalUrl } from "./external-url";
@@ -9,10 +8,11 @@ import { readTripLocation } from "./trip-location";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest, type PlaceDetailRequestOptions, type PlacePreviewValue } from "./PlaceThumbnail";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
+import { TodayPlaceGuide, type TodayPlaceGuideReference } from "./TodayPlaceGuide";
 import { NativeSelect } from "./components/ui/native-select";
 
 interface TodayDetailSelection {
-  reference: PlaceDetailReference;
+  reference: TodayPlaceGuideReference;
   name: string;
   triggerKey: string;
   date: string;
@@ -461,6 +461,12 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
       date={selectedDetail.date}
       photoRevision={photoRevision}
       request={detailRequest}
+      interlude={<TodayPlaceGuide
+        tripId={model.tripId}
+        reference={selectedDetail.reference}
+        placeName={selectedDetail.name}
+        request={detailRequest}
+      />}
     />
   ) : null;
   const formattedDay = new Intl.DateTimeFormat(locale, { timeZone: "UTC", month: "long", day: "numeric", weekday: "short" }).format(new Date(`${day.date}T12:00:00Z`));

@@ -62,6 +62,7 @@ import {
   parsePlacePreviewIds,
 } from "@along-the-way/contracts/place-details";
 import type { PlaceDetailModule } from "./place-details/place-detail-module";
+import type { PlaceGuideModule } from "./place-guides/place-guide-module";
 import type { FeedbackModule } from "./admin/postgres-feedback-module";
 import type { GoogleUsageModule } from "./admin/google-usage-module";
 
@@ -77,6 +78,7 @@ export interface AppDependencies {
   mapsConfig?: MapsConfigResponse;
   appVersion?: string;
   placeDetails: PlaceDetailModule;
+  placeGuides?: PlaceGuideModule;
   rateLimiter: RateLimiter;
   readiness: ReadinessProbe;
   siteAddress: string;
@@ -407,6 +409,7 @@ export function createApp({
   identityAccess,
   mapsConfig = { browserKey: null, mapId: null },
   placeDetails,
+  placeGuides,
   rateLimiter,
   readiness,
   siteAddress,
@@ -701,6 +704,17 @@ export function createApp({
     return context.json(await googleUsage.get());
   });
 
+  app.post("/api/admin/places/:placeId/guide/regenerate", async (context) => {
+    const { user } = await authenticatedAdmin(context);
+    if (!placeGuides) throw new AppError("service_unavailable", "Place guides are unavailable", 503);
+    const guide = await placeGuides.regenerate(
+      uuidParam(context, "placeId"),
+      () => rateLimiter.consume("place_guide_generation", clientIp(context), user.id),
+    );
+    context.header("Cache-Control", "private, no-store");
+    return context.json({ guide });
+  });
+
   app.get("/api/maps/config", async (context) => {
     await authenticated(context);
     return context.json(exposedMapsConfig);
@@ -901,6 +915,41 @@ export function createApp({
         userAgent: context.req.header("User-Agent")?.slice(0, 500) || null,
       },
     ), 201);
+  });
+
+  app.get("/api/trips/:tripId/place-guide", async (context) => {
+    const { user } = await authenticated(context);
+    if (!placeGuides) throw new AppError("service_unavailable", "Place guides are unavailable", 503);
+    let reference;
+    try {
+      reference = parsePlaceDetailReference({
+        kind: context.req.query("kind"),
+        id: context.req.query("id"),
+      });
+    } catch {
+      throw new AppError("validation_error", "Invalid place guide reference");
+    }
+    const guide = await placeGuides.getGuide(
+      user.id,
+      uuidParam(context, "tripId"),
+      reference,
+      () => rateLimiter.consume("place_guide_generation", clientIp(context), user.id),
+    );
+    context.header("Cache-Control", "private, no-store");
+    return context.json({ guide });
+  });
+
+  app.get("/api/trips/:tripId/trip-places/:tripPlaceId/guide", async (context) => {
+    const { user } = await authenticated(context);
+    if (!placeGuides) throw new AppError("service_unavailable", "Place guides are unavailable", 503);
+    const guide = await placeGuides.getGuide(
+      user.id,
+      uuidParam(context, "tripId"),
+      { kind: "trip-place", id: uuidParam(context, "tripPlaceId") },
+      () => rateLimiter.consume("place_guide_generation", clientIp(context), user.id),
+    );
+    context.header("Cache-Control", "private, no-store");
+    return context.json({ guide });
   });
 
   app.get("/api/trips/:tripId/place-details", async (context) => {
