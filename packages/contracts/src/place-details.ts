@@ -557,7 +557,7 @@ export function parsePlaceDetailResponse(value: unknown): PlaceDetailResponse {
   ]);
   const sources = unique(array(detail.sources, "sources", 100, source), (item) => item.id, "source ids");
   const curatedPhotos = unique(
-    unique(array(detail.photos, "photos", 3, photoDto), (photo) => photo.id, "work ids/order"),
+    unique(array(detail.photos, "photos", 3, (value) => photoDto(value)), (photo) => photo.id, "work ids/order"),
     (photo) => photo.sourceUrl,
     "work source URLs",
   );
