@@ -139,7 +139,7 @@ describe("Today place detail identities", () => {
     wishlist[0]!.name = skeleton.places[0]!.name;
     const readModel = createTodayModel(trip, skeleton, wishlist, todayUser.id);
 
-    expect(readModel.items[0]!.endpoints[0]!.place).toMatchObject({ id: "place", name: "Park" });
-    expect(readModel.days[0]!.wishlist[0]).toEqual({ id: "FIRST", name: "Park", latitude: 34, longitude: 135, providerPlaceId: null });
+    expect(readModel.items[0]!.endpoints[0]!.place).toMatchObject({ id: "place", name: "Park", type: "activity" });
+    expect(readModel.days[0]!.wishlist[0]).toEqual({ id: "FIRST", name: "Park", type: "activity", latitude: 34, longitude: 135, providerPlaceId: null });
   });
 });

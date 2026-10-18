@@ -123,13 +123,37 @@ const legacyV4 = {
   },
 };
 
+const legacyV5 = {
+  ...legacyV4,
+  schemaVersion: 5,
+  model: {
+    ...legacyV4.model,
+    tripName: "V5 trip",
+    tripVersion: 5,
+    days: [{
+      ...legacyV4.model.days[0]!,
+      itemIds: ["legacy-v5"],
+      wishlist: [{ id: "wish-v5", name: "V5 wishlist place", latitude: 35, longitude: 139, providerPlaceId: "google-v5" }],
+    }],
+    items: [{
+      ...legacyV4.model.items[0]!,
+      id: "legacy-v5",
+      title: "V5 transport",
+      endpoints: [{
+        ...legacyV4.model.items[0]!.endpoints[0]!,
+        place: { id: "station-v5", name: "V5 station", address: null, latitude: 35, longitude: 139 },
+      }],
+    }],
+  },
+};
+
 describe("account-scoped read-only Today snapshots", () => {
   beforeEach(() => localStorage.clear());
   it("reopens the last successful formal version through a fresh store while offline", () => {
     const store = new TodaySnapshotStore(localStorage);
     store.save("account", model, Date.parse("2026-10-21T02:30Z"));
     const reopened = new TodaySnapshotStore(localStorage);
-    expect(reopened.read("account", "trip")).toMatchObject({ schemaVersion: 5, fetchedAt: "2026-10-21T02:30:00.000Z", model: { tripVersion: 7, days: [{ timeZone: "Asia/Tokyo" }] } });
+    expect(reopened.read("account", "trip")).toMatchObject({ schemaVersion: 6, fetchedAt: "2026-10-21T02:30:00.000Z", model: { tripVersion: 7, days: [{ timeZone: "Asia/Tokyo" }] } });
     expect(reopened.read("other-account", "trip")).toBeNull();
     expect(reopened.lastAccount()).toBe("account");
     store.save("account", { ...model, tripVersion: 8 });
@@ -237,31 +261,35 @@ describe("account-scoped read-only Today snapshots", () => {
     const saved = store.save(todayUser.id, readModel);
 
     expect(saved).not.toBeNull();
-    expect(saved?.schemaVersion).toBe(5);
+    expect(saved?.schemaVersion).toBe(6);
     expect(new TodaySnapshotStore(localStorage).read(todayUser.id, trip.id)?.model.days[0]!.wishlist).toEqual([
-      { id: "FIRST", name: "FIRST", latitude: 34, longitude: 135, providerPlaceId: "google-FIRST" },
-      { id: "SECOND", name: "SECOND", latitude: null, longitude: null, providerPlaceId: null },
+      { id: "FIRST", name: "FIRST", type: "activity", latitude: 34, longitude: 135, providerPlaceId: "google-FIRST" },
+      { id: "SECOND", name: "SECOND", type: "activity", latitude: null, longitude: null, providerPlaceId: null },
     ]);
   });
   it.each([
-    { version: 2, snapshot: legacyV2, endpointId: null, removed: null },
-    { version: 3, snapshot: legacyV3, endpointId: "station-v3", removed: null },
-    { version: 4, snapshot: legacyV4, endpointId: "station-v4", removed: true },
-  ])("migrates a genuine schema $version snapshot to schema 5 without inventing historical fields", ({ snapshot, endpointId, removed }) => {
+    { version: 2, snapshot: legacyV2, endpointId: null, removed: null, latitude: null, longitude: null, providerPlaceId: null },
+    { version: 3, snapshot: legacyV3, endpointId: "station-v3", removed: null, latitude: null, longitude: null, providerPlaceId: null },
+    { version: 4, snapshot: legacyV4, endpointId: "station-v4", removed: true, latitude: null, longitude: null, providerPlaceId: null },
+    { version: 5, snapshot: legacyV5, endpointId: "station-v5", removed: true, latitude: 35, longitude: 139, providerPlaceId: "google-v5" },
+  ])("migrates a genuine schema $version snapshot to schema 6 without inventing historical fields", ({
+    snapshot, endpointId, removed, latitude, longitude, providerPlaceId,
+  }) => {
     localStorage.setItem(key, JSON.stringify(snapshot));
     const migrated = new TodaySnapshotStore(localStorage).read("account", "trip");
 
-    expect(migrated?.schemaVersion).toBe(5);
+    expect(migrated?.schemaVersion).toBe(6);
     expect(migrated?.model.days[0]!.wishlist[0]).toEqual({
       id: snapshot.model.days[0]!.wishlist[0]!.id,
       name: snapshot.model.days[0]!.wishlist[0]!.name,
-      latitude: null,
-      longitude: null,
-      providerPlaceId: null,
+      type: null,
+      latitude,
+      longitude,
+      providerPlaceId,
     });
-    expect(migrated?.model.items[0]!.endpoints[0]!.place?.id).toBe(endpointId);
+    expect(migrated?.model.items[0]!.endpoints[0]!.place).toMatchObject({ id: endpointId, type: null });
     expect(migrated?.model.items[0]!.participants?.[0]?.removed).toBe(removed);
-    expect(JSON.parse(localStorage.getItem(key)!).schemaVersion).toBe(5);
+    expect(JSON.parse(localStorage.getItem(key)!).schemaVersion).toBe(6);
   });
   it("rejects a purported legacy snapshot carrying a place identity outside the legacy format", () => {
     const trip = todayTrip();

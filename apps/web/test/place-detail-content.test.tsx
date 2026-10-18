@@ -43,12 +43,14 @@ function photo(id: string, title: string, author: string, licenseName: string): 
 function googlePhoto(index: 0 | 1 | 2, author: string): GooglePlacePhotoDto {
   const providerPlaceId = "ChIJGooglePhoto123";
   const fingerprint = String(index + 1).repeat(16);
+  const capability = `resource=photo-resource-${index}&maxWidth=`;
+  const suffix = `&exp=1791676799&sig=${"A".repeat(43)}`;
   return {
     source: "google",
     index,
     id: `google:${providerPlaceId}:${index}:${fingerprint}`,
-    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?index=${index}&photo=${fingerprint}&maxWidth=192`,
-    imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?index=${index}&photo=${fingerprint}&maxWidth=1024`,
+    thumbnailUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?index=${index}&photo=${fingerprint}&${capability}192${suffix}`,
+    imageUrl: `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?index=${index}&photo=${fingerprint}&${capability}1024${suffix}`,
     width: 1200,
     height: 800,
     authors: [{ displayName: author, uri: `https://maps.google.com/contrib/${index}` }],
@@ -66,6 +68,8 @@ const response: PlaceDetailResponse = {
     sources: [{ id: "official", title: "官方網站", url: "https://example.test/place", checkedAt: "2026-10-09T12:00:00Z", publishedAt: null, validFrom: null, validUntil: null, expiresAt: null }],
     photos: [photo("work-one", "第一張作品", "作者甲", "CC BY-SA 4.0"), photo("work-two", "第二張作品", "作者乙", "CC0 1.0")],
     googlePhotos: [],
+    photosUnavailable: false,
+    commonsPhotoReportable: false,
   },
 };
 
@@ -196,6 +200,18 @@ it("shows a calm explicit empty state when neither curated nor Google photos exi
   render(<PlaceDetailContent tripId={tripId} reference={{ kind: "trip-place", id: referenceId }} request={emptyRequest} />);
   await screen.findByText("此地點目前沒有照片", { exact: true });
   expect(document.querySelector(".place-gallery__empty svg")).not.toBeInTheDocument();
+});
+
+it("distinguishes a temporary photo outage from a place with no photos", async () => {
+  const unavailableResponse: PlaceDetailResponse = {
+    detail: { ...response.detail, photos: [], googlePhotos: [], photosUnavailable: true },
+  };
+  const unavailableRequest: PlaceDetailRequest = async <T,>(_path: string, init?: PlaceDetailRequestOptions) =>
+    (init?.parse ? init.parse(unavailableResponse) : unavailableResponse) as T;
+
+  render(<PlaceDetailContent tripId={tripId} reference={{ kind: "trip-place", id: referenceId }} request={unavailableRequest} />);
+  await screen.findByText("照片暫時無法載入", { exact: true });
+  expect(screen.queryByText("此地點目前沒有照片", { exact: true })).not.toBeInTheDocument();
 });
 
 it("offers a 44px-class retry action that repeats a failed detail request", async () => {
