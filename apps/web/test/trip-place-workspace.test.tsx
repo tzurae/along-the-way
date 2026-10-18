@@ -340,7 +340,7 @@ it("refreshes an auto-applied Commons photo in the row and open detail without s
   let candidateReads = 0;
   let scheduledRefresh: (() => void) | null = null;
   const realSetTimeout = window.setTimeout.bind(window);
-  vi.spyOn(window, "setTimeout").mockImplementation((handler, timeout) => {
+  vi.spyOn(window as Window, "setTimeout").mockImplementation((handler, timeout) => {
     if (timeout === 16_000) {
       scheduledRefresh = () => {
         if (typeof handler === "function") handler();
