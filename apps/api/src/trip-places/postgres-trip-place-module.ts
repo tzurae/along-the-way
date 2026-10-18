@@ -35,7 +35,6 @@ import {
 } from "../private-trips/postgres-private-trip-store";
 import {
   googlePlacePhotoDto,
-  googlePlacePhotoFingerprint,
   ProviderQuotaError,
   ProviderUnavailableError,
   type PlaceProvider,
@@ -52,6 +51,7 @@ import {
 } from "./safe-google-maps-url";
 import type { TripPlaceModule } from "./trip-place-module";
 import type { PreparedCommonsPhoto, RepresentativePhotoSource } from "../place-details/commons-place-photos";
+import type { CommonsCandidateGenerator } from "../place-details/commons-photo-candidates";
 
 interface ModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
@@ -61,6 +61,8 @@ interface ModuleOptions {
   photoCapabilitySecret?: string;
   /** Looks up a freely licensed representative photo once, when a Google place is added. */
   commonsPhotos?: RepresentativePhotoSource;
+  /** Generates manual-review candidates only after strict CID matching misses. */
+  commonsCandidates?: CommonsCandidateGenerator;
 }
 
 interface ManualPlaceFacts {
@@ -329,6 +331,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
   private readonly now: () => Date;
   private readonly photoCapability: GooglePhotoCapability | undefined;
   private readonly commonsPhotos: RepresentativePhotoSource | undefined;
+  private readonly commonsCandidates: CommonsCandidateGenerator | undefined;
   private readonly pendingAdds = new Map<string, Promise<TripPlaceDto>>();
 
   constructor(options: ModuleOptions) {
@@ -341,6 +344,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       ? new GooglePhotoCapability(options.photoCapabilitySecret, this.now)
       : undefined;
     this.commonsPhotos = options.commonsPhotos;
+    this.commonsCandidates = options.commonsCandidates;
   }
 
   async list(userId: string, tripId: string) {
@@ -676,7 +680,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         // Only a fresh Google intake reaches here; replays and manual places skip the lookup.
         // Wikimedia failures resolve to null and leave the place on the Google photo fallback.
         if (this.commonsPhotos && !(await this.hasCommonsPhoto(intake.candidate.providerPlaceId))) {
-          intake.photo = await this.commonsPhotos.prepare(intake.candidate.sourceUrl);
+          intake.photo = await this.commonsPhotos.prepare(intake.candidate.sourceUrl, intake.candidate.providerPlaceId);
         }
         return intake.candidate;
       };
@@ -688,7 +692,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       // Provider and Commons intake can take seconds; finish it before reserving a pooled
       // connection for the atomic idempotency and persistence transaction.
       const candidate = loadCandidate ? await loadCandidate() : null;
-      return await this.persistPlace(
+      const response = await this.persistPlace(
         userId,
         tripId,
         key,
@@ -704,6 +708,17 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
           if (intake.photo && this.commonsPhotos) await this.commonsPhotos.store(transaction, placeIdentityId, intake.photo);
         },
       );
+      if (candidate && !intake.photo && this.commonsCandidates) {
+        const placeIdentityId = response.placeId;
+        void this.commonsCandidates.generate(placeIdentityId).catch((error: unknown) => {
+          console.error(JSON.stringify({
+            event: "commons_candidate_generation_failed",
+            placeIdentityId,
+            errorClass: error instanceof Error ? error.constructor.name : "NonErrorThrow",
+          }));
+        });
+      }
+      return response;
     } catch (error) {
       if (input.method !== "manual" && error instanceof TypeError) {
         throw new AppError("validation_error", error.message);
@@ -766,7 +781,6 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         alreadyInWishlist: alreadyInWishlist.has(candidate.providerPlaceId),
       };
       const index = 0;
-      const fingerprint = googlePlacePhotoFingerprint(providerPhoto);
       return {
         ...dto,
         photo: googlePlacePhotoDto(
@@ -774,7 +788,9 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
           candidate.providerPlaceId,
           index,
           providerPhoto,
-          this.photoCapability?.issue(tripId, userId, candidate.providerPlaceId, index, fingerprint),
+          (fingerprint) => this.photoCapability?.issue(
+            tripId, userId, candidate.providerPlaceId, index, fingerprint, providerPhoto.name,
+          ),
         ),
         alreadyInWishlist: alreadyInWishlist.has(candidate.providerPlaceId),
       };

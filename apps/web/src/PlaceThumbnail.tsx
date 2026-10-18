@@ -1,5 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
-import { ImageOff } from "lucide-react";
+import {
+  BedDouble,
+  Coffee,
+  ImageOff,
+  Images,
+  Landmark,
+  MapPin,
+  Plane,
+  ShoppingBag,
+  Ticket,
+  TrainFront,
+  Trees,
+  Utensils,
+  type LucideIcon,
+} from "lucide-react";
 
 import {
   parsePlacePreviewResponse,
@@ -9,6 +23,7 @@ import {
   type PlacePreviewDto,
   type PlacePreviewResponse,
 } from "@along-the-way/contracts/place-details";
+import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 import { useI18n } from "./i18n";
 import { safeExternalUrl } from "./external-url";
 import "./place-media.css";
@@ -22,6 +37,20 @@ export type PlaceDetailRequest = <T>(path: string, init?: PlaceDetailRequestOpti
 export type PlaceDisplayPhoto = PlacePhotoDto | GooglePlacePhotoDto;
 
 export type PlacePreviewValue = Pick<PlacePreviewDto, "photo" | "photoCount">;
+
+const PLACE_TYPE_ICONS: Record<PlaceType, LucideIcon> = {
+  activity: Ticket,
+  worship: Landmark,
+  museum: Images,
+  nature: Trees,
+  restaurant: Utensils,
+  cafe: Coffee,
+  shopping: ShoppingBag,
+  lodging: BedDouble,
+  station: TrainFront,
+  airport: Plane,
+  other: MapPin,
+};
 
 interface PreviewState {
   loading: boolean;
@@ -95,9 +124,10 @@ export interface PlaceThumbnailProps {
   photo: PlaceDisplayPhoto | null | undefined;
   photoCount?: PlacePreviewDto["photoCount"];
   loading?: boolean;
+  placeType?: PlaceType;
 }
 
-export function PlaceThumbnail({ photo, photoCount = photo ? 1 : 0, loading = false }: PlaceThumbnailProps) {
+export function PlaceThumbnail({ photo, photoCount = photo ? 1 : 0, loading = false, placeType }: PlaceThumbnailProps) {
   const photoKey = photo ? `${photo.id}\u0000${photo.thumbnailUrl}` : null;
   const [failure, setFailure] = useState({ photoKey, failed: false });
   if (failure.photoKey !== photoKey) {
@@ -105,6 +135,8 @@ export function PlaceThumbnail({ photo, photoCount = photo ? 1 : 0, loading = fa
   }
   const failed = failure.photoKey === photoKey && failure.failed;
   const { t } = useI18n();
+  const noPhoto = photo === null;
+  const EmptyIcon = noPhoto && placeType ? PLACE_TYPE_ICONS[placeType] : ImageOff;
 
   return (
     <span
@@ -131,9 +163,13 @@ export function PlaceThumbnail({ photo, photoCount = photo ? 1 : 0, loading = fa
       ) : null}
       {!loading && (!photo || failed) ? (
         // `null` means the place has no photo; `undefined` or a broken image means it failed to load.
-        <span className="place-thumbnail__empty" role="img" aria-label={photo === null ? t.placeDetail.noPhoto : t.placeDetail.photoUnavailable}>
-          <ImageOff aria-hidden="true" className="place-thumbnail__empty-icon" />
-          <span aria-hidden="true">{photo === null ? t.placeDetail.noPhotoShort : t.placeDetail.photoUnavailableShort}</span>
+        <span
+          className={`place-thumbnail__empty${noPhoto ? " place-thumbnail__empty--type" : ""}`}
+          role="img"
+          aria-label={noPhoto ? t.placeDetail.noPhotoShort : t.placeDetail.photoUnavailable}
+        >
+          <EmptyIcon aria-hidden="true" className="place-thumbnail__empty-icon" />
+          {!noPhoto ? <span aria-hidden="true">{t.placeDetail.photoUnavailableShort}</span> : null}
         </span>
       ) : null}
     </span>

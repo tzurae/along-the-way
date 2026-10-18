@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { MoreHorizontal } from "lucide-react";
 
 export interface RowMenuItem {
@@ -59,7 +60,9 @@ export function RowMenu({ label, items }: { label: string; items: RowMenuItem[] 
                 className={item.danger ? "row-menu__item row-menu__item--danger" : "row-menu__item"}
                 disabled={item.disabled}
                 onClick={() => {
-                  setOpen(false);
+                  // Commit the close before the action: a blocking window.confirm would otherwise
+                  // freeze the page with the menu still painted over the list.
+                  flushSync(() => setOpen(false));
                   item.onSelect();
                 }}
               >

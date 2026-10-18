@@ -1,3 +1,5 @@
+import { isPlaceType, type PlaceType } from "./trip-skeleton";
+
 export type PlaceDetailReferenceKind = "trip-place" | "proposal" | "itinerary-place";
 
 export interface PlaceDetailReference {
@@ -63,12 +65,52 @@ export interface PlacePhotoMetadata {
 }
 
 export interface PlacePhotoDto extends PlacePhotoMetadata {
-  /** `curated`: operator-reviewed packaged work. `commons`: Wikidata's representative image, matched by Google CID at intake. */
+  /** `curated`: operator-reviewed packaged work. `commons`: a licence-checked Wikidata P18 work with a confirmed place match. */
   source: "curated" | "commons";
   imageUrl: string;
   thumbnailUrl: string;
   width: number;
   height: number;
+}
+
+export interface CommonsCandidateNameDto {
+  lang: string;
+  value: string;
+}
+
+export interface CommonsCandidateInstanceOfDto {
+  id: string;
+  label: string;
+}
+
+export interface CommonsCandidateDto {
+  id: string;
+  tripPlaceId: string;
+  placeName: string;
+  placeType: PlaceType;
+  wikidataId: string;
+  label: string;
+  names: CommonsCandidateNameDto[];
+  instanceOf: CommonsCandidateInstanceOfDto[];
+  description: string | null;
+  distanceMeters: number | null;
+  photo: PlacePhotoDto;
+}
+
+export interface CommonsCandidatesResponse {
+  candidates: CommonsCandidateDto[];
+}
+
+export interface CommonsCandidateDecisionInput {
+  decision: "confirm" | "reject";
+}
+
+export interface CommonsCandidateDecisionResponse {
+  remaining: number;
+}
+
+export interface CommonsPhotoReportResponse {
+  remainingCandidates: number;
 }
 
 export interface GooglePlacePhotoDto {
@@ -92,6 +134,8 @@ export interface PlaceDetailDto {
   sources: PlaceDetailSourceDto[];
   photos: PlacePhotoDto[];
   googlePhotos: GooglePlacePhotoDto[];
+  photosUnavailable: boolean;
+  commonsPhotoReportable: boolean;
 }
 
 export interface PlaceDetailResponse {
@@ -100,7 +144,7 @@ export interface PlaceDetailResponse {
 
 export interface PlacePreviewDto {
   reference: PlaceDetailReference;
-  photo: PlacePhotoDto | GooglePlacePhotoDto | null;
+  photo: PlacePhotoDto | null;
   photoCount: number;
 }
 
@@ -352,43 +396,111 @@ export function parseCuratedPlaceManifest(value: unknown): CuratedPlaceManifest 
   };
 }
 
-function assetUrl(value: unknown): string {
+function assetUrl(value: unknown, candidateId: string | null): string {
   const url = text(value, "authenticated asset URL", 1_000);
-  if (!/^\/api\/trips\/[0-9a-f-]{36}\/place-photo-assets\/[a-f0-9]{64}\.(jpg|png|webp)\?kind=(trip-place|proposal|itinerary-place)&id=[0-9a-f-]{36}$/.test(url)) {
-    return invalid("authenticated asset URL");
+  if (candidateId === null) {
+    return /^\/api\/trips\/[0-9a-f-]{36}\/place-photo-assets\/[a-f0-9]{64}\.(jpg|png|webp)\?kind=(trip-place|proposal|itinerary-place)&id=[0-9a-f-]{36}$/.test(url)
+      ? url
+      : invalid("authenticated asset URL");
   }
-  return url;
+  const match = /^\/api\/trips\/[0-9a-f-]{36}\/commons-candidates\/([0-9a-f-]{36})\/assets\/[a-f0-9]{64}\.(jpg|png|webp)$/.exec(url);
+  return match?.[1]?.toLowerCase() === candidateId ? url : invalid("authenticated candidate asset URL");
 }
 
-function photoDto(value: unknown): PlacePhotoDto {
+function photoDto(value: unknown, candidateId: string | null = null): PlacePhotoDto {
   const item = record(value, "photo", ["source", ...photoKeys, "imageUrl", "thumbnailUrl", "width", "height"]);
   if (item.source !== "curated" && item.source !== "commons") return invalid("licensed photo source");
   return {
     source: item.source,
     ...photoMetadata(item),
-    imageUrl: assetUrl(item.imageUrl),
-    thumbnailUrl: assetUrl(item.thumbnailUrl),
+    imageUrl: assetUrl(item.imageUrl, candidateId),
+    thumbnailUrl: assetUrl(item.thumbnailUrl, candidateId),
     width: dimension(item.width),
     height: dimension(item.height),
   };
 }
 
-function isLicensedPhotoSource(value: unknown) {
-  return value === "curated" || value === "commons";
+export function parseCommonsCandidatesResponse(value: unknown): CommonsCandidatesResponse {
+  const response = record(value, "response", ["candidates"]);
+  if (!Array.isArray(response.candidates)) return invalid("Commons candidates");
+  return {
+    candidates: unique(response.candidates.map((value) => {
+      const item = record(value, "Commons candidate", [
+        "id", "tripPlaceId", "placeName", "placeType", "wikidataId", "label", "names",
+        "instanceOf", "description", "distanceMeters", "photo",
+      ]);
+      const id = uuid(item.id, "candidate id");
+      const placeType = item.placeType;
+      if (!isPlaceType(placeType)) return invalid("candidate place type");
+      const wikidataId = text(item.wikidataId, "Wikidata id", 20);
+      if (!/^Q[1-9][0-9]*$/.test(wikidataId)) return invalid("Wikidata id");
+      const names = unique(array(item.names, "candidate names", 100, (value) => {
+        const name = record(value, "candidate name", ["lang", "value"]);
+        return {
+          lang: text(name.lang, "candidate name language", 20),
+          value: text(name.value, "candidate name", 500),
+        };
+      }), (name) => `${name.lang}\0${name.value}`, "candidate names");
+      const instanceOf = unique(array(item.instanceOf, "candidate instance-of", 100, (value) => {
+        const type = record(value, "candidate instance-of", ["id", "label"]);
+        const typeId = text(type.id, "candidate instance-of id", 20);
+        if (!/^Q[1-9][0-9]*$/.test(typeId)) return invalid("candidate instance-of id");
+        return { id: typeId, label: text(type.label, "candidate instance-of label", 500) };
+      }), (type) => type.id, "candidate instance-of ids");
+      const distanceMeters = item.distanceMeters;
+      if (distanceMeters !== null
+        && (typeof distanceMeters !== "number" || !Number.isSafeInteger(distanceMeters) || distanceMeters < 0)) {
+        return invalid("candidate distance");
+      }
+      const photo = photoDto(item.photo, id);
+      const assetFragment = `/commons-candidates/${id}/assets/`;
+      if (photo.source !== "commons"
+        || !photo.imageUrl.includes(assetFragment)
+        || !photo.thumbnailUrl.includes(assetFragment)) {
+        return invalid("candidate photo");
+      }
+      return {
+        id,
+        tripPlaceId: uuid(item.tripPlaceId, "candidate trip place id"),
+        placeName: text(item.placeName, "candidate place name", 200),
+        placeType,
+        wikidataId,
+        label: text(item.label, "candidate label", 500),
+        names,
+        instanceOf,
+        description: nullable(item.description, (value) => text(value, "candidate description", 2_000)),
+        distanceMeters,
+        photo,
+      };
+    }), (candidate) => candidate.id, "candidate ids"),
+  };
 }
 
+export function parseCommonsPhotoReportResponse(value: unknown): CommonsPhotoReportResponse {
+  const response = record(value, "Commons photo report response", ["remainingCandidates"]);
+  const remainingCandidates = response.remainingCandidates;
+  if (typeof remainingCandidates !== "number"
+    || !Number.isSafeInteger(remainingCandidates)
+    || remainingCandidates < 0) {
+    return invalid("remaining Commons candidates");
+  }
+  return { remainingCandidates };
+}
+
+
 function googlePhotoUrl(value: unknown, field: string, maxWidth: 192 | 1024) {
-  const url = text(value, field, 1_800);
-  const match = /^\/api\/trips\/([0-9a-f-]{36})\/google-place-photos\/([A-Za-z0-9_-]{8,300})\?index=([0-2])&photo=([A-Za-z0-9_-]{1,512})&maxWidth=(192|1024)(?:&exp=([1-9][0-9]{9})&sig=([A-Za-z0-9_-]{43}))?$/.exec(url);
-  if (!match || Number(match[5]) !== maxWidth) return invalid(field);
+  const url = text(value, field, 2_800);
+  const match = /^\/api\/trips\/([0-9a-f-]{36})\/google-place-photos\/([A-Za-z0-9_-]{8,300})\?index=([0-2])&photo=([A-Za-z0-9_-]{1,512})&resource=([A-Za-z0-9_-]{1,1000})&maxWidth=(192|1024)&exp=([1-9][0-9]{9})&sig=([A-Za-z0-9_-]{43})$/.exec(url);
+  if (!match || Number(match[6]) !== maxWidth) return invalid(field);
   return {
     url,
     tripId: match[1]!,
     providerPlaceId: match[2]!,
     index: Number(match[3]) as 0 | 1 | 2,
     photoFingerprint: match[4]!,
-    capabilityExpiry: match[6] ?? null,
-    capabilitySignature: match[7] ?? null,
+    photoResource: match[5]!,
+    capabilityExpiry: match[7]!,
+    capabilitySignature: match[8]!,
   };
 }
 
@@ -415,6 +527,7 @@ export function parseGooglePlacePhoto(value: unknown): GooglePlacePhotoDto {
     || image.index !== index
     || thumbnail.photoFingerprint !== photoFingerprint
     || image.photoFingerprint !== photoFingerprint
+    || thumbnail.photoResource !== image.photoResource
     || thumbnail.capabilityExpiry !== image.capabilityExpiry
     || thumbnail.capabilitySignature !== image.capabilitySignature) return invalid("Google photo URL identity");
   return {
@@ -440,6 +553,7 @@ export function parsePlaceDetailResponse(value: unknown): PlaceDetailResponse {
   const response = record(value, "response", ["detail"]);
   const detail = record(response.detail, "detail", [
     "reference", "canonicalPlaceId", "name", "asOfDate", "sections", "sources", "photos", "googlePhotos",
+    "photosUnavailable", "commonsPhotoReportable",
   ]);
   const sources = unique(array(detail.sources, "sources", 100, source), (item) => item.id, "source ids");
   const curatedPhotos = unique(
@@ -454,6 +568,9 @@ export function parsePlaceDetailResponse(value: unknown): PlaceDetailResponse {
   );
   if (googlePhotos.some((photo, index) => photo.index !== index)) return invalid("Google photo indexes");
   if (curatedPhotos.length > 0 && googlePhotos.length > 0) return invalid("curated and Google photos are mutually exclusive");
+  const commonsPhotoReportable = detail.commonsPhotoReportable;
+  if (typeof commonsPhotoReportable !== "boolean") return invalid("Commons photo reportable");
+  if (commonsPhotoReportable && curatedPhotos[0]?.source !== "commons") return invalid("Commons photo reportable");
   return { detail: {
     reference: parsePlaceDetailReference(detail.reference),
     canonicalPlaceId: nullable(detail.canonicalPlaceId, (value) => uuid(value, "canonical place id")),
@@ -463,6 +580,8 @@ export function parsePlaceDetailResponse(value: unknown): PlaceDetailResponse {
     sources,
     photos: curatedPhotos,
     googlePhotos,
+    photosUnavailable: typeof detail.photosUnavailable === "boolean" ? detail.photosUnavailable : invalid("photos unavailable"),
+    commonsPhotoReportable,
   } };
 }
 
@@ -470,14 +589,7 @@ export function parsePlacePreviewResponse(value: unknown): PlacePreviewResponse 
   const response = record(value, "response", ["previews"]);
   return { previews: unique(array(response.previews, "previews", 100, (value) => {
     const item = record(value, "preview", ["reference", "photo", "photoCount"]);
-    const photo = nullable(item.photo, (value) => {
-      const photo = record(value, "photo", ["source", ...(
-        isLicensedPhotoSource((value as Record<string, unknown>).source)
-          ? [...photoKeys, "imageUrl", "thumbnailUrl", "width", "height"]
-          : ["id", "index", "thumbnailUrl", "imageUrl", "width", "height", "authors", "googleMapsUri"]
-      )]);
-      return isLicensedPhotoSource(photo.source) ? photoDto(photo) : parseGooglePlacePhoto(photo);
-    });
+    const photo = nullable(item.photo, photoDto);
     const photoCount = item.photoCount;
     if (!Number.isInteger(photoCount) || typeof photoCount !== "number" || photoCount < 0 || photoCount > 3
       || (photo === null) !== (photoCount === 0)) return invalid("preview photo count");

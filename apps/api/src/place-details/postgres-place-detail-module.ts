@@ -17,7 +17,6 @@ import type { AlongTheWayDatabase } from "../database/database";
 import { AppError } from "../private-trips/private-trip-module";
 import {
   googlePlacePhotoDto,
-  googlePlacePhotoFingerprint,
   PlacePhotoNotFoundError,
   type PlaceProvider,
 } from "../trip-places/google-places-provider";
@@ -37,21 +36,6 @@ interface GooglePhotoReadResult {
   failed: boolean;
 }
 
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  work: (item: T, index: number) => Promise<R>,
-) {
-  const results = new Array<R>(items.length);
-  let nextIndex = 0;
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (nextIndex < items.length) {
-      const index = nextIndex++;
-      results[index] = await work(items[index]!, index);
-    }
-  }));
-  return results;
-}
 
 export class PostgresPlaceDetailModule implements PlaceDetailModule {
   private readonly database: Kysely<AlongTheWayDatabase>;
@@ -85,7 +69,8 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
       canonicalPlaceId: place!.canonicalPlaceId,
       name: place!.name,
       asOfDate: date,
-      sections: [], sources: [], photos: [], googlePhotos: [],
+      sections: [], sources: [], photos: [], googlePhotos: [], photosUnavailable: false,
+      commonsPhotoReportable: false,
     };
     const content = place!.canonicalPlaceId
       ? await this.database.selectFrom("curated_place_details").selectAll()
@@ -104,14 +89,21 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
     if (!content) {
       const commons = place!.canonicalPlaceId ? (await this.commonsPhotos([place!.canonicalPlaceId])).get(place!.canonicalPlaceId) : undefined;
       if (commons) {
-        return { detail: { ...empty, photos: [this.photoDto(tripId, reference, commons, "commons")] }, googleFallbackFailed: false };
+        return { detail: {
+          ...empty,
+          photos: [this.photoDto(tripId, reference, commons, "commons")],
+          commonsPhotoReportable: true,
+        } };
       }
       const fallback = includeGooglePhoto
-        ? await this.googlePhotos(tripId, place!.providerPlaceId)
-        : { photos: [], failed: false };
+        ? await this.googlePhotos(userId, tripId, place!.providerPlaceId)
+        : { photos: [], failed: place!.providerPlaceId !== null };
       return {
-        detail: { ...empty, googlePhotos: fallback.photos },
-        googleFallbackFailed: fallback.failed,
+        detail: {
+          ...empty,
+          googlePhotos: fallback.photos,
+          photosUnavailable: fallback.failed,
+        },
       };
     }
     // Validate stored content too: malformed data is an error, never a false empty state.
@@ -128,8 +120,10 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
     const curatedPhotos = curated.photos.map((photo) => this.photoDto(tripId, reference, photo, "curated"));
     const commons = curatedPhotos.length === 0 ? (await this.commonsPhotos([place!.canonicalPlaceId!])).get(place!.canonicalPlaceId!) : undefined;
     const photos = commons ? [this.photoDto(tripId, reference, commons, "commons")] : curatedPhotos;
-    const fallback = photos.length === 0 && includeGooglePhoto
-      ? await this.googlePhotos(tripId, place!.providerPlaceId)
+    const fallback = photos.length === 0
+      ? includeGooglePhoto
+        ? await this.googlePhotos(userId, tripId, place!.providerPlaceId)
+        : { photos: [], failed: place!.providerPlaceId !== null }
       : null;
     return {
       detail: {
@@ -140,12 +134,13 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
         })) })),
         photos,
         googlePhotos: fallback?.photos ?? [],
+        photosUnavailable: fallback?.failed ?? false,
+        commonsPhotoReportable: photos[0]?.source === "commons",
       },
-      googleFallbackFailed: fallback?.failed ?? false,
     };
   }
 
-  async getPreviews(userId: string, tripId: string, kind: PlaceDetailReferenceKind, ids: string[], includeGooglePhoto = true): Promise<PlacePreviewReadResult> {
+  async getPreviews(userId: string, tripId: string, kind: PlaceDetailReferenceKind, ids: string[]): Promise<PlacePreviewReadResult> {
     await this.authorize(userId, tripId);
     try {
       parsePlacePreviewIds(ids.join(","));
@@ -170,8 +165,7 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
       photoCount: row.photo_count,
     }]));
     const commonsByPlace = await this.commonsPhotos(canonicalIds.filter((id) => !byPlace.has(id)));
-    let googleFallbackFailed = false;
-    const previews = await mapWithConcurrency(places, 4, async (place) => {
+    const previews = places.map((place) => {
       const reference = { kind, id: place.id };
       const curated = place.canonicalPlaceId ? byPlace.get(place.canonicalPlaceId) : undefined;
       if (curated) return {
@@ -181,17 +175,9 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
       };
       const commons = place.canonicalPlaceId ? commonsByPlace.get(place.canonicalPlaceId) : undefined;
       if (commons) return { reference, photo: this.photoDto(tripId, reference, commons, "commons"), photoCount: 1 };
-      const fallback = includeGooglePhoto
-        ? await this.googlePhotos(tripId, place.providerPlaceId)
-        : { photos: [], failed: false };
-      if (fallback.failed) googleFallbackFailed = true;
-      return {
-        reference,
-        photo: fallback.photos[0] ?? null,
-        photoCount: fallback.photos.length,
-      };
+      return { reference, photo: null, photoCount: 0 };
     });
-    return { previews, googleFallbackFailed };
+    return { previews };
   }
 
   async getPhotoAsset(userId: string, tripId: string, reference: PlaceDetailReference, filename: string) {
@@ -235,6 +221,7 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
     providerPlaceId: string,
     index: 0 | 1 | 2,
     photoFingerprint: string,
+    photoResource: string,
     maxWidth: 192 | 1024,
     capabilityExpiry: string | null = null,
     capabilitySignature: string | null = null,
@@ -242,47 +229,30 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
     await this.authorize(userId, tripId);
     if (!/^[A-Za-z0-9_-]{8,300}$/.test(providerPlaceId)
       || !/^[a-f0-9]{16}$/.test(photoFingerprint)
+      || !/^[A-Za-z0-9_-]{1,1000}$/.test(photoResource)
       || (maxWidth !== 192 && maxWidth !== 1024)) {
       throw new AppError("validation_error", "Invalid Google place photo request");
     }
-    const [wishlistAssociation, proposalAssociation] = await Promise.all([
-      this.database.selectFrom("trip_places as tripPlace")
-        .innerJoin("place_identities as identity", "identity.id", "tripPlace.place_id")
-        .select("tripPlace.id")
-        .where("tripPlace.trip_id", "=", tripId)
-        .where("identity.provider", "=", "google")
-        .where("identity.provider_place_id", "=", providerPlaceId)
-        .executeTakeFirst(),
-      this.database.selectFrom("candidate_proposals")
-        .select("id")
-        .where("trip_id", "=", tripId)
-        .where("provider_place_id", "=", providerPlaceId)
-        .executeTakeFirst(),
-    ]);
-    if (!wishlistAssociation && !proposalAssociation
-      && !this.photoCapability?.matches(
-        tripId,
-        userId,
-        providerPlaceId,
-        index,
-        photoFingerprint,
-        capabilityExpiry,
-        capabilitySignature,
-      )) {
+    const photoName = `places/${providerPlaceId}/photos/${photoResource}`;
+    if (!this.photoCapability?.matches(
+      tripId,
+      userId,
+      providerPlaceId,
+      index,
+      photoFingerprint,
+      photoName,
+      capabilityExpiry,
+      capabilitySignature,
+    )) {
       throw new AppError("place_photo_not_found", "Place photo not found", 404);
     }
     if (!this.provider
       || this.provider.available === false
-      || !this.provider.getPhotos
       || !this.provider.fetchPhotoMedia) {
       throw new AppError("place_photo_not_found", "Place photo not found", 404);
     }
     try {
-      const photo = (await this.provider.getPhotos(providerPlaceId))[index];
-      if (!photo || googlePlacePhotoFingerprint(photo) !== photoFingerprint) {
-        throw new PlacePhotoNotFoundError();
-      }
-      const media = await this.provider.fetchPhotoMedia(photo.name, maxWidth);
+      const media = await this.provider.fetchPhotoMedia(photoName, maxWidth);
       return { bytes: media.bytes, mediaType: media.contentType };
     } catch (error) {
       if (error instanceof PlacePhotoNotFoundError) {
@@ -349,15 +319,26 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
     });
   }
 
-  private async googlePhotos(tripId: string, providerPlaceId: string | null): Promise<GooglePhotoReadResult> {
-    if (!providerPlaceId || !this.provider?.getPhotos || this.provider.available === false) {
-      return { photos: [], failed: false };
+  private async googlePhotos(userId: string, tripId: string, providerPlaceId: string | null): Promise<GooglePhotoReadResult> {
+    if (!providerPlaceId) return { photos: [], failed: false };
+    const photoCapability = this.photoCapability;
+    if (!this.provider?.getPhotos || !this.provider.fetchPhotoMedia
+      || this.provider.available === false || !photoCapability) {
+      return { photos: [], failed: true };
     }
     try {
       const photos = (await this.provider.getPhotos(providerPlaceId)).slice(0, 3);
       return {
         photos: photos.map((photo, index) =>
-          googlePlacePhotoDto(tripId, providerPlaceId, index as 0 | 1 | 2, photo)),
+          googlePlacePhotoDto(
+            tripId,
+            providerPlaceId,
+            index as 0 | 1 | 2,
+            photo,
+            (fingerprint) => photoCapability.issue(
+              tripId, userId, providerPlaceId, index as 0 | 1 | 2, fingerprint, photo.name,
+            ),
+          )),
         failed: false,
       };
     } catch {

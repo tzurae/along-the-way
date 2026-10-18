@@ -15,6 +15,7 @@ import { PostgresTripPlaceModule } from "./trip-places/postgres-trip-place-modul
 import { PostgresPlaceDetailModule } from "./place-details/postgres-place-detail-module";
 import { packagedPhotoRoot } from "./place-details/photo-assets";
 import { CommonsPlacePhotos } from "./place-details/commons-place-photos";
+import { PostgresCommonsCandidateModule } from "./place-details/commons-photo-candidates";
 import packageJson from "../../../package.json";
 
 function requireSetting(name: string) {
@@ -41,14 +42,19 @@ const placeProvider = new GooglePlacesProvider({
   apiKey: process.env.GOOGLE_MAPS_API_KEY,
   consumeBudget: () => rateLimiter.tryConsumePaidProvider("google_places"),
 });
+const wikimediaUserAgent = `AlongTheWay/${packageJson.version} (https://github.com/tzurae/along-the-way)`;
+const commonsPhotos = new CommonsPlacePhotos({ userAgent: wikimediaUserAgent });
+const commonsCandidates = new PostgresCommonsCandidateModule({
+  database,
+  photos: commonsPhotos,
+  userAgent: wikimediaUserAgent,
+});
 const tripPlaces = new PostgresTripPlaceModule({
   database,
   provider: placeProvider,
   photoCapabilitySecret: tokenSecret,
-  // Wikimedia asks API clients for a descriptive User-Agent with contact information.
-  commonsPhotos: new CommonsPlacePhotos({
-    userAgent: `AlongTheWay/${packageJson.version} (https://github.com/tzurae/along-the-way)`,
-  }),
+  commonsPhotos,
+  commonsCandidates,
 });
 const discovery = new PostgresDiscoveryModule({
   database,
@@ -68,6 +74,7 @@ const dayPlans = new PostgresDayPlanModule({
 const readiness = new PostgresReadinessProbe(database);
 const app = createApp({
   collaboration: new PostgresCollaborationModule(database),
+  commonsCandidates,
   dayPlans,
   discovery,
   identityAccess,

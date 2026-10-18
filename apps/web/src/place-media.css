@@ -59,9 +59,20 @@
   text-align: center;
 }
 
+.place-thumbnail__empty--type {
+  background: color-mix(in srgb, var(--color-accent) 9%, var(--color-surface-subtle));
+  color: var(--color-accent-strong);
+}
+
 .place-thumbnail__empty-icon {
   width: 20px;
   height: 20px;
+}
+
+.place-thumbnail__empty--type .place-thumbnail__empty-icon {
+  width: 28px;
+  height: 28px;
+  stroke-width: 1.75;
 }
 
 .place-photo-credit {
