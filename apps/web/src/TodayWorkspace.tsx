@@ -1,13 +1,21 @@
-import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, BedDouble, BellRing, CalendarDays, Check, ChevronRight, CircleDot, Clock3, ExternalLink, ListOrdered, Lock, MapPin, Navigation, Plane, TriangleAlert, Users, WifiOff } from "lucide-react";
-import type { PlaceDetailReference } from "@along-the-way/contracts/place-details";
+import {
+  parseCommonsCandidatesResponse,
+  type CommonsCandidateDecisionInput,
+  type CommonsCandidateDto,
+  type CommonsCandidatesResponse,
+  type PlaceDetailReference,
+} from "@along-the-way/contracts/place-details";
 import { useI18n } from "./i18n";
 import { googleMapsCoordinatesUrl, googleMapsDirectionsUrl, googleMapsNavigationUrl } from "./google-maps";
 import { safeExternalUrl } from "./external-url";
 import { dayItems, localDate, parallelItemIds, personalState, tripClock, type TodayDay, type TodayItem, type TodayModel } from "./today-model";
 import { readTripLocation } from "./trip-location";
+import { notify } from "./AppToaster";
+import { CommonsCandidateReviewSheet } from "./CommonsCandidateReviewSheet";
 import { PlaceDetailContent } from "./PlaceDetailContent";
-import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest, type PlacePreviewValue } from "./PlaceThumbnail";
+import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest, type PlaceDetailRequestOptions, type PlacePreviewValue } from "./PlaceThumbnail";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import { NativeSelect } from "./components/ui/native-select";
 
@@ -65,7 +73,7 @@ function TodayItemDetails({ item, now, parallel, memberId, date, previews, previ
           const triggerKey = detailIdentity ? encodeURIComponent(`${item.id}:${endpoint.role}:${detailIdentity}`) : "";
           const preview = detailIdentity ? previews.get(detailIdentity) : undefined;
           return <div key={endpoint.role} className="today-detail-endpoint">
-            {endpoint.place && detailIdentity && openPlace ? <PlaceThumbnail photo={preview?.photo} photoCount={preview?.photoCount} loading={previewsLoading} /> : null}
+            {endpoint.place && detailIdentity && openPlace ? <PlaceThumbnail photo={preview?.photo} photoCount={preview?.photoCount} loading={previewsLoading} placeType={endpoint.place.type ?? undefined} /> : null}
             <div className="min-w-0">
               <dt>{endpoint.role === "start" ? startLabel : endLabel}</dt>
               <dd>
@@ -249,7 +257,7 @@ function TodayPlaceCard({ place, order, date, preview, previewsLoading, openPlac
     <span className="today-stop-order" aria-hidden="true">{order}</span>
     <span className="today-stop-track" aria-hidden="true" />
     <div className="today-stop-body today-place-body">
-      {openPlace ? <PlaceThumbnail photo={preview?.photo} photoCount={preview?.photoCount} loading={previewsLoading} /> : null}
+      {openPlace ? <PlaceThumbnail photo={preview?.photo} photoCount={preview?.photoCount} loading={previewsLoading} placeType={place.type ?? undefined} /> : null}
       <div className="today-place-copy">
         {openPlace ? <button
           type="button"
@@ -287,6 +295,58 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
   const detailReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const itemReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const timelineRef = useRef<HTMLElement | null>(null);
+  const detailTitleRef = useRef<HTMLHeadingElement>(null);
+  const candidateReadGeneration = useRef(0);
+  const [candidatePhotoRevision, setCandidatePhotoRevision] = useState(0);
+  const [commonsCandidates, setCommonsCandidates] = useState<CommonsCandidateDto[]>([]);
+  const [candidateReviewPlaceId, setCandidateReviewPlaceId] = useState<string | null>(null);
+  const [candidateReviewOpen, setCandidateReviewOpen] = useState(false);
+  const refreshedRequest = useCallback(async <T,>(url: string, options?: PlaceDetailRequestOptions): Promise<T> => {
+    if (!request) throw new Error("Place detail request is unavailable");
+    return request<T>(
+      url,
+      candidatePhotoRevision === 0 ? options : { ...options, cache: "no-cache" },
+    );
+  }, [candidatePhotoRevision, request]);
+  const refreshCommonsCandidates = useCallback(async (): Promise<void> => {
+    if (!request) {
+      setCommonsCandidates([]);
+      return;
+    }
+    const generation = ++candidateReadGeneration.current;
+    const response = await request<CommonsCandidatesResponse>(
+      `/api/trips/${encodeURIComponent(model.tripId)}/commons-candidates`,
+      { cache: "no-cache", parse: parseCommonsCandidatesResponse },
+    );
+    if (generation === candidateReadGeneration.current) setCommonsCandidates(response.candidates);
+  }, [model.tripId, request]);
+  const resolveCommonsCandidate = useCallback((
+    candidate: CommonsCandidateDto,
+    resolution: CommonsCandidateDecisionInput["decision"] | "skip",
+  ) => {
+    setCommonsCandidates((current) => resolution === "confirm"
+      ? current.filter((entry) => entry.tripPlaceId !== candidate.tripPlaceId)
+      : current.filter((entry) => entry.id !== candidate.id));
+  }, []);
+  const handleCommonsPhotoReported = useCallback(async (tripPlaceId: string, remainingCandidates: number) => {
+    setCandidatePhotoRevision((current) => current + 1);
+    if (remainingCandidates > 0) {
+      try {
+        await refreshCommonsCandidates();
+        setCandidateReviewPlaceId(tripPlaceId);
+        setCandidateReviewOpen(true);
+        return;
+      } catch {
+        // The report succeeded; the refreshed detail remains the source of truth.
+      }
+    } else {
+      void refreshCommonsCandidates().catch(() => undefined);
+    }
+    notify("success", t.tripPlaces.commonsCandidates.photoRemoved);
+  }, [refreshCommonsCandidates, t.tripPlaces.commonsCandidates.photoRemoved]);
+  useEffect(() => () => {
+    candidateReadGeneration.current += 1;
+  }, []);
   useEffect(() => {
     const tick = () => setNow(Date.now());
     const timer = window.setInterval(tick, 15_000);
@@ -415,7 +475,10 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
   const endpointIds = useMemo(() => [...new Set(model.items.flatMap((item) => item.endpoints.flatMap((endpoint) => endpoint.place?.id ? [endpoint.place.id] : [])))], [model.items]);
   const wishlistIds = useMemo(() => [...new Set(model.days.flatMap((entry) => entry.wishlist.map((place) => place.id)))], [model.days]);
   const endpointPreviews = usePlacePreviews({ tripId: model.tripId, kind: "itinerary-place", ids: endpointIds, request, enabled: Boolean(request) && !offline });
-  const wishlistPreviews = usePlacePreviews({ tripId: model.tripId, kind: "trip-place", ids: wishlistIds, request, enabled: Boolean(request) && !offline });
+  const wishlistPreviews = usePlacePreviews({ tripId: model.tripId, kind: "trip-place", ids: wishlistIds, request: request ? refreshedRequest : undefined, enabled: Boolean(request) && !offline });
+  const visibleCommonsCandidates = candidateReviewPlaceId
+    ? commonsCandidates.filter((candidate) => candidate.tripPlaceId === candidateReviewPlaceId)
+    : [];
 
   if (!day) return <p>{text.empty}</p>;
   const index = model.days.indexOf(day);
@@ -448,7 +511,15 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     }
   }
 
-  const detail = selectedDetail && request ? <PlaceDetailContent tripId={model.tripId} reference={selectedDetail.reference} date={selectedDetail.date} request={request} /> : null;
+  const detail = selectedDetail && request ? (
+    <PlaceDetailContent
+      tripId={model.tripId}
+      reference={selectedDetail.reference}
+      date={selectedDetail.date}
+      request={refreshedRequest}
+      onCommonsPhotoReported={handleCommonsPhotoReported}
+    />
+  ) : null;
   const formattedDay = new Intl.DateTimeFormat(locale, { timeZone: "UTC", month: "long", day: "numeric", weekday: "short" }).format(new Date(`${day.date}T12:00:00Z`));
   const leadItem = clock.phase === "before"
     ? firstFixed
@@ -644,6 +715,29 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     >
       {selectedItem ? <TodayItemDetails item={selectedItem} now={now} parallel={selectedItemParallel} memberId={model.memberId} date={selectedItemDay.date} previews={endpointPreviews.previews} previewsLoading={endpointPreviews.loading} openPlace={openPlace} /> : null}
     </PlaceDetailSheet>
-    <PlaceDetailSheet open={Boolean(selectedDetail)} title={selectedDetail ? text.detailTitle(selectedDetail.name) : ""} onClose={closeDetail}>{detail}</PlaceDetailSheet>
+    <PlaceDetailSheet
+      open={Boolean(selectedDetail)}
+      title={selectedDetail ? text.detailTitle(selectedDetail.name) : ""}
+      titleRef={detailTitleRef}
+      onClose={closeDetail}
+    >
+      {detail}
+    </PlaceDetailSheet>
+    {request ? (
+      <CommonsCandidateReviewSheet
+        open={candidateReviewOpen}
+        tripId={model.tripId}
+        candidates={visibleCommonsCandidates}
+        request={refreshedRequest}
+        onClose={() => {
+          setCandidateReviewOpen(false);
+          setCandidateReviewPlaceId(null);
+          window.requestAnimationFrame(() => detailTitleRef.current?.focus());
+        }}
+        onCandidateResolved={resolveCommonsCandidate}
+        onConfirmed={() => setCandidatePhotoRevision((current) => current + 1)}
+        refreshCandidates={refreshCommonsCandidates}
+      />
+    ) : null}
   </section>;
 }

@@ -456,27 +456,30 @@ describe("Google Places provider adapter", () => {
       authors: [{ displayName: "甲", uri: null }],
       googleMapsUri: null,
     };
-    const dto = googlePlacePhotoDto("11111111-1111-4111-8111-111111111111", "ChIJ-photo-place-1234", 1, photo);
+    const issueCapability = () => ({ exp: 1791547200, sig: "test-signature" });
+    const dto = googlePlacePhotoDto("11111111-1111-4111-8111-111111111111", "ChIJ-photo-place-1234", 1, photo, issueCapability);
     expect(dto).toMatchObject({
       source: "google",
       index: 1,
       id: "google:ChIJ-photo-place-1234:1:84df05a7b9f74968",
-      thumbnailUrl: "/api/trips/11111111-1111-4111-8111-111111111111/google-place-photos/ChIJ-photo-place-1234?index=1&photo=84df05a7b9f74968&maxWidth=192",
-      imageUrl: "/api/trips/11111111-1111-4111-8111-111111111111/google-place-photos/ChIJ-photo-place-1234?index=1&photo=84df05a7b9f74968&maxWidth=1024",
+      thumbnailUrl: "/api/trips/11111111-1111-4111-8111-111111111111/google-place-photos/ChIJ-photo-place-1234?index=1&photo=84df05a7b9f74968&resource=first-token&maxWidth=192&exp=1791547200&sig=test-signature",
+      imageUrl: "/api/trips/11111111-1111-4111-8111-111111111111/google-place-photos/ChIJ-photo-place-1234?index=1&photo=84df05a7b9f74968&resource=first-token&maxWidth=1024&exp=1791547200&sig=test-signature",
     });
     const renamed = googlePlacePhotoDto(
       "11111111-1111-4111-8111-111111111111",
       "ChIJ-photo-place-1234",
       1,
       { ...photo, name: "places/ChIJ-photo-place-1234/photos/rotated-provider-token" },
+      issueCapability,
     );
-    expect({ id: renamed.id, thumbnailUrl: renamed.thumbnailUrl, imageUrl: renamed.imageUrl })
-      .toEqual({ id: dto.id, thumbnailUrl: dto.thumbnailUrl, imageUrl: dto.imageUrl });
+    expect(renamed.id).toBe(dto.id);
+    expect(new URL(renamed.imageUrl, "https://example.test").searchParams.get("resource")).toBe("rotated-provider-token");
     const sameMetadataAtAnotherIndex = googlePlacePhotoDto(
       "11111111-1111-4111-8111-111111111111",
       "ChIJ-photo-place-1234",
       2,
       photo,
+      issueCapability,
     );
     expect(sameMetadataAtAnotherIndex.id).not.toBe(dto.id);
     expect(sameMetadataAtAnotherIndex.id.endsWith("84df05a7b9f74968")).toBe(true);
@@ -485,9 +488,10 @@ describe("Google Places provider adapter", () => {
       "ChIJ-photo-place-1234",
       1,
       { ...photo, googleMapsUri: "https://maps.google.com/?cid=a-different-photo" },
+      issueCapability,
     );
     expect(differentPhoto.id).not.toBe(dto.id);
-    expect(JSON.stringify(dto)).not.toMatch(/key=|server-only-key|first-token/);
+    expect(JSON.stringify(dto)).not.toMatch(/key=|server-only-key/);
   });
 
 });

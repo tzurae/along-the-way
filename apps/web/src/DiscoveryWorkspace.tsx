@@ -27,6 +27,7 @@ import { ConflictPanel, useVersionConflict } from "./ConflictPanel";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { usePlacePreviews, type PlaceDetailRequest } from "./PlaceThumbnail";
 import { PlaceListRow } from "./PlaceListRow";
+import { PlaceListSkeleton } from "./PlaceListSkeleton";
 import { canArrangeItinerary } from "./trip-permissions";
 import { PlaceFilterBar, PlaceFilterEmpty, placeArea, usePlaceFilters } from "./PlaceFilters";
 import { placeTypeFilterLabel } from "./locales/zh-TW/place-types";
@@ -1002,7 +1003,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
         }}
       /> : null}
 
-      {loading ? <p className="mt-6" role="status">{t.header.loading}</p> : null}
+      {loading ? <PlaceListSkeleton label={t.header.loading} className="mt-6" /> : null}
 
       {!loading ? (
         <div hidden={Boolean(resolution.conflict)} className="grid gap-5">
@@ -1216,6 +1217,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
                       variant="proposal"
                       name={proposal.name}
                       typeLabel={t.placeType[proposal.type]}
+                      placeType={proposal.type}
                       stateLabel={proposalStatusLabel(proposal, displayStatus)}
                       secondary={firstSentence?.text ?? proposal.recommendation}
                       evidence={<span>{evidenceLabel}</span>}

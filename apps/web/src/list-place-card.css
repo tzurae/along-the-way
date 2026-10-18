@@ -178,6 +178,12 @@
   border-radius: 12px;
 }
 
+.list-place-row .place-photo-credit {
+  position: relative;
+  z-index: 2;
+  margin-top: 0;
+}
+
 .list-place-row__body {
   display: grid;
   min-width: 0;
@@ -527,6 +533,42 @@ button.list-place-row__title:hover {
   }
 }
 
+/* Loading placeholder rows: same row geometry as the real list, blocks breathe light ↔ dark. */
+@keyframes place-list-skeleton-breathe {
+  0%, 100% { background-color: color-mix(in srgb, var(--color-ink) 7%, var(--color-surface)); }
+  50% { background-color: color-mix(in srgb, var(--color-ink) 15%, var(--color-surface)); }
+}
+
+.place-list-skeleton__block {
+  display: block;
+  border-radius: 8px;
+  background-color: color-mix(in srgb, var(--color-ink) 10%, var(--color-surface));
+  animation: place-list-skeleton-breathe 1.4s ease-in-out infinite;
+}
+
+.place-list-skeleton__thumb {
+  width: var(--place-row-thumb);
+  height: var(--place-row-thumb);
+  border-radius: 12px;
+}
+
+.place-list-skeleton__lines {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding-top: 6px;
+}
+
+.place-list-skeleton__title {
+  width: 60%;
+  height: 16px;
+}
+
+.place-list-skeleton__meta {
+  width: 38%;
+  height: 12px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .list-place-row {
     transition: none;
@@ -534,5 +576,9 @@ button.list-place-row__title:hover {
 
   .list-place-row--changed {
     animation: none !important;
+  }
+
+  .place-list-skeleton__block {
+    animation: none;
   }
 }

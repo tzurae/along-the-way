@@ -137,48 +137,6 @@ describe("owner-only schedule surfaces", () => {
     expect(screen.queryByText(ownerOnly)).not.toBeInTheDocument();
   });
 
-  it("shows Google author attribution beside a Today endpoint thumbnail", async () => {
-    const trip = todayTrip();
-    const model = createTodayModel(trip, todaySkeleton(trip, [todayActivity()]), [], todayUser.id);
-    const request = async <T,>(url: string) => {
-      if (!url.includes("/place-previews?")) throw new Error(`Unexpected request: ${url}`);
-      return {
-        previews: [{
-          reference: { kind: "itinerary-place", id: "place" },
-          photo: {
-            source: "google",
-            index: 0,
-            id: "google:ChIJTodayEndpoint:0:0123456789abcdef",
-            thumbnailUrl: "/api/trips/A/google-place-photos/ChIJTodayEndpoint?index=0&photo=0123456789abcdef&maxWidth=192",
-            imageUrl: "/api/trips/A/google-place-photos/ChIJTodayEndpoint?index=0&photo=0123456789abcdef&maxWidth=1024",
-            width: 1200,
-            height: 800,
-            authors: [{ displayName: "端點攝影者", uri: "https://maps.google.com/contrib/today-author" }],
-            googleMapsUri: "https://maps.google.com/?cid=987",
-          },
-          photoCount: 3,
-        }],
-      } as T;
-    };
-    const { container } = render(
-      <TodayWorkspace
-        model={model}
-        selectedDate="2026-10-21"
-        onDayChanged={() => {}}
-        fetchedAt="2026-10-21T01:30:00Z"
-        retry={() => {}}
-        request={request}
-      />,
-    );
-
-    const item = container.querySelector<HTMLButtonElement>("[data-today-item-trigger]");
-    expect(item).toBeInTheDocument();
-    fireEvent.click(item!);
-    await waitFor(() => expect(document.querySelector(".place-photo-credit")).toHaveTextContent("Google Maps・端點攝影者"));
-    expect(screen.getByRole("link", { name: "端點攝影者" })).toHaveAttribute("href", "https://maps.google.com/contrib/today-author");
-    expect(screen.getByRole("img", { name: "共 3 張照片" })).toBeInTheDocument();
-  });
-
   it("hides locked-item unlock, edit, and delete controls from editors", async () => {
     const ownerTrip = todayTrip();
     const lockedItem = {

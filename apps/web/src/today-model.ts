@@ -2,12 +2,13 @@ import { Temporal } from "@js-temporal/polyfill";
 import { resolveDayTimeZone } from "@along-the-way/contracts/day-time-zone";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
-import type { ItineraryItemDto, ItineraryItemType, TripSkeletonDto } from "@along-the-way/contracts/trip-skeleton";
+import type { ItineraryItemDto, ItineraryItemType, PlaceType, TripSkeletonDto } from "@along-the-way/contracts/trip-skeleton";
 
 export type TodayFact = "carrier" | "serviceNumber" | "confirmationNotes" | "bookedBy" | "confirmationCode" | "mode" | "ticketInfo" | "durationMinutes" | "confirmationStatus";
 export interface TodayPlace {
   id: string | null;
   name: string;
+  type: PlaceType | null;
   address: string | null;
   latitude: number | null;
   longitude: number | null;
@@ -31,7 +32,7 @@ export interface TodayDay {
   date: string;
   timeZone: string | null;
   itemIds: string[];
-  wishlist: Array<{ id: string; name: string; latitude: number | null; longitude: number | null; providerPlaceId: string | null }>;
+  wishlist: Array<{ id: string; name: string; type: PlaceType | null; latitude: number | null; longitude: number | null; providerPlaceId: string | null }>;
 }
 export interface TodayModel {
   tripId: string;
@@ -78,7 +79,7 @@ export function createTodayModel(trip: TripDto, skeleton: TripSkeletonDto, place
       endpoints: item.endpoints.map((endpoint) => {
         const place = byPlace.get(endpoint.placeId);
         return { role: endpoint.role, instant: endpoint.instant, timeZone: endpoint.timeZone,
-          place: place ? { id: place.id, name: place.name, address: place.address, latitude: place.latitude, longitude: place.longitude } : null };
+          place: place ? { id: place.id, name: place.name, type: place.type, address: place.address, latitude: place.latitude, longitude: place.longitude } : null };
       }),
       participants: item.participants?.map((person) => ({
         id: person.memberId,
@@ -111,6 +112,7 @@ export function createTodayModel(trip: TripDto, skeleton: TripSkeletonDto, place
         wishlist: assigned.map((place) => ({
           id: place.id,
           name: place.name,
+          type: place.type,
           latitude: place.latitude,
           longitude: place.longitude,
           providerPlaceId: place.providerPlaceId,

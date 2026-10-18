@@ -141,6 +141,11 @@ export class AppError extends Error {
       | "revoked_invite"
       | "invite_email_mismatch"
       | "place_photo_not_found"
+      | "commons_photo_not_found"
+      | "service_unavailable"
+      | "candidate_not_found"
+      | "candidate_asset_not_found"
+      | "candidate_already_decided"
       | "place_photo_unavailable",
     message: string,
     readonly status: 400 | 401 | 403 | 404 | 409 | 429 | 502 | 503 = 400,

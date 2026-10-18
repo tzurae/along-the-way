@@ -257,6 +257,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     const response = await app.request(`/api/trips/${tripId}/place-details?kind=${reference.kind}&id=${reference.id}&date=${date}`, { headers: { cookie: owner.cookie } });
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("private, max-age=3600");
+    expect(response.headers.get("vary")).toBe("Cookie");
     return parsePlaceDetailResponse(await response.json()).detail;
   }
 
@@ -296,9 +297,9 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     expect(previews.headers.get("cache-control")).toBe("private, max-age=3600");
     const parsed = parsePlacePreviewResponse(await previews.json()).previews;
     expect(parsed.map((item) => item.reference.id)).toEqual([branch.id, place.id]);
-    expect(parsed[0]).toMatchObject({ photo: { source: "google", index: 0 }, photoCount: 3 });
+    expect(parsed[0]).toMatchObject({ photo: null, photoCount: 0 });
     expect(parsed[1]).toMatchObject({ photo: { source: "curated", id: "original-test-pixel" }, photoCount: 1 });
-    expect(providerReads).toBe(2);
+    expect(providerReads).toBe(1);
     expect(await (await app.request(`/api/trips/${tripId}/skeleton`, { headers: { cookie: owner.cookie } })).json()).toEqual(before);
     const wishlistAfter = await (await app.request(`/api/trips/${tripId}/trip-places`, { headers: { cookie: owner.cookie } })).json();
     // Acceptance deliberately changes the proposal pointer only; member notes/votes/schedules remain intact.
@@ -306,17 +307,32 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
       .toEqual(wishlistBefore.tripPlaces.map(({ aiProposalId: _id, ...rest }: TripPlaceDto) => rest));
   });
 
-  it("keeps a preview batch available when one Google photo lookup fails", async () => {
+  it("never asks Google for a preview batch, even when a provider lookup would fail", async () => {
     failedProviderPhotoId = branch.providerPlaceId;
     const response = await app.request(
       `/api/trips/${tripId}/place-previews?kind=trip-place&ids=${branch.id},${place.id}`,
       { headers: { cookie: owner.cookie } },
     );
     expect(response.status).toBe(200);
-    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("cache-control")).toBe("private, max-age=3600");
     const previews = parsePlacePreviewResponse(await response.json()).previews;
     expect(previews[0]?.photo).toBeNull();
     expect(previews[1]?.photo).toMatchObject({ source: "curated", id: "original-test-pixel" });
+    expect(providerReads).toBe(0);
+  });
+
+  it.each(["trip-place", "proposal", "itinerary-place"] as const)("never returns a Google photo from a %s preview", async (kind) => {
+    await database.deleteFrom("curated_place_photos").where("place_id", "=", place.placeId).execute();
+    const id = kind === "trip-place" ? place.id : kind === "proposal" ? proposalId : legacyId;
+    const response = await app.request(`/api/trips/${tripId}/place-previews?kind=${kind}&ids=${id}`, {
+      headers: { cookie: owner.cookie },
+    });
+    expect(response.status).toBe(200);
+    expect(parsePlacePreviewResponse(await response.json()).previews).toEqual([
+      { reference: { kind, id }, photo: null, photoCount: 0 },
+    ]);
+    expect(providerReads).toBe(0);
+    expect(mediaReads).toBe(0);
   });
 
   it("caps curated detail and preview photos at three before considering Google fallback", async () => {
@@ -413,7 +429,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     const expiredUrl = new URL(thumbnailUrl, "https://app.example.test");
     expiredUrl.searchParams.set("exp", String(expired));
     expiredUrl.searchParams.set("sig", new TokenIssuer(photoCapabilitySecret).issue(
-      `${tripId}|${owner.id}|${candidate.providerPlaceId}|0|${fingerprint}|${expired}`,
+      `${tripId}|${owner.id}|${candidate.providerPlaceId}|0|${fingerprint}|places/${candidate.providerPlaceId}/photos/${expiredUrl.searchParams.get("resource")}|${expired}`,
     ));
     expect((await app.request(`${expiredUrl.pathname}${expiredUrl.search}`, {
       headers: { cookie: owner.cookie },
@@ -421,7 +437,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     expect(providerReads).toBe(readsBeforeTampering);
   });
 
-  it("degrades rate-limited detail and preview metadata reads without calling Google", async () => {
+  it("does not consume the detail photo allowance for previews and exposes a rate-limited detail failure", async () => {
     const secret = "place-detail-rate-secret-at-least-32-bytes";
     const scope = "place_photo_metadata:account";
     await database.insertInto("rate_limit_windows").values({
@@ -431,16 +447,20 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
       request_count: 299,
     }).execute();
 
-    // Two requested IDs consume two units, so this batch crosses the 300/hour account limit.
+    // Previews no longer consume the final metadata unit.
     const previewResponse = await app.request(
       `/api/trips/${tripId}/place-previews?kind=trip-place&ids=${branch.id},${place.id}`,
       { headers: { cookie: owner.cookie } },
     );
     expect(previewResponse.status).toBe(200);
-    expect(previewResponse.headers.get("cache-control")).toBe("private, no-store");
+    expect(previewResponse.headers.get("cache-control")).toBe("private, max-age=3600");
     const previews = parsePlacePreviewResponse(await previewResponse.json()).previews;
     expect(previews[0]).toMatchObject({ photo: null, photoCount: 0 });
     expect(previews[1]).toMatchObject({ photo: { source: "curated", id: "original-test-pixel" }, photoCount: 1 });
+    expect(providerReads).toBe(0);
+    const lastAllowed = await detail({ kind: "trip-place", id: branch.id });
+    expect(lastAllowed.googlePhotos).toHaveLength(3);
+    expect(lastAllowed.photosUnavailable).toBe(false);
 
     const detailResponse = await app.request(
       `/api/trips/${tripId}/place-details?kind=trip-place&id=${branch.id}`,
@@ -448,8 +468,10 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     );
     expect(detailResponse.status).toBe(200);
     expect(detailResponse.headers.get("cache-control")).toBe("private, no-store");
-    expect(parsePlaceDetailResponse(await detailResponse.json()).detail.googlePhotos).toEqual([]);
-    expect(providerReads).toBe(0);
+    expect(parsePlaceDetailResponse(await detailResponse.json()).detail).toMatchObject({
+      googlePhotos: [], photosUnavailable: true,
+    });
+    expect(providerReads).toBe(1);
   });
 
   it("returns a Google photo for an uncurated proposal without a place identity and proxies its bytes privately", async () => {
@@ -501,10 +523,10 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
       photoName: `places/${providerPlaceId}/photos/controlled-photo-2`,
       maxWidthPx: 1024,
     }]);
-    expect(providerReads).toBe(metadataReads + 1);
+    expect(providerReads).toBe(metadataReads);
   });
 
-  it("rejects wrong-index fingerprints, changed order, and absent indexes without fetching media", async () => {
+  it("rejects tampered signed fields and keeps issued resources valid when Google metadata order changes", async () => {
     const result = await detail({ kind: "trip-place", id: branch.id });
     const readsBeforeValidation = providerReads;
     const missingIndexUrl = new URL(result.googlePhotos[0]!.imageUrl, "https://app.example.test");
@@ -529,34 +551,42 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
       headers: { cookie: owner.cookie },
     })).status).toBe(404);
     expect(mediaRequests).toEqual([]);
-    expect(providerReads).toBe(metadataReads + 1);
+    expect(providerReads).toBe(metadataReads);
+
+    const resourceTampered = new URL(result.googlePhotos[1]!.imageUrl, "https://app.example.test");
+    resourceTampered.searchParams.set("resource", "other-photo");
+    expect((await app.request(`${resourceTampered.pathname}${resourceTampered.search}`, {
+      headers: { cookie: owner.cookie },
+    })).status).toBe(404);
+    expect(mediaRequests).toEqual([]);
 
     googlePhotoOrder = [1, 0, 2];
-    expect((await app.request(result.googlePhotos[1]!.imageUrl, { headers: { cookie: owner.cookie } })).status).toBe(404);
-    expect(mediaRequests).toEqual([]);
-    expect(providerReads).toBe(metadataReads + 2);
-
+    expect((await app.request(result.googlePhotos[1]!.imageUrl, { headers: { cookie: owner.cookie } })).status).toBe(200);
     googlePhotoOrder = [0, 1];
-    expect((await app.request(result.googlePhotos[2]!.imageUrl, { headers: { cookie: owner.cookie } })).status).toBe(404);
-    expect(mediaRequests).toEqual([]);
-    expect(providerReads).toBe(metadataReads + 3);
+    expect((await app.request(result.googlePhotos[2]!.imageUrl, { headers: { cookie: owner.cookie } })).status).toBe(200);
+    expect(mediaRequests).toEqual([
+      { photoName: `places/${branch.providerPlaceId}/photos/controlled-photo-2`, maxWidthPx: 1024 },
+      { photoName: `places/${branch.providerPlaceId}/photos/controlled-photo-3`, maxWidthPx: 1024 },
+    ]);
+    expect(providerReads).toBe(metadataReads);
   });
 
-  it("does not serve a different author's photo under a cached fingerprint URL", async () => {
+  it("fetches the originally signed resource rather than a newly returned author's photo", async () => {
     const result = await detail({ kind: "trip-place", id: branch.id });
     const metadataReads = providerReads;
     currentPhotoToken = "different-photo";
     currentPhotoAuthors = [{ displayName: "另一位攝影者", uri: "https://example.test/another-author" }];
     const photo = await app.request(result.googlePhotos[0]!.imageUrl, { headers: { cookie: owner.cookie } });
-    expect(photo.status).toBe(404);
-    expect(await photo.json()).toMatchObject({ error: { code: "place_photo_not_found" } });
-    expect(mediaRequests).toEqual([]);
-    expect(providerReads).toBe(metadataReads + 1);
+    expect(photo.status).toBe(200);
+    expect(mediaRequests).toEqual([{
+      photoName: `places/${branch.providerPlaceId}/photos/controlled-photo`,
+      maxWidthPx: 1024,
+    }]);
+    expect(providerReads).toBe(metadataReads);
   });
 
   it("maps an expired matching Google media resource to not found", async () => {
     const result = await detail({ kind: "trip-place", id: branch.id });
-    currentPhotoToken = "rotated-provider-token";
     missingMediaPhotoName = `places/${branch.providerPlaceId}/photos/${currentPhotoToken}`;
     const photo = await app.request(result.googlePhotos[0]!.imageUrl, { headers: { cookie: owner.cookie } });
     expect(photo.status).toBe(404);
@@ -578,7 +608,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     });
     const metadataReads = providerReads;
     const response = await app.request(
-      `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?index=0&photo=${fingerprint}&maxWidth=1024`,
+      `/api/trips/${tripId}/google-place-photos/${providerPlaceId}?index=0&photo=${fingerprint}&resource=${currentPhotoToken}&maxWidth=1024`,
       { headers: { cookie: owner.cookie } },
     );
     expect(response.status).toBe(404);

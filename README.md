@@ -153,8 +153,8 @@ commands, persistent data, and rollback are documented in
 
 ## Place details and photos
 
-Pocket-list, discovery and Today place references share the canonical detail API
-and an optional thumbnail/gallery surface. Each place shows the first available of:
+Pocket-list, discovery and Today previews return only curated or Commons photos;
+they never request Google photo metadata or media. Detail pages show the first available of:
 
 1. **Curated photos**: packaged, individually reviewed Wikimedia Commons works with
    per-work attribution, licence/version, verification revision and derivative notices.
@@ -163,22 +163,27 @@ and an optional thumbnail/gallery surface. Each place shows the first available 
    exactly one item matches, that item has a representative image (`P18`), and the
    work is CC0, CC BY or CC BY-SA, the API downloads Commons' 1280px and 330px
    renditions into PostgreSQL (`place_photo_blobs`, `commons_place_photos`). Reads
-   never contact Wikimedia or Google. Any other outcome, including a Wikimedia
-   failure, leaves the place on the Google fallback; the CID is not stored.
-3. **Google Places photos**, fetched per read because Google's terms forbid storing them.
+   never contact Wikimedia. Any other outcome, including a Wikimedia failure,
+   leaves only the detail page eligible for Google fallback; the CID is not stored.
+3. **Google Places photos**, fetched only for details because Google's terms forbid
+   storing them. Signed, user-bound photo resource URLs let the image route fetch
+   media directly without a second GetPlace call. Detail responses use `Vary: Cookie`.
 
-Places are never matched by name or coordinates, so same-name branches do not
-borrow another identity's content. A thumbnail without a photo says so in text
-(「沒有照片」), and a failed image says 「載入失敗」.
+Name and coordinate searches also produce a Commons candidate queue (see below).
+Only one eligible exact-name, compatible-type candidate within 300 m can auto-apply
+for worship, nature or museum places; other related candidates need member confirmation.
+A list row without a photo shows its place-type icon. Detail fallback failures show
+「照片暫時無法載入」 (`photosUnavailable`) rather than claiming the place has no photos.
+Gallery loading uses a shimmer and thumbnail blur-up; initial lists use `PlaceListSkeleton`.
 
 ### Lists and must-items (#123)
 
 Both 口袋名單 and AI 建議 use one compact row (`PlaceListRow`). Each row shows a
 64px thumbnail (a button that opens the detail), the name with a type chip, one
 list-specific line, and a status. A wishlist place without a 想去 reason shows
-the area part of its address instead. Rows carry no photo-credit or Google Maps
-attribution line (owner decision #127; this conflicts with Google's Places
-attribution policy for list thumbnails, and the detail gallery keeps its credits).
+the area part of its address instead. List rows never show Google photos, so they
+need no Google photo attribution. The detail gallery and candidate comparison retain
+per-work Commons credits and Google attribution where applicable.
 Both lists are ordered by confirmed vote count and slide rows to their new
 position when the order changes (`FlipList`; a fade under reduced motion).
 AI 建議 hides rejected proposals. AI suggestions only go into the itinerary: there
@@ -211,6 +216,43 @@ re-reads each Google place's `primaryType` once (Place Details, `primaryType`
 field only) and updates `place_identities`, provider-backed `trip_places`/`places`
 and `candidate_proposals`. Places Google returns without a type are skipped.
 A pre-0.9.0 build rejects the new categories when it reads them.
+
+### Commons photo backfill (#149)
+
+Run `DATABASE_URL=... bun apps/api/src/database/backfill-commons-photos.ts`
+after deploying migrations `024`, `032_commons_photo_candidates` and
+`033_commons_candidate_names`. It checks only identities without a
+`commons_place_photos` row, extracts the CID from stored `places.source_url`,
+`legacy_place_origins.source_url` or `trip_place_contributions.source_url`, and
+queries Wikidata and Wikimedia Commons serially. It never calls Google and is
+safe to rerun. Each lookup logs its outcome, and the final line prints counts
+for matches and every miss reason.
+
+### Commons candidate backfill (migrations 032–033)
+
+Deploy `032_commons_photo_candidates` followed by `033_commons_candidate_names`,
+then run `DATABASE_URL=... bun apps/api/src/database/backfill-commons-candidates.ts`.
+It serially searches Wikidata in Japanese, Chinese and English plus a 1 km
+coordinate search, then keeps up to three manual-review works plus any uniquely
+eligible automatic match, all passing the existing Commons licence and rendition
+checks. Names, instance-of facts and `auto_applied`
+record why a candidate can be shown or applied. Automatic application is restricted
+to worship, nature and museum places, and requires exactly one eligible candidate
+with an exact normalized label/alias, a compatible type and distance at most 300 m.
+Everything else remains pending for side-by-side review.
+It skips identities with a Commons photo or prior candidates, never calls Google,
+waits between identities, and prints per-identity outcomes plus final counts.
+Use `--refresh` to refresh stored candidate facts and remove unrelated pending
+candidates while preserving rejections and confirmed photos. The detail action
+「這不是正確的圖片？」 deletes the representative photo and marks its Wikidata candidate
+rejected in one transaction; strict backfill and refresh cannot silently reapply it.
+The report endpoint is `POST /api/trips/:tripId/trip-places/:tripPlaceId/commons-photo/report`.
+The web combines `commonsPhotoReportable`, the trip-place reference and edit permission
+to decide whether to show the report action.
+
+These migrations are expand-only; older application code ignores the new table.
+Rollback requires retaining these migration files in the rollback build because
+Kysely rejects a migration history containing files missing from that build.
 
 ### Members and scheduling permission (migration 026)
 
@@ -907,16 +949,16 @@ so transportation is labeled unavailable rather than displaying generated route
 estimates or stale live traffic.
 
 Each successful, version-consistent read saves one localStorage snapshot per
-account and trip: `{ schemaVersion: 4, accountId, fetchedAt, model }`. The model
+account and trip: `{ schemaVersion: 6, accountId, fetchedAt, model }`. The model
 contains trip ID/name/version, the current member ID, resolved day zones, item
-IDs, separate untimed wishlist names, and allowlisted card fields. Participant
+IDs, untimed wishlist routing fields, place types, and allowlisted card fields. Participant
 labels use display name, falling back to email, only for participants in the stored
-formal items; schema 4 also retains whether each historical participant is known
+formal items; it also retains whether each historical participant is known
 to have been removed. Unused profile emails, invitations, change events, member
 profiles, drafts, credentials, provider keys and unsaved inputs are never copied.
-Compatible version-2 and version-3 snapshots migrate strictly to version 4.
-Missing endpoint place references and legacy participant-removal status remain
-`null`; migration never guesses either from names, coordinates or another snapshot.
+Compatible version-2/3/4/5 snapshots migrate strictly to version 6.
+Missing endpoint references, participant-removal status, place types and legacy
+wishlist routing facts remain `null`; migration never guesses them from another snapshot.
 If persisting that upgrade fails, the validated in-memory model remains readable
 and the original saved value is preserved. See the
 [feature migration details](docs/engineering/place-details-and-photos.md#ui失敗與-today-snapshot).

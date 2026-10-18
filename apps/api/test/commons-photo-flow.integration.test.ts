@@ -3,13 +3,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Hono } from "hono";
 import { sql, type Kysely } from "kysely";
-import { parsePlaceDetailResponse, parsePlacePreviewResponse } from "@along-the-way/contracts/place-details";
+import { parseCommonsCandidatesResponse, parseCommonsPhotoReportResponse, parsePlaceDetailResponse, parsePlacePreviewResponse } from "@along-the-way/contracts/place-details";
 import { parseTripResponse } from "@along-the-way/contracts/private-trips";
 import { parseTripPlaceListResponse, parseTripPlaceResponse, type ProviderPlaceCandidateDto, type TripPlaceDto } from "@along-the-way/contracts/trip-places";
 import { createApp } from "../src/app";
 import { createDatabase, type AlongTheWayDatabase } from "../src/database/database";
 import { runMigrations } from "../src/database/migrate";
 import { CommonsPlacePhotos } from "../src/place-details/commons-place-photos";
+import { PostgresCommonsCandidateModule } from "../src/place-details/commons-photo-candidates";
+import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 import { PostgresPlaceDetailModule } from "../src/place-details/postgres-place-detail-module";
 import { PostgresCollaborationModule } from "../src/private-trips/postgres-collaboration-module";
 import { PostgresIdentityAccessModule } from "../src/private-trips/postgres-identity-access-module";
@@ -91,6 +93,9 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
   let wikimediaRequests: string[];
   let scenarios: Map<string, WikimediaScenario>;
   let duringDownload: (() => Promise<void>) | null;
+  let commonsPhotos: CommonsPlacePhotos;
+  let commonsCandidates: PostgresCommonsCandidateModule;
+  let candidateFacts: Array<{ id: string; name: string; typeId: string; latitude: number | null }>;
   const createdTrips: string[] = [];
   const createdUsers: string[] = [];
   const canonicalIds: string[] = [];
@@ -106,6 +111,38 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
     wikimediaRequests = [];
     scenarios = new Map();
     duringDownload = null;
+    candidateFacts = [];
+    commonsPhotos = new CommonsPlacePhotos({
+      now, userAgent: "AlongTheWayTest/0 (https://example.test)",
+      fetch: wikimedia(scenarios, wikimediaRequests, () => duringDownload?.()),
+    });
+    commonsCandidates = new PostgresCommonsCandidateModule({
+      database, photos: commonsPhotos, now, userAgent: "AlongTheWayTest/0 (https://example.test)",
+      fetch: async (input) => {
+        const url = new URL(String(input));
+        if (url.hostname === "query.wikidata.org") return Response.json({ results: { bindings: [] } });
+        if (url.searchParams.get("action") === "wbsearchentities") {
+          return Response.json({ search: candidateFacts.map(({ id }) => ({ id })) });
+        }
+        if (url.searchParams.get("props") === "labels") {
+          return Response.json({ entities: Object.fromEntries(candidateFacts.map(({ typeId }) => [
+            typeId, { labels: { en: { value: typeId } } },
+          ])) });
+        }
+        return Response.json({ entities: Object.fromEntries(candidateFacts.map((candidate) => [
+          candidate.id, {
+            labels: { ja: { value: candidate.name } },
+            claims: {
+              P18: [{ mainsnak: { datavalue: { value: "Controlled shrine.jpg" } } }],
+              P31: [{ mainsnak: { datavalue: { value: { id: candidate.typeId } } } }],
+              P625: candidate.latitude === null ? [] : [{
+                mainsnak: { datavalue: { value: { latitude: candidate.latitude, longitude: 135 } } },
+              }],
+            },
+          },
+        ])) });
+      },
+    });
     const provider: PlaceProvider = {
       available: true,
       attribution: "Controlled provider",
@@ -123,10 +160,10 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
     };
     const tripPlaces = new PostgresTripPlaceModule({
       database, provider, now,
-      commonsPhotos: new CommonsPlacePhotos({ now, userAgent: "AlongTheWayTest/0 (https://example.test)",
-        fetch: wikimedia(scenarios, wikimediaRequests, () => duringDownload?.()) }),
+      commonsPhotos,
     });
     app = createApp({
+      commonsCandidates,
       collaboration: new PostgresCollaborationModule(database), dayPlans: unrelatedDayPlanModule, discovery: unrelatedDiscoveryModule,
       identityAccess: new PostgresIdentityAccessModule({ database, now, tokenIssuer: new TokenIssuer("commons-photo-integration-secret-at-least-32-bytes") }),
       placeDetails: new PostgresPlaceDetailModule({ database, assetRoot, provider, now }),
@@ -222,16 +259,99 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
     ["no Wikidata item has the CID", { items: [], license: "cc0" }],
     ["the work is not freely licensed", { items: ["Q714828"], license: "arr" }],
     ["Wikimedia throttles the lookup", { items: ["Q714828"], license: "cc0", failing: true }],
-  ] as const)("keeps the place and its Google fallback when %s", async (_, scenario) => {
+  ] as const)("keeps a photo-less preview without calling Google when %s", async (_, scenario) => {
     const cid = `${Date.now()}2`;
     scenarios.set(cid, scenario);
     const place = await addPlace(cid);
     expect(place.name).toBe("受控神社");
 
     expect((await preview(place)).photo).toBeNull();
-    expect(googlePhotoReads).toBe(1);
+    expect(googlePhotoReads).toBe(0);
     expect(await database.selectFrom("commons_place_photos").select("place_id").where("place_id", "=", place.placeId).executeTakeFirst())
       .toBeUndefined();
+  });
+
+  it.each([
+    { reason: "single exact worship match at 300 m", type: "worship", typeId: "Q34627", name: "受控神社", latitude: 35.002698, count: 1, auto: true },
+    { reason: "single exact nature match", type: "nature", typeId: "Q23397", name: "受控神社", latitude: 35, count: 1, auto: true },
+    { reason: "single exact museum match", type: "museum", typeId: "Q33506", name: "受控神社", latitude: 35, count: 1, auto: true },
+    { reason: "two eligible matches", type: "worship", typeId: "Q34627", name: "受控神社", latitude: 35, count: 2, auto: false },
+    { reason: "related but not exact name", type: "worship", typeId: "Q34627", name: "受控神社庭園", latitude: 35, count: 1, auto: false },
+    { reason: "incompatible type", type: "worship", typeId: "Q55488", name: "受控神社", latitude: 35, count: 1, auto: false },
+    { reason: "distance beyond 300 m", type: "worship", typeId: "Q34627", name: "受控神社", latitude: 35.00271, count: 1, auto: false },
+    { reason: "unknown distance", type: "worship", typeId: "Q34627", name: "受控神社", latitude: null, count: 1, auto: false },
+    { reason: "station always requires manual review", type: "station", typeId: "Q55488", name: "受控神社", latitude: 35, count: 1, auto: false },
+    { reason: "activity always requires manual review", type: "activity", typeId: "Q34627", name: "受控神社", latitude: 35, count: 1, auto: false },
+  ] as const)("applies the auto-photo rule: $reason", async ({ type, typeId, name, latitude, count, auto }) => {
+    const place = await addPlace(`${Date.now()}6`);
+    await database.updateTable("trip_places").set({ place_type: type as PlaceType }).where("id", "=", place.id).execute();
+    candidateFacts = Array.from({ length: count }, (_, index) => ({ id: `Q${714828 + index}`, name, typeId, latitude }));
+    const result = await commonsCandidates.generate(place.placeId);
+    expect(result.outcome).toBe(auto ? "auto_applied" : "generated");
+    expect((await preview(place)).photo?.source ?? null).toBe(auto ? "commons" : null);
+    const response = await app.request(`/api/trips/${tripId}/commons-candidates`, { headers: { cookie } });
+    expect(response.status).toBe(200);
+    expect(parseCommonsCandidatesResponse(await response.json()).candidates).toHaveLength(auto ? 0 : count);
+    // Refresh follows the same public rule, not a second weaker auto-apply path.
+    await commonsCandidates.refresh(place.placeId);
+    expect((await preview(place)).photo?.source ?? null).toBe(auto ? "commons" : null);
+  });
+
+  it("applies a previously pending photo when refreshed facts become a unique exact match", async () => {
+    const place = await addPlace(`${Date.now()}8`);
+    await database.updateTable("trip_places").set({ place_type: "worship" }).where("id", "=", place.id).execute();
+    candidateFacts = [{ id: "Q714828", name: "受控神社庭園", typeId: "Q34627", latitude: 35 }];
+    expect((await commonsCandidates.generate(place.placeId)).outcome).toBe("generated");
+    expect((await preview(place)).photo).toBeNull();
+    candidateFacts[0]!.name = "受控神社";
+    expect((await commonsCandidates.refresh(place.placeId)).outcome).toBe("auto_applied");
+    expect((await preview(place)).photo?.source).toBe("commons");
+    const listed = await app.request(`/api/trips/${tripId}/commons-candidates`, { headers: { cookie } });
+    expect(parseCommonsCandidatesResponse(await listed.json()).candidates).toEqual([]);
+  });
+
+  it.each(["strict", "auto", "manual"] as const)("report removes a %s photo and prevents its rejected candidate from reappearing", async (origin) => {
+    const cid = `${Date.now()}7`;
+    if (origin === "strict") scenarios.set(cid, { items: ["Q714828"], license: "cc0" });
+    const place = await addPlace(cid);
+    candidateFacts = [{ id: "Q714828", name: "受控神社", typeId: "Q34627", latitude: 35 }];
+    if (origin !== "strict") {
+      await database.updateTable("trip_places").set({ place_type: origin === "auto" ? "worship" : "activity" })
+        .where("id", "=", place.id).execute();
+      await commonsCandidates.generate(place.placeId);
+      if (origin === "manual") {
+        const listed = await app.request(`/api/trips/${tripId}/commons-candidates`, { headers: { cookie } });
+        const candidate = parseCommonsCandidatesResponse(await listed.json()).candidates[0]!;
+        const decision = await app.request(`/api/trips/${tripId}/commons-candidates/${candidate.id}/decision`, {
+          method: "POST", headers: { cookie, origin: "https://app.example.test", "content-type": "application/json" },
+          body: JSON.stringify({ decision: "confirm" }),
+        });
+        expect(decision.status).toBe(200);
+      }
+    }
+    const before = await app.request(`/api/trips/${tripId}/place-details?kind=trip-place&id=${place.id}`, { headers: { cookie } });
+    expect(parsePlaceDetailResponse(await before.json()).detail.commonsPhotoReportable).toBe(true);
+    const oldAssetUrl = (await preview(place)).photo!.imageUrl;
+    const reportUrl = `/api/trips/${tripId}/trip-places/${place.id}/commons-photo/report`;
+    const report = await app.request(reportUrl, {
+      method: "POST", headers: { cookie, origin: "https://app.example.test" },
+    });
+    expect(report.status).toBe(200);
+    expect(parseCommonsPhotoReportResponse(await report.json())).toEqual({ remainingCandidates: 0 });
+    expect((await preview(place)).photo).toBeNull();
+    expect((await app.request(oldAssetUrl, { headers: { cookie } })).status).toBe(404);
+    expect((await app.request(reportUrl, {
+      method: "POST", headers: { cookie, origin: "https://app.example.test" },
+    })).status).toBe(409);
+    await commonsCandidates.refresh(place.placeId);
+    const prepared = await commonsPhotos.prepareWikidataCandidate("Q714828");
+    expect(prepared).not.toBeNull();
+    await database.transaction().execute((transaction) => commonsPhotos.store(transaction, place.placeId, prepared!));
+    expect((await preview(place)).photo).toBeNull();
+    const remaining = await app.request(`/api/trips/${tripId}/commons-candidates`, { headers: { cookie } });
+    expect(parseCommonsCandidatesResponse(await remaining.json()).candidates).toEqual([]);
+    const after = await app.request(`/api/trips/${tripId}/place-details?kind=trip-place&id=${place.id}`, { headers: { cookie } });
+    expect(parsePlaceDetailResponse(await after.json()).detail.commonsPhotoReportable).toBe(false);
   });
 
   it("does not serve another place's Commons file through this place's reference", async () => {

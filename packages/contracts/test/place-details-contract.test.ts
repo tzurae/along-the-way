@@ -35,12 +35,15 @@ const id = "22222222-2222-4222-8222-222222222222";
 function googlePhoto(index: 0 | 1 | 2 = 0, fingerprint = `0baa8b4907390a5${index}`): GooglePlacePhotoDto {
   const providerPlaceId = "ChIJ-place-photo-1234";
   const prefix = `/api/trips/${tripId}/google-place-photos/${providerPlaceId}`;
+  const capability = `resource=photo-resource-${index}&maxWidth=`;
+  const signature = "A".repeat(43);
+  const suffix = `&exp=1791676799&sig=${signature}`;
   return {
     source: "google",
     id: `google:${providerPlaceId}:${index}:${fingerprint}`,
     index,
-    thumbnailUrl: `${prefix}?index=${index}&photo=${fingerprint}&maxWidth=192`,
-    imageUrl: `${prefix}?index=${index}&photo=${fingerprint}&maxWidth=1024`,
+    thumbnailUrl: `${prefix}?index=${index}&photo=${fingerprint}&${capability}192${suffix}`,
+    imageUrl: `${prefix}?index=${index}&photo=${fingerprint}&${capability}1024${suffix}`,
     width: 1600,
     height: 1200,
     authors: [{ displayName: `攝影者 ${index + 1}`, uri: `https://example.test/author/${index + 1}` }],
@@ -96,41 +99,42 @@ describe("curated place detail contract boundaries", () => {
     }
   });
 
-  it("requires response source integrity, explicit recheck state, and same-origin authenticated photos", () => {
+  it("requires response source integrity, explicit status flags, recheck state, and same-origin authenticated photos", () => {
     const place = reviewedManifest().places[0]!;
     const { image, thumbnail: _thumbnail, ...metadata } = place.photos[0]!;
     const url = `/api/trips/${tripId}/place-photo-assets/${image.filename}?kind=trip-place&id=${id}`;
     const photo = { source: "curated" as const, ...metadata, imageUrl: url, thumbnailUrl: url, width: 800, height: 600 };
     const response = { detail: { reference: { kind: "trip-place", id }, canonicalPlaceId: id, name: place.name,
       asOfDate: "2026-11-01", sources: place.sources, photos: [photo], googlePhotos: [],
+      photosUnavailable: false, commonsPhotoReportable: false,
       sections: place.sections.map((section) => ({ ...section, blocks: section.blocks.map((block) => ({ ...block, needsRecheck: true })) })),
     } };
     expect(parsePlaceDetailResponse(response).detail.sections[0]?.blocks[0]?.needsRecheck).toBe(true);
     expect(() => parsePlaceDetailResponse({ detail: { ...response.detail, sources: [] } })).toThrow();
+    expect(() => parsePlaceDetailResponse({ detail: { ...response.detail, photosUnavailable: undefined } })).toThrow();
+    expect(() => parsePlaceDetailResponse({ detail: { ...response.detail, commonsPhotoReportable: undefined } })).toThrow();
     expect(() => parsePlacePreviewResponse({ previews: [{ reference: response.detail.reference,
       photo: { ...photo, imageUrl: "https://other.test/photo.jpg" }, photoCount: 1 }] })).toThrow();
     expect(parsePlacePreviewResponse({ previews: [{ reference: response.detail.reference, photo: null, photoCount: 0 }] }).previews[0]?.photo).toBeNull();
   });
 
-  it("accepts same-origin indexed Google photos and rejects mismatched identities", () => {
+  it("accepts signed same-origin indexed Google photos and rejects mismatched capabilities", () => {
     const photo = googlePhoto();
     expect(parseGooglePlacePhoto(photo)).toEqual(photo);
     const fixtureFingerprint = "fixture_token-1";
     const fixturePhoto = googlePhoto(0, fixtureFingerprint);
     expect(parseGooglePlacePhoto(fixturePhoto)).toEqual(fixturePhoto);
-    const signed = {
-      ...photo,
-      thumbnailUrl: `${photo.thumbnailUrl}&exp=1791676799&sig=${"A".repeat(43)}`,
-      imageUrl: `${photo.imageUrl}&exp=1791676799&sig=${"A".repeat(43)}`,
-    };
-    expect(parseGooglePlacePhoto(signed)).toEqual(signed);
     expect(() => parseGooglePlacePhoto({
-      ...signed,
-      imageUrl: `${photo.imageUrl}&exp=1791676799&sig=${"B".repeat(43)}`,
+      ...photo,
+      imageUrl: photo.imageUrl.replace(`sig=${"A".repeat(43)}`, `sig=${"B".repeat(43)}`),
     })).toThrow();
-    expect(parsePlacePreviewResponse({ previews: [{
+    expect(() => parsePlacePreviewResponse({ previews: [{
       reference: { kind: "trip-place", id }, photo, photoCount: 1,
-    }] }).previews[0]?.photo).toEqual(photo);
+    }] })).toThrow();
+    expect(() => parseGooglePlacePhoto({
+      ...photo,
+      imageUrl: photo.imageUrl.replace("&resource=photo-resource-0", ""),
+    })).toThrow();
     expect(() => parseGooglePlacePhoto({ ...photo, imageUrl: "https://places.googleapis.com/v1/photo/media?key=secret" })).toThrow();
     expect(() => parseGooglePlacePhoto({
       ...photo,
@@ -153,6 +157,7 @@ describe("curated place detail contract boundaries", () => {
     const detail = {
       reference: { kind: "trip-place", id }, canonicalPlaceId: id, name: place.name, asOfDate: null,
       sources: place.sources, sections: [], photos: [photo], googlePhotos: [],
+      photosUnavailable: false, commonsPhotoReportable: false,
     };
     expect(parsePlaceDetailResponse({ detail }).detail.photos[0]?.source).toBe("curated");
     expect(() => parsePlaceDetailResponse({ detail: { ...detail, photos: [{ ...photo, source: undefined }] } })).toThrow();

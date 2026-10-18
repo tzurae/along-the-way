@@ -21,6 +21,7 @@ export class GooglePhotoCapability {
     providerPlaceId: string,
     index: 0 | 1 | 2,
     fingerprint: string,
+    photoName: string,
   ): GooglePhotoCapabilityValue {
     const now = this.now();
     const exp = Math.floor(Date.UTC(
@@ -30,7 +31,7 @@ export class GooglePhotoCapability {
     ) / 1_000) - 1;
     return {
       exp,
-      sig: this.issuer.issue(this.identifier(tripId, userId, providerPlaceId, index, fingerprint, exp)),
+      sig: this.issuer.issue(this.identifier(tripId, userId, providerPlaceId, index, fingerprint, photoName, exp)),
     };
   }
 
@@ -40,6 +41,7 @@ export class GooglePhotoCapability {
     providerPlaceId: string,
     index: 0 | 1 | 2,
     fingerprint: string,
+    photoName: string,
     rawExpiry: string | null,
     signature: string | null,
   ) {
@@ -48,7 +50,7 @@ export class GooglePhotoCapability {
     const exp = Number(rawExpiry);
     if (!Number.isSafeInteger(exp) || exp < Math.floor(this.now().getTime() / 1_000)) return false;
     return this.issuer.matches(
-      this.identifier(tripId, userId, providerPlaceId, index, fingerprint, exp),
+      this.identifier(tripId, userId, providerPlaceId, index, fingerprint, photoName, exp),
       signature,
     );
   }
@@ -59,8 +61,9 @@ export class GooglePhotoCapability {
     providerPlaceId: string,
     index: 0 | 1 | 2,
     fingerprint: string,
+    photoName: string,
     exp: number,
   ) {
-    return `${tripId}|${userId}|${providerPlaceId}|${index}|${fingerprint}|${exp}`;
+    return `${tripId}|${userId}|${providerPlaceId}|${index}|${fingerprint}|${photoName}|${exp}`;
   }
 }
