@@ -634,6 +634,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
   });
 
   it("does not disclose details, previews, or photo bytes outside the authorized trip/reference", async () => {
+    googlePhotoOrder = [];
     const result = await detail({ kind: "trip-place", id: place.id });
     const url = `/api/trips/${tripId}/place-details?kind=trip-place&id=${place.id}`;
     const previewUrl = `/api/trips/${tripId}/place-previews?kind=trip-place&ids=${place.id}`;
@@ -713,6 +714,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
   });
 
   it("repeats imports safely, replaces rather than appends, and keeps errors atomic", async () => {
+    googlePhotoOrder = [];
     const reference: PlaceDetailReference = { kind: "trip-place", id: place.id };
     const before = await detail(reference);
     await importCuratedPlaceDetails({ database, manifest: input, bindings, assetRoot });
@@ -744,6 +746,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
   });
 
   it("fails honestly when packaged bytes are missing or altered without blocking text reads", async () => {
+    googlePhotoOrder = [];
     const result = await detail({ kind: "trip-place", id: place.id });
     await writeFile(join(assetRoot, filename), Buffer.from("not the reviewed image"));
     await expect(importCuratedPlaceDetails({ database, manifest: input, bindings, assetRoot })).rejects.toThrow("checksum");
