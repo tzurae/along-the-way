@@ -4,14 +4,14 @@ import { MoreHorizontal } from "lucide-react";
 
 export interface RowMenuItem {
   label: string;
-  onSelect(): void;
+  onSelect(trigger: HTMLButtonElement | null): void;
   danger?: boolean;
   disabled?: boolean;
 }
 
 /**
- * The 「⋯」 menu at the end of a list row: actions on a place that are not part of reading its
- * detail (移除、更改日期). Closes on choice, Escape or a click elsewhere; focus returns to the button.
+ * The 「⋯」 menu at the end of a list row: actions on a place that are not part of opening its
+ * detail. Closes on choice, Escape or a click elsewhere; focus returns to the button.
  */
 export function RowMenu({ label, items }: { label: string; items: RowMenuItem[] }) {
   const [open, setOpen] = useState(false);
@@ -63,7 +63,7 @@ export function RowMenu({ label, items }: { label: string; items: RowMenuItem[] 
                   // Commit the close before the action: a blocking window.confirm would otherwise
                   // freeze the page with the menu still painted over the list.
                   flushSync(() => setOpen(false));
-                  item.onSelect();
+                  item.onSelect(trigger.current);
                 }}
               >
                 {item.label}

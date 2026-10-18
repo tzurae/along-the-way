@@ -25,7 +25,7 @@ import { notify } from "./AppToaster";
 import { VoteControl, VoteVoters } from "./VoteControl";
 import { ConflictPanel, useVersionConflict } from "./ConflictPanel";
 import { PlaceDetailContent } from "./PlaceDetailContent";
-import { usePlacePreviews, type PlaceDetailRequest } from "./PlaceThumbnail";
+import { usePlacePreviews, type PlaceDetailRequest, type PlaceDetailRequestOptions } from "./PlaceThumbnail";
 import { PlaceListRow } from "./PlaceListRow";
 import { PlaceListSkeleton } from "./PlaceListSkeleton";
 import { canArrangeItinerary } from "./trip-permissions";
@@ -44,6 +44,7 @@ interface DiscoveryWorkspaceProps {
   trip: TripDto;
   accountId: string;
   request: PlaceDetailRequest;
+  photoRevision?: number;
   placesRevision: number;
   onPlacesChanged(): void;
 }
@@ -239,9 +240,13 @@ function ResearchPanel({ first, open, onClose, children, footer }: { first: bool
 }
 
 
-export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, onPlacesChanged }: DiscoveryWorkspaceProps) {
+export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0, placesRevision, onPlacesChanged }: DiscoveryWorkspaceProps) {
   const { locale, t: { discovery: t, schedule: scheduleT, tripPlaces: tripPlacesT } } = useI18n();
   const [workspace, setWorkspace] = useState<DiscoveryWorkspaceDto | null>(null);
+  const photoRequest = useCallback(<T,>(url: string, options?: PlaceDetailRequestOptions): Promise<T> => request<T>(
+    url,
+    photoRevision === 0 ? options : { ...options, cache: "no-cache" },
+  ), [photoRevision, request]);
   const [tripPlaces, setTripPlaces] = useState<TripPlaceDto[]>([]);
   const [briefDraft, setBriefDraft] = useState("");
   const [questionDrafts, setQuestionDrafts] = useState<Record<string, QuestionDraft>>({});
@@ -654,7 +659,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
     tripId: trip.id,
     kind: "proposal",
     ids: workspace?.proposals.map((proposal) => proposal.id) ?? [],
-    request,
+    request: photoRequest,
   });
 
   function proposalDetail(proposal: CandidateProposalDto) {
@@ -668,7 +673,8 @@ export function DiscoveryWorkspace({ trip, accountId, request, placesRevision, o
       <PlaceDetailContent
         tripId={trip.id}
         reference={{ kind: "proposal", id: proposal.id }}
-        request={request}
+        photoRevision={photoRevision}
+        request={photoRequest}
         // Sources are linked inline from each sentence ([1][2]…); a separate evidence list only repeated them.
         showArticle={false}
         focusHeadingId={detailFocusSection ?? undefined}

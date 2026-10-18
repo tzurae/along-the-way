@@ -1,6 +1,6 @@
 import { sql, type Kysely } from "kysely";
 
-// Expand-only: older releases ignore manual-review candidates and continue serving confirmed photos.
+// Expand-only: older releases ignore candidate records and continue serving confirmed photos.
 export async function up(database: Kysely<unknown>) {
   await sql`
     create table commons_photo_candidates (

@@ -91,7 +91,6 @@ const readiness = new PostgresReadinessProbe(database);
 const app = createApp({
   appVersion: packageJson.version,
   collaboration: new PostgresCollaborationModule(database),
-  commonsCandidates,
   dayPlans,
   discovery,
   feedback,

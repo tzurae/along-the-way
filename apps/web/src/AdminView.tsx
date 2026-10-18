@@ -17,6 +17,7 @@ import { AlertTriangle, BarChart3, MessageSquareText } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
+import { ApiRequestError } from "./api-error";
 import { useI18n } from "./i18n";
 import "./admin.css";
 
@@ -27,6 +28,7 @@ interface RequestOptions extends RequestInit {
 interface AdminViewProps {
   routeError?: string;
   request<T>(url: string, options?: RequestOptions): Promise<T>;
+  onPhotoRemoved(): void;
 }
 
 type AdminTab = "feedback" | "google-usage";
@@ -34,7 +36,7 @@ type FilterStatus = "all" | FeedbackStatus;
 type FilterType = "all" | FeedbackType;
 
 const feedbackStatuses: FeedbackStatus[] = ["new", "in_progress", "done", "wont_do"];
-const feedbackTypes: FeedbackType[] = ["bug", "idea", "other"];
+const feedbackTypes: FeedbackType[] = ["bug", "idea", "other", "photo"];
 const dateTimeFormatter = new Intl.DateTimeFormat("zh-TW", {
   dateStyle: "medium",
   timeStyle: "short",
@@ -54,11 +56,17 @@ function formatDateTime(value: string) {
 
 function FeedbackCard({
   item,
+  photoRemoved,
   onUpdated,
+  onPhotoRemoved,
+  onRefresh,
   request,
 }: {
   item: FeedbackAdminDto;
+  photoRemoved: boolean;
   onUpdated(item: FeedbackAdminDto): void;
+  onPhotoRemoved(): void;
+  onRefresh(): void;
   request: AdminViewProps["request"];
 }) {
   const { t } = useI18n();
@@ -67,6 +75,9 @@ function FeedbackCard({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
+  const [confirmingPhotoRemoval, setConfirmingPhotoRemoval] = useState(false);
+  const [removingPhoto, setRemovingPhoto] = useState(false);
+  const [photoError, setPhotoError] = useState("");
   const noteTooLong = adminNote.length > 2_000;
   const changed = status !== item.status || adminNote !== (item.adminNote ?? "");
 
@@ -102,6 +113,32 @@ function FeedbackCard({
     }
   }
 
+  async function removePhoto() {
+    if (item.type !== "photo" || removingPhoto) return;
+    setRemovingPhoto(true);
+    setPhotoError("");
+    try {
+      const updated = await request<FeedbackAdminDto>(`/api/admin/feedback/${encodeURIComponent(item.id)}/remove-photo`, {
+        method: "POST",
+        parse: parseFeedbackAdminResponse,
+      });
+      setStatus(updated.status);
+      setAdminNote(updated.adminNote ?? "");
+      onUpdated(updated);
+      setConfirmingPhotoRemoval(false);
+      onPhotoRemoved();
+      onRefresh();
+    } catch (error) {
+      setPhotoError(
+        error instanceof ApiRequestError && error.code === "photo_feedback_place_gone"
+          ? t.admin.photoFeedback.placeGone
+          : t.admin.photoFeedback.removeError,
+      );
+    } finally {
+      setRemovingPhoto(false);
+    }
+  }
+
   return (
     <article className="admin-feedback-card">
       <div className="admin-feedback-card__heading">
@@ -117,6 +154,15 @@ function FeedbackCard({
       <dl className="admin-feedback-facts">
         <div><dt>{t.admin.page}</dt><dd>{item.page ?? "—"}</dd></div>
         <div><dt>{t.admin.trip}</dt><dd>{item.tripName ?? "—"}</dd></div>
+        {item.type === "photo" ? (
+          <>
+            <div><dt>{t.admin.photoFeedback.place}</dt><dd>{item.placeName ?? "—"}</dd></div>
+            <div><dt>{t.admin.photoFeedback.reason}</dt><dd>{item.photoReason ? t.admin.photoReasons[item.photoReason] : "—"}</dd></div>
+            <div><dt>{t.admin.photoFeedback.wikidataId}</dt><dd>{item.photoWikidataId
+              ? <a href={`https://www.wikidata.org/wiki/${encodeURIComponent(item.photoWikidataId)}`} target="_blank" rel="noreferrer">{item.photoWikidataId}</a>
+              : "—"}</dd></div>
+          </>
+        ) : null}
         <div><dt>{t.admin.contact}</dt><dd>{item.submitterEmail ?? t.admin.contactNotAllowed}</dd></div>
         <div><dt>{t.admin.appVersion}</dt><dd>{item.appVersion}</dd></div>
         <div><dt>{t.admin.viewport}</dt><dd>{item.viewport ?? "—"}</dd></div>
@@ -124,6 +170,31 @@ function FeedbackCard({
         <div className="admin-feedback-facts__wide"><dt>{t.admin.userAgent}</dt><dd>{item.userAgent ?? "—"}</dd></div>
       </dl>
 
+      {item.type === "photo" ? (
+        <div className="admin-photo-action">
+          {photoRemoved ? (
+            <p className="admin-photo-action__success" role="status">{t.admin.photoFeedback.removed}</p>
+          ) : confirmingPhotoRemoval ? (
+            <div className="admin-photo-action__confirm">
+              <p>{t.admin.photoFeedback.confirm}</p>
+              <div>
+                <Button type="button" variant="outline" disabled={removingPhoto} onClick={() => setConfirmingPhotoRemoval(false)}>
+                  {t.admin.photoFeedback.cancel}
+                </Button>
+                <Button type="button" disabled={removingPhoto} onClick={() => void removePhoto()}>
+                  {removingPhoto ? t.admin.photoFeedback.removing : t.admin.photoFeedback.confirmAction}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <Button type="button" variant="outline" onClick={() => {
+              setPhotoError("");
+              setConfirmingPhotoRemoval(true);
+            }}>{t.admin.photoFeedback.remove}</Button>
+          )}
+          {photoError ? <p className="admin-inline-error" role="alert">{photoError}</p> : null}
+        </div>
+      ) : null}
       <div className="admin-feedback-editor">
         <label>
           <span>{t.admin.filters.status}</span>
@@ -169,7 +240,7 @@ function FeedbackCard({
   );
 }
 
-function FeedbackAdminPanel({ request }: AdminViewProps) {
+function FeedbackAdminPanel({ request, onPhotoRemoved }: AdminViewProps) {
   const { t } = useI18n();
   const [status, setStatus] = useState<FilterStatus>("all");
   const [type, setType] = useState<FilterType>("all");
@@ -177,6 +248,7 @@ function FeedbackAdminPanel({ request }: AdminViewProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
+  const [removedPhotoFeedbackIds, setRemovedPhotoFeedbackIds] = useState<Set<string>>(() => new Set());
   const filterGeneration = useRef(0);
 
   useEffect(() => {
@@ -255,7 +327,17 @@ function FeedbackAdminPanel({ request }: AdminViewProps) {
             <FeedbackCard
               key={item.id}
               item={item}
+              photoRemoved={removedPhotoFeedbackIds.has(item.id)}
+              onPhotoRemoved={() => {
+                setRemovedPhotoFeedbackIds((current) => new Set(current).add(item.id));
+                onPhotoRemoved();
+              }}
               request={request}
+              onRefresh={() => {
+                filterGeneration.current += 1;
+                setLoading(true);
+                setRevision((value) => value + 1);
+              }}
               onUpdated={(updated) => setFeedback((current) => {
                 if (filterGeneration.current !== renderGeneration) return current;
                 return status !== "all" && updated.status !== status
@@ -458,7 +540,7 @@ function GoogleUsagePanel({ request }: AdminViewProps) {
   );
 }
 
-export function AdminView({ request, routeError }: AdminViewProps) {
+export function AdminView({ request, routeError, onPhotoRemoved }: AdminViewProps) {
   const { t } = useI18n();
   const [tab, setTab] = useState<AdminTab>("feedback");
   const tabItems = [
@@ -497,7 +579,7 @@ export function AdminView({ request, routeError }: AdminViewProps) {
           </button>
         ))}
       </div>
-      {tab === "feedback" ? <FeedbackAdminPanel request={request} /> : <GoogleUsagePanel request={request} />}
+      {tab === "feedback" ? <FeedbackAdminPanel request={request} onPhotoRemoved={onPhotoRemoved} /> : <GoogleUsagePanel request={request} onPhotoRemoved={onPhotoRemoved} />}
     </div>
   );
 }

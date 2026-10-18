@@ -1,10 +1,11 @@
 import { isRecord } from "./type-guards";
 
-export type FeedbackType = "bug" | "idea" | "other";
+export type FeedbackType = "bug" | "idea" | "other" | "photo";
 export type FeedbackStatus = "new" | "in_progress" | "done" | "wont_do";
+export type PhotoFeedbackReason = "wrong_place" | "poor_quality" | "other";
 
 export interface CreateFeedbackInput {
-  type: FeedbackType;
+  type: Exclude<FeedbackType, "photo">;
   body: string;
   page: string | null;
   tripId: string | null;
@@ -16,6 +17,15 @@ export interface CreateFeedbackResponse {
   id: string;
 }
 
+export interface CreatePhotoFeedbackInput {
+  reason: PhotoFeedbackReason;
+  note: string | null;
+}
+
+export interface CreatePhotoFeedbackResponse {
+  id: string;
+}
+
 export interface FeedbackAdminDto {
   id: string;
   type: FeedbackType;
@@ -23,6 +33,10 @@ export interface FeedbackAdminDto {
   page: string | null;
   tripId: string | null;
   tripName: string | null;
+  tripPlaceId: string | null;
+  placeName: string | null;
+  photoReason: PhotoFeedbackReason | null;
+  photoWikidataId: string | null;
   submitterEmail: string | null;
   appVersion: string;
   userAgent: string | null;
@@ -109,7 +123,9 @@ function booleanValue(value: unknown) {
 }
 
 function feedbackTypeValue(value: unknown): FeedbackType {
-  return value === "bug" || value === "idea" || value === "other" ? value : invalidResponse();
+  return value === "bug" || value === "idea" || value === "other" || value === "photo"
+    ? value
+    : invalidResponse();
 }
 
 function feedbackStatusValue(value: unknown): FeedbackStatus {
@@ -127,6 +143,16 @@ function feedbackAdminValue(value: unknown): FeedbackAdminDto {
     page: nullableStringValue(value.page),
     tripId: nullableStringValue(value.tripId),
     tripName: nullableStringValue(value.tripName),
+    tripPlaceId: nullableStringValue(value.tripPlaceId),
+    placeName: nullableStringValue(value.placeName),
+    photoReason: value.photoReason === null
+      ? null
+      : value.photoReason === "wrong_place"
+        || value.photoReason === "poor_quality"
+        || value.photoReason === "other"
+        ? value.photoReason
+        : invalidResponse(),
+    photoWikidataId: nullableStringValue(value.photoWikidataId),
     submitterEmail: nullableStringValue(value.submitterEmail),
     appVersion: stringValue(value.appVersion),
     userAgent: nullableStringValue(value.userAgent),
@@ -177,6 +203,11 @@ function googleProjectValue(value: unknown): GoogleProjectUsageDto {
 }
 
 export function parseCreateFeedbackResponse(value: unknown): CreateFeedbackResponse {
+  if (!isRecord(value)) return invalidResponse();
+  return { id: stringValue(value.id) };
+}
+
+export function parseCreatePhotoFeedbackResponse(value: unknown): CreatePhotoFeedbackResponse {
   if (!isRecord(value)) return invalidResponse();
   return { id: stringValue(value.id) };
 }

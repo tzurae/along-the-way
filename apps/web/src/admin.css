@@ -141,6 +141,7 @@
 .admin-feedback-type { background: #ece5da; color: #44554d; }
 .admin-feedback-type--bug { background: #f8ddd5; color: #8a351f; }
 .admin-feedback-type--idea { background: #e2ece5; color: #265b3e; }
+.admin-feedback-type--photo { background: #e4e5f2; color: #3f466f; }
 .admin-feedback-status { border: 1px solid var(--border); background: transparent; color: var(--muted-foreground); }
 .admin-feedback-status--in_progress { border-color: #ba762c66; background: #fff0d9; color: #714109; }
 .admin-feedback-status--done { border-color: #43846055; background: #e3f2e8; color: #245a3b; }
@@ -179,6 +180,46 @@
   font-size: 13px;
   line-height: 1.5;
 }
+.admin-feedback-facts a {
+  color: #864128;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.admin-photo-action {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  padding: 18px 20px;
+}
+.admin-photo-action > [data-slot="button"],
+.admin-photo-action__confirm [data-slot="button"] {
+  min-height: 40px;
+  border-radius: 999px;
+}
+.admin-photo-action__confirm {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.admin-photo-action__confirm p,
+.admin-photo-action__success {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+.admin-photo-action__confirm > div {
+  display: flex;
+  flex: none;
+  gap: 8px;
+}
+.admin-photo-action__success { color: #2f6b4a; }
+.admin-photo-action .admin-inline-error { grid-column: auto; }
 
 .admin-feedback-editor {
   display: grid;
@@ -445,6 +486,9 @@
   .admin-feedback-facts { margin-right: 16px; margin-left: 16px; }
   .admin-feedback-card__heading { padding-right: 0; padding-left: 0; }
   .admin-feedback-editor { padding: 16px; }
+  .admin-photo-action { padding: 16px; }
+  .admin-photo-action__confirm { align-items: stretch; flex-direction: column; }
+  .admin-photo-action__confirm > div { justify-content: flex-end; }
   .usage-project__header,
   .usage-services,
   .usage-quotas { padding-right: 16px; padding-left: 16px; }

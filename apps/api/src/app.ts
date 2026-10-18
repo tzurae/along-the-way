@@ -31,8 +31,10 @@ import type { CreateDayRouteInput } from "@along-the-way/contracts/day-plans";
 import type { MapsConfigResponse } from "@along-the-way/contracts/maps";
 import type {
   CreateFeedbackInput,
+  CreatePhotoFeedbackInput,
   FeedbackStatus,
   FeedbackType,
+  PhotoFeedbackReason,
   UpdateFeedbackAdminInput,
 } from "@along-the-way/contracts/admin";
 import type { DiscoveryModule } from "./discovery/discovery-module";
@@ -60,7 +62,6 @@ import {
   parsePlacePreviewIds,
 } from "@along-the-way/contracts/place-details";
 import type { PlaceDetailModule } from "./place-details/place-detail-module";
-import type { CommonsCandidateModule } from "./place-details/commons-photo-candidates";
 import type { FeedbackModule } from "./admin/postgres-feedback-module";
 import type { GoogleUsageModule } from "./admin/google-usage-module";
 
@@ -69,7 +70,6 @@ const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 export interface AppDependencies {
   collaboration: PostgresCollaborationModule;
   dayPlans: DayPlanModule;
-  commonsCandidates?: CommonsCandidateModule;
   discovery: DiscoveryModule;
   feedback?: FeedbackModule;
   googleUsage?: GoogleUsageModule;
@@ -139,8 +139,16 @@ function characterLength(value: string) {
 }
 
 function feedbackTypeValue(value: unknown): FeedbackType {
-  if (value === "bug" || value === "idea" || value === "other") return value;
-  throw new AppError("validation_error", "type must be bug, idea, or other");
+  if (value === "bug" || value === "idea" || value === "other" || value === "photo") return value;
+  throw new AppError("validation_error", "type must be bug, idea, other, or photo");
+}
+
+function photoFeedbackReasonValue(value: unknown): PhotoFeedbackReason {
+  if (value === "wrong_place" || value === "poor_quality" || value === "other") return value;
+  throw new AppError(
+    "validation_error",
+    "reason must be wrong_place, poor_quality, or other",
+  );
 }
 
 function feedbackStatusValue(value: unknown): FeedbackStatus {
@@ -392,7 +400,6 @@ async function jsonBody(context: Context) {
 export function createApp({
   appVersion = "unknown",
   collaboration,
-  commonsCandidates,
   dayPlans,
   discovery,
   feedback,
@@ -635,8 +642,12 @@ export function createApp({
     if (viewport !== null && characterLength(viewport) > 20) {
       throw new AppError("validation_error", "viewport must be at most 20 characters");
     }
+    const type = feedbackTypeValue(body.type);
+    if (type === "photo") {
+      throw new AppError("validation_error", "Photo feedback must use the photo-feedback endpoint");
+    }
     const input: CreateFeedbackInput = {
-      type: feedbackTypeValue(body.type),
+      type,
       body: feedbackBody,
       page,
       tripId: tripId?.toLowerCase() ?? null,
@@ -676,6 +687,12 @@ export function createApp({
       throw new AppError("validation_error", "status or adminNote is required");
     }
     return context.json(await feedback.update(uuidParam(context, "id"), input));
+  });
+
+  app.post("/api/admin/feedback/:id/remove-photo", async (context) => {
+    const { user } = await authenticatedAdmin(context);
+    if (!feedback) throw new AppError("service_unavailable", "Feedback is unavailable", 503);
+    return context.json(await feedback.removePhoto(uuidParam(context, "id"), user.id));
   });
 
   app.get("/api/admin/google-usage", async (context) => {
@@ -861,55 +878,29 @@ export function createApp({
     });
   });
 
-  app.get("/api/trips/:tripId/commons-candidates", async (context) => {
+  app.post("/api/trips/:tripId/trip-places/:tripPlaceId/photo-feedback", async (context) => {
     const { user } = await authenticated(context);
-    if (!commonsCandidates) throw new AppError("service_unavailable", "Commons candidate review is unavailable", 503);
-    const candidates = await commonsCandidates.list(user.id, uuidParam(context, "tripId"));
-    context.header("Cache-Control", "private, no-store");
-    return context.json({ candidates });
-  });
-
-  app.post("/api/trips/:tripId/commons-candidates/:candidateId/decision", async (context) => {
-    const { user } = await authenticated(context);
-    if (!commonsCandidates) throw new AppError("service_unavailable", "Commons candidate review is unavailable", 503);
+    if (!feedback) throw new AppError("service_unavailable", "Feedback is unavailable", 503);
+    await rateLimiter.consume("feedback", clientIp(context), user.id);
     const body = await jsonBody(context);
-    const decision = stringField(body, "decision");
-    if (decision !== "confirm" && decision !== "reject") {
-      throw new AppError("validation_error", "decision must be confirm or reject");
+    const note = nullableStringField(body, "note");
+    if (note !== null && characterLength(note) > 500) {
+      throw new AppError("validation_error", "note must be at most 500 characters");
     }
-    return context.json(await commonsCandidates.decide(
-      user.id,
-      uuidParam(context, "tripId"),
-      uuidParam(context, "candidateId"),
-      decision,
-    ));
-  });
-
-  app.post("/api/trips/:tripId/trip-places/:tripPlaceId/commons-photo/report", async (context) => {
-    const { user } = await authenticated(context);
-    if (!commonsCandidates) throw new AppError("service_unavailable", "Commons candidate review is unavailable", 503);
-    return context.json(await commonsCandidates.report(
+    const input: CreatePhotoFeedbackInput = {
+      reason: photoFeedbackReasonValue(body.reason),
+      note,
+    };
+    return context.json(await feedback.submitPhoto(
       user.id,
       uuidParam(context, "tripId"),
       uuidParam(context, "tripPlaceId"),
-    ));
-  });
-
-  app.get("/api/trips/:tripId/commons-candidates/:candidateId/assets/:filename", async (context) => {
-    const { user } = await authenticated(context);
-    if (!commonsCandidates) throw new AppError("service_unavailable", "Commons candidate review is unavailable", 503);
-    const asset = await commonsCandidates.getAsset(
-      user.id,
-      uuidParam(context, "tripId"),
-      uuidParam(context, "candidateId"),
-      context.req.param("filename"),
-    );
-    return new Response(asset.bytes, { headers: {
-      "Content-Type": asset.mediaType,
-      "Content-Length": String(asset.bytes.byteLength),
-      "Cache-Control": "private, no-store",
-      "X-Content-Type-Options": "nosniff",
-    } });
+      input,
+      {
+        appVersion: appVersion.slice(0, 500),
+        userAgent: context.req.header("User-Agent")?.slice(0, 500) || null,
+      },
+    ), 201);
   });
 
   app.get("/api/trips/:tripId/place-details", async (context) => {

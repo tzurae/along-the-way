@@ -26,7 +26,7 @@ GET /api/trips/:tripId/place-photo-assets/<sha256>.jpg?kind=trip-place&id=<UUID>
 GET /api/trips/:tripId/google-place-photos/<providerPlaceId>?index=0|1|2&photo=<photoFingerprint>&resource=<photoToken>&maxWidth=192|1024&exp=<unixSeconds>&sig=<base64urlHmac>
 ```
 
-`kind` 亦接受 `proposal`、`itinerary-place`。詳情回傳 `{ detail }`，其中 curated／Commons `photos` 與 Google `googlePhotos` 各為 0–3 張且不得同時非空；`photosUnavailable` 區分 Google fallback 失敗與真的沒有照片，`commonsPhotoReportable` 標示目前代表照片能否檢舉。縮圖預覽回傳 `{ previews }`，每項只有 curated／Commons 首張 `photo`（沒有則 null）及 capped `photoCount` 0–3，絕不回 Google DTO。契約與嚴格 parser 位於 `packages/contracts/src/place-details.ts`。日期必須是實際存在的完整日曆日期；省略日期不表示來源已證實當日有效。
+`kind` 亦接受 `proposal`、`itinerary-place`。詳情回傳 `{ detail }`，其中 curated／Commons `photos` 與 Google `googlePhotos` 各為 0–3 張且不得同時非空；`photosUnavailable` 區分 Google fallback 失敗與真的沒有照片。縮圖預覽回傳 `{ previews }`，每項只有 curated／Commons 首張 `photo`（沒有則 null）及 capped `photoCount` 0–3，絕不回 Google DTO。契約與嚴格 parser 位於 `packages/contracts/src/place-details.ts`。日期必須是實際存在的完整日曆日期；省略日期不表示來源已證實當日有效。
 
 每條 route 先驗證登入與有效旅程成員資格，再解析同一旅程的 reference。策展照片雜湊不是公開憑證：仍需登入、旅程成員資格，以及 reference 與照片的關聯；其回應使用 private／no-store。Google 代理一律要求綁定旅程、使用者、provider place id、index、fingerprint、完整 photo resource 與到期時間的 HMAC capability，不能只憑地點已屬於旅程略過驗章。代理按帳號每小時 600 次、IP 每小時 1,200 次限流，回應使用 `Cache-Control: private, max-age=86400` 及 `X-Content-Type-Options: nosniff`。未知檔案、缺失或毀損不冒充正常圖片。
 
@@ -56,15 +56,15 @@ DTO 仍以尺寸、依序的作者 display name／URI，以及 Google 提供時�
 
 #149 記錄 2026-10-18 的 `GetPlaceRequest` quota 為 2,000/day。新版清單 preview 用零次 Google；詳情 fallback 一次 metadata；media 不再追加 GetPlace。`/place-previews` 使用 `Cache-Control: private, max-age=3600`；`/place-details` 另加 `Vary: Cookie`，正常時 private/max-age=3600，`photosUnavailable` 時 private/no-store，避免快取暫時失敗。UI 顯示「照片暫時無法載入」，不誤稱沒有照片。media 仍是 private/max-age=86400。
 
-## Commons 候選與檢舉
+## Commons 自動選圖與照片反饋
 
-依序部署 `032_commons_photo_candidates`、`033_commons_candidate_names`；後者加入 `names`、`instance_of` 與 `auto_applied`。strict CID backfill 只讀既存 source URL，列出 no_cid、no_item、multiple_items、no_p18、licence_rejected、error 或 matched，完全不查 Google。候選搜尋另用多語 label／alias 與 1 km 座標範圍；只保留有名稱關聯、P18 及合格 Commons 授權／rendition 的候選。
+依序部署 `032_commons_photo_candidates`、`033_commons_candidate_names`、`034_feedback`、`035_photo_feedback`。strict CID backfill 只讀既存 source URL，列出 no_cid、no_item、multiple_items、no_p18、licence_rejected、error 或 matched，完全不查 Google。候選搜尋另用多語 label／alias 與 1 km 座標範圍；只有具 P18，且 Commons 授權與 rendition 檢查通過的作品能被套用。
 
-自動套用限 worship／nature／museum，必須 exact normalized label／alias、類型相容、已知距離 ≤300 m，且只有一個合格候選。其他候選使用左右對照由成員確認／拒絕。`--refresh` 更新候選 facts，移除無關 pending，保留 confirmed／rejected 決定。回填命令與部署前提見 [README](../../README.md#commons-candidate-backfill-migrations-032033)。
+每個尚無 `commons_place_photos` 的 place identity 都自動選一張：名稱相關候選優先並依距離由近到遠，沒有名稱相關候選時才選 1 km 內最近者。選中列標為 `confirmed`、`auto_applied=true`，pending siblings 標為 rejected；每個 place 最多保留三列。已 rejected 的 QID 永不再選，refresh 不刪除無關候選。`--refresh` 會重新檢查並套用既有 pending 候選。回填命令與部署前提見 [README](../../README.md#commons-candidate-backfill-and-photo-feedback-migrations-032035)。
 
-`GET /api/trips/:tripId/commons-candidates` 讀候選；`POST .../commons-candidates/:candidateId/decision` 接受 confirm／reject；`GET .../commons-candidates/:candidateId/assets/:filename` 讀受保護圖片。`POST /api/trips/:tripId/trip-places/:tripPlaceId/commons-photo/report` 在同一交易刪除 Commons 代表照片並標為 rejected；strict store／候選決定／檢舉共用 identity-first lock，避免被拒絕照片又寫回。web 搭配 `commonsPhotoReportable`、trip-place reference 與編輯權限顯示「這不是正確的圖片？」。已無照片回 409，其他候選可繼續比對。
+任何 trip member 都可呼叫 `POST /api/trips/:tripId/trip-places/:tripPlaceId/photo-feedback`，提交 `wrong_place`、`poor_quality` 或 `other` 與最長 500 code points 的 optional note；它與一般 feedback 共用 rate limit。`035_photo_feedback` 把 trip place、地點名稱快照、原因與當時顯示的 Commons QID 存入 feedback；合併同 canonical identity 的地點時會把回饋移到 target，合併不同 identity 或其他 hard delete 則以 `ON DELETE SET NULL` 保留回饋與名稱快照，避免 admin action 刪到另一個 identity 的照片。管理員呼叫 `POST /api/admin/feedback/:id/remove-photo` 後，系統以 identity-first lock 移除照片、把 Commons 候選標成 rejected，並把 feedback 設為 done；成功請求重送時，取得同一 identity lock 並重讀 feedback 後，若原照片已不存在，會直接回傳目前的 done DTO。舊候選清單、決定、候選 asset、會員檢舉 API 與可檢舉旗標已移除。
 
-新增地點後的 16 秒 refresh 同時更新候選、no-cache preview 與已開啟的詳情。背景 auto_applied 不會留下 pending 候選，所以不能只靠候選 banner 更新圖片。
+新增地點後的 16 秒 refresh 仍會更新 preview 與已開啟的詳情，讓背景自動套用的照片出現。
 
 
 ## 營運者匯入

@@ -774,10 +774,14 @@ export function App() {
   const [onboardingFacts, setOnboardingFacts] = useState<OnboardingFacts | null>(null);
   const [createdTripId, setCreatedTripId] = useState<string | null>(null);
   const [placesRevision, setPlacesRevision] = useState(0);
+  const [photoRevision, setPhotoRevision] = useState(0);
   const [syncRevision, setSyncRevision] = useState(0);
   const workspaceRevision = placesRevision + syncRevision;
   const placesChanged = useCallback(() => {
     setPlacesRevision((revision) => revision + 1);
+  }, []);
+  const photoRemoved = useCallback(() => {
+    setPhotoRevision((revision) => revision + 1);
   }, []);
   const [activeTripTab, setActiveTripTab] = useState<TripTab>(() => readTripLocation().tab ?? "itinerary");
   const [activeSegment, setActiveSegment] = useState<TripSegment | null>(() => {
@@ -1473,7 +1477,7 @@ export function App() {
         <nav aria-label={t.today.savedTrips} className="mb-4 flex flex-wrap gap-2">{store?.forAccount(todaySnapshot.accountId).map((snapshot) => <button className="min-h-11 rounded-lg border px-3" key={snapshot.model.tripId} onClick={() => {
           writeTripLocation(snapshot.model.tripId, "today", null, null); restoreSnapshot();
         }}>{snapshot.model.tripName}</button>)}</nav>
-        <TodayWorkspace model={todaySnapshot.model} fetchedAt={todaySnapshot.fetchedAt} selectedDate={selectedDate} onDayChanged={selectDay} offline retry={() => void reconnect()} retrying={retrying} />
+        <TodayWorkspace model={todaySnapshot.model} fetchedAt={todaySnapshot.fetchedAt} selectedDate={selectedDate} onDayChanged={selectDay} offline retry={() => void reconnect()} retrying={retrying} photoRevision={photoRevision} />
       </> : <section><p role="status">{t.today.noSnapshot}</p><button className="mt-4 min-h-11 rounded-lg border px-4" onClick={() => void reconnect()} disabled={retrying}>{t.today.retry}</button></section>}
     </main>;
   }
@@ -1662,7 +1666,7 @@ export function App() {
           ) : null}
 
           {globalView === "admin" && user.isAdmin ? (
-            <AdminView request={request} routeError={adminRouteError} />
+            <AdminView request={request} routeError={adminRouteError} onPhotoRemoved={photoRemoved} />
           ) : selectedTrip ? (
             <>
               {onboardingFacts?.tripId === selectedTrip.id ? (
@@ -1707,6 +1711,7 @@ export function App() {
                     retry={() => void reconnect()}
                     retrying={retrying}
                     persisted={persisted}
+                    photoRevision={photoRevision}
                     request={request}
                   />
                 ) : <p role="status">{t.today.unavailable}</p>}
@@ -1760,6 +1765,7 @@ export function App() {
                     trip={selectedTrip}
                     accountId={user.id}
                     request={request}
+                    photoRevision={photoRevision}
                     placesRevision={workspaceRevision}
                     onPlacesChanged={placesChanged}
                   />
@@ -1770,6 +1776,7 @@ export function App() {
                     trip={selectedTrip}
                     accountId={user.id}
                     request={request}
+                    photoRevision={photoRevision}
                     placesRevision={workspaceRevision}
                     onPlacesChanged={placesChanged}
                   />

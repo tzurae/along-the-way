@@ -3,7 +3,6 @@ import {
   parseCreateFeedbackResponse,
   type CreateFeedbackInput,
   type CreateFeedbackResponse,
-  type FeedbackType,
 } from "@along-the-way/contracts/admin";
 
 import { Button } from "@/components/ui/button";
@@ -53,7 +52,7 @@ export function FeedbackDialog({
   const pageHelpId = useId();
   const formErrorId = useId();
   const submissionSequence = useRef(0);
-  const [type, setType] = useState<FeedbackType>("bug");
+  const [type, setType] = useState<CreateFeedbackInput["type"]>("bug");
   const [body, setBody] = useState("");
   const [page, setPage] = useState("");
   const [contactAllowed, setContactAllowed] = useState(true);

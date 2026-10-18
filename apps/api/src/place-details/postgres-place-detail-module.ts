@@ -70,7 +70,6 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
       name: place!.name,
       asOfDate: date,
       sections: [], sources: [], photos: [], googlePhotos: [], photosUnavailable: false,
-      commonsPhotoReportable: false,
     };
     const content = place!.canonicalPlaceId
       ? await this.database.selectFrom("curated_place_details").selectAll()
@@ -92,7 +91,6 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
         return { detail: {
           ...empty,
           photos: [this.photoDto(tripId, reference, commons, "commons")],
-          commonsPhotoReportable: true,
         } };
       }
       const fallback = includeGooglePhoto
@@ -135,7 +133,6 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
         photos,
         googlePhotos: fallback?.photos ?? [],
         photosUnavailable: fallback?.failed ?? false,
-        commonsPhotoReportable: photos[0]?.source === "commons",
       },
     };
   }

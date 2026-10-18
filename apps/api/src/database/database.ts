@@ -6,7 +6,11 @@ import {
 } from "kysely";
 import { Pool } from "pg";
 import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
-import type { FeedbackStatus, FeedbackType } from "@along-the-way/contracts/admin";
+import type {
+  FeedbackStatus,
+  FeedbackType,
+  PhotoFeedbackReason,
+} from "@along-the-way/contracts/admin";
 
 type Timestamp = ColumnType<Date, Date | string | undefined, Date | string>;
 type DateOnly = ColumnType<Date, string, string>;
@@ -425,6 +429,8 @@ export interface FeedbackTable {
   id: Generated<string>;
   user_id: string;
   trip_id: string | null;
+  trip_place_id: string | null;
+  place_name: string | null;
   type: FeedbackType;
   body: string;
   page: string | null;
@@ -432,6 +438,8 @@ export interface FeedbackTable {
   app_version: string;
   user_agent: string | null;
   viewport: string | null;
+  photo_wikidata_id: string | null;
+  photo_reason: PhotoFeedbackReason | null;
   status: Generated<FeedbackStatus>;
   admin_note: string | null;
   created_at: Timestamp;

@@ -144,9 +144,7 @@ export class AppError extends Error {
       | "commons_photo_not_found"
       | "service_unavailable"
       | "feedback_not_found"
-      | "candidate_not_found"
-      | "candidate_asset_not_found"
-      | "candidate_already_decided"
+      | "photo_feedback_place_gone"
       | "place_photo_unavailable",
     message: string,
     readonly status: 400 | 401 | 403 | 404 | 409 | 429 | 502 | 503 = 400,

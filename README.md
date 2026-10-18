@@ -169,9 +169,9 @@ they never request Google photo metadata or media. Detail pages show the first a
    storing them. Signed, user-bound photo resource URLs let the image route fetch
    media directly without a second GetPlace call. Detail responses use `Vary: Cookie`.
 
-Name and coordinate searches also produce a Commons candidate queue (see below).
-Only one eligible exact-name, compatible-type candidate within 300 m can auto-apply
-for worship, nature or museum places; other related candidates need member confirmation.
+Name and coordinate searches also produce Commons candidates (see below). Every
+place without a Commons photo automatically takes the nearest name-related
+licensed P18 work, or otherwise the nearest licensed P18 work within 1 km.
 A list row without a photo shows its place-type icon. Detail fallback failures show
 「照片暫時無法載入」 (`photosUnavailable`) rather than claiming the place has no photos.
 Gallery loading uses a shimmer and thumbnail blur-up; initial lists use `PlaceListSkeleton`.
@@ -182,8 +182,8 @@ Both 口袋名單 and AI 建議 use one compact row (`PlaceListRow`). Each row s
 64px thumbnail (a button that opens the detail), the name with a type chip, one
 list-specific line, and a status. A wishlist place without a 想去 reason shows
 the area part of its address instead. List rows never show Google photos, so they
-need no Google photo attribution. The detail gallery and candidate comparison retain
-per-work Commons credits and Google attribution where applicable.
+need no Google photo attribution. The detail gallery retains per-work Commons
+credits and Google attribution where applicable.
 Both lists are ordered by confirmed vote count and slide rows to their new
 position when the order changes (`FlipList`; a fade under reduced motion).
 AI 建議 hides rejected proposals. AI suggestions only go into the itinerary: there
@@ -228,27 +228,30 @@ queries Wikidata and Wikimedia Commons serially. It never calls Google and is
 safe to rerun. Each lookup logs its outcome, and the final line prints counts
 for matches and every miss reason.
 
-### Commons candidate backfill (migrations 032–033)
+### Commons candidate backfill and photo feedback (migrations 032–035)
 
-Deploy `032_commons_photo_candidates` followed by `033_commons_candidate_names`,
-then run `DATABASE_URL=... bun apps/api/src/database/backfill-commons-candidates.ts`.
-It serially searches Wikidata in Japanese, Chinese and English plus a 1 km
-coordinate search, then keeps up to three manual-review works plus any uniquely
-eligible automatic match, all passing the existing Commons licence and rendition
-checks. Names, instance-of facts and `auto_applied`
-record why a candidate can be shown or applied. Automatic application is restricted
-to worship, nature and museum places, and requires exactly one eligible candidate
-with an exact normalized label/alias, a compatible type and distance at most 300 m.
-Everything else remains pending for side-by-side review.
-It skips identities with a Commons photo or prior candidates, never calls Google,
-waits between identities, and prints per-identity outcomes plus final counts.
-Use `--refresh` to refresh stored candidate facts and remove unrelated pending
-candidates while preserving rejections and confirmed photos. The detail action
-「這不是正確的圖片？」 deletes the representative photo and marks its Wikidata candidate
-rejected in one transaction; strict backfill and refresh cannot silently reapply it.
-The report endpoint is `POST /api/trips/:tripId/trip-places/:tripPlaceId/commons-photo/report`.
-The web combines `commonsPhotoReportable`, the trip-place reference and edit permission
-to decide whether to show the report action.
+Deploy `032_commons_photo_candidates`, `033_commons_candidate_names`,
+`034_feedback`, then `035_photo_feedback`. Run
+`DATABASE_URL=... bun apps/api/src/database/backfill-commons-candidates.ts`.
+It serially searches Wikidata labels and aliases in Japanese, Chinese and
+English plus a 1 km coordinate search, then keeps at most three works that pass
+the existing P18, Commons licence and rendition checks. It automatically applies
+the nearest name-related work; if none qualifies, it applies the nearest work
+within 1 km. The chosen row is `confirmed` with `auto_applied=true`, and pending
+siblings become rejected without a user decision.
+
+Generation skips every Wikidata QID already rejected for that place and never
+deletes an unrelated stored candidate. It never calls Google, waits between
+identities, and prints per-identity outcomes plus final counts. `--refresh`
+rechecks existing pending candidates and applies the same selection rule without
+overwriting a confirmed photo or reapplying an admin-removed QID.
+
+Any trip member can submit `POST /api/trips/:tripId/trip-places/:tripPlaceId/photo-feedback`
+with a required reason and optional note. Admin feedback includes the place,
+reason and reported Wikidata QID. `POST /api/admin/feedback/:id/remove-photo`
+removes the reported photo under the same identity-first lock, rejects a Commons
+candidate so generation cannot re-add it, and marks the report done. The old
+candidate review, decision, candidate asset and member report routes were removed.
 
 These migrations are expand-only; older application code ignores the new table.
 Rollback requires retaining these migration files in the rollback build because
