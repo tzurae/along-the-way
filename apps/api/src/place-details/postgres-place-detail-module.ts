@@ -80,7 +80,7 @@ export class PostgresPlaceDetailModule implements PlaceDetailModule {
               from curated_place_photos candidate
               where candidate.place_id = curated_place_details.place_id
               order by candidate.position
-              limit 3
+              limit 2
             ) photo
           ), '[]'::jsonb)`.as("photos"))
           .where("place_id", "=", place!.canonicalPlaceId).executeTakeFirst()

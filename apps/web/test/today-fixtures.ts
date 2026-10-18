@@ -1,8 +1,8 @@
-import type { TripDto } from "@along-the-way/contracts/private-trips";
+import type { TripDto, UserDto } from "@along-the-way/contracts/private-trips";
 import type { TripSkeletonDto, ItineraryItemDto } from "@along-the-way/contracts/trip-skeleton";
 import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
 
-export const todayUser = { id: "account", email: "owner@example.test", displayName: null };
+export const todayUser: UserDto = { id: "account", email: "owner@example.test", displayName: null, isAdmin: false };
 export function todayTrip(id = "A", month = "10"): TripDto {
   return { id, name: `Trip ${id}`, startDate: `2026-${month}-21`, endDate: `2026-${month}-23`, defaultCurrency: "JPY",
     countryStops: [{ id: "stop", countryCode: "JP", position: 0, timeZone: "Asia/Tokyo" }],

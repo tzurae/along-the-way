@@ -26,13 +26,13 @@ GET /api/trips/:tripId/place-photo-assets/<sha256>.jpg?kind=trip-place&id=<UUID>
 GET /api/trips/:tripId/google-place-photos/<providerPlaceId>?index=0|1|2&photo=<photoFingerprint>&resource=<photoToken>&maxWidth=192|1024&exp=<unixSeconds>&sig=<base64urlHmac>
 ```
 
-`kind` 亦接受 `proposal`、`itinerary-place`。詳情回傳 `{ detail }`，其中 curated／Commons `photos` 為 0–3 張，執行期的 Google `googlePhotos` 為 0–2 張，兩者不得同時非空；photo route contract 仍接受 `index=0|1|2`。`photosUnavailable` 只在 Google 讀取失敗且沒有 curated／Commons fallback 時為 true，失敗後能顯示 fallback 時仍為 false。縮圖預覽回傳 `{ previews }`，每項只有 curated／Commons 首張 `photo`（沒有則 null）及 capped `photoCount` 0–3，絕不回 Google DTO。契約與嚴格 parser 位於 `packages/contracts/src/place-details.ts`。日期必須是實際存在的完整日曆日期；省略日期不表示來源已證實當日有效。
+`kind` 亦接受 `proposal`、`itinerary-place`。詳情回傳 `{ detail }`，其中 curated／Commons `photos` 為 0–2 張，執行期的 Google `googlePhotos` 為 0–2 張，兩者不得同時非空；photo route contract 仍接受 `index=0|1|2`。`photosUnavailable` 只在 Google 讀取失敗且沒有 curated／Commons fallback 時為 true，失敗後能顯示 fallback 時仍為 false。縮圖預覽回傳 `{ previews }`，每項只有 curated／Commons 首張 `photo`（沒有則 null）及 capped `photoCount` 0–3，絕不回 Google DTO。契約與嚴格 parser 位於 `packages/contracts/src/place-details.ts`。日期必須是實際存在的完整日曆日期；省略日期不表示來源已證實當日有效。
 
 每條 route 先驗證登入與有效旅程成員資格，再解析同一旅程的 reference。策展照片雜湊不是公開憑證：仍需登入、旅程成員資格，以及 reference 與照片的關聯；其回應使用 private／no-store。Google 代理一律要求綁定旅程、使用者、provider place id、index、fingerprint、完整 photo resource 與到期時間的 HMAC capability，不能只憑地點已屬於旅程略過驗章。代理按帳號每小時 600 次、IP 每小時 1,200 次限流，回應使用 `Cache-Control: private, max-age=86400` 及 `X-Content-Type-Options: nosniff`。未知檔案、缺失或毀損不冒充正常圖片。
 
 已接受提案優先使用 `accepted_trip_place_id` 的 canonical identity；未接受提案的 Google provider id 直接來自該提案，無須為顯示照片建立 `place_identities`。legacy 行程地點只能經同旅程既有 `trip_places.legacy_place_id` 關聯解析。地點名稱不作為身分匹配鍵；不建立或合併身分來湊內容。手動地點、未知店、同名分店及未關聯的 travel-only 地點不借用其他地點的內容或照片；原有可確認的行程資料仍保留。
 
-完整策展內容與依 position 排序的前三張照片由同一 SQL statement 讀取 publication snapshot，且在 JSON aggregation 前即限制為 3。預覽批次只取首張策展 metadata 及 capped count，沒有策展照片時查儲存的 Commons 代表照片，再沒有就回 null。三種 preview reference 都不呼叫 Google、不消耗 `place_photo_metadata` 額度；詳情有 provider identity 時才先走下述 Google 路徑，無照片、失敗或受限時再依序使用策展與 Commons。
+完整策展內容與依 position 排序的前兩張照片由同一 SQL statement 讀取 publication snapshot，且在 JSON aggregation 前即限制為 2。預覽批次只取首張策展 metadata 及 capped count，沒有策展照片時查儲存的 Commons 代表照片，再沒有就回 null。三種 preview reference 都不呼叫 Google、不消耗 `place_photo_metadata` 額度；詳情有 provider identity 時才先走下述 Google 路徑，無照片、失敗或受限時再依序使用策展與 Commons。
 
 ## 經人工查核的 catalog
 
