@@ -1,4 +1,9 @@
+import packageJson from "../../../package.json";
+
 import { createDatabase, requireDatabaseUrl } from "./database/database";
+import { OpenAiPlacePlanningProfileModel } from "./planning/openai-place-planning-profile-model";
+import { PostgresPlacePlanningProfileWorker } from "./planning/postgres-place-planning-profile-module";
+import { PlaceGuideSourceFetcher } from "./place-guides/place-guide-sources";
 import { PostgresEmailWorker } from "./private-trips/postgres-email-worker";
 import { PostgresRetention } from "./private-trips/retention";
 import { SmtpEmailSender } from "./private-trips/smtp-email-sender";
@@ -38,7 +43,7 @@ if (smtpUsername && !smtpSecure && !smtpRequireTls) {
     "Authenticated SMTP requires SMTP_SECURE or SMTP_REQUIRE_TLS",
   );
 }
-const worker = new PostgresEmailWorker({
+const emailWorker = new PostgresEmailWorker({
   database,
   siteAddress: requireSetting("SITE_ADDRESS"),
   tokenIssuer: new TokenIssuer(requireSetting("TOKEN_SECRET")),
@@ -52,6 +57,15 @@ const worker = new PostgresEmailWorker({
     username: smtpUsername,
   }),
 });
+const wikimediaUserAgent = `AlongTheWay/${packageJson.version} (https://github.com/tzurae/along-the-way)`;
+const planningProfileWorker = new PostgresPlacePlanningProfileWorker({
+  database,
+  model: new OpenAiPlacePlanningProfileModel({
+    apiKey: optionalSetting("OPENAI_API_KEY"),
+    model: optionalSetting("OPENAI_MODEL"),
+  }),
+  sources: new PlaceGuideSourceFetcher({ userAgent: wikimediaUserAgent }),
+});
 const retention = new PostgresRetention(database);
 let stopping = false;
 
@@ -61,17 +75,28 @@ function delay(milliseconds: number) {
   return promise;
 }
 
-async function run() {
-  console.info(JSON.stringify({ event: "email_worker_started", status: "ok" }));
+async function runEmailLoop() {
   while (!stopping) {
     await retention.runIfDue();
-    const processed = await worker.runOnce();
+    const processed = await emailWorker.runOnce();
     if (!processed) await delay(1_000);
   }
 }
 
+async function runPlanningProfileLoop() {
+  while (!stopping) {
+    const processed = await planningProfileWorker.runBatch();
+    if (processed === 0) await delay(1_000);
+  }
+}
+
+async function run() {
+  console.info(JSON.stringify({ event: "worker_started", status: "ok" }));
+  await Promise.all([runEmailLoop(), runPlanningProfileLoop()]);
+}
+
 function stop(signal: string) {
-  console.info(JSON.stringify({ event: "email_worker_stopping", signal }));
+  console.info(JSON.stringify({ event: "worker_stopping", signal }));
   stopping = true;
 }
 

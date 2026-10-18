@@ -121,6 +121,10 @@ export class AppError extends Error {
       | "must_item_limit"
       | "duplicate_suggestion_not_found"
       | "discovery_proposal_not_found"
+      | "whole_trip_plan_not_found"
+      | "plan_stale"
+      | "plan_not_complete"
+      | "planner_input_too_large"
       | "model_unavailable"
       | "provider_unavailable"
       | "provider_quota"
@@ -147,10 +151,11 @@ export class AppError extends Error {
       | "photo_feedback_place_gone"
       | "place_photo_unavailable",
     message: string,
-    readonly status: 400 | 401 | 403 | 404 | 409 | 429 | 502 | 503 = 400,
+    readonly status: 400 | 401 | 403 | 404 | 409 | 422 | 429 | 502 | 503 = 400,
     readonly retryAfterSeconds?: number,
     readonly currentVersion?: number,
     readonly conflictTargetId?: string,
+    readonly changedEntityIds?: string[],
   ) {
     super(message);
   }

@@ -980,6 +980,11 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     ) {
       throw new AppError("validation_error", "durationMinutes must be a positive integer");
     }
+    const effortLevel = input.effortLevel;
+    if (effortLevel !== undefined && effortLevel !== null
+      && (!Number.isSafeInteger(effortLevel) || effortLevel < 1 || effortLevel > 5)) {
+      throw new AppError("validation_error", "effortLevel must be an integer from 1 to 5 or null");
+    }
     const budgetAmountMinor = input.budgetAmountMinor ?? null;
     const budgetCurrency = optionalText(input.budgetCurrency, "budgetCurrency", 3)?.toUpperCase() ?? null;
     if ((budgetAmountMinor === null) !== (budgetCurrency === null)) {
@@ -1012,6 +1017,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         .executeTakeFirstOrThrow();
       await transaction.updateTable("trip_places").set({
         duration_minutes: durationMinutes,
+        ...(effortLevel === undefined ? {} : { effort_level: effortLevel }),
         budget_amount_minor: budgetAmountMinor,
         budget_currency: budgetCurrency,
         notes,
@@ -1538,6 +1544,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
           || scheduled !== undefined || sourceAssignment !== undefined || targetAssignment !== undefined,
         unplaced_from_date: unplacedFromDate,
         duration_minutes: target.duration_minutes ?? source.duration_minutes,
+        effort_level: target.effort_level ?? source.effort_level,
         budget_amount_minor: target.budget_amount_minor === null
           ? source.budget_amount_minor === null
             ? null
@@ -1994,6 +2001,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         "tripPlace.longitude",
         "tripPlace.time_zone",
         "tripPlace.duration_minutes",
+        "tripPlace.effort_level",
         "tripPlace.selected_for_itinerary",
         "tripPlace.unplaced_from_date",
         "tripPlace.budget_amount_minor",
@@ -2120,6 +2128,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         selectedForItinerary: row.selected_for_itinerary,
         unplacedFromDate: row.unplaced_from_date === null ? null : dateOnly(row.unplaced_from_date),
         durationMinutes: row.duration_minutes,
+        effortLevel: row.effort_level,
         assignedDayId: assignmentByPlaceId.get(row.id)?.trip_day_id ?? null,
         dayPosition: assignmentByPlaceId.get(row.id)?.day_position ?? null,
         budgetAmountMinor: row.budget_amount_minor === null ? null : Number(row.budget_amount_minor),

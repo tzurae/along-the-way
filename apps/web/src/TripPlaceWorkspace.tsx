@@ -26,6 +26,12 @@ import {
   type TripPlaceDto,
   type UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
+import {
+  parsePlanningLoadResponse,
+  type PlanningEstimateDto,
+  type PlanningEstimateSource,
+  type PlanningLoadResponse,
+} from "@along-the-way/contracts/planning";
 import { ConflictPanel, useVersionConflict, type EditSnapshot } from "./ConflictPanel";
 import { ApiRequestError } from "./api-error";
 import { PLACE_TYPES, type PlaceType } from "@along-the-way/contracts/trip-skeleton";
@@ -444,20 +450,37 @@ function AddPlacePanel({
   );
 }
 
-type PlanningInput = Pick<UpdateTripPlacePlanningInput, "durationMinutes" | "budgetAmountMinor" | "budgetCurrency" | "notes">;
+type PlanningInput = Pick<UpdateTripPlacePlanningInput, "durationMinutes" | "effortLevel" | "budgetAmountMinor" | "budgetCurrency" | "notes">;
+
+const DEFAULT_ESTIMATE_BY_TYPE: Record<PlaceType, { visitMinutes: number; effortLevel: number }> = {
+  activity: { visitMinutes: 120, effortLevel: 3 },
+  museum: { visitMinutes: 120, effortLevel: 2 },
+  worship: { visitMinutes: 60, effortLevel: 2 },
+  nature: { visitMinutes: 120, effortLevel: 4 },
+  cafe: { visitMinutes: 45, effortLevel: 1 },
+  restaurant: { visitMinutes: 75, effortLevel: 1 },
+  shopping: { visitMinutes: 60, effortLevel: 2 },
+  station: { visitMinutes: 15, effortLevel: 1 },
+  lodging: { visitMinutes: 60, effortLevel: 2 },
+  airport: { visitMinutes: 60, effortLevel: 2 },
+  other: { visitMinutes: 60, effortLevel: 2 },
+};
 
 function planningValues(place: TripPlaceDto): PlanningInput {
   return {
     durationMinutes: place.durationMinutes,
+    effortLevel: place.effortLevel,
     budgetAmountMinor: place.budgetAmountMinor,
     budgetCurrency: place.budgetCurrency,
     notes: place.notes,
   };
 }
 
-function PlanningEditors({ tripId, place, available, request, changed, editingChanged }: {
+function PlanningEditors({ tripId, place, estimate, estimatesAvailable, available, request, changed, editingChanged }: {
   tripId: string;
   place: TripPlaceDto;
+  estimate?: PlanningEstimateDto;
+  estimatesAvailable: boolean;
   available: boolean;
   request: TripPlaceWorkspaceProps["request"];
   changed(): Promise<void>;
@@ -488,7 +511,12 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
   }
 
   async function save(attempted?: PlanningInput, version = base.version, conflictBase = resolution.conflictBaseVersion) {
-    const normalized = attempted ?? { ...base.input, notes: draft.notes?.trim() || null };
+    const normalized = attempted ?? {
+      ...draft,
+      durationMinutes: draft.durationMinutes ?? null,
+      effortLevel: draft.effortLevel ?? null,
+      notes: draft.notes?.trim() || null,
+    };
     const operation = `planning:${place.id}`;
     const payload = { ...normalized, expectedVersion: version };
     setBusy(true);
@@ -501,7 +529,12 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
       });
       clearRetryKey(retryKeys.current, operation);
       finish({ input: planningValues(response.tripPlace), version: response.tripPlace.version });
-      await changed();
+      notify("success", t.planning.saved);
+      try {
+        await changed();
+      } catch (refreshError) {
+        notify("error", errorMessage(refreshError, t.errors.requestFailed));
+      }
     } catch (error) {
       try {
         if (error instanceof ApiRequestError && error.code === "trip_place_not_found") {
@@ -531,17 +564,29 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
     attempted: draft,
     latestChange: null,
   };
+  const fallback = DEFAULT_ESTIMATE_BY_TYPE[place.type];
+  const visitMinutes = base.input.durationMinutes ?? estimate?.visitMinutes ?? fallback.visitMinutes;
+  const effortLevel = base.input.effortLevel ?? estimate?.effortLevel ?? fallback.effortLevel;
+  const visitSource: PlanningEstimateSource = base.input.durationMinutes != null ? "member" : estimate?.visitSource ?? "default";
+  const effortSource: PlanningEstimateSource = base.input.effortLevel != null ? "member" : estimate?.effortSource ?? "default";
+  // When planning-load could not be read the shown value really is the type default, so the
+  // source stays 「系統預估」; the read failure is reported separately below.
+  const visitSourceLabel = t.planning.sources[visitSource];
+  const effortSourceLabel = t.planning.sources[effortSource];
+  const estimatesStale = !estimatesAvailable && place.selectedForItinerary
+    && (base.input.durationMinutes == null || base.input.effortLevel == null);
+
   return (
     <section className="pd-detail-section">
       <div className="pd-reason-head">
-        <h3>{t.workspace.reasonTitle}</h3>
+        <h3>{t.planning.summary}</h3>
         {available && !editing && !conflict ? <button type="button" className="pd-reason-action" onClick={() => {
           const snapshot = { input: planningValues(place), version: place.version };
           setBase(snapshot);
           setDraft(snapshot.input);
           setEditing(true);
           editingChanged(true);
-        }}><Pencil aria-hidden="true" className="size-4" />{base.input.notes ? t.workspace.editReason : t.workspace.addReason}</button> : null}
+        }}><Pencil aria-hidden="true" className="size-4" />{t.planning.edit}</button> : null}
       </div>
       {conflict ? <ConflictPanel
         conflict={conflict}
@@ -559,26 +604,54 @@ function PlanningEditors({ tripId, place, available, request, changed, editingCh
         }}
         onReapply={() => void save(conflict.attempted, conflict.current!.version, conflict.base.version)}
         onEdit={() => {
-          const current = conflict.current!;
-          setBase(current);
-          setDraft({ ...current.input, notes: conflict.attempted.notes });
+          setBase(conflict.current!);
+          setDraft(conflict.attempted);
           resolution.resume();
           setEditing(true);
         }}
       /> : editing ? (
-        <form className="pd-reason-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
-          <textarea value={draft.notes ?? ""} maxLength={200} rows={3} placeholder={t.add.reasonPlaceholder} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} />
-          <p className="pd-field-help">{t.add.reasonHelp}</p>
+        <form className="pd-planning-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+          <label className="pd-planning-field">
+            <span>{t.planning.durationMinutes}</span>
+            <span className="pd-planning-number">
+              <input type="number" min="1" max="10080" step="1" value={draft.durationMinutes ?? ""} onChange={(event) => setDraft({ ...draft, durationMinutes: event.target.value === "" ? null : Number(event.target.value) })} />
+              <span aria-hidden="true">分鐘</span>
+            </span>
+            <small>{t.planning.durationHelp}</small>
+          </label>
+          <fieldset className="pd-effort-field">
+            <legend>{t.planning.effortLevel}</legend>
+            <p>{t.planning.effortHelp}</p>
+            <div className="pd-effort-options">
+              {([1, 2, 3, 4, 5] as const).map((level) => <label key={level} data-selected={draft.effortLevel === level || undefined}>
+                <input type="radio" name={`effort-${place.id}`} value={level} checked={draft.effortLevel === level} onChange={() => setDraft({ ...draft, effortLevel: level })} />
+                <span>{t.planning.effortLabels[level]}</span>
+              </label>)}
+            </div>
+            {draft.effortLevel !== null ? <button type="button" className="pd-planning-clear" onClick={() => setDraft({ ...draft, effortLevel: null })}>{t.planning.clearValue}</button> : null}
+          </fieldset>
+          <label className="pd-planning-field">
+            <span>{t.planning.reasonLabel}</span>
+            <textarea value={draft.notes ?? ""} maxLength={200} rows={3} placeholder={t.add.reasonPlaceholder} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} />
+            <small>{t.planning.reasonHelp}</small>
+          </label>
           <div className="pd-reason-actions">
             <button type="button" className="pd-secondary" disabled={busy} onClick={() => {
               setDraft(base.input);
               setEditing(false);
               editingChanged(false);
-            }}>{t.workspace.cancelReason}</button>
-            <button type="submit" className="pd-primary" disabled={busy}><CircleCheck aria-hidden="true" className="size-4" />{busy ? t.workspace.savingReason : t.workspace.saveReason}</button>
+            }}>{t.planning.cancel}</button>
+            <button type="submit" className="pd-primary" disabled={busy}><CircleCheck aria-hidden="true" className="size-4" />{busy ? t.planning.saving : t.planning.save}</button>
           </div>
         </form>
-      ) : <p className={base.input.notes ? "pd-reason-copy" : "pd-reason-copy pd-muted"}>{base.input.notes ?? t.workspace.noReasonDetail}</p>}
+      ) : <div className="pd-planning-summary">
+        <dl>
+          <div><dt>{t.planning.durationMinutes}</dt><dd>{t.planning.estimateValue(visitMinutes, visitSourceLabel)}</dd></div>
+          <div><dt>{t.planning.effortLevel}</dt><dd>{t.planning.effortValue(effortLevel, effortSourceLabel)}</dd></div>
+        </dl>
+        {estimatesStale ? <p className="pd-reason-copy pd-muted" role="status">{t.planning.estimatesUnavailable}</p> : null}
+        <p className={base.input.notes ? "pd-reason-copy" : "pd-reason-copy pd-muted"}>{base.input.notes ?? t.workspace.noReasonDetail}</p>
+      </div>}
     </section>
   );
 }
@@ -626,6 +699,8 @@ export function TripPlaceWorkspace({
   const [photoFeedback, setPhotoFeedback] = useState<{ tripPlaceId: string; returnFocus: HTMLButtonElement | null } | null>(null);
   const photoRefreshTimer = useRef<number | null>(null);
   const [candidatePhotoRevision, setCandidatePhotoRevision] = useState(0);
+  const [planningEstimates, setPlanningEstimates] = useState<Record<string, PlanningEstimateDto>>({});
+  const [planningEstimatesAvailable, setPlanningEstimatesAvailable] = useState(false);
 
 
   const canSchedule = canArrangeItinerary(trip);
@@ -677,14 +752,20 @@ export function TripPlaceWorkspace({
 
   const refreshPlaces = useCallback(async (generation = ++readGeneration.current) => {
     try {
-      const response = await request<unknown>(`/api/trips/${trip.id}/trip-places`);
+      const [placesResult, loadResult] = await Promise.allSettled([
+        request<unknown>(`/api/trips/${trip.id}/trip-places`),
+        request<PlanningLoadResponse>(`/api/trips/${trip.id}/planning-load`, { parse: parsePlanningLoadResponse }),
+      ]);
+      if (placesResult.status === "rejected") throw placesResult.reason;
       if (generation !== readGeneration.current) return false;
-      const current = parseTripPlaceListResponse(response).tripPlaces;
+      const current = parseTripPlaceListResponse(placesResult.value).tripPlaces;
       const currentIds = new Set(current.map((place) => place.id));
       setReadModel((previous) => ({
         current,
         retained: [...previous.current, ...previous.retained].filter((place) => editingPlaceIds.current.has(place.id) && !currentIds.has(place.id)),
       }));
+      setPlanningEstimates(loadResult.status === "fulfilled" ? loadResult.value.estimates : {});
+      setPlanningEstimatesAvailable(loadResult.status === "fulfilled");
       setReadError("");
       setLoading(false);
       return true;
@@ -1094,7 +1175,8 @@ export function TripPlaceWorkspace({
         collapsible
         disclosureLabel="旅遊資訊與資料來源"
         interlude={<div className="pd-detail">
-          <PlanningEditors key={place.id} tripId={trip.id} place={place} available={available} request={request} changed={changedPlaces}
+          <PlanningEditors key={place.id} tripId={trip.id} place={place} estimate={planningEstimates[place.id]}
+            estimatesAvailable={planningEstimatesAvailable} available={available} request={request} changed={changedPlaces}
             editingChanged={(editing) => {
               if (editing) editingPlaceIds.current.add(place.id);
               else {

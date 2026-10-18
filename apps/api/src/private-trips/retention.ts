@@ -37,6 +37,9 @@ export class PostgresRetention {
       await transaction.deleteFrom("mutation_requests")
         .where("created_at", "<", new Date(now.valueOf() - MUTATION_REPLAY_MS))
         .execute();
+      await transaction.deleteFrom("whole_trip_plan_proposals")
+        .where("expires_at", "<=", now)
+        .execute();
       for (const rule of rateLimitRetentionRules()) {
         await transaction.deleteFrom("rate_limit_windows")
           .where("scope", "like", rule.scopePattern)

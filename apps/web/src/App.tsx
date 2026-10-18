@@ -33,12 +33,14 @@ import { auth } from "./locales/zh-TW/auth";
 import { DiscoveryWorkspace } from "./DiscoveryWorkspace";
 import { TripSkeletonWorkspace } from "./TripSkeletonWorkspace";
 import { TripPlaceWorkspace } from "./TripPlaceWorkspace";
+import { TripPlanningSettings } from "./TripPlanningSettings";
 import { TravelWorkspace } from "./TravelWorkspace";
 import { useI18n, type Messages } from "./i18n";
 import { canArrangeItinerary } from "./trip-permissions";
 import { parseTripSkeletonResponse, type TripSkeletonResponse } from "@along-the-way/contracts/trip-skeleton";
 import { parseTripPlaceListResponse, type TripPlaceListResponse } from "@along-the-way/contracts/trip-places";
 import { TodayWorkspace } from "./TodayWorkspace";
+import type { WholeTripPlannerLaunch } from "./WholeTripPlanning";
 import { TripOnboardingChecklist } from "./TripOnboardingChecklist";
 import { createTodayModel, tripClock } from "./today-model";
 import { PENDING_SERVER_LOGOUT_STORAGE_KEY, TodaySnapshotStore, TODAY_SCHEMA_VERSION, TODAY_SIGNED_OUT_STORAGE_KEY, type TodaySnapshot } from "./today-snapshot";
@@ -722,6 +724,7 @@ export function App() {
   const [signingOutEverywhere, setSigningOutEverywhere] = useState(false);
   const [trips, setTrips] = useState<TripSummaryDto[]>([]);
   const [selectedTrip, setSelectedTrip] = useState<TripDto | null>(null);
+  const [plannerLaunch, setPlannerLaunch] = useState<{ tripId: string; launch: WholeTripPlannerLaunch } | null>(null);
   const [error, setError] = useState("");
   const [adminRouteError, setAdminRouteError] = useState("");
   const [accepting, setAccepting] = useState(false);
@@ -1736,6 +1739,8 @@ export function App() {
                       placesRevision={workspaceRevision}
                       onPlacesChanged={placesChanged}
                       onTravelEdit={openTravelSegment}
+                      plannerLaunch={plannerLaunch?.tripId === selectedTrip.id ? plannerLaunch.launch : null}
+                      onPlannerLaunchConsumed={() => setPlannerLaunch(null)}
                     />
                   </div>
                 ) : itinerarySegment === "flight" ? (
@@ -1743,10 +1748,24 @@ export function App() {
                     <TravelWorkspace key={selectedTrip.id} trip={selectedTrip} type="flight" request={request} revision={workspaceRevision}
                       onChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }} />
                   </div>
-                ) : (
+                ) : itinerarySegment === "lodging" ? (
                   <div id="itinerary-segment-panel-lodging" role="tabpanel" aria-labelledby="itinerary-segment-lodging">
                     <TravelWorkspace key={selectedTrip.id} trip={selectedTrip} type="lodging" request={request} revision={workspaceRevision}
                       onChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }} />
+                  </div>
+                ) : (
+                  <div id="itinerary-segment-panel-settings" role="tabpanel" aria-labelledby="itinerary-segment-settings">
+                    <TripPlanningSettings
+                      key={selectedTrip.id}
+                      tripId={selectedTrip.id}
+                      revision={workspaceRevision}
+                      canEdit={canArrangeItinerary(selectedTrip)}
+                      request={request}
+                      onCreateReplanDraft={(drafts) => {
+                        setPlannerLaunch({ tripId: selectedTrip.id, launch: drafts });
+                        selectSegment("itinerary", "daily");
+                      }}
+                    />
                   </div>
                 )}
               </div>

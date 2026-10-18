@@ -18,6 +18,8 @@ x-worker-environment: &worker-environment
   SMTP_REQUIRE_TLS: "${SMTP_REQUIRE_TLS:-true}"
   SMTP_USERNAME: "${SMTP_USERNAME:-}"
   SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+  OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+  OPENAI_MODEL: "${OPENAI_MODEL:-gpt-5.5}"
 
 x-default-logging: &default-logging
   driver: json-file

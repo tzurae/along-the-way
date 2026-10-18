@@ -43,6 +43,13 @@ import { safeExternalUrl } from "./external-url";
 import "./plan-route.css";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import { readTripOverviewFilter, TRIP_OVERVIEW_FILTER_CHANGE_EVENT, writeTripOverviewFilter } from "./trip-location";
+import {
+  PlanningDaySummary,
+  WholeTripPlannerButton,
+  WholeTripPlanningOverlays,
+  WholeTripPlanningProvider,
+  type WholeTripPlannerLaunch,
+} from "./WholeTripPlanning";
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -51,10 +58,12 @@ interface RequestOptions extends RequestInit {
 
 type JsonRequest = <T>(url: string, options?: RequestOptions) => Promise<T>;
 
-interface TripSkeletonWorkspaceProps {
+export interface TripSkeletonWorkspaceProps {
   trip: TripDto;
   request: JsonRequest;
   placesRevision: number;
+  plannerLaunch?: WholeTripPlannerLaunch | null;
+  onPlannerLaunchConsumed?(): void;
   onPlacesChanged(): void;
   onTravelEdit(type: "flight" | "lodging"): void;
 }
@@ -372,6 +381,8 @@ export function TripSkeletonWorkspace({
   trip,
   request,
   placesRevision,
+  plannerLaunch,
+  onPlannerLaunchConsumed,
   onPlacesChanged,
   onTravelEdit,
 }: TripSkeletonWorkspaceProps) {
@@ -506,6 +517,18 @@ export function TripSkeletonWorkspace({
     () => new Map(skeleton?.items.map((item) => [item.id, item]) ?? []),
     [skeleton?.items],
   );
+  const plannerFlightDayIds = useMemo(() => new Set(
+    skeleton?.days
+      .filter((day) => day.entries.some((entry) => itemsById.get(entry.itemId)?.type === "flight"))
+      .map((day) => day.id) ?? [],
+  ), [itemsById, skeleton?.days]);
+  const planningEntityNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const place of tripPlaces) names.set(place.id, place.name);
+    for (const place of skeleton?.places ?? []) names.set(place.id, place.name);
+    for (const item of skeleton?.items ?? []) names.set(item.id, item.title);
+    return names;
+  }, [skeleton?.items, skeleton?.places, tripPlaces]);
 
   async function savePlace(input: UpdatePlaceInput, place: PlaceDto, conflictBase?: number) {
     if (!skeleton) throw new Error(t.tripSkeleton.loadingError);
@@ -1008,11 +1031,35 @@ export function TripSkeletonWorkspace({
     writeTripOverviewFilter(days);
   }
   return (
-    <>
+    <WholeTripPlanningProvider
+      tripId={trip.id}
+      request={request}
+      days={skeleton.days}
+      flightDayIds={plannerFlightDayIds}
+      entityNames={planningEntityNames}
+      hasSelectedPlaces={tripPlaces.some((place) => place.selectedForItinerary)}
+      canArrange={canArrange}
+      refreshToken={placesRevision}
+      plannerLaunch={plannerLaunch}
+      onPlannerLaunchConsumed={onPlannerLaunchConsumed}
+      onEditPlace={(placeId) => {
+        setRepairingPlaceId(placeId);
+        setError("");
+      }}
+      onApplied={async () => {
+        await load();
+        onPlacesChanged();
+      }}
+    >
       <section className="trip-skeleton-shell plan-workspace" aria-labelledby="itinerary-heading">
         <header className="plan-pagehead">
-          <h2 id="itinerary-heading">{t.tripSkeleton.heading}</h2>
-          <p>{t.tripSkeleton.introduction}</p>
+          <div className="plan-pagehead__main">
+            <div>
+              <h2 id="itinerary-heading">{t.tripSkeleton.heading}</h2>
+              <p>{t.tripSkeleton.introduction}</p>
+            </div>
+            <WholeTripPlannerButton />
+          </div>
         </header>
 
         {!canArrange ? (
@@ -1201,6 +1248,7 @@ export function TripSkeletonWorkspace({
                     ) : null}
                   </div>
                 </header>
+                <PlanningDaySummary dayId={day.id} />
                 {missingLodging ? (
                   <aside className="plan-lodging-notice">
                     <BedDouble aria-hidden="true" />
@@ -1478,8 +1526,8 @@ export function TripSkeletonWorkspace({
         />
 
         {repairingPlace ? renderLocationEditor(repairingPlace, true) : null}
-
+        <WholeTripPlanningOverlays />
       </section>
-    </>
+    </WholeTripPlanningProvider>
   );
 }

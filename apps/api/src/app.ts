@@ -39,6 +39,14 @@ import type {
 } from "@along-the-way/contracts/admin";
 import type { DiscoveryModule } from "./discovery/discovery-module";
 import type { DayPlanModule } from "./planning/postgres-day-plan-module";
+import type { PlanningSettingsModule } from "./planning/postgres-planning-settings-module";
+import type { WholeTripPlanModule } from "./planning/postgres-whole-trip-plan-module";
+import {
+  parseDeletePlanningOverrideInput,
+  parsePlanningDrafts,
+  parsePutPlanningOverrideInput,
+  parsePutPlanningSettingsInput,
+} from "@along-the-way/contracts/planning";
 
 import {
   AppError,
@@ -79,6 +87,8 @@ export interface AppDependencies {
   appVersion?: string;
   placeDetails: PlaceDetailModule;
   placeGuides?: PlaceGuideModule;
+  planningSettings?: PlanningSettingsModule;
+  wholeTripPlans?: WholeTripPlanModule;
   rateLimiter: RateLimiter;
   readiness: ReadinessProbe;
   siteAddress: string;
@@ -305,9 +315,15 @@ function tripPlaceInput(body: Record<string, unknown>): CreateTripPlaceInput {
 function planningInput(
   body: Record<string, unknown>,
 ): UpdateTripPlacePlanningInput {
+  const effortLevel = optionalNumberField(body, "effortLevel");
+  if (effortLevel !== undefined && effortLevel !== null
+    && (!Number.isInteger(effortLevel) || effortLevel < 1 || effortLevel > 5)) {
+    throw new AppError("validation_error", "effortLevel must be an integer from 1 to 5 or null");
+  }
   return {
     expectedVersion: numberField(body, "expectedVersion"),
     durationMinutes: optionalNumberField(body, "durationMinutes"),
+    ...(effortLevel === undefined ? {} : { effortLevel }),
     budgetAmountMinor: optionalNumberField(body, "budgetAmountMinor"),
     budgetCurrency: optionalStringField(body, "budgetCurrency"),
     notes: optionalStringField(body, "notes"),
@@ -399,6 +415,14 @@ async function jsonBody(context: Context) {
   }
 }
 
+function planningRequest<T>(parse: (value: unknown) => T, value: unknown): T {
+  try {
+    return parse(value);
+  } catch {
+    throw new AppError("validation_error", "行程設定格式不正確");
+  }
+}
+
 export function createApp({
   appVersion = "unknown",
   collaboration,
@@ -410,6 +434,8 @@ export function createApp({
   mapsConfig = { browserKey: null, mapId: null },
   placeDetails,
   placeGuides,
+  planningSettings,
+  wholeTripPlans,
   rateLimiter,
   readiness,
   siteAddress,
@@ -1315,6 +1341,91 @@ export function createApp({
     },
   );
 
+  app.get("/api/trips/:tripId/planning-settings", async (context) => {
+    const { user } = await authenticated(context);
+    if (!planningSettings) throw new AppError("service_unavailable", "Planning settings are unavailable", 503);
+    context.header("Cache-Control", "private, no-store");
+    return context.json(await planningSettings.getSettings(user.id, uuidParam(context, "tripId")));
+  });
+
+  app.put("/api/trips/:tripId/planning-settings", async (context) => {
+    const { user } = await authenticated(context);
+    if (!planningSettings) throw new AppError("service_unavailable", "Planning settings are unavailable", 503);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const input = planningRequest(parsePutPlanningSettingsInput, await jsonBody(context));
+    return context.json(await planningSettings.putSettings(user.id, uuidParam(context, "tripId"), idempotencyKey(context), input));
+  });
+
+  app.get("/api/trips/:tripId/days/:dayId/planning-override", async (context) => {
+    const { user } = await authenticated(context);
+    if (!planningSettings) throw new AppError("service_unavailable", "Planning settings are unavailable", 503);
+    context.header("Cache-Control", "private, no-store");
+    return context.json(await planningSettings.getOverride(user.id, uuidParam(context, "tripId"), uuidParam(context, "dayId")));
+  });
+
+  app.put("/api/trips/:tripId/days/:dayId/planning-override", async (context) => {
+    const { user } = await authenticated(context);
+    if (!planningSettings) throw new AppError("service_unavailable", "Planning settings are unavailable", 503);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const input = planningRequest(parsePutPlanningOverrideInput, await jsonBody(context));
+    return context.json(await planningSettings.putOverride(
+      user.id, uuidParam(context, "tripId"), uuidParam(context, "dayId"), idempotencyKey(context), input,
+    ));
+  });
+
+  app.delete("/api/trips/:tripId/days/:dayId/planning-override", async (context) => {
+    const { user } = await authenticated(context);
+    if (!planningSettings) throw new AppError("service_unavailable", "Planning settings are unavailable", 503);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const input = planningRequest(parseDeletePlanningOverrideInput, await jsonBody(context));
+    return context.json(await planningSettings.deleteOverride(
+      user.id, uuidParam(context, "tripId"), uuidParam(context, "dayId"), idempotencyKey(context), input,
+    ));
+  });
+
+  app.get("/api/trips/:tripId/planning-load", async (context) => {
+    const { user } = await authenticated(context);
+    if (!planningSettings) throw new AppError("service_unavailable", "Planning settings are unavailable", 503);
+    context.header("Cache-Control", "private, no-store");
+    return context.json(await planningSettings.getLoad(user.id, uuidParam(context, "tripId")));
+  });
+
+  app.post("/api/trips/:tripId/planning-load", async (context) => {
+    const { user } = await authenticated(context);
+    if (!planningSettings) throw new AppError("service_unavailable", "Planning settings are unavailable", 503);
+    const input = planningRequest(parsePlanningDrafts, await jsonBody(context));
+    context.header("Cache-Control", "private, no-store");
+    return context.json(await planningSettings.previewLoad(user.id, uuidParam(context, "tripId"), input));
+  });
+
+  app.post("/api/trips/:tripId/whole-trip-plan/preview", async (context) => {
+    const { user } = await authenticated(context);
+    if (!wholeTripPlans) throw new AppError("service_unavailable", "Whole-trip planning is unavailable", 503);
+    const proposal = await wholeTripPlans.preview(
+      user.id, uuidParam(context, "tripId"), await jsonBody(context),
+      () => rateLimiter.consume("whole_trip_plan_preview", clientIp(context), user.id),
+    );
+    context.header("Cache-Control", "private, no-store");
+    return context.json({ proposal }, 201);
+  });
+
+  app.get("/api/trips/:tripId/whole-trip-plan/proposals/:proposalId", async (context) => {
+    const { user } = await authenticated(context);
+    if (!wholeTripPlans) throw new AppError("service_unavailable", "Whole-trip planning is unavailable", 503);
+    const proposal = await wholeTripPlans.getProposal(user.id, uuidParam(context, "tripId"), uuidParam(context, "proposalId"));
+    context.header("Cache-Control", "private, no-store");
+    return context.json({ proposal });
+  });
+
+  app.post("/api/trips/:tripId/whole-trip-plan/proposals/:proposalId/apply", async (context) => {
+    const { user } = await authenticated(context);
+    if (!wholeTripPlans) throw new AppError("service_unavailable", "Whole-trip planning is unavailable", 503);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    return context.json(await wholeTripPlans.apply(
+      user.id, uuidParam(context, "tripId"), uuidParam(context, "proposalId"), idempotencyKey(context),
+    ));
+  });
+
   app.post(
     "/api/trips/:tripId/days/:dayId/route",
     async (context) => {
@@ -1705,6 +1816,7 @@ export function createApp({
               ? {}
               : { currentVersion: error.currentVersion }),
             ...(latestChange === undefined ? {} : { latestChange }),
+            ...(error.changedEntityIds === undefined ? {} : { changedEntityIds: error.changedEntityIds }),
           },
         },
         error.status,

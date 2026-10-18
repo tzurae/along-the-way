@@ -20,7 +20,8 @@ export type RateLimitedAction =
   | "place_photo"
   | "place_photo_metadata"
   | "discovery_ai"
-  | "place_guide_generation";
+  | "place_guide_generation"
+  | "whole_trip_plan_preview";
 export type PaidProvider = "google_places" | "google_maps_js";
 export interface AppRateLimitUsage {
   googlePlacesToday: number;
@@ -64,6 +65,7 @@ const RULES: Record<RateLimitedAction, Rule> = {
   },
   discovery_ai: { windowSeconds: 60 * 60, ipLimit: 6, accountLimit: 10 },
   place_guide_generation: { windowSeconds: 60 * 60, accountLimit: 30 },
+  whole_trip_plan_preview: { windowSeconds: 60, accountLimit: 10 },
 };
 
 // Paid-provider budgets deliberately leave headroom below their Google Cloud project quotas.
@@ -102,6 +104,10 @@ export function rateLimitRetentionRules() {
       scopePattern: `${action}:%`,
       windowSeconds: rule.windowSeconds,
     })),
+    {
+      scopePattern: "place_planning_profile_generation:%",
+      windowSeconds: 24 * 60 * 60,
+    },
     {
       scopePattern: "paid_provider:google_places:%",
       windowSeconds: PAID_PROVIDER_WINDOW_SECONDS,

@@ -61,6 +61,7 @@ export const app = {
     daily: "總覽",
     flight: "航班",
     lodging: "住宿",
+    settings: "設定",
   },
   placesSegments: {
     wishlist: "口袋名單",

@@ -4,6 +4,8 @@ import { createDatabase, requireDatabaseUrl } from "./database/database";
 import { OpenAiResponsesDiscoveryModel } from "./discovery/openai-responses-discovery-model";
 import { PostgresDiscoveryModule } from "./discovery/postgres-discovery-module";
 import { PostgresDayPlanModule } from "./planning/postgres-day-plan-module";
+import { PostgresPlanningSettingsModule } from "./planning/postgres-planning-settings-module";
+import { PostgresWholeTripPlanModule } from "./planning/postgres-whole-trip-plan-module";
 import { PostgresIdentityAccessModule } from "./private-trips/postgres-identity-access-module";
 import { PostgresRateLimiter } from "./private-trips/postgres-rate-limiter";
 import { PostgresReadinessProbe } from "./private-trips/postgres-readiness-probe";
@@ -115,6 +117,8 @@ const app = createApp({
     photoCapabilitySecret: tokenSecret,
   }),
   placeGuides,
+  planningSettings: new PostgresPlanningSettingsModule({ database }),
+  wholeTripPlans: new PostgresWholeTripPlanModule({ database }),
   rateLimiter,
   readiness,
   siteAddress,
