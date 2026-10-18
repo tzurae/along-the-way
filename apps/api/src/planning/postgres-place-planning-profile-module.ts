@@ -270,7 +270,7 @@ export class PostgresPlacePlanningProfileWorker {
     return claimed.length;
   }
 
-  private claimNext() {
+  private claimNext(): Promise<ClaimedProfile | null> {
     const now = this.now();
     const staleBefore = new Date(now.valueOf() - CLAIM_STALE_MILLISECONDS);
     return this.options.database.transaction().execute(async (transaction) => {
@@ -354,7 +354,7 @@ export class PostgresPlacePlanningProfileWorker {
         previousEvidenceHash: candidate.previousEvidenceHash,
         previousInputHash: candidate.previousInputHash,
         token,
-      } satisfies ClaimedProfile;
+      };
     });
   }
 

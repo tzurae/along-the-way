@@ -702,6 +702,9 @@ function OverrideSheet() {
 
   if (!overrideDayId || !day || !dayRef || !inherited) return null;
   const effective = resolvePlanningSettings(inherited, draft, false);
+  // Hoisted function declarations below do not keep the guard's narrowing; bind the narrowed values.
+  const openDayId: string = overrideDayId;
+  const openDay: PlanningDayLoadDto = day;
 
   function chooseShortcut(next: ShortcutKind) {
     setKind(next);
@@ -712,8 +715,8 @@ function OverrideSheet() {
       // §1: absolute values from the day's current (saved) effective caps, not the live draft, so
       // pressing twice never compounds. Fields the shortcut does not touch keep their saved
       // override, otherwise dropping e.g. a saved lower hop cap would raise it back.
-      const saved = day!.override ?? EMPTY_PLANNING_OVERRIDE;
-      const shortcut = shortcutOverride(day!.caps, next);
+      const saved = openDay.override ?? EMPTY_PLANNING_OVERRIDE;
+      const shortcut = shortcutOverride(openDay.caps, next);
       setDraft(Object.fromEntries(OVERRIDABLE_PLANNING_FIELDS.map((field) => [field, shortcut[field] ?? saved[field]])) as PlanningOverride);
     }
   }
@@ -747,14 +750,14 @@ function OverrideSheet() {
     const values = reset ? null : draft;
     try {
       if (!force) {
-        const preview = await previewOverride(overrideDayId, day.overrideVersion ?? 0, values);
+        const preview = await previewOverride(openDayId, openDay.overrideVersion ?? 0, values);
         if (preview && preview.status !== "valid") {
           setImpact(preview);
           return;
         }
       }
       if (!saveKey.current) saveKey.current = crypto.randomUUID();
-      await saveOverride(overrideDayId, day.overrideVersion ?? 0, values, saveKey.current);
+      await saveOverride(openDayId, openDay.overrideVersion ?? 0, values, saveKey.current);
       notify("success", reset ? "這天已改回沿用旅程設定。" : "已儲存這天的設定。");
       closeOverride();
       await refresh();
@@ -772,7 +775,7 @@ function OverrideSheet() {
     await createPreview({
       mode: "replan",
       useAi: true,
-      draftOverrides: [{ dayId: overrideDayId, expectedVersion: day.overrideVersion ?? 0, values: reset ? null : draft }],
+      draftOverrides: [{ dayId: openDayId, expectedVersion: openDay.overrideVersion ?? 0, values: reset ? null : draft }],
     });
   }
 
