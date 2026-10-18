@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Youtube } from "lucide-react";
+// lucide-react 1.x dropped brand icons; a generic play icon marks the YouTube link.
+import { CirclePlay } from "lucide-react";
 
 import {
   parsePlaceGuideResponse,
@@ -128,7 +129,7 @@ export function TodayPlaceGuide({ tripId, reference, placeName, request }: {
       ) : null}
       {phase === "empty" ? <p className="today-place-guide__empty">{t.today.guide.unavailable}</p> : null}
       <a className="today-place-guide__youtube" href={youtubeHref} target="_blank" rel="noreferrer">
-        <Youtube aria-hidden="true" className="size-4" />
+        <CirclePlay aria-hidden="true" className="size-4" />
         {t.today.guide.youtube}
       </a>
     </section>
