@@ -875,6 +875,8 @@ export function TripPlaceWorkspace({
     }
     candidateRefreshTimer.current = window.setTimeout(() => {
       candidateRefreshTimer.current = null;
+      // Auto-applied photos leave no pending candidate; refresh previews and any open detail too.
+      setCandidatePhotoRevision((current) => current + 1);
       void refreshCommonsCandidates().catch(() => undefined);
     }, 16_000);
   }

@@ -4,7 +4,7 @@
 
 本分支實作 [正式規格](../superpowers/specs/2026-10-09-place-details-and-photos-design.md) 的 B 體驗：清單小縮圖、詳情相簿、逐張資訊及完整照片檢視器。景點文字、來源、照片及權限由正式 API／PostgreSQL 供應，不使用 POC 的本機假資料。
 
-目前正在隔離環境完成行為驗收與修復；這不是部署完成宣告。未直接觀察的驗收項目仍是 `UNVERIFIED`。此次不修改真實旅程，不 commit／push／建立 PR／部署。驗收帳號、登入 cookie、資料庫密碼只保存在隔離環境，不能加入 repository。
+現行讀取規則已依 #149 與 2026-10-18 owner 核准的 Commons 候選流程更新。這不是部署完成宣告；本次依 RULES.md rule 9 不跑本機測試或 browser，檢查交給 PR 的 Verify CI。實際圖片、付費 API 與正式資料行為仍是 `UNVERIFIED`。下方「歷史驗收與追蹤」保留早期證據，不代表 #149 已通過那些情境。帳號、登入 cookie、資料庫密碼不能加入 repository。
 
 不包含：照片上傳、旅程相簿、任意景點自動研究、抓取 Google Maps 網頁圖片、公開圖片網址，或改動投票／排程／導航／成員權限演算法。既有 Google Maps 網頁外連不作為圖片抓取來源；下述 Google Places (New) Photos fallback 是經驗證、私有代理的獨立路徑。
 
@@ -23,16 +23,16 @@
 GET /api/trips/:tripId/place-details?kind=trip-place&id=<UUID>&date=YYYY-MM-DD
 GET /api/trips/:tripId/place-previews?kind=trip-place&ids=<UUID>,<UUID>
 GET /api/trips/:tripId/place-photo-assets/<sha256>.jpg?kind=trip-place&id=<UUID>
-GET /api/trips/:tripId/google-place-photos/<providerPlaceId>?index=0|1|2&photo=<photoFingerprint>&maxWidth=192|1024[&exp=<unixSeconds>&sig=<base64urlHmac>]
+GET /api/trips/:tripId/google-place-photos/<providerPlaceId>?index=0|1|2&photo=<photoFingerprint>&resource=<photoToken>&maxWidth=192|1024&exp=<unixSeconds>&sig=<base64urlHmac>
 ```
 
-`kind` 亦接受 `proposal`、`itinerary-place`。詳情回傳 `{ detail }`，其中策展 `photos` 與 Google `googlePhotos` 各為 0–3 張且不得同時非空；縮圖預覽回傳 `{ previews }`，每項包含首張 `photo`（沒有則為 null）及 capped `photoCount` 0–3。契約與嚴格 parser 位於 `packages/contracts/src/place-details.ts`。日期必須是實際存在的完整日曆日期；省略日期不表示來源已證實當日有效。
+`kind` 亦接受 `proposal`、`itinerary-place`。詳情回傳 `{ detail }`，其中 curated／Commons `photos` 與 Google `googlePhotos` 各為 0–3 張且不得同時非空；`photosUnavailable` 區分 Google fallback 失敗與真的沒有照片，`commonsPhotoReportable` 標示目前代表照片能否檢舉。縮圖預覽回傳 `{ previews }`，每項只有 curated／Commons 首張 `photo`（沒有則 null）及 capped `photoCount` 0–3，絕不回 Google DTO。契約與嚴格 parser 位於 `packages/contracts/src/place-details.ts`。日期必須是實際存在的完整日曆日期；省略日期不表示來源已證實當日有效。
 
-每條 route 先驗證登入與有效旅程成員資格，再解析同一旅程的 reference。策展照片路徑中的雜湊不是公開存取憑證：仍需登入、旅程成員資格，以及該 reference 對應照片的關聯；其回應使用 private／no-store。Google 照片代理同樣要求旅程成員資格，且 provider place id 必須已關聯同旅程的口袋地點／提案，或 URL 帶有綁定同一旅程、同一使用者、provider place id、照片 index、fingerprint 與到期時間的 HMAC capability。代理另按帳號每小時 600 次、IP 每小時 1,200 次限流，回應使用 `Cache-Control: private, max-age=86400` 及 `X-Content-Type-Options: nosniff`。未知檔案、缺失或毀損不冒充正常圖片。
+每條 route 先驗證登入與有效旅程成員資格，再解析同一旅程的 reference。策展照片雜湊不是公開憑證：仍需登入、旅程成員資格，以及 reference 與照片的關聯；其回應使用 private／no-store。Google 代理一律要求綁定旅程、使用者、provider place id、index、fingerprint、完整 photo resource 與到期時間的 HMAC capability，不能只憑地點已屬於旅程略過驗章。代理按帳號每小時 600 次、IP 每小時 1,200 次限流，回應使用 `Cache-Control: private, max-age=86400` 及 `X-Content-Type-Options: nosniff`。未知檔案、缺失或毀損不冒充正常圖片。
 
 已接受提案優先使用 `accepted_trip_place_id` 的 canonical identity；未接受提案的 Google provider id 直接來自該提案，無須為顯示照片建立 `place_identities`。legacy 行程地點只能經同旅程既有 `trip_places.legacy_place_id` 關聯解析。地點名稱不作為身分匹配鍵；不建立或合併身分來湊內容。手動地點、未知店、同名分店及未關聯的 travel-only 地點不借用其他地點的內容或照片；原有可確認的行程資料仍保留。
 
-完整策展內容與依 position 排序的前三張照片由同一 SQL statement 讀取 publication snapshot，且在 JSON aggregation 前即限制為 3，避免一個詳情混用兩次匯入的資料或在應用程式載入其餘作品。預覽批次只取首張策展 metadata 及 capped count；僅對沒有任何策展照片且具有 Google provider identity 的項目，以最大並行數 4 各做一次 Google `photos` metadata 查詢，同時產生首張預覽與 `photoCount`。單一供應商失敗只使該項 fallback 為空，不使整批失敗。
+完整策展內容與依 position 排序的前三張照片由同一 SQL statement 讀取 publication snapshot，且在 JSON aggregation 前即限制為 3。預覽批次只取首張策展 metadata 及 capped count，沒有策展照片時查儲存的 Commons 代表照片，再沒有就回 null。三種 reference 都不呼叫 Google、不消耗 `place_photo_metadata` 額度。詳細照片才走下述 Google fallback。
 
 ## 經人工查核的 catalog
 
@@ -46,15 +46,26 @@ catalog 不會在啟動時依名稱自動套用。營運者必須逐一確認現
 
 ## Google Places 照片 fallback
 
-經人工查核的 catalog 對已加入旅程的預覽與詳情永遠優先；只要 catalog 有一張照片，就回傳依 position 排序的最多三張策展照片及零張 Google 照片，不以 Google 補滿。catalog 為零張時，一次 Google Places (New) metadata 查詢按上游順序驗證前三張並回傳 `googlePhotos[0..2]`；前三張任一 metadata 無效時整組 fallback 為空，不能壓縮陣列而改變安全 index。預覽只攜帶 index 0 DTO 與同一批資料的 capped `photoCount`。加入前的搜尋結果維持單張照片，固定為 Google index 0。所有 client URL 都是同源 `/api/trips/.../google-place-photos/...`，不包含 Google API key。
+策展照片優先，其次是已儲存的 Commons 代表照片，不以 Google 補滿。只有詳情兩者都沒有且具有 provider identity 時，才用一次 Google Places (New) metadata 查詢取得前三張 `googlePhotos[0..2]`；前三張任一 metadata 無效時整組失敗，不能壓縮陣列改變 index。加入前的主動搜尋仍可顯示 index 0 照片，候選比較由使用者開啟後讀詳情。所有 client URL 都是同源 `/api/trips/.../google-place-photos/...`，不包含 Google API key。
 
-每張 Google DTO 的 `index` 為 `0 | 1 | 2`，ID 為 `google:<providerPlaceId>:<index>:<fingerprint>`，縮圖與大圖 URL 都包含相同的 index、fingerprint，以及（若有）完全相同的 capability。未加入地點的 URL 另含 `exp` 與 `sig`：`sig` 是 `TOKEN_SECRET` 對 `tripId|userId|providerPlaceId|index|fingerprint|exp` 的 HMAC-SHA256 base64url，`exp` 固定為簽發當日之下一個 UTC 日結束，因此同一天、同一張照片簽發的 URL 穩定且可供瀏覽器快取；改 index、改 fingerprint、過期、跨旅程或換使用者皆在 provider／media 呼叫前回 404。
+每張 Google DTO 的 `index` 為 `0 | 1 | 2`，ID 為 `google:<providerPlaceId>:<index>:<fingerprint>`。縮圖與大圖 URL 必須帶相同的 index、fingerprint、resource、exp、sig。`sig` 是 `TOKEN_SECRET` 對 `tripId|userId|providerPlaceId|index|fingerprint|photoName|exp` 的 HMAC-SHA256 base64url，其中 `photoName` 是 `places/<providerPlaceId>/photos/<resource>`。`exp` 固定為簽發當日之下一個 UTC 日結束。竄改 index、fingerprint、resource、過期、跨旅程或換使用者，均不能以原簽章取得 media。
 
-Google 對同一張照片在不同 metadata response 可能回傳不同 photo name，因此 client URL 不直接使用該不穩定名稱。DTO 以尺寸、完整作者 attribution（依序包含 display name 與 URI），以及 Google 提供時的 `googleMapsUri` 計算 SHA-256，取前 16 個小寫十六進位字元作穩定 fingerprint；index 則區分不同位置但相同 metadata 的照片。代理以 Place Details `photos` Essentials IDs Only mask 重新取得當下前三張照片，精確選取 URL 指定的 index，再比對該位置的 fingerprint；相同才以當次 photo name 和 `skipHttpRedirect=true` 取得短效 `photoUri`，缺少該 index、上游重排、署名／Maps URI 改變或 fingerprint 不符都回 404 且不取得 media。這使 provider 僅輪換不穩定 photo name 時仍保有相同 URL，可實際使用 24 小時 private browser cache。短效 URL 必須是 HTTPS `googleusercontent.com` 或其子網域；伺服器最多手動跟隨兩次且逐次重新驗證 host，只接受 JPEG、PNG 或 WebP，metadata 上限 256 KiB，圖片上限 5 MiB，圖片抓取逾時 8 秒。照片名稱、短效 URL 與圖片 bytes 不寫入 PostgreSQL、檔案或其他 server cache；只有瀏覽器依 private cache header 暫存。依 [Google Places 政策](https://developers.google.com/maps/documentation/places/web-service/policies#photos)，使用 Google 圖片時 UI 同時顯示 `Google Maps`、作者署名及該張照片自己的 Google Maps 連結。
+DTO 仍以尺寸、依序的作者 display name／URI，以及 Google 提供時的 `googleMapsUri` 計算 SHA-256 前 16 個小寫十六進位字元作 fingerprint；index 區分相同 metadata 的位置。圖片代理驗章後直接以簽發時的完整 photoName 取 media，不再 GetPlace，也不重新解讀上游排序。resource 過期由 Google media 回應映射為 404，不偷換成另一張照片。取得 `photoUri` 使用 `skipHttpRedirect=true`；短效 URL 必須是 HTTPS `googleusercontent.com` 或其子網域，最多手動跟隨兩次並逐次驗證 host，只接受 JPEG、PNG、WebP，metadata 上限 256 KiB，圖片上限 5 MiB，圖片抓取逾時 8 秒。照片名稱、短效 URL 與 bytes 不寫入 PostgreSQL、檔案或 server cache；只有瀏覽器依 private header 暫存。依 [Google Places 政策](https://developers.google.com/maps/documentation/places/web-service/policies#photos)，使用 Google 圖片時顯示 `Google Maps`、作者署名及該張照片自己的 Maps 連結。
 
-`photos` field mask 屬於 **Essentials IDs Only** SKU；依 [Google Maps Platform pricing](https://developers.google.com/maps/billing-and-pricing/pricing)（2026-10-12 查閱）不計費，但仍受供應商配額與延遲影響，因此 metadata 與 media 端點各自限流。Google Place Photo media 每月前 1,000 次免費，其後每 1,000 次 US$7（每次 US$0.007）：未命中 private browser cache 時，打開詳情只載入首張為一次 media request；看完三張為三次、免費額度後合計 US$0.021。每月 1,000 次打開若都只看首張，剛好用完免費池；若每次看完三張，共 3,000 次，扣除前 1,000 次後為 US$14。卡片 192px 縮圖是另一個 media request；照片數 badge 本身不發 request。
+`photos` field mask 屬於 **Essentials IDs Only** SKU；依 [Google Maps Platform pricing](https://developers.google.com/maps/billing-and-pricing/pricing)（2026-10-12 查閱）不計費，但仍受配額與延遲影響。當時 Google Place Photo media 每月前 1,000 次免費，其後每 1,000 次 US$7（每次 US$0.007）：未命中 browser cache 時，詳情只看首張是一次 media，看完三張為三次、免費額度後合計 US$0.021。每月 1,000 次打開若都只看首張，剛好用完免費池；若都看三張，3,000 次扣免費後為 US$14。這是有日期的價格紀錄，不是重新查價。口袋／AI／今天清單不載入 Google media；主動搜尋結果的 192px Google 縮圖仍是另一個 media request，照片數 badge 不發 request。
 
-本 Google Cloud project 另有 `GetPlaceRequest per day = 300` 的硬上限。未命中 HTTP cache 時，每個需要 Google fallback 的預覽 batch entry 會用一次 Place Details、每次 Google detail 會用一次，且每張 media proxy 請求為驗證目前 index／fingerprint 還會再用一次。成功且沒有任何 rate-limit／上游失敗降級的 `/place-previews` 與 `/place-details` 回應使用 `Cache-Control: private, max-age=3600`，讓同一使用者一小時內重用結果；任一 Google lookup 失敗或 metadata rate limit 降級時維持 `private, no-store`，避免把暫時缺圖快取一小時並允許後續視圖重試。media proxy 仍使用既有 `private, max-age=86400`。
+#149 記錄 2026-10-18 的 `GetPlaceRequest` quota 為 2,000/day。新版清單 preview 用零次 Google；詳情 fallback 一次 metadata；media 不再追加 GetPlace。`/place-previews` 使用 `Cache-Control: private, max-age=3600`；`/place-details` 另加 `Vary: Cookie`，正常時 private/max-age=3600，`photosUnavailable` 時 private/no-store，避免快取暫時失敗。UI 顯示「照片暫時無法載入」，不誤稱沒有照片。media 仍是 private/max-age=86400。
+
+## Commons 候選與檢舉
+
+依序部署 `032_commons_photo_candidates`、`033_commons_candidate_names`；後者加入 `names`、`instance_of` 與 `auto_applied`。strict CID backfill 只讀既存 source URL，列出 no_cid、no_item、multiple_items、no_p18、licence_rejected、error 或 matched，完全不查 Google。候選搜尋另用多語 label／alias 與 1 km 座標範圍；只保留有名稱關聯、P18 及合格 Commons 授權／rendition 的候選。
+
+自動套用限 worship／nature／museum，必須 exact normalized label／alias、類型相容、已知距離 ≤300 m，且只有一個合格候選。其他候選使用左右對照由成員確認／拒絕。`--refresh` 更新候選 facts，移除無關 pending，保留 confirmed／rejected 決定。回填命令與部署前提見 [README](../../README.md#commons-candidate-backfill-migrations-032033)。
+
+`GET /api/trips/:tripId/commons-candidates` 讀候選；`POST .../commons-candidates/:candidateId/decision` 接受 confirm／reject；`GET .../commons-candidates/:candidateId/assets/:filename` 讀受保護圖片。`POST /api/trips/:tripId/trip-places/:tripPlaceId/commons-photo/report` 在同一交易刪除 Commons 代表照片並標為 rejected；strict store／候選決定／檢舉共用 identity-first lock，避免被拒絕照片又寫回。web 搭配 `commonsPhotoReportable`、trip-place reference 與編輯權限顯示「這不是正確的圖片？」。已無照片回 409，其他候選可繼續比對。
+
+新增地點後的 16 秒 refresh 同時更新候選、no-cache preview 與已開啟的詳情。背景 auto_applied 不會留下 pending 候選，所以不能只靠候選 banner 更新圖片。
+
 
 ## 營運者匯入
 
@@ -104,7 +115,7 @@ Bindings 格式：
 
 相簿支持零／一／兩／多張；署名與完整資訊對應選中的作品。照片網路失敗只影響該作品，詳情文字及其他照片不等待它。56px 小資訊列必須是主詳情捲動的一部分，沒有內層垂直捲動；截斷的摘要不能取代完整資訊入口。放大／關閉不得改動加入原因、投票、行程或其版本。
 
-Today snapshot schema version 4 保留行程 endpoint 的 legacy Place reference，以及每位歷史參與者已知的移除狀態；wishlist 沿用已足夠的 TripPlace `id`，不額外保存未使用的 canonical `placeId`。合格 version 2／3 在同帳號及 exact-key 檢查下嚴格遷移到 version 4：version 2 缺少的 endpoint reference 為 null，兩個舊版本缺少的 participant removal status 也為 null，不靠名稱、座標或其他快照猜 identity／狀態。遷移結果通過完整驗證後，即使 `setItem` 因 quota 失敗，也返回可讀的記憶體結果並保留原始快照；不能將寫入失敗當成資料損壞而刪除。照片或 optional 詳情失敗不使核心 projection／snapshot 作廢。離線不發起 authenticated 詳情讀取。
+Today snapshot schema version 6 保留 endpoint 的 legacy Place reference、歷史參與者移除狀態、wishlist routing facts 與地點 type。wishlist 沿用 TripPlace `id`，不存未使用的 canonical `placeId`。合格 version 2／3／4／5 在同帳號、exact-key 檢查後遷移到 6：version 2 缺少的 endpoint reference、version 2／3 缺少的 participant removal、version 2–4 缺少的 wishlist routing facts、version 2–5 缺少的 place type 保持 null，不從別份快照猜測。遷移通過完整驗證後，即使 `setItem` 因 quota 失敗，也返回可讀記憶體結果並保留原值。照片或 optional 詳情失敗不使核心 snapshot 作廢；Google metadata 不進 snapshot，離線不發起 authenticated 詳情讀取。
 
 資訊列使用固定 CSS pixels，而非隨 root 字級成長的 rem 高度；兩列摘要之外，完整資訊控制占滿獨立的 56px 欄位。檢視器明確覆寫共用 Dialog 的 responsive max-width，且 metadata 欄寬同時受可用寬度比例與最大寬度限制，不能把圖片欄擠到零。metadata 標籤／內容依自身 container 寬度排版，不以整個 viewport 推定狹窄側欄能放兩欄。
 
@@ -112,7 +123,9 @@ Today snapshot schema version 4 保留行程 endpoint 的 legacy Place reference
 
 口袋名單／建議頁／Today 按實際 section container 寬度切換雙欄，不能僅按整個 viewport 假定有空間容納 rem 側欄。入口保存原視窗位置，關閉時先無捲動地恢復焦點，再還原該位置；閱讀不改寫任何投票或排程資料。
 
-## 驗收與追蹤
+## 歷史驗收與追蹤（#149 之前）
+
+本節保留早期實作的驗收、暫存證據與當時工作狀態；不代表這次 #149／候選流程已跑過相同檢查。這次實際 CI 結果記在 release PR，owner browser 驗證仍是 `UNVERIFIED`。
 
 已直接觀察：真實 magic-link／Mailpit 登入、正式建旅程 API、營運者 CLI 匯入與禁止重指、三 reference 內容一致、匿名401、非法日曆400、同名／未知空內容、季節時段修前修後 HTTP、零／一／兩張、過期／衝突頁面、三入口相同七節正文、原生手機 1→2→3→2→1 及 56px／正文位置穩定。獨立 backend verifier 比對 56 次 authenticated 展示／縮圖回應（另 56 次匿名拒絕），並核對下列十份 Commons 永久版本；二十個 packaged JPEG 逐檔與官方 Commons 衍生檔 SHA-256 相等。
 

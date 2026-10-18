@@ -297,6 +297,19 @@ describe("Commons representative photos chosen by Google CID at intake", () => {
     expect((await preview(place)).photo?.source ?? null).toBe(auto ? "commons" : null);
   });
 
+  it("applies a previously pending photo when refreshed facts become a unique exact match", async () => {
+    const place = await addPlace(`${Date.now()}8`);
+    await database.updateTable("trip_places").set({ place_type: "worship" }).where("id", "=", place.id).execute();
+    candidateFacts = [{ id: "Q714828", name: "受控神社庭園", typeId: "Q34627", latitude: 35 }];
+    expect((await commonsCandidates.generate(place.placeId)).outcome).toBe("generated");
+    expect((await preview(place)).photo).toBeNull();
+    candidateFacts[0]!.name = "受控神社";
+    expect((await commonsCandidates.refresh(place.placeId)).outcome).toBe("auto_applied");
+    expect((await preview(place)).photo?.source).toBe("commons");
+    const listed = await app.request(`/api/trips/${tripId}/commons-candidates`, { headers: { cookie } });
+    expect(parseCommonsCandidatesResponse(await listed.json()).candidates).toEqual([]);
+  });
+
   it.each(["strict", "auto", "manual"] as const)("report removes a %s photo and prevents its rejected candidate from reappearing", async (origin) => {
     const cid = `${Date.now()}7`;
     if (origin === "strict") scenarios.set(cid, { items: ["Q714828"], license: "cc0" });

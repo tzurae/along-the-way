@@ -949,16 +949,16 @@ so transportation is labeled unavailable rather than displaying generated route
 estimates or stale live traffic.
 
 Each successful, version-consistent read saves one localStorage snapshot per
-account and trip: `{ schemaVersion: 4, accountId, fetchedAt, model }`. The model
+account and trip: `{ schemaVersion: 6, accountId, fetchedAt, model }`. The model
 contains trip ID/name/version, the current member ID, resolved day zones, item
-IDs, separate untimed wishlist names, and allowlisted card fields. Participant
+IDs, untimed wishlist routing fields, place types, and allowlisted card fields. Participant
 labels use display name, falling back to email, only for participants in the stored
-formal items; schema 4 also retains whether each historical participant is known
+formal items; it also retains whether each historical participant is known
 to have been removed. Unused profile emails, invitations, change events, member
 profiles, drafts, credentials, provider keys and unsaved inputs are never copied.
-Compatible version-2 and version-3 snapshots migrate strictly to version 4.
-Missing endpoint place references and legacy participant-removal status remain
-`null`; migration never guesses either from names, coordinates or another snapshot.
+Compatible version-2/3/4/5 snapshots migrate strictly to version 6.
+Missing endpoint references, participant-removal status, place types and legacy
+wishlist routing facts remain `null`; migration never guesses them from another snapshot.
 If persisting that upgrade fails, the validated in-memory model remains readable
 and the original saved value is preserved. See the
 [feature migration details](docs/engineering/place-details-and-photos.md#ui失敗與-today-snapshot).
