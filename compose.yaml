@@ -178,6 +178,11 @@ services:
       GOOGLE_MAPS_MAP_ID: "${GOOGLE_MAPS_MAP_ID:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENAI_MODEL: "${OPENAI_MODEL:-gpt-5.5}"
+      ADMIN_EMAILS: "${ADMIN_EMAILS:-}"
+      GCP_MONITORING_PROJECTS: "${GCP_MONITORING_PROJECTS:-test-along:正式站,along-the-way-dev:開發}"
+      GCP_MONITORING_CREDENTIALS_FILE: "/run/secrets/gcp-monitoring.json"
+    volumes:
+      - "${GCP_MONITORING_CREDENTIALS_HOST_FILE:-./infra/gcp-monitoring.empty.json}:/run/secrets/gcp-monitoring.json:ro"
     depends_on:
       provision-app-role:
         condition: service_completed_successfully

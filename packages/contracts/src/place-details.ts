@@ -1,5 +1,3 @@
-import { isPlaceType, type PlaceType } from "./trip-skeleton";
-
 export type PlaceDetailReferenceKind = "trip-place" | "proposal" | "itinerary-place";
 
 export interface PlaceDetailReference {
@@ -73,46 +71,6 @@ export interface PlacePhotoDto extends PlacePhotoMetadata {
   height: number;
 }
 
-export interface CommonsCandidateNameDto {
-  lang: string;
-  value: string;
-}
-
-export interface CommonsCandidateInstanceOfDto {
-  id: string;
-  label: string;
-}
-
-export interface CommonsCandidateDto {
-  id: string;
-  tripPlaceId: string;
-  placeName: string;
-  placeType: PlaceType;
-  wikidataId: string;
-  label: string;
-  names: CommonsCandidateNameDto[];
-  instanceOf: CommonsCandidateInstanceOfDto[];
-  description: string | null;
-  distanceMeters: number | null;
-  photo: PlacePhotoDto;
-}
-
-export interface CommonsCandidatesResponse {
-  candidates: CommonsCandidateDto[];
-}
-
-export interface CommonsCandidateDecisionInput {
-  decision: "confirm" | "reject";
-}
-
-export interface CommonsCandidateDecisionResponse {
-  remaining: number;
-}
-
-export interface CommonsPhotoReportResponse {
-  remainingCandidates: number;
-}
-
 export interface GooglePlacePhotoDto {
   source: "google";
   index: 0 | 1 | 2;
@@ -135,7 +93,6 @@ export interface PlaceDetailDto {
   photos: PlacePhotoDto[];
   googlePhotos: GooglePlacePhotoDto[];
   photosUnavailable: boolean;
-  commonsPhotoReportable: boolean;
 }
 
 export interface PlaceDetailResponse {
@@ -396,97 +353,25 @@ export function parseCuratedPlaceManifest(value: unknown): CuratedPlaceManifest 
   };
 }
 
-function assetUrl(value: unknown, candidateId: string | null): string {
+function assetUrl(value: unknown): string {
   const url = text(value, "authenticated asset URL", 1_000);
-  if (candidateId === null) {
-    return /^\/api\/trips\/[0-9a-f-]{36}\/place-photo-assets\/[a-f0-9]{64}\.(jpg|png|webp)\?kind=(trip-place|proposal|itinerary-place)&id=[0-9a-f-]{36}$/.test(url)
-      ? url
-      : invalid("authenticated asset URL");
-  }
-  const match = /^\/api\/trips\/[0-9a-f-]{36}\/commons-candidates\/([0-9a-f-]{36})\/assets\/[a-f0-9]{64}\.(jpg|png|webp)$/.exec(url);
-  return match?.[1]?.toLowerCase() === candidateId ? url : invalid("authenticated candidate asset URL");
+  return /^\/api\/trips\/[0-9a-f-]{36}\/place-photo-assets\/[a-f0-9]{64}\.(jpg|png|webp)\?kind=(trip-place|proposal|itinerary-place)&id=[0-9a-f-]{36}$/.test(url)
+    ? url
+    : invalid("authenticated asset URL");
 }
 
-function photoDto(value: unknown, candidateId: string | null = null): PlacePhotoDto {
+function photoDto(value: unknown): PlacePhotoDto {
   const item = record(value, "photo", ["source", ...photoKeys, "imageUrl", "thumbnailUrl", "width", "height"]);
   if (item.source !== "curated" && item.source !== "commons") return invalid("licensed photo source");
   return {
     source: item.source,
     ...photoMetadata(item),
-    imageUrl: assetUrl(item.imageUrl, candidateId),
-    thumbnailUrl: assetUrl(item.thumbnailUrl, candidateId),
+    imageUrl: assetUrl(item.imageUrl),
+    thumbnailUrl: assetUrl(item.thumbnailUrl),
     width: dimension(item.width),
     height: dimension(item.height),
   };
 }
-
-export function parseCommonsCandidatesResponse(value: unknown): CommonsCandidatesResponse {
-  const response = record(value, "response", ["candidates"]);
-  if (!Array.isArray(response.candidates)) return invalid("Commons candidates");
-  return {
-    candidates: unique(response.candidates.map((value) => {
-      const item = record(value, "Commons candidate", [
-        "id", "tripPlaceId", "placeName", "placeType", "wikidataId", "label", "names",
-        "instanceOf", "description", "distanceMeters", "photo",
-      ]);
-      const id = uuid(item.id, "candidate id");
-      const placeType = item.placeType;
-      if (!isPlaceType(placeType)) return invalid("candidate place type");
-      const wikidataId = text(item.wikidataId, "Wikidata id", 20);
-      if (!/^Q[1-9][0-9]*$/.test(wikidataId)) return invalid("Wikidata id");
-      const names = unique(array(item.names, "candidate names", 100, (value) => {
-        const name = record(value, "candidate name", ["lang", "value"]);
-        return {
-          lang: text(name.lang, "candidate name language", 20),
-          value: text(name.value, "candidate name", 500),
-        };
-      }), (name) => `${name.lang}\0${name.value}`, "candidate names");
-      const instanceOf = unique(array(item.instanceOf, "candidate instance-of", 100, (value) => {
-        const type = record(value, "candidate instance-of", ["id", "label"]);
-        const typeId = text(type.id, "candidate instance-of id", 20);
-        if (!/^Q[1-9][0-9]*$/.test(typeId)) return invalid("candidate instance-of id");
-        return { id: typeId, label: text(type.label, "candidate instance-of label", 500) };
-      }), (type) => type.id, "candidate instance-of ids");
-      const distanceMeters = item.distanceMeters;
-      if (distanceMeters !== null
-        && (typeof distanceMeters !== "number" || !Number.isSafeInteger(distanceMeters) || distanceMeters < 0)) {
-        return invalid("candidate distance");
-      }
-      const photo = photoDto(item.photo, id);
-      const assetFragment = `/commons-candidates/${id}/assets/`;
-      if (photo.source !== "commons"
-        || !photo.imageUrl.includes(assetFragment)
-        || !photo.thumbnailUrl.includes(assetFragment)) {
-        return invalid("candidate photo");
-      }
-      return {
-        id,
-        tripPlaceId: uuid(item.tripPlaceId, "candidate trip place id"),
-        placeName: text(item.placeName, "candidate place name", 200),
-        placeType,
-        wikidataId,
-        label: text(item.label, "candidate label", 500),
-        names,
-        instanceOf,
-        description: nullable(item.description, (value) => text(value, "candidate description", 2_000)),
-        distanceMeters,
-        photo,
-      };
-    }), (candidate) => candidate.id, "candidate ids"),
-  };
-}
-
-export function parseCommonsPhotoReportResponse(value: unknown): CommonsPhotoReportResponse {
-  const response = record(value, "Commons photo report response", ["remainingCandidates"]);
-  const remainingCandidates = response.remainingCandidates;
-  if (typeof remainingCandidates !== "number"
-    || !Number.isSafeInteger(remainingCandidates)
-    || remainingCandidates < 0) {
-    return invalid("remaining Commons candidates");
-  }
-  return { remainingCandidates };
-}
-
 
 function googlePhotoUrl(value: unknown, field: string, maxWidth: 192 | 1024) {
   const url = text(value, field, 2_800);
@@ -553,7 +438,7 @@ export function parsePlaceDetailResponse(value: unknown): PlaceDetailResponse {
   const response = record(value, "response", ["detail"]);
   const detail = record(response.detail, "detail", [
     "reference", "canonicalPlaceId", "name", "asOfDate", "sections", "sources", "photos", "googlePhotos",
-    "photosUnavailable", "commonsPhotoReportable",
+    "photosUnavailable",
   ]);
   const sources = unique(array(detail.sources, "sources", 100, source), (item) => item.id, "source ids");
   const curatedPhotos = unique(
@@ -568,9 +453,6 @@ export function parsePlaceDetailResponse(value: unknown): PlaceDetailResponse {
   );
   if (googlePhotos.some((photo, index) => photo.index !== index)) return invalid("Google photo indexes");
   if (curatedPhotos.length > 0 && googlePhotos.length > 0) return invalid("curated and Google photos are mutually exclusive");
-  const commonsPhotoReportable = detail.commonsPhotoReportable;
-  if (typeof commonsPhotoReportable !== "boolean") return invalid("Commons photo reportable");
-  if (commonsPhotoReportable && curatedPhotos[0]?.source !== "commons") return invalid("Commons photo reportable");
   return { detail: {
     reference: parsePlaceDetailReference(detail.reference),
     canonicalPlaceId: nullable(detail.canonicalPlaceId, (value) => uuid(value, "canonical place id")),
@@ -581,7 +463,6 @@ export function parsePlaceDetailResponse(value: unknown): PlaceDetailResponse {
     photos: curatedPhotos,
     googlePhotos,
     photosUnavailable: typeof detail.photosUnavailable === "boolean" ? detail.photosUnavailable : invalid("photos unavailable"),
-    commonsPhotoReportable,
   } };
 }
 

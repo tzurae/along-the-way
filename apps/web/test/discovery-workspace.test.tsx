@@ -173,7 +173,7 @@ it("renders an unsafe discovery citation as text instead of an external link", a
     else if (path.includes("/place-details?")) value = { detail: {
       reference: { kind: "proposal", id: proposal.id }, canonicalPlaceId: null, name: proposal.name,
       asOfDate: null, sections: [], sources: [], photos: [], googlePhotos: [],
-      photosUnavailable: false, commonsPhotoReportable: false,
+      photosUnavailable: false,
     } };
     else throw new Error(`Unexpected request: ${path}`);
     return (init?.parse ? init.parse(value) : value) as T;
@@ -217,7 +217,6 @@ it("shows an accepted proposal's detail as reasons then location, without wishli
         photos: [],
         googlePhotos: [],
         photosUnavailable: false,
-        commonsPhotoReportable: false,
       } };
     } else {
       throw new Error(`Unexpected request: ${path}`);
@@ -276,7 +275,6 @@ it("opens proposal thumbnails during normal and selection modes with licensed ro
         photos: [],
         googlePhotos: [],
         photosUnavailable: false,
-        commonsPhotoReportable: false,
       } };
     } else {
       throw new Error(`Unexpected request: ${path}`);

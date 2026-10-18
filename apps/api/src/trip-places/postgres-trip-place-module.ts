@@ -61,7 +61,7 @@ interface ModuleOptions {
   photoCapabilitySecret?: string;
   /** Looks up a freely licensed representative photo once, when a Google place is added. */
   commonsPhotos?: RepresentativePhotoSource;
-  /** Generates manual-review candidates only after strict CID matching misses. */
+  /** Finds and auto-applies a licensed Commons candidate after strict CID matching misses. */
   commonsCandidates?: CommonsCandidateGenerator;
 }
 
@@ -1564,6 +1564,12 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         .set({ trip_place_id: target.id })
         .where("trip_place_id", "=", source.id)
         .execute();
+      if (source.place_id === target.place_id) {
+        await transaction.updateTable("feedback")
+          .set({ trip_place_id: target.id })
+          .where("trip_place_id", "=", source.id)
+          .execute();
+      }
       await transaction.deleteFrom("trip_places").where("id", "=", source.id).execute();
       await transaction.deleteFrom("places")
         .where("trip_id", "=", tripId)

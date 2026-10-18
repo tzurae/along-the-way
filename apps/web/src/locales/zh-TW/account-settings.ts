@@ -3,4 +3,5 @@ export const accountSettings = {
   account: "帳號",
   email: "電子郵件",
   signInActions: "登入操作",
+  services: "帳號功能",
 };

@@ -261,7 +261,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     return parsePlaceDetailResponse(await response.json()).detail;
   }
 
-  it("keeps curated photos ahead of Google fallback and preserves same-name distinctions and planning state", async () => {
+  it("keeps Google first in detail and curated list photos while preserving same-name distinctions and planning state", async () => {
     const before = await (await app.request(`/api/trips/${tripId}/skeleton`, { headers: { cookie: owner.cookie } })).json();
     const wishlistBefore = await (await app.request(`/api/trips/${tripId}/trip-places`, { headers: { cookie: owner.cookie } })).json();
     const references: PlaceDetailReference[] = [{ kind: "trip-place", id: place.id }, { kind: "proposal", id: proposalId }, { kind: "itinerary-place", id: legacyId }];
@@ -269,28 +269,23 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
       const result = await detail(reference);
       expect(result.canonicalPlaceId).toBe(place.placeId);
       expect(result.sections[0]?.blocks[0]?.text).toBe("庭園有可參觀的東側步道。");
-      expect(result.photos[0]).toMatchObject({ id: "original-test-pixel", author: "測試作者", licenseName: "CC0 1.0" });
-      expect(result.googlePhotos).toEqual([]);
-      const image = await app.request(result.photos[0]!.imageUrl, { headers: { cookie: owner.cookie } });
-      expect(image.status).toBe(200);
-      expect(image.headers.get("content-type")).toBe("image/png");
-      expect(Buffer.from(await image.arrayBuffer()).equals(png)).toBe(true);
+      expect(result.photos).toEqual([]);
+      expect(result.googlePhotos).toHaveLength(2);
     }
     await database.updateTable("candidate_proposals").set({ status: "accepted", accepted_trip_place_id: place.id, decided_by: owner.id, decided_at: now() })
       .where("id", "=", proposalId).execute();
     expect((await detail({ kind: "proposal", id: proposalId })).canonicalPlaceId).toBe(place.placeId);
-    expect(providerReads).toBe(0);
+    expect(providerReads).toBe(4);
     const other = await detail({ kind: "trip-place", id: branch.id });
     expect(other.canonicalPlaceId).toBe(branch.placeId);
     expect(other.sections).toEqual([]);
     expect(other.photos).toEqual([]);
-    expect(other.googlePhotos).toHaveLength(3);
+    expect(other.googlePhotos).toHaveLength(2);
     expect(other.googlePhotos.map(({ index, authors, googleMapsUri }) => ({
       index, author: authors[0]?.displayName, googleMapsUri,
     }))).toEqual([
       { index: 0, author: "Google 攝影者", googleMapsUri: "https://maps.google.com/?cid=controlled-photo" },
       { index: 1, author: "Google 攝影者二", googleMapsUri: "https://maps.google.com/?cid=controlled-photo-2" },
-      { index: 2, author: "Google 攝影者三", googleMapsUri: "https://maps.google.com/?cid=controlled-photo-3" },
     ]);
     expect(other.googlePhotos[0]?.imageUrl).not.toContain("server-only");
     const previews = await app.request(`/api/trips/${tripId}/place-previews?kind=trip-place&ids=${branch.id},${place.id}`, { headers: { cookie: owner.cookie } });
@@ -299,7 +294,11 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     expect(parsed.map((item) => item.reference.id)).toEqual([branch.id, place.id]);
     expect(parsed[0]).toMatchObject({ photo: null, photoCount: 0 });
     expect(parsed[1]).toMatchObject({ photo: { source: "curated", id: "original-test-pixel" }, photoCount: 1 });
-    expect(providerReads).toBe(1);
+    const image = await app.request(parsed[1]!.photo!.imageUrl, { headers: { cookie: owner.cookie } });
+    expect(image.status).toBe(200);
+    expect(image.headers.get("content-type")).toBe("image/png");
+    expect(Buffer.from(await image.arrayBuffer()).equals(png)).toBe(true);
+    expect(providerReads).toBe(5);
     expect(await (await app.request(`/api/trips/${tripId}/skeleton`, { headers: { cookie: owner.cookie } })).json()).toEqual(before);
     const wishlistAfter = await (await app.request(`/api/trips/${tripId}/trip-places`, { headers: { cookie: owner.cookie } })).json();
     // Acceptance deliberately changes the proposal pointer only; member notes/votes/schedules remain intact.
@@ -335,7 +334,8 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     expect(mediaReads).toBe(0);
   });
 
-  it("caps curated detail and preview photos at three before considering Google fallback", async () => {
+  it("caps curated detail fallback at two without changing the preview count when Google returns no photos", async () => {
+    googlePhotoOrder = [];
     const first = input.places[0]!.photos[0]!;
     await database.insertInto("curated_place_photos").values([1, 2, 3].map((position) => ({
       place_id: place.placeId,
@@ -358,7 +358,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
 
     const result = await detail({ kind: "trip-place", id: place.id });
     expect(result.photos.map((photo) => photo.id)).toEqual([
-      "original-test-pixel", "curated-work-1", "curated-work-2",
+      "original-test-pixel", "curated-work-1",
     ]);
     expect(result.googlePhotos).toEqual([]);
     const response = await app.request(
@@ -369,7 +369,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
       photo: { id: "original-test-pixel" },
       photoCount: 3,
     });
-    expect(providerReads).toBe(0);
+    expect(providerReads).toBe(1);
   });
 
   it("serves a signed search-result photo only to the member who received its capability", async () => {
@@ -459,7 +459,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     expect(previews[1]).toMatchObject({ photo: { source: "curated", id: "original-test-pixel" }, photoCount: 1 });
     expect(providerReads).toBe(0);
     const lastAllowed = await detail({ kind: "trip-place", id: branch.id });
-    expect(lastAllowed.googlePhotos).toHaveLength(3);
+    expect(lastAllowed.googlePhotos).toHaveLength(2);
     expect(lastAllowed.photosUnavailable).toBe(false);
 
     const detailResponse = await app.request(
@@ -502,7 +502,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     const result = await detail({ kind: "proposal", id: proposal.id });
     expect(result.canonicalPlaceId).toBeNull();
     expect(result.photos).toEqual([]);
-    expect(result.googlePhotos).toHaveLength(3);
+    expect(result.googlePhotos).toHaveLength(2);
     expect(result.googlePhotos[1]).toMatchObject({
       source: "google",
       index: 1,
@@ -562,11 +562,11 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
 
     googlePhotoOrder = [1, 0, 2];
     expect((await app.request(result.googlePhotos[1]!.imageUrl, { headers: { cookie: owner.cookie } })).status).toBe(200);
-    googlePhotoOrder = [0, 1];
-    expect((await app.request(result.googlePhotos[2]!.imageUrl, { headers: { cookie: owner.cookie } })).status).toBe(200);
+    googlePhotoOrder = [1];
+    expect((await app.request(result.googlePhotos[0]!.imageUrl, { headers: { cookie: owner.cookie } })).status).toBe(200);
     expect(mediaRequests).toEqual([
       { photoName: `places/${branch.providerPlaceId}/photos/controlled-photo-2`, maxWidthPx: 1024 },
-      { photoName: `places/${branch.providerPlaceId}/photos/controlled-photo-3`, maxWidthPx: 1024 },
+      { photoName: `places/${branch.providerPlaceId}/photos/controlled-photo`, maxWidthPx: 1024 },
     ]);
     expect(providerReads).toBe(metadataReads);
   });
@@ -634,6 +634,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
   });
 
   it("does not disclose details, previews, or photo bytes outside the authorized trip/reference", async () => {
+    googlePhotoOrder = [];
     const result = await detail({ kind: "trip-place", id: place.id });
     const url = `/api/trips/${tripId}/place-details?kind=trip-place&id=${place.id}`;
     const previewUrl = `/api/trips/${tripId}/place-previews?kind=trip-place&ids=${place.id}`;
@@ -713,6 +714,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
   });
 
   it("repeats imports safely, replaces rather than appends, and keeps errors atomic", async () => {
+    googlePhotoOrder = [];
     const reference: PlaceDetailReference = { kind: "trip-place", id: place.id };
     const before = await detail(reference);
     await importCuratedPlaceDetails({ database, manifest: input, bindings, assetRoot });
@@ -744,6 +746,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
   });
 
   it("fails honestly when packaged bytes are missing or altered without blocking text reads", async () => {
+    googlePhotoOrder = [];
     const result = await detail({ kind: "trip-place", id: place.id });
     await writeFile(join(assetRoot, filename), Buffer.from("not the reviewed image"));
     await expect(importCuratedPlaceDetails({ database, manifest: input, bindings, assetRoot })).rejects.toThrow("checksum");

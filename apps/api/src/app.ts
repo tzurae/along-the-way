@@ -29,6 +29,14 @@ import type {
 } from "@along-the-way/contracts/trip-places";
 import type { CreateDayRouteInput } from "@along-the-way/contracts/day-plans";
 import type { MapsConfigResponse } from "@along-the-way/contracts/maps";
+import type {
+  CreateFeedbackInput,
+  CreatePhotoFeedbackInput,
+  FeedbackStatus,
+  FeedbackType,
+  PhotoFeedbackReason,
+  UpdateFeedbackAdminInput,
+} from "@along-the-way/contracts/admin";
 import type { DiscoveryModule } from "./discovery/discovery-module";
 import type { DayPlanModule } from "./planning/postgres-day-plan-module";
 
@@ -54,17 +62,20 @@ import {
   parsePlacePreviewIds,
 } from "@along-the-way/contracts/place-details";
 import type { PlaceDetailModule } from "./place-details/place-detail-module";
-import type { CommonsCandidateModule } from "./place-details/commons-photo-candidates";
+import type { FeedbackModule } from "./admin/postgres-feedback-module";
+import type { GoogleUsageModule } from "./admin/google-usage-module";
 
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
 export interface AppDependencies {
   collaboration: PostgresCollaborationModule;
   dayPlans: DayPlanModule;
-  commonsCandidates?: CommonsCandidateModule;
   discovery: DiscoveryModule;
+  feedback?: FeedbackModule;
+  googleUsage?: GoogleUsageModule;
   identityAccess: IdentityAccessModule;
   mapsConfig?: MapsConfigResponse;
+  appVersion?: string;
   placeDetails: PlaceDetailModule;
   rateLimiter: RateLimiter;
   readiness: ReadinessProbe;
@@ -119,6 +130,32 @@ function booleanField(body: Record<string, unknown>, name: string) {
     throw new AppError("validation_error", `${name} must be true or false`);
   }
   return value;
+}
+
+function characterLength(value: string) {
+  let count = 0;
+  for (const _character of value) count += 1;
+  return count;
+}
+
+function feedbackTypeValue(value: unknown): FeedbackType {
+  if (value === "bug" || value === "idea" || value === "other" || value === "photo") return value;
+  throw new AppError("validation_error", "type must be bug, idea, other, or photo");
+}
+
+function photoFeedbackReasonValue(value: unknown): PhotoFeedbackReason {
+  if (value === "wrong_place" || value === "poor_quality" || value === "other") return value;
+  throw new AppError(
+    "validation_error",
+    "reason must be wrong_place, poor_quality, or other",
+  );
+}
+
+function feedbackStatusValue(value: unknown): FeedbackStatus {
+  if (value === "new" || value === "in_progress" || value === "done" || value === "wont_do") {
+    return value;
+  }
+  throw new AppError("validation_error", "status must be new, in_progress, done, or wont_do");
 }
 
 function optionalNumberField(body: Record<string, unknown>, name: string) {
@@ -361,10 +398,12 @@ async function jsonBody(context: Context) {
 }
 
 export function createApp({
+  appVersion = "unknown",
   collaboration,
-  commonsCandidates,
   dayPlans,
   discovery,
+  feedback,
+  googleUsage,
   identityAccess,
   mapsConfig = { browserKey: null, mapId: null },
   placeDetails,
@@ -469,6 +508,14 @@ export function createApp({
     return { user, token };
   }
 
+  async function authenticatedAdmin(context: Context) {
+    const authenticatedSession = await authenticated(context);
+    if (!authenticatedSession.user.isAdmin) {
+      throw new AppError("forbidden", "Administrator access required", 403);
+    }
+    return authenticatedSession;
+  }
+
   // Reject oversized bodies before parsing, authentication or rate limiting. Auth bodies hold only
   // an email or token. The largest legitimate API body is a whole-trip plan apply at the domain
   // bounds (366 days × 100 place ids ≈ 1.5 MB), so the general limit is 2 MiB.
@@ -570,6 +617,88 @@ export function createApp({
   app.get("/api/session", async (context) => {
     const { user } = await authenticated(context);
     return context.json({ user });
+  });
+
+  app.post("/api/feedback", async (context) => {
+    const { user } = await authenticated(context);
+    if (!feedback) throw new AppError("service_unavailable", "Feedback is unavailable", 503);
+    await rateLimiter.consume("feedback", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const feedbackBody = stringField(body, "body");
+    const page = nullableStringField(body, "page");
+    const tripId = nullableStringField(body, "tripId");
+    const viewport = nullableStringField(body, "viewport");
+    const feedbackBodyLength = characterLength(feedbackBody);
+    if (feedbackBodyLength < 10 || feedbackBodyLength > 2_000) {
+      throw new AppError("validation_error", "body must be between 10 and 2000 characters");
+    }
+    if (page !== null && characterLength(page) > 200) {
+      throw new AppError("validation_error", "page must be at most 200 characters");
+    }
+    if (tripId !== null
+      && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(tripId)) {
+      throw new AppError("validation_error", "tripId must be a UUID or null");
+    }
+    if (viewport !== null && characterLength(viewport) > 20) {
+      throw new AppError("validation_error", "viewport must be at most 20 characters");
+    }
+    const type = feedbackTypeValue(body.type);
+    if (type === "photo") {
+      throw new AppError("validation_error", "Photo feedback must use the photo-feedback endpoint");
+    }
+    const input: CreateFeedbackInput = {
+      type,
+      body: feedbackBody,
+      page,
+      tripId: tripId?.toLowerCase() ?? null,
+      contactAllowed: booleanField(body, "contactAllowed"),
+      viewport,
+    };
+    return context.json(await feedback.submit(user.id, input, {
+      appVersion: appVersion.slice(0, 500),
+      userAgent: context.req.header("User-Agent")?.slice(0, 500) || null,
+    }), 201);
+  });
+
+  app.get("/api/admin/feedback", async (context) => {
+    await authenticatedAdmin(context);
+    if (!feedback) throw new AppError("service_unavailable", "Feedback is unavailable", 503);
+    const rawStatus = context.req.query("status");
+    const rawType = context.req.query("type");
+    const status = rawStatus === undefined ? undefined : feedbackStatusValue(rawStatus);
+    const type = rawType === undefined ? undefined : feedbackTypeValue(rawType);
+    return context.json({ feedback: await feedback.list({ status, type }) });
+  });
+
+  app.patch("/api/admin/feedback/:id", async (context) => {
+    await authenticatedAdmin(context);
+    if (!feedback) throw new AppError("service_unavailable", "Feedback is unavailable", 503);
+    const body = await jsonBody(context);
+    const input: UpdateFeedbackAdminInput = {};
+    if (Object.hasOwn(body, "status")) input.status = feedbackStatusValue(body.status);
+    if (Object.hasOwn(body, "adminNote")) {
+      const adminNote = nullableStringField(body, "adminNote");
+      if (adminNote !== null && adminNote !== undefined && characterLength(adminNote) > 2_000) {
+        throw new AppError("validation_error", "adminNote must be at most 2000 characters");
+      }
+      input.adminNote = adminNote;
+    }
+    if (input.status === undefined && input.adminNote === undefined) {
+      throw new AppError("validation_error", "status or adminNote is required");
+    }
+    return context.json(await feedback.update(uuidParam(context, "id"), input));
+  });
+
+  app.post("/api/admin/feedback/:id/remove-photo", async (context) => {
+    const { user } = await authenticatedAdmin(context);
+    if (!feedback) throw new AppError("service_unavailable", "Feedback is unavailable", 503);
+    return context.json(await feedback.removePhoto(uuidParam(context, "id"), user.id));
+  });
+
+  app.get("/api/admin/google-usage", async (context) => {
+    await authenticatedAdmin(context);
+    if (!googleUsage) throw new AppError("service_unavailable", "Google usage is unavailable", 503);
+    return context.json(await googleUsage.get());
   });
 
   app.get("/api/maps/config", async (context) => {
@@ -749,55 +878,29 @@ export function createApp({
     });
   });
 
-  app.get("/api/trips/:tripId/commons-candidates", async (context) => {
+  app.post("/api/trips/:tripId/trip-places/:tripPlaceId/photo-feedback", async (context) => {
     const { user } = await authenticated(context);
-    if (!commonsCandidates) throw new AppError("service_unavailable", "Commons candidate review is unavailable", 503);
-    const candidates = await commonsCandidates.list(user.id, uuidParam(context, "tripId"));
-    context.header("Cache-Control", "private, no-store");
-    return context.json({ candidates });
-  });
-
-  app.post("/api/trips/:tripId/commons-candidates/:candidateId/decision", async (context) => {
-    const { user } = await authenticated(context);
-    if (!commonsCandidates) throw new AppError("service_unavailable", "Commons candidate review is unavailable", 503);
+    if (!feedback) throw new AppError("service_unavailable", "Feedback is unavailable", 503);
+    await rateLimiter.consume("feedback", clientIp(context), user.id);
     const body = await jsonBody(context);
-    const decision = stringField(body, "decision");
-    if (decision !== "confirm" && decision !== "reject") {
-      throw new AppError("validation_error", "decision must be confirm or reject");
+    const note = nullableStringField(body, "note");
+    if (note !== null && characterLength(note) > 500) {
+      throw new AppError("validation_error", "note must be at most 500 characters");
     }
-    return context.json(await commonsCandidates.decide(
-      user.id,
-      uuidParam(context, "tripId"),
-      uuidParam(context, "candidateId"),
-      decision,
-    ));
-  });
-
-  app.post("/api/trips/:tripId/trip-places/:tripPlaceId/commons-photo/report", async (context) => {
-    const { user } = await authenticated(context);
-    if (!commonsCandidates) throw new AppError("service_unavailable", "Commons candidate review is unavailable", 503);
-    return context.json(await commonsCandidates.report(
+    const input: CreatePhotoFeedbackInput = {
+      reason: photoFeedbackReasonValue(body.reason),
+      note,
+    };
+    return context.json(await feedback.submitPhoto(
       user.id,
       uuidParam(context, "tripId"),
       uuidParam(context, "tripPlaceId"),
-    ));
-  });
-
-  app.get("/api/trips/:tripId/commons-candidates/:candidateId/assets/:filename", async (context) => {
-    const { user } = await authenticated(context);
-    if (!commonsCandidates) throw new AppError("service_unavailable", "Commons candidate review is unavailable", 503);
-    const asset = await commonsCandidates.getAsset(
-      user.id,
-      uuidParam(context, "tripId"),
-      uuidParam(context, "candidateId"),
-      context.req.param("filename"),
-    );
-    return new Response(asset.bytes, { headers: {
-      "Content-Type": asset.mediaType,
-      "Content-Length": String(asset.bytes.byteLength),
-      "Cache-Control": "private, no-store",
-      "X-Content-Type-Options": "nosniff",
-    } });
+      input,
+      {
+        appVersion: appVersion.slice(0, 500),
+        userAgent: context.req.header("User-Agent")?.slice(0, 500) || null,
+      },
+    ), 201);
   });
 
   app.get("/api/trips/:tripId/place-details", async (context) => {
@@ -825,7 +928,7 @@ export function createApp({
       date,
       includeGooglePhoto,
     ));
-    context.header("Cache-Control", result.detail.photosUnavailable ? "private, no-store" : "private, max-age=3600");
+    context.header("Cache-Control", result.googleFallbackFailed ? "private, no-store" : "private, max-age=3600");
     // Google photo URLs are signed for this user; another member in the same browser must not reuse them.
     context.header("Vary", "Cookie");
     return context.json({ detail: result.detail });

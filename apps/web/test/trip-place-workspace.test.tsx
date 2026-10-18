@@ -307,7 +307,7 @@ it("shows progress only on the pending candidate and restores its label after fa
   expect(within(dialog).queryByText("正在新增「清水寺」…")).not.toBeInTheDocument();
 });
 
-it("refreshes an auto-applied Commons photo in the row and open detail without showing a pending review", async () => {
+it("refreshes an auto-applied Commons row photo while keeping Google first in the open detail", async () => {
   const added: TripPlaceDto = {
     ...place(unscheduledId, "自動照片地點", false),
     provider: "google",
@@ -337,7 +337,6 @@ it("refreshes an auto-applied Commons photo in the row and open detail without s
   };
   let addedOnServer = false;
   let autoApplied = false;
-  let candidateReads = 0;
   let scheduledRefresh: (() => void) | null = null;
   const realSetTimeout = window.setTimeout.bind(window);
   vi.spyOn(window as Window, "setTimeout").mockImplementation((handler, timeout) => {
@@ -350,10 +349,6 @@ it("refreshes an auto-applied Commons photo in the row and open detail without s
     return realSetTimeout(handler, timeout);
   });
   const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
-    if (path.endsWith("/commons-candidates")) {
-      candidateReads += 1;
-      return applyParser({ candidates: [] }, init);
-    }
     if (path.endsWith("/trip-places") && !init?.method) {
       return applyParser({ tripPlaces: addedOnServer ? [added] : [] }, init);
     }
@@ -379,10 +374,9 @@ it("refreshes an auto-applied Commons photo in the row and open detail without s
         asOfDate: null,
         sections: [],
         sources: [],
-        photos: autoApplied ? [previewPhoto] : [],
-        googlePhotos: autoApplied ? [] : [googlePhoto()],
+        photos: [],
+        googlePhotos: [googlePhoto()],
         photosUnavailable: false,
-        commonsPhotoReportable: autoApplied,
       } }, init);
     }
     if (path.endsWith("/must-items") && !init?.method) return applyParser({ items: [] }, init);
@@ -410,7 +404,6 @@ it("refreshes an auto-applied Commons photo in the row and open detail without s
   fireEvent.click(row.querySelector(".list-place-row__media")!);
   const detail = await screen.findByRole("dialog", { name: added.name });
   await waitFor(() => expect(detail.querySelector(`[data-photo-credit="${googlePhoto().id}"]`)).toHaveTextContent("Google Maps・照片：搜尋攝影者"));
-  const candidateReadsBeforeTimer = candidateReads;
   expect(scheduledRefresh).not.toBeNull();
 
   autoApplied = true;
@@ -419,8 +412,8 @@ it("refreshes an auto-applied Commons photo in the row and open detail without s
   await waitFor(() => expect(
     rendered.container.querySelector(`[data-wishlist-place="${added.name}"] [data-place-thumbnail="${previewPhoto.id}"] img`),
   ).toBeInTheDocument());
-  await waitFor(() => expect(detail.querySelector(`[data-photo-credit="${previewPhoto.id}"]`)).toHaveTextContent("口袋名單攝影者"));
-  expect(candidateReads).toBeGreaterThan(candidateReadsBeforeTimer);
+  expect(detail.querySelector(`[data-photo-credit="${googlePhoto().id}"]`)).toHaveTextContent("Google Maps・照片：搜尋攝影者");
+  expect(detail.querySelector(`[data-photo-credit="${previewPhoto.id}"]`)).not.toBeInTheDocument();
   expect(document.querySelector(".commons-candidate-banner")).not.toBeInTheDocument();
 });
 
@@ -447,7 +440,7 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
       return applyParser({ detail: {
         reference: { kind: "trip-place", id }, canonicalPlaceId: selected.placeId, name: selected.name,
         asOfDate: null, sections: [], sources: [], photos: [], googlePhotos: [],
-        photosUnavailable: false, commonsPhotoReportable: false,
+        photosUnavailable: false,
       } }, init);
     }
     throw new Error(`Unexpected request: ${path}`);
@@ -511,7 +504,7 @@ it("renders unsafe wishlist and duplicate source URLs as text instead of externa
     if (path.includes("/place-details?")) return applyParser({ detail: {
       reference: { kind: "trip-place", id: current.id }, canonicalPlaceId: current.placeId, name: current.name,
       asOfDate: null, sections: [], sources: [], photos: [], googlePhotos: [],
-      photosUnavailable: false, commonsPhotoReportable: false,
+      photosUnavailable: false,
     } }, init);
     throw new Error(`Unexpected request: ${path}`);
   };
@@ -548,7 +541,6 @@ it("round-trips duration and budget values when saving only the wishlist reason"
       photos: [],
       googlePhotos: [],
       photosUnavailable: false,
-      commonsPhotoReportable: false,
     } }, init);
     if (path.endsWith("/must-items") && !init?.method) return applyParser({ items: [] }, init);
     if (path.endsWith("/planning") && init?.method === "PATCH") {
@@ -598,7 +590,6 @@ it("keeps thumbnail detail access in and out of selection mode with Commons row 
         photos: [],
         googlePhotos: [],
         photosUnavailable: false,
-        commonsPhotoReportable: false,
       } };
     } else if (path.endsWith("/must-items") && !init?.method) {
       value = { items: [] };
@@ -747,7 +738,6 @@ it("links an unlocated wishlist place to the working overview repair editor", as
         photos: [],
         googlePhotos: [],
         photosUnavailable: false,
-        commonsPhotoReportable: false,
       },
     }, init);
     throw new Error(`Unexpected request: ${path}`);

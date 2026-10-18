@@ -28,7 +28,6 @@ const candidates = new PostgresCommonsCandidateModule({
   userAgent,
 });
 const counts: Record<CommonsCandidateGenerationOutcome | "error", number> = {
-  generated: 0,
   auto_applied: 0,
   refreshed: 0,
   has_photo: 0,

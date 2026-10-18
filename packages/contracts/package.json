@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./admin": "./src/admin.ts",
     "./countries": "./src/countries.ts",
     "./day-plans": "./src/day-plans.ts",
     "./day-time-zone": "./src/day-time-zone.ts",
