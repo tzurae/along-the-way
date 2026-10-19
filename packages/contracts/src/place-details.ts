@@ -481,3 +481,98 @@ export function parsePlacePreviewResponse(value: unknown): PlacePreviewResponse 
     };
   }), (item) => `${item.reference.kind}:${item.reference.id}`, "preview references") };
 }
+
+export type PlaceGuideStatus = "ready" | "no_sources" | "pending";
+
+export interface PlaceGuideSourceDto {
+  title: string;
+  url: string;
+}
+
+export interface PlaceGuideContent {
+  history: string | null;
+  see: string[];
+  do: string[];
+  eat: string[];
+}
+
+export interface PlaceGuideDto extends PlaceGuideContent {
+  status: PlaceGuideStatus;
+  sources: PlaceGuideSourceDto[];
+  generatedAt: string | null;
+}
+
+export interface PlaceGuideResponse {
+  guide: PlaceGuideDto;
+}
+
+function placeGuideSource(value: unknown): PlaceGuideSourceDto {
+  const item = record(value, "place guide source", ["title", "url"]);
+  const url = httpsUrl(item.url, "place guide source URL");
+  const parsed = new URL(url);
+  const host = parsed.hostname.toLowerCase();
+  if ((!host.endsWith(".wikipedia.org") && !host.endsWith(".wikivoyage.org"))
+    || parsed.port) {
+    return invalid("place guide source URL");
+  }
+  return {
+    title: text(item.title, "place guide source title", 500),
+    url,
+  };
+}
+
+function placeGuideItems(value: unknown, field: string): string[] {
+  return array(value, field, 3, (item) => text(item, `${field} item`, 120));
+}
+
+export function parsePlaceGuideContent(value: unknown): PlaceGuideContent {
+  const item = record(value, "place guide content", ["history", "see", "do", "eat"]);
+  return {
+    history: nullable(item.history, (history) => text(history, "place guide history", 2_000)),
+    see: placeGuideItems(item.see, "place guide see"),
+    do: placeGuideItems(item.do, "place guide do"),
+    eat: placeGuideItems(item.eat, "place guide eat"),
+  };
+}
+
+export function parsePlaceGuideSources(value: unknown): PlaceGuideSourceDto[] {
+  return array(value, "place guide sources", 12, placeGuideSource);
+}
+
+export function parsePlaceGuideResponse(value: unknown): PlaceGuideResponse {
+  const response = record(value, "place guide response", ["guide"]);
+  const guide = record(response.guide, "place guide", [
+    "status", "history", "see", "do", "eat", "sources", "generatedAt",
+  ]);
+  if (guide.status !== "ready" && guide.status !== "no_sources" && guide.status !== "pending") {
+    return invalid("place guide status");
+  }
+  const content = parsePlaceGuideContent({
+    history: guide.history,
+    see: guide.see,
+    do: guide.do,
+    eat: guide.eat,
+  });
+  const sources = parsePlaceGuideSources(guide.sources);
+  const generatedAt = nullable(guide.generatedAt, (value) => instant(value, "place guide generatedAt"));
+  if (guide.status === "ready" && (sources.length === 0 || generatedAt === null)) {
+    return invalid("ready place guide metadata");
+  }
+  if (guide.status !== "ready"
+    && (content.history !== null
+      || content.see.length > 0
+      || content.do.length > 0
+      || content.eat.length > 0
+      || sources.length > 0
+      || (guide.status === "pending" && generatedAt !== null))) {
+    return invalid("empty place guide content");
+  }
+  return {
+    guide: {
+      status: guide.status,
+      ...content,
+      sources,
+      generatedAt,
+    },
+  };
+}

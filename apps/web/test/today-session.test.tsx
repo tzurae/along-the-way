@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { fireEvent, waitFor } from "@testing-library/react";
 import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
+import { DEFAULT_PLANNING_SETTINGS } from "@along-the-way/contracts/planning";
 import { App } from "../src/App";
 import { createTodayModel } from "../src/today-model";
 import { TodaySnapshotStore } from "../src/today-snapshot";
@@ -31,10 +32,12 @@ let logoutTargetMismatch = false;
 let logoutBodies: unknown[] = [];
 let sessionUser = todayUser;
 let tripPlacesOverride: TripPlaceDto[] | null = null;
+let discoveryJobsStatus = 200;
 const reply = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 
 beforeEach(() => {
   localStorage.clear();
+  discoveryJobsStatus = 200;
   trips = [todayTrip(), todayTrip("B", "11")];
   skeleton = todaySkeleton(trips[0]);
   dayVersion = 1;
@@ -181,6 +184,15 @@ beforeEach(() => {
       });
       savedOrder = true;
       return reply({ tripPlaces: todayWishlist(true) });
+    }
+    if (input.endsWith("/discovery/jobs/latest")) {
+      return discoveryJobsStatus === 200 ? reply({ job: null }) : reply({ error: { code: "internal_error", message: "boom" } }, discoveryJobsStatus);
+    }
+    if (input.endsWith("/planning-load")) {
+      return reply({ days: [], estimates: {}, counts: { flexible: 0, fixedSelected: 0, days: 0, aiPending: 0 }, settingsVersion: 1 });
+    }
+    if (input.endsWith("/planning-settings")) {
+      return reply({ raw: null, resolved: DEFAULT_PLANNING_SETTINGS, defaults: DEFAULT_PLANNING_SETTINGS, version: 1 });
     }
     if (input.endsWith("/discovery")) return reply({ discovery: { brief: null, latestRun: null, proposals: [], decided: [], modelAvailable: false, placeProviderAvailable: false } });
     throw new Error(`Unexpected request: ${input}`);
@@ -691,6 +703,19 @@ it("reopens the private read-only snapshot when the session read loses the netwo
   expect(document.body).toHaveTextContent("離線資料");
   expect(document.body).toHaveTextContent("Trip A");
   expect(document.querySelector('input[type="email"]')).toBeNull();
+});
+
+it("does not reload the whole trip when only the 調查 status read fails", async () => {
+  discoveryJobsStatus = 500;
+  await mount();
+  await waitFor(() => expect(requests.some((path) => path.endsWith("/discovery/jobs/latest"))).toBe(true));
+  const tripReads = () => requests.filter((path) => path === "/api/trips/A").length;
+  const before = tripReads();
+  // A failed projection read is retried by re-reading the trip after about a second; the
+  // optional status poll must not start that cycle.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_500)); });
+  expect(tripReads()).toBe(before);
+  expect(document.querySelector('[role="alert"]')).toBeNull();
 });
 
 it("shows localized copy instead of a browser network error for a failed mutation", async () => {

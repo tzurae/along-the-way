@@ -1,4 +1,4 @@
-import { type CSSProperties, type FormEvent, type KeyboardEvent, Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { type CSSProperties, type FormEvent, type KeyboardEvent, type ReactNode, Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 
 import {
@@ -33,12 +33,14 @@ import { auth } from "./locales/zh-TW/auth";
 import { DiscoveryWorkspace } from "./DiscoveryWorkspace";
 import { TripSkeletonWorkspace } from "./TripSkeletonWorkspace";
 import { TripPlaceWorkspace } from "./TripPlaceWorkspace";
+import { TripPlanningSettings } from "./TripPlanningSettings";
 import { TravelWorkspace } from "./TravelWorkspace";
 import { useI18n, type Messages } from "./i18n";
 import { canArrangeItinerary } from "./trip-permissions";
 import { parseTripSkeletonResponse, type TripSkeletonResponse } from "@along-the-way/contracts/trip-skeleton";
 import { parseTripPlaceListResponse, type TripPlaceListResponse } from "@along-the-way/contracts/trip-places";
 import { TodayWorkspace } from "./TodayWorkspace";
+import type { WholeTripPlannerLaunch } from "./WholeTripPlanning";
 import { TripOnboardingChecklist } from "./TripOnboardingChecklist";
 import { createTodayModel, tripClock } from "./today-model";
 import { PENDING_SERVER_LOGOUT_STORAGE_KEY, TodaySnapshotStore, TODAY_SCHEMA_VERSION, TODAY_SIGNED_OUT_STORAGE_KEY, type TodaySnapshot } from "./today-snapshot";
@@ -59,6 +61,9 @@ import {
 } from "./trip-location";
 import { ApiRequestError, localizedApiErrorMessage } from "./api-error";
 import { useTripLiveUpdates } from "./useTripLiveUpdates";
+import { useDiscoveryJob, useDiscoveryJobTitle, type DiscoveryJobBadge } from "./useDiscoveryJob";
+import { useScheduleToast } from "./ScheduleToast";
+import { focusDiscoveryBatch } from "./DiscoveryInvestigate";
 interface OnboardingFacts {
   tripId: string;
   hasLodging: boolean;
@@ -479,7 +484,21 @@ function TripSwitcher({ trips, selectedTrip, openCreateTrip, selectTrip }: {
   );
 }
 
-function TripNavigation({ layout, activeTab, selectTab, itinerarySegment, selectItinerarySegment, membersSegment, membersSegments, selectMembersSegment, openFeedback }: {
+/** 調查 status on 地點 and 幫我找: a dot while it runs, then the new-place count or 「!」 until seen. */
+function DiscoveryNavBadge({ badge }: { badge: DiscoveryJobBadge | null }) {
+  const { t } = useI18n();
+  if (!badge) return null;
+  const label = badge.kind === "running" ? t.discovery.run.badgeRunning
+    : badge.kind === "failed" ? t.discovery.run.badgeFailed
+      : t.discovery.run.badgeDone(badge.count);
+  return (
+    <span className="atw-nav-badge" data-kind={badge.kind} role="img" aria-label={label}>
+      {badge.kind === "done" ? badge.count : badge.kind === "failed" ? "!" : null}
+    </span>
+  );
+}
+
+function TripNavigation({ layout, activeTab, selectTab, itinerarySegment, selectItinerarySegment, membersSegment, membersSegments, selectMembersSegment, openFeedback, placesBadge }: {
   layout: "mobile" | "desktop";
   activeTab: TripTab;
   selectTab(tab: TripTab): void;
@@ -491,6 +510,7 @@ function TripNavigation({ layout, activeTab, selectTab, itinerarySegment, select
   selectMembersSegment(segment: MembersSegment): void;
   /** Opens the 反饋 dialog; an action next to the tabs, not a destination. */
   openFeedback(trigger: HTMLElement): void;
+  placesBadge: DiscoveryJobBadge | null;
 }) {
   const { t } = useI18n();
   const destinations = [
@@ -534,6 +554,7 @@ function TripNavigation({ layout, activeTab, selectTab, itinerarySegment, select
             >
               <Icon aria-hidden="true" className={layout === "mobile" ? "size-[22px]" : "size-5"} />
               <span>{label}</span>
+              {value === "places" ? <DiscoveryNavBadge badge={placesBadge} /> : null}
             </button>
             {/* Desktop child bar under 行程 and 成員; mobile uses the segment strip at the top of the
                 panel because the bottom bar has no room. The bars stay mounted so they can expand
@@ -593,12 +614,13 @@ function TripNavigation({ layout, activeTab, selectTab, itinerarySegment, select
   );
 }
 
-function SegmentControl<T extends string>({ label, id, items, active, onSelect }: {
+function SegmentControl<T extends string>({ label, id, items, active, onSelect, badges }: {
   label: string;
   id: string;
   items: readonly { value: T; label: string }[];
   active: T;
   onSelect(value: T): void;
+  badges?: Partial<Record<T, ReactNode>>;
 }) {
   const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>, value: T) => {
     const currentIndex = items.findIndex((item) => item.value === value);
@@ -629,6 +651,7 @@ function SegmentControl<T extends string>({ label, id, items, active, onSelect }
           onKeyDown={(event) => handleKeyDown(event, item.value)}
         >
           {item.label}
+          {badges?.[item.value]}
         </button>
       ))}
     </div>
@@ -698,7 +721,8 @@ export function App() {
     const isRead = !options.method || ["GET", "HEAD"].includes(options.method.toUpperCase());
     const tripRead = isRead ? url.match(/^\/api\/trips\/([^/?]+)(?:\/(?:skeleton|trip-places))?$/) : null;
     const coreRead = isRead && (tripRead || url === "/api/session" || url === "/api/trips");
-    const optionalPlaceRead = isRead && /^\/api\/trips\/[^/?]+\/(?:place-details|place-previews)(?:\?|$)/.test(url);
+    // Optional reads: a failure stays with the feature that asked; it never starts the whole-trip re-read cycle.
+    const optionalPlaceRead = isRead && /^\/api\/trips\/[^/?]+\/(?:place-details|place-previews|discovery\/jobs\/latest)(?:\?|$)/.test(url);
     try { return await requestJson<T>(t.errors, url, options); }
     catch (reason) {
       if (reason instanceof ApiRequestError && (reason.status === 401 || (tripRead && [403, 404].includes(reason.status ?? 0)))) {
@@ -722,6 +746,7 @@ export function App() {
   const [signingOutEverywhere, setSigningOutEverywhere] = useState(false);
   const [trips, setTrips] = useState<TripSummaryDto[]>([]);
   const [selectedTrip, setSelectedTrip] = useState<TripDto | null>(null);
+  const [plannerLaunch, setPlannerLaunch] = useState<{ tripId: string; launch: WholeTripPlannerLaunch } | null>(null);
   const [error, setError] = useState("");
   const [adminRouteError, setAdminRouteError] = useState("");
   const [accepting, setAccepting] = useState(false);
@@ -1197,6 +1222,34 @@ export function App() {
       void refreshTrips().catch(() => setTrips([]));
     },
   });
+
+  // 調查 runs in the background; following it here keeps the badge, toast and tab title working
+  // while the member is on another page.
+  const discoveryToast = useScheduleToast();
+  const viewingDiscovery = Boolean(selectedTrip) && globalView !== "admin"
+    && activeTripTab === "places" && activeSegment === "discovery";
+  const discoveryJob = useDiscoveryJob({
+    tripId: offline ? undefined : selectedTrip?.id,
+    request,
+    viewing: viewingDiscovery,
+    onResult: (job) => {
+      if (viewingDiscovery || !selectedTrip) return;
+      const failed = job.status === "failed";
+      const count = job.addedCount ?? 0;
+      discoveryToast.show(
+        failed ? t.discovery.run.toastFailed : count > 0 ? t.discovery.run.toastDone(count) : t.discovery.run.toastNone,
+        {
+          label: failed ? t.discovery.run.viewReason : t.discovery.run.view,
+          href: `?trip=${encodeURIComponent(selectedTrip.id)}&tab=places&segment=discovery`,
+          navigate: () => {
+            selectSegment("places", "discovery");
+            focusDiscoveryBatch();
+          },
+        },
+      );
+    },
+  });
+  useDiscoveryJobTitle(discoveryJob.badge, selectedTrip?.name, t.discovery.run);
   projectionFailure.current = retryReadModels;
 
   useEffect(() => {
@@ -1470,7 +1523,7 @@ export function App() {
 
   if (offline) {
     return <main className="mx-auto min-h-screen w-[min(100%-1.25rem,58rem)] py-5">
-      <header className="mb-5 flex flex-wrap items-center justify-between gap-3"><h1 className="text-xl font-bold">{todaySnapshot?.model.tripName ?? t.today.title}</h1><button className="min-h-11 rounded-lg border px-4 font-bold" onClick={() => void logout()}>{t.app.signOut}</button></header>
+      <header className="mb-5 flex flex-wrap items-center justify-between gap-3"><h1 className="text-xl font-bold">{todaySnapshot?.model.tripName ?? t.app.tabs.today}</h1><button className="min-h-11 rounded-lg border px-4 font-bold" onClick={() => void logout()}>{t.app.signOut}</button></header>
       <p className="mb-4 text-sm">{t.today.offlineAccount}</p>
       {error ? <p className="mb-4" role="alert">{error}</p> : null}
       {todaySnapshot ? <>
@@ -1639,7 +1692,7 @@ export function App() {
       <div className="atw-frame">
         <aside className="atw-rail">
           <TripSwitcher trips={trips} selectedTrip={selectedTrip} openCreateTrip={openCreateTrip} selectTrip={selectTrip} />
-          {globalView !== "admin" && selectedTrip ? <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} openFeedback={openFeedback} /> : <div />}
+          {globalView !== "admin" && selectedTrip ? <TripNavigation layout="desktop" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} openFeedback={openFeedback} placesBadge={discoveryJob.badge} /> : <div />}
           <div className="atw-account-footer">
             <button
               type="button"
@@ -1736,6 +1789,8 @@ export function App() {
                       placesRevision={workspaceRevision}
                       onPlacesChanged={placesChanged}
                       onTravelEdit={openTravelSegment}
+                      plannerLaunch={plannerLaunch?.tripId === selectedTrip.id ? plannerLaunch.launch : null}
+                      onPlannerLaunchConsumed={() => setPlannerLaunch(null)}
                     />
                   </div>
                 ) : itinerarySegment === "flight" ? (
@@ -1743,10 +1798,24 @@ export function App() {
                     <TravelWorkspace key={selectedTrip.id} trip={selectedTrip} type="flight" request={request} revision={workspaceRevision}
                       onChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }} />
                   </div>
-                ) : (
+                ) : itinerarySegment === "lodging" ? (
                   <div id="itinerary-segment-panel-lodging" role="tabpanel" aria-labelledby="itinerary-segment-lodging">
                     <TravelWorkspace key={selectedTrip.id} trip={selectedTrip} type="lodging" request={request} revision={workspaceRevision}
                       onChanged={async () => { placesChanged(); await loadTrip(selectedTrip.id); }} />
+                  </div>
+                ) : (
+                  <div id="itinerary-segment-panel-settings" role="tabpanel" aria-labelledby="itinerary-segment-settings">
+                    <TripPlanningSettings
+                      key={selectedTrip.id}
+                      tripId={selectedTrip.id}
+                      revision={workspaceRevision}
+                      canEdit={canArrangeItinerary(selectedTrip)}
+                      request={request}
+                      onCreateReplanDraft={(drafts) => {
+                        setPlannerLaunch({ tripId: selectedTrip.id, launch: drafts });
+                        selectSegment("itinerary", "daily");
+                      }}
+                    />
                   </div>
                 )}
               </div>
@@ -1758,6 +1827,7 @@ export function App() {
                   items={placeSegments}
                   active={placesSegment}
                   onSelect={(segment) => selectSegment("places", segment)}
+                  badges={{ discovery: <DiscoveryNavBadge badge={discoveryJob.badge} /> }}
                 />
                 <div id="places-segment-panel-wishlist" role="tabpanel" aria-labelledby="places-segment-wishlist" hidden={placesSegment !== "wishlist"}>
                   <TripPlaceWorkspace
@@ -1779,6 +1849,8 @@ export function App() {
                     photoRevision={photoRevision}
                     placesRevision={workspaceRevision}
                     onPlacesChanged={placesChanged}
+                    job={discoveryJob.job}
+                    onJobStarted={discoveryJob.track}
                   />
                 </div>
               </div>
@@ -1803,7 +1875,7 @@ export function App() {
           )}
         </div>
       </div>
-      {globalView !== "admin" && selectedTrip ? <TripNavigation layout="mobile" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} openFeedback={openFeedback} /> : null}
+      {globalView !== "admin" && selectedTrip ? <TripNavigation layout="mobile" activeTab={activeTripTab} selectTab={selectTab} itinerarySegment={itinerarySegment} selectItinerarySegment={(segment) => selectSegment("itinerary", segment)} membersSegment={membersSegment} membersSegments={availableMembersSegments} selectMembersSegment={(segment) => selectSegment("members", segment)} openFeedback={openFeedback} placesBadge={discoveryJob.badge} /> : null}
       <CreateTripDialog
         open={createDialogOpen}
         onOpenChange={changeCreateDialogOpen}
@@ -1827,6 +1899,7 @@ export function App() {
         signingOutEverywhere={signingOutEverywhere}
       />
       <AppToaster />
+      {discoveryToast.toast}
     </main>
   );
 }

@@ -17,7 +17,12 @@ export const collaboration = {
   replanDay: "這天的時間或地點安排已由其他成員更新，尚未儲存這份順序。請按「重新排」取得最新安排，確認後再儲存。",
   fields: {
     name: "名稱", type: "類型", address: "地址", latitude: "緯度", longitude: "經度", timeZone: "時區",
-    sourceUrl: "來源連結", notes: "共同備註", durationMinutes: "停留分鐘", budgetAmountMinor: "預算最小單位", budgetCurrency: "預算幣別",
+    sourceUrl: "來源連結", notes: "共同備註", durationMinutes: "停留分鐘", effortLevel: "體力", budgetAmountMinor: "預算最小單位", budgetCurrency: "預算幣別",
+    pacePreset: "節奏", targetPlacesPerDay: "每天希望地點", maxPlacesPerDay: "每天最多地點",
+    dayStart: "出門時間", dayEnd: "回住宿時間", maxEffortPerDay: "每日體力上限",
+    mealReserveMinutes: "用餐預留", restMinutes: "另外休息", slackPercent: "保留餘裕",
+    travelProfile: "主要移動方式", speedKmh: "估算速度", detourFactor: "繞路係數",
+    perLegMinutes: "每段進出站／停車", lightTravelDays: "抵達／離開日少排一點",
     title: "標題", participantMemberIds: "參加成員", money: "費用", amountMinor: "金額最小單位", currency: "幣別",
     endpoints: "時間與地點", role: "起訖", countryStopId: "國家段落", placeId: "地點", localDateTime: "當地時間", utcOffset: "UTC 偏移",
     details: "詳細資料", serviceNumber: "班次", carrier: "航空公司", departureAirport: "出發機場", arrivalAirport: "抵達機場",

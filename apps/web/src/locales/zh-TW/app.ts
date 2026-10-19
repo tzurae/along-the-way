@@ -52,8 +52,8 @@ export const app = {
   tripSections: "旅程主要功能",
   feedbackNav: "反饋",
   tabs: {
-    today: "今天",
-    itinerary: "行程",
+    today: "行程",
+    itinerary: "安排",
     places: "地點",
     members: "成員",
   },
@@ -61,10 +61,11 @@ export const app = {
     daily: "總覽",
     flight: "航班",
     lodging: "住宿",
+    settings: "設定",
   },
   placesSegments: {
     wishlist: "口袋名單",
-    discovery: "AI 建議",
+    discovery: "幫我找",
   },
   membersSegments: {
     people: "成員",
@@ -72,7 +73,7 @@ export const app = {
     invites: "邀請",
     permissions: "權限",
   },
-  itinerarySectionPicker: "行程內容",
+  itinerarySectionPicker: "安排內容",
   placesSectionPicker: "地點內容",
   membersSectionPicker: "成員內容",
   membersPage: {

@@ -34,6 +34,31 @@ export interface DiscoveryRequest {
   exclusions: string[];
   /** BCP-47 tag of the destination's language, used to search local guides. */
   localLanguage: string;
+  /** Google Maps searches that find the real places research may pick from. */
+  searchQueries: DiscoverySearchQuery[];
+}
+
+/** One Google Maps search the plan asks for, in the destination's language. */
+export interface DiscoverySearchQuery {
+  query: string;
+  area: string;
+  /** The request category this search serves; null for a traveler-named place. */
+  category: string | null;
+  /** The traveler-named place this search looks for, exactly as in the request, or null. */
+  namedPlace: string | null;
+}
+
+/**
+ * The real places one search found. `summary` is Google Maps Content: it identifies the places
+ * for the research model during this run and is never stored.
+ */
+export interface DiscoveredPlaceGroup extends DiscoverySearchQuery {
+  summary: string;
+  /**
+   * Place IDs in the order the summary cites them ("[0]" is the first); null where the place is
+   * one the trip already has or rejected, so it cannot be picked again.
+   */
+  placeIds: Array<string | null>;
 }
 
 /** Persisted per run and shown as the search plan. */
@@ -72,6 +97,8 @@ export interface DiscoveryClaimSentence {
 }
 
 export interface ResearchedCandidate {
+  /** The Google Place ID picked from the discovered places; never written by the model freely. */
+  providerPlaceId: string;
   /** Name in the output language. */
   name: string;
   /** Name in the destination's language, and in English, when known; used to look it up and verify it. */
@@ -97,6 +124,33 @@ export interface DiscoveryResearchResult {
   sources: DiscoveryWebSource[];
 }
 
+/** One checklist question as the clarifying worker proposes it; the server assigns ids. */
+export interface ClarifyQuestionDraft {
+  text: string;
+  why: string;
+  options: string[];
+  allowOther: boolean;
+  multiple: boolean;
+  required: boolean;
+}
+
+export interface ClarifyReviewItem {
+  id: string;
+  text: string;
+  options: string[];
+  required: boolean;
+  /** null: the traveler skipped an optional question. */
+  answer: string | null;
+}
+
+export interface ClarifyReviewVerdict {
+  id: string;
+  verdict: "sufficient" | "insufficient" | "unreasonable";
+  /** Plain ask-back shown to the traveler; null when sufficient. */
+  reason: string | null;
+  /** The answer restated as one explicit statement for research; null when nothing usable. */
+  interpretation: string | null;
+}
 
 export interface DiscoveryModel {
   readonly available: boolean;
@@ -111,10 +165,14 @@ export interface DiscoveryModel {
     request: DiscoveryRequest;
     trip: DiscoveryTripFacts;
     questionAnswers: DiscoveryQuestionAnswer[];
-    /** Names of places the traveler already rejected. */
-    rejectedPlaces: string[];
+    /** Real places to pick from; places the trip already has or rejected are removed beforehand. */
+    discovered: DiscoveredPlaceGroup[];
     outputLanguage: string;
   }): Promise<DiscoveryResearchResult>;
+  /** Worker: at most five questions whose answers materially change the recommendations. */
+  clarify(input: { brief: string; trip: DiscoveryTripFacts }): Promise<{ modelId: string; questions: ClarifyQuestionDraft[] }>;
+  /** Reviewer: judges whether each required answer is sufficient and reasonable. */
+  reviewAnswers(input: { brief: string; trip: DiscoveryTripFacts; items: ClarifyReviewItem[] }): Promise<{ verdicts: ClarifyReviewVerdict[] }>;
 }
 
 export class DiscoveryModelUnavailableError extends Error {

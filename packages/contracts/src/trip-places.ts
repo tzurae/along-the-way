@@ -71,6 +71,8 @@ export interface TripPlaceDto {
   /** Last removed placement's local date, or null when unknown or currently placed. */
   unplacedFromDate: string | null;
   durationMinutes: number | null;
+  /** Historical responses without this field are read as null. */
+  effortLevel: number | null;
   assignedDayId: string | null;
   /** Applied order within the assigned day; null until a route order is applied. */
   dayPosition: number | null;
@@ -144,12 +146,13 @@ export type CreateTripPlaceInput =
   | CreateProviderTripPlaceInput;
 
 /**
- * The planning PATCH treats omitted optional fields as null. A caller changing one field
- * must round-trip every other value it intends to preserve.
+ * Existing planning fields treat omission as null. effortLevel is tri-state:
+ * omitted preserves, null clears, and an integer from 1 through 5 sets it.
  */
 export interface UpdateTripPlacePlanningInput {
   expectedVersion: number;
   durationMinutes?: number | null;
+  effortLevel?: number | null;
   budgetAmountMinor?: number | null;
   budgetCurrency?: string | null;
   notes?: string | null;
@@ -315,6 +318,9 @@ function tripPlace(value: unknown): TripPlaceDto {
     selectedForItinerary,
     unplacedFromDate,
     durationMinutes: nullableInteger(row.durationMinutes),
+    effortLevel: row.effortLevel == null ? null
+      : typeof row.effortLevel === "number" && Number.isInteger(row.effortLevel) && row.effortLevel >= 1 && row.effortLevel <= 5
+        ? row.effortLevel : invalid(),
     assignedDayId,
     dayPosition: nullableInteger(row.dayPosition),
     budgetAmountMinor: nullableInteger(row.budgetAmountMinor),

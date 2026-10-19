@@ -52,6 +52,7 @@ import {
 import type { TripPlaceModule } from "./trip-place-module";
 import type { PreparedCommonsPhoto, RepresentativePhotoSource } from "../place-details/commons-place-photos";
 import type { CommonsCandidateGenerator } from "../place-details/commons-photo-candidates";
+import { upsertGooglePlaceIdentity } from "./google-place-identity";
 
 interface ModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
@@ -854,7 +855,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     refuseActiveProviderDuplicate: boolean,
   ) {
     const identity = candidate
-      ? await this.upsertProviderIdentity(transaction, candidate)
+      ? await upsertGooglePlaceIdentity(transaction, candidate, this.now())
       : await transaction.insertInto("place_identities").values({
           provider: "manual",
           provider_place_id: null,
@@ -980,6 +981,11 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     ) {
       throw new AppError("validation_error", "durationMinutes must be a positive integer");
     }
+    const effortLevel = input.effortLevel;
+    if (effortLevel !== undefined && effortLevel !== null
+      && (!Number.isSafeInteger(effortLevel) || effortLevel < 1 || effortLevel > 5)) {
+      throw new AppError("validation_error", "effortLevel must be an integer from 1 to 5 or null");
+    }
     const budgetAmountMinor = input.budgetAmountMinor ?? null;
     const budgetCurrency = optionalText(input.budgetCurrency, "budgetCurrency", 3)?.toUpperCase() ?? null;
     if ((budgetAmountMinor === null) !== (budgetCurrency === null)) {
@@ -1012,6 +1018,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         .executeTakeFirstOrThrow();
       await transaction.updateTable("trip_places").set({
         duration_minutes: durationMinutes,
+        ...(effortLevel === undefined ? {} : { effort_level: effortLevel }),
         budget_amount_minor: budgetAmountMinor,
         budget_currency: budgetCurrency,
         notes,
@@ -1538,6 +1545,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
           || scheduled !== undefined || sourceAssignment !== undefined || targetAssignment !== undefined,
         unplaced_from_date: unplacedFromDate,
         duration_minutes: target.duration_minutes ?? source.duration_minutes,
+        effort_level: target.effort_level ?? source.effort_level,
         budget_amount_minor: target.budget_amount_minor === null
           ? source.budget_amount_minor === null
             ? null
@@ -1703,38 +1711,6 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       });
       await remember(transaction, userId, operation, key, { removed: true });
     });
-  }
-
-  private async upsertProviderIdentity(
-    transaction: Transaction<AlongTheWayDatabase>,
-    candidate: ProviderPlaceCandidateDto,
-  ) {
-    const result = await sql<{ id: string }>`
-      insert into place_identities (
-        provider, provider_place_id, canonical_name, canonical_type,
-        canonical_address, latitude, longitude, time_zone,
-        provider_observed_at, provider_expires_at, provider_attribution,
-        updated_at
-      ) values (
-        'google', ${candidate.providerPlaceId}, ${candidate.name}, ${candidate.type},
-        ${candidate.address}, ${candidate.latitude}, ${candidate.longitude}, ${candidate.timeZone},
-        ${candidate.observedAt}, ${candidate.expiresAt}, ${candidate.attribution}, ${this.now()}
-      )
-      on conflict (provider, provider_place_id) where provider_place_id is not null
-      do update set
-        canonical_name = excluded.canonical_name,
-        canonical_type = excluded.canonical_type,
-        canonical_address = excluded.canonical_address,
-        latitude = excluded.latitude,
-        longitude = excluded.longitude,
-        time_zone = excluded.time_zone,
-        provider_observed_at = excluded.provider_observed_at,
-        provider_expires_at = excluded.provider_expires_at,
-        provider_attribution = excluded.provider_attribution,
-        updated_at = excluded.updated_at
-      returning id
-    `.execute(transaction);
-    return result.rows[0]!;
   }
 
   private async reconcileLegacyPlaces(
@@ -1994,6 +1970,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         "tripPlace.longitude",
         "tripPlace.time_zone",
         "tripPlace.duration_minutes",
+        "tripPlace.effort_level",
         "tripPlace.selected_for_itinerary",
         "tripPlace.unplaced_from_date",
         "tripPlace.budget_amount_minor",
@@ -2016,7 +1993,8 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         "place.time_zone as canonical_time_zone",
       ]).where("tripPlace.trip_id", "=", tripId)
       .where("tripPlace.archived_at", "is", null)
-      .orderBy("tripPlace.created_at").execute();
+      // Newest first; votes are shown but never reorder the list (owner decision 2026-10-19).
+      .orderBy("tripPlace.created_at", "desc").orderBy("tripPlace.id", "desc").execute();
     if (placeRows.length === 0) return [];
     const ids = placeRows.map((row) => row.id);
     const legacyPlaceIds = placeRows.map((row) => row.legacy_place_id);
@@ -2120,6 +2098,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         selectedForItinerary: row.selected_for_itinerary,
         unplacedFromDate: row.unplaced_from_date === null ? null : dateOnly(row.unplaced_from_date),
         durationMinutes: row.duration_minutes,
+        effortLevel: row.effort_level,
         assignedDayId: assignmentByPlaceId.get(row.id)?.trip_day_id ?? null,
         dayPosition: assignmentByPlaceId.get(row.id)?.day_position ?? null,
         budgetAmountMinor: row.budget_amount_minor === null ? null : Number(row.budget_amount_minor),
@@ -2134,7 +2113,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         version: row.version,
       };
     });
-    return members.length >= 1 ? places.sort((left, right) => right.voteCount - left.voteCount) : places;
+    return places;
   }
 
   private async readOne(

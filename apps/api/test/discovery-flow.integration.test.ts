@@ -20,10 +20,15 @@ import { runMigrations } from "../src/database/migrate";
 import { seedDatabase } from "../src/database/seed";
 import type { RecommendationSourceChecks } from "../src/discovery/candidate-verification";
 import type {
+  ClarifyQuestionDraft,
+  ClarifyReviewVerdict,
   DiscoveryModel,
   DiscoveryPlanResult,
   DiscoveryResearchResult,
+  ResearchedCandidate,
 } from "../src/discovery/discovery-model";
+import { claimNextDiscoveryJob } from "../src/discovery/discovery-jobs";
+import type { PlaceDiscovery } from "../src/discovery/maps-grounding-lite";
 import { PostgresDiscoveryModule } from "../src/discovery/postgres-discovery-module";
 import type { EmailSender } from "../src/private-trips/email-sender";
 import { PostgresEmailWorker } from "../src/private-trips/postgres-email-worker";
@@ -35,6 +40,7 @@ import { TokenIssuer } from "../src/private-trips/token-issuer";
 import { PostgresTripSkeletonModule } from "../src/trip-skeleton/postgres-trip-skeleton-module";
 import {
   ProviderQuotaError,
+  ProviderUnavailableError,
   type PlaceProvider,
   type RatedPlaceCandidate,
   type RatedPlaceLookup,
@@ -75,11 +81,14 @@ function place(name: string, providerPlaceId: string): ProviderPlaceCandidateDto
   return { ...market, name, providerPlaceId, sourceUrl: null };
 }
 
+/** Google's ID for a place name in these fixtures. */
+const idOf = (name: string) => name === "Nishiki Market" ? market.providerPlaceId : `ChIJ-${name.replaceAll(" ", "-")}`;
+
 class ControlledPlaceProvider implements PlaceProvider, RatedPlaceLookup {
   readonly available = true;
   readonly attribution = "Google Maps";
+  /** Place Details calls, by Place ID. */
   lookups: string[] = [];
-  quotaRefusals = 0;
   alwaysQuota = false;
   /** Further places Google knows, by name: well reviewed and, unless overridden, open, in Japan, with coordinates. */
   readonly known = new Map<string, {
@@ -93,38 +102,51 @@ class ControlledPlaceProvider implements PlaceProvider, RatedPlaceLookup {
   async getPlace() {
     return market;
   }
-  async lookup(query: string): Promise<RatedPlaceCandidate[]> {
+  async details(providerPlaceId: string): Promise<RatedPlaceCandidate> {
     if (this.alwaysQuota) throw new ProviderQuotaError();
-    if (this.quotaRefusals > 0) {
-      this.quotaRefusals -= 1;
-      throw new ProviderQuotaError();
-    }
-    this.lookups.push(query);
+    this.lookups.push(providerPlaceId);
     const open = { businessStatus: "operational" as const, countryCode: "JP" };
-    const known = [...this.known.keys()].find((name) => query.includes(name));
+    const known = [...this.known.keys()].find((name) => idOf(name) === providerPlaceId);
     if (known) {
       const facts = this.known.get(known)!;
-      const candidate = place(known, `ChIJ-${known.replaceAll(" ", "-")}`);
-      return [{
+      const candidate = place(known, providerPlaceId);
+      return {
         candidate: facts.located === false ? { ...candidate, latitude: null, longitude: null } : candidate,
         rating: 4.5,
         userRatingCount: 1_000,
         websiteUri: null,
         businessStatus: facts.businessStatus ?? open.businessStatus,
         countryCode: facts.countryCode ?? open.countryCode,
-      }];
+      };
     }
-    if (query.includes("Nishiki")) {
-      return [{ candidate: market, rating: 4.4, userRatingCount: 12_000, websiteUri: "https://www.kyoto-nishiki.or.jp/", ...open }];
+    if (providerPlaceId === market.providerPlaceId) {
+      return { candidate: market, rating: 4.4, userRatingCount: 12_000, websiteUri: "https://www.kyoto-nishiki.or.jp/", ...open };
     }
-    if (query.includes("Tiny Cafe")) {
+    if (providerPlaceId === idOf("Tiny Cafe")) {
       // A near-perfect rating from too few reviews to count.
-      return [{ candidate: place("Tiny Cafe", "ChIJ-Tiny-Cafe"), rating: 4.9, userRatingCount: 40, websiteUri: null, ...open }];
+      return { candidate: place("Tiny Cafe", providerPlaceId), rating: 4.9, userRatingCount: 40, websiteUri: null, ...open };
     }
-    if (query.includes("Takao") || query.includes("高雄")) {
-      return [{ candidate: place("Takao Kanko Hotel", "ChIJ-Takao-Hotel"), rating: 4.3, userRatingCount: 900, websiteUri: null, ...open }];
+    if (providerPlaceId === idOf("Takao Kanko Hotel")) {
+      return { candidate: place("Takao Kanko Hotel", providerPlaceId), rating: 4.3, userRatingCount: 900, websiteUri: null, ...open };
     }
-    return [];
+    throw new ProviderUnavailableError();
+  }
+}
+
+/** Grounding Lite: every search finds the default places plus every place Google knows in this test. */
+class ControlledPlaceDiscovery implements PlaceDiscovery {
+  readonly available = true;
+  readonly searches: string[] = [];
+  quota = false;
+  constructor(private readonly provider: ControlledPlaceProvider) {}
+  async searchPlaces(query: string) {
+    if (this.quota) throw new ProviderQuotaError();
+    this.searches.push(query);
+    const names = ["Nishiki Market", "Tiny Cafe", "Takao Kanko Hotel", ...this.provider.known.keys()];
+    return {
+      summary: names.map((name, index) => `${name} [${index}]`).join(", "),
+      places: names.map((name) => ({ providerPlaceId: idOf(name), latitude: 35, longitude: 135.7 })),
+    };
   }
 }
 
@@ -155,32 +177,27 @@ class ControlledDiscoveryModel implements DiscoveryModel {
   researchCalls = 0;
   /** An unexpected failure (not a model or provider error) to raise from research. */
   researchFailure: Error | null = null;
-  /** When set, research finds exactly these places, each cited by an official tourism page. */
+  /** When set, research picks exactly these places, each cited by an official tourism page. */
   researchedPlaces: string[] | null = null;
+  /** The checklist the clarifying worker drafts. */
+  clarifyQuestions: ClarifyQuestionDraft[] = [];
+  /** The reviewer's verdict for each reviewed answer. */
+  review: (item: { id: string; answer: string | null }) => ClarifyReviewVerdict = (item) =>
+    ({ id: item.id, verdict: "sufficient", reason: null, interpretation: item.answer });
   readonly planInputs: Array<Parameters<DiscoveryModel["plan"]>[0]> = [];
   readonly researchInputs: Array<Parameters<DiscoveryModel["research"]>[0]> = [];
-  unresolvedQuestions: string[] = [];
-  private releaseFirstPlan: (() => void) | null = null;
-  private firstPlanStarted: (() => void) | null = null;
-  readonly planStarted = new Promise<void>((resolve) => {
-    this.firstPlanStarted = resolve;
-  });
-  private readonly planRelease = new Promise<void>((resolve) => {
-    this.releaseFirstPlan = resolve;
-  });
 
-  releasePlan() {
-    this.releaseFirstPlan?.();
+  async clarify() {
+    return { modelId: this.modelId, questions: this.clarifyQuestions };
   }
 
+  async reviewAnswers(input: Parameters<DiscoveryModel["reviewAnswers"]>[0]) {
+    return { verdicts: input.items.map((item) => this.review(item)) };
+  }
 
   async plan(input: Parameters<DiscoveryModel["plan"]>[0]): Promise<DiscoveryPlanResult> {
     this.planInputs.push(input);
     this.planCalls += 1;
-    if (this.planCalls === 1) {
-      this.firstPlanStarted?.();
-      await this.planRelease;
-    }
     return {
       modelId: this.modelId,
       structuredBrief: {
@@ -190,7 +207,7 @@ class ControlledDiscoveryModel implements DiscoveryModel {
         exclusions: ["long walking days"],
         areas: ["Kyoto"],
       },
-      unresolvedQuestions: this.unresolvedQuestions,
+      unresolvedQuestions: [],
       request: {
         namedPlaces: [{ name: "Nishiki Market", area: "Kyoto" }, { name: "Saihoji", area: "Kyoto" }],
         categories: ["Food markets"],
@@ -199,6 +216,10 @@ class ControlledDiscoveryModel implements DiscoveryModel {
         areas: ["Kyoto"],
         exclusions: ["long walking days"],
         localLanguage: "ja",
+        searchQueries: [
+          { query: "京都 錦市場", area: "Kyoto", category: null, namedPlace: "Nishiki Market" },
+          { query: "京都 市場", area: "Kyoto", category: "Food markets", namedPlace: null },
+        ],
       },
       outputLanguage: "en",
     };
@@ -208,11 +229,15 @@ class ControlledDiscoveryModel implements DiscoveryModel {
     this.researchInputs.push(input);
     this.researchCalls += 1;
     if (this.researchFailure) throw this.researchFailure;
+    // Like the real model, it can only pick a Place ID discovery offered this run.
+    const offered = new Set(input.discovered.flatMap((group) => group.placeIds.filter((id): id is string => id !== null)));
+    const picked = (candidates: ResearchedCandidate[]) => candidates.filter((candidate) => offered.has(candidate.providerPlaceId));
     if (this.researchedPlaces) {
       return {
         modelId: this.modelId,
         sources: [{ url: "https://kyoto.example.test/gardens", title: "Official Kyoto gardens guide" }],
-        candidates: this.researchedPlaces.map((name) => ({
+        candidates: picked(this.researchedPlaces.map((name) => ({
+          providerPlaceId: idOf(name),
           name,
           localName: null,
           englishName: null,
@@ -227,7 +252,7 @@ class ControlledDiscoveryModel implements DiscoveryModel {
             sourceUrls: ["https://kyoto.example.test/gardens"],
           }],
           sources: [{ url: "https://kyoto.example.test/gardens", type: "tourism_board" as const }],
-        })),
+        }))),
       };
     }
     const base = {
@@ -244,9 +269,10 @@ class ControlledDiscoveryModel implements DiscoveryModel {
         { url: "https://travel.example.test/nishiki-crowds", title: "When to visit Nishiki Market" },
         { url: "https://kyoto.example.test/tiny-cafe", title: "Tiny Cafe feature" },
       ],
-      candidates: [
+      candidates: picked([
         {
           ...base,
+          providerPlaceId: market.providerPlaceId,
           name: "Nishiki Market",
           localName: "錦市場",
           englishName: "Nishiki Market",
@@ -263,6 +289,7 @@ class ControlledDiscoveryModel implements DiscoveryModel {
         },
         {
           ...base,
+          providerPlaceId: idOf("Tiny Cafe"),
           name: "Tiny Cafe",
           localName: null,
           englishName: null,
@@ -274,7 +301,9 @@ class ControlledDiscoveryModel implements DiscoveryModel {
           sources: [{ url: "https://kyoto.example.test/tiny-cafe", type: "tourism_board" }],
         },
         {
+          // Written about Takao, but the picked ID is the hotel next to it in Google's answer.
           ...base,
+          providerPlaceId: idOf("Takao Kanko Hotel"),
           name: "Takao",
           localName: "高雄",
           englishName: "Takao",
@@ -282,10 +311,9 @@ class ControlledDiscoveryModel implements DiscoveryModel {
           recommendationSentences: [{ text: "Mountain temples with early autumn leaves.", sourceUrls: [] }],
           sources: [],
         },
-      ],
+      ]),
     };
   }
-
 }
 
 function json(value: unknown) {
@@ -305,7 +333,9 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
   let worker: PostgresEmailWorker;
   let model: ControlledDiscoveryModel;
   let provider: ControlledPlaceProvider;
+  let placeDiscovery: ControlledPlaceDiscovery;
   let sourceChecks: ControlledSourceChecks;
+  let discovery: PostgresDiscoveryModule;
   const now = () => new Date("2026-09-28T12:00:00.000Z");
 
   beforeAll(async () => {
@@ -316,6 +346,8 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
   beforeEach(async () => {
     await sql`
       truncate table
+        discovery_jobs,
+        discovery_clarifications,
         discovery_feedback,
         discovery_proposal_votes,
         candidate_proposal_evidence,
@@ -356,6 +388,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     email = new CapturingEmailSender();
     model = new ControlledDiscoveryModel();
     provider = new ControlledPlaceProvider();
+    placeDiscovery = new ControlledPlaceDiscovery(provider);
     sourceChecks = new ControlledSourceChecks();
     const tokenIssuer = new TokenIssuer("discovery-integration-secret-at-least-32-bytes");
     const identityAccess = new PostgresIdentityAccessModule({
@@ -380,10 +413,11 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       now,
     );
     const tripPlaces = new PostgresTripPlaceModule({ database, provider, now });
-    const discovery = new PostgresDiscoveryModule({
+    discovery = new PostgresDiscoveryModule({
       database,
       model,
       placeLookup: provider,
+      placeDiscovery,
       claimAiRun: (userId, tripId) => rateLimiter.claimDiscoveryAiRun(userId, tripId),
       tripPlaces,
       sourceChecks,
@@ -467,7 +501,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
 
   function discoveryRequest(cookie: string, path: string, key: string, body: unknown) {
     return app.request(path, {
-      method: path.includes("/discovery/brief") || path.endsWith("/vote") ? "PUT" : "POST",
+      method: path.includes("/discovery/brief") || path.endsWith("/vote") || path.endsWith("/clarification/answers") ? "PUT" : "POST",
       headers: {
         cookie,
         "content-type": "application/json",
@@ -476,6 +510,43 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       },
       body: json(body),
     });
+  }
+
+  async function readWorkspace(cookie: string, tripId: string) {
+    const response = await app.request(`/api/trips/${tripId}/discovery`, { headers: { cookie } });
+    expect(response.status).toBe(200);
+    return parseDiscoveryWorkspaceResponse(await response.json()).discovery;
+  }
+
+  async function saveBrief(cookie: string, tripId: string, key: string, originalText = "Quiet gardens.") {
+    const saved = await discoveryRequest(cookie, `/api/trips/${tripId}/discovery/brief`, key, { originalText, expectedVersion: null });
+    expect(saved.status, await saved.clone().text()).toBe(200);
+  }
+
+  /** 調查 up to the queue: the checklist (none by default, so it is ready), then the research request. */
+  async function queueResearch(cookie: string, tripId: string, key: string, briefVersion = 1) {
+    const asked = await discoveryRequest(cookie, `/api/trips/${tripId}/discovery/clarification`, `${key}-clarify`, {
+      expectedBriefVersion: briefVersion,
+    });
+    expect(asked.status, await asked.clone().text()).toBe(200);
+    return discoveryRequest(cookie, `/api/trips/${tripId}/discovery/research`, key, { expectedBriefVersion: briefVersion });
+  }
+
+  /** What the worker does: claim the oldest queued job and run it. */
+  async function runQueuedJob() {
+    const claimed = await claimNextDiscoveryJob(database, now());
+    if (!claimed) throw new Error("Expected a queued discovery job");
+    await discovery.runJob(claimed);
+    return database.selectFrom("discovery_jobs").selectAll().where("id", "=", claimed.id).executeTakeFirstOrThrow();
+  }
+
+  /** A whole 調查: queue it, let the worker run it, and read the workspace it left. */
+  async function research(cookie: string, tripId: string, key: string, briefVersion = 1) {
+    const queued = await queueResearch(cookie, tripId, key, briefVersion);
+    expect(queued.status, await queued.clone().text()).toBe(202);
+    const job = await runQueuedJob();
+    expect(job.status, job.error_code ?? "").toBe("succeeded");
+    return readWorkspace(cookie, tripId);
   }
 
   async function addEditorMember(tripId: string, emailAddress: string) {
@@ -502,80 +573,11 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     key: string,
     names: readonly string[],
   ) {
-    model.releasePlan();
     for (const name of names) provider.known.set(name, {});
     model.researchedPlaces = [...names];
-    const brief = await discoveryRequest(cookie, `/api/trips/${tripId}/discovery/brief`, `${key}-brief`, {
-      originalText: "Quiet gardens.",
-      expectedVersion: null,
-    });
-    expect(brief.status).toBe(200);
-    const generated = await discoveryRequest(cookie, `/api/trips/${tripId}/discovery/generate`, `${key}-generate`, {
-      expectedBriefVersion: 1,
-    });
-    expect(generated.status).toBe(200);
-    return parseDiscoveryWorkspaceResponse(await generated.json()).discovery;
+    await saveBrief(cookie, tripId, `${key}-brief`);
+    return research(cookie, tripId, `${key}-research`);
   }
-
-  it("does not persist a failed discovery replay when Google refuses a local quota reservation", async () => {
-    const cookie = await login("discovery-quota@example.test");
-    const trip = await createTrip(cookie, "Discovery quota retry");
-    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "quota-brief", {
-      originalText: "Food markets.",
-      expectedVersion: null,
-    })).status).toBe(200);
-    provider.quotaRefusals = 1;
-    const generate = () => discoveryRequest(
-      cookie,
-      `/api/trips/${trip.id}/discovery/generate`,
-      "quota-retry",
-      { expectedBriefVersion: 1 },
-    );
-    const refused = generate();
-    await model.planStarted;
-    model.releasePlan();
-    expect((await refused).status).toBe(503);
-    expect(await database.selectFrom("mutation_requests")
-      .select("idempotency_key")
-      .where("idempotency_key", "=", "quota-retry")
-      .execute()).toHaveLength(0);
-
-    const retried = await generate();
-    expect(retried.status, await retried.clone().text()).toBe(200);
-    expect(model.researchCalls).toBe(2);
-    expect(provider.lookups.length).toBeGreaterThan(0);
-  });
-
-  it("counts repeated same-key Google quota refusals against the hourly AI start limit", async () => {
-    const cookie = await login("discovery-quota-limit@example.test");
-    const trip = await createTrip(cookie, "Discovery quota limit");
-    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "quota-limit-brief", {
-      originalText: "Food markets.",
-      expectedVersion: null,
-    })).status).toBe(200);
-    provider.alwaysQuota = true;
-    model.releasePlan();
-    const generate = () => discoveryRequest(
-      cookie,
-      `/api/trips/${trip.id}/discovery/generate`,
-      "quota-limit-same-key",
-      { expectedBriefVersion: 1 },
-    );
-    for (let attempt = 0; attempt < 6; attempt += 1) {
-      const refused = await generate();
-      expect(refused.status).toBe(503);
-      expect(await database.selectFrom("mutation_requests")
-        .select("idempotency_key")
-        .where("idempotency_key", "=", "quota-limit-same-key")
-        .execute()).toHaveLength(0);
-    }
-    const limited = await generate();
-    expect(limited.status).toBe(429);
-    expect(limited.headers.get("retry-after")).toMatch(/^\d+$/);
-    expect(await limited.json()).toMatchObject({ error: { code: "research_limit_reached" } });
-    expect(model.planCalls).toBe(6);
-    expect(model.researchCalls).toBe(6);
-  });
 
   it("stores a readback marker and replays a mutation with a large decided list", async () => {
     const cookie = await login("large-discovery-replay@example.test");
@@ -748,84 +750,73 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
   });
 
 
-  it("persists answered and skipped questions for model inputs and clears them when the brief changes", async () => {
+  it("asks back at most twice on a required answer, then researches with it as uncertain", async () => {
     const cookie = await login();
     const trip = await createTrip(cookie);
-    const questions = ["Indoor or outdoor markets?", "How much walking is acceptable?"];
-    model.unresolvedQuestions = questions;
-    model.releasePlan();
-    const saved = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "question-brief", {
-      originalText: "Recommend food markets in Kyoto.",
-      expectedVersion: null,
-    });
-    expect(saved.status).toBe(200);
-    const generatedResponse = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "question-generate-1", {
-      expectedBriefVersion: 1,
-    });
-    expect(generatedResponse.status).toBe(200);
-    const generated = parseDiscoveryWorkspaceResponse(await generatedResponse.json()).discovery;
-    expect(generated.brief).toMatchObject({ unresolvedQuestions: questions, questionAnswers: [], version: 1 });
-
-    const answers = [
-      { question: questions[0]!, answer: "Indoor markets" },
-      { question: questions[1]!, answer: null },
+    model.clarifyQuestions = [
+      { text: "How much walking is fine?", why: "Sets how far apart places may be.", options: ["Little", "Some"], allowOther: true, multiple: false, required: true },
+      { text: "Indoor or outdoor markets?", why: "Picks the kind of market.", options: ["Indoor", "Outdoor"], allowOther: false, multiple: false, required: false },
     ];
-    const answeredResponse = await discoveryRequest(
-      cookie,
-      `/api/trips/${trip.id}/discovery/brief/questions`,
-      "question-answers",
-      { expectedVersion: generated.brief?.version, answers },
-    );
-    expect(answeredResponse.status).toBe(200);
-    const answered = parseDiscoveryWorkspaceResponse(await answeredResponse.json()).discovery;
-    expect(answered.brief).toMatchObject({ questionAnswers: answers, version: 2 });
+    model.review = (item) => item.id === "q1"
+      ? { id: item.id, verdict: "insufficient", reason: "Say roughly how long.", interpretation: null }
+      : { id: item.id, verdict: "sufficient", reason: null, interpretation: item.answer };
+    await saveBrief(cookie, trip.id, "clarify-brief", "Food markets.");
+    const asked = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/clarification`, "clarify-start", { expectedBriefVersion: 1 });
+    expect(asked.status).toBe(200);
+    let clarification = parseDiscoveryWorkspaceResponse(await asked.json()).discovery.clarification!;
+    expect(clarification).toMatchObject({ status: "asking", version: 1, items: [{ id: "q1", required: true }, { id: "q2", required: false }] });
 
-    const reloadedResponse = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
-    expect(reloadedResponse.status).toBe(200);
-    expect(parseDiscoveryWorkspaceResponse(await reloadedResponse.json()).discovery.brief?.questionAnswers).toEqual(answers);
+    // Research is refused while a required answer is missing or not accepted.
+    const early = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "clarify-too-early", { expectedBriefVersion: 1 });
+    expect(early.status).toBe(409);
+    expect(await early.json()).toMatchObject({ error: { code: "clarification_incomplete" } });
 
-    const researchedResponse = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "question-generate-2", {
-      expectedBriefVersion: 2,
+    const answer = async (key: string, text: string) => {
+      const response = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/clarification/answers`, key, {
+        expectedVersion: clarification.version, answers: [{ id: "q1", answer: text }, { id: "q2", answer: null }],
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+      clarification = parseDiscoveryWorkspaceResponse(await response.json()).discovery.clarification!;
+      return clarification;
+    };
+    expect(await answer("clarify-answer-1", "A bit")).toMatchObject({
+      status: "asking", items: [{ verdict: "insufficient", reason: "Say roughly how long.", followUps: 1 }, { skipped: true, verdict: "sufficient" }],
     });
-    expect(researchedResponse.status).toBe(200);
-    expect(model.planInputs.at(-1)?.questionAnswers).toEqual(answers);
-    expect(model.researchInputs.at(-1)?.questionAnswers).toEqual(answers);
-    expect(parseDiscoveryWorkspaceResponse(await researchedResponse.json()).discovery.brief).toMatchObject({
-      unresolvedQuestions: [],
-      questionAnswers: answers,
-    });
+    expect((await answer("clarify-answer-2", "Not much")).items[0]).toMatchObject({ verdict: "insufficient", followUps: 2 });
+    // The third rejection is not asked back: the answer counts as uncertain and research may start.
+    expect(await answer("clarify-answer-3", "Some")).toMatchObject({ status: "ready", items: [{ verdict: "unknown", reason: null }, {}] });
 
-    const changedResponse = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "changed-question-brief", {
-      originalText: "Recommend quiet gardens instead.",
-      expectedVersion: 2,
-    });
-    expect(changedResponse.status).toBe(200);
-    expect(parseDiscoveryWorkspaceResponse(await changedResponse.json()).discovery.brief).toMatchObject({
-      originalText: "Recommend quiet gardens instead.",
-      unresolvedQuestions: [],
-      questionAnswers: [],
-      version: 3,
-    });
+    const queued = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "clarify-research", { expectedBriefVersion: 1 });
+    expect(queued.status).toBe(202);
+    expect((await runQueuedJob()).status).toBe("succeeded");
+    // Uncertain and skipped answers reach planning and research as unknown, never guessed.
+    expect(model.planInputs.at(-1)?.questionAnswers).toEqual([
+      { question: "How much walking is fine?", answer: null },
+      { question: "Indoor or outdoor markets?", answer: null },
+    ]);
+    expect(model.researchInputs.at(-1)?.questionAnswers).toEqual(model.planInputs.at(-1)?.questionAnswers);
+    // A successful run used up its checklist: the next 調查 asks fresh questions.
+    expect((await readWorkspace(cookie, trip.id)).clarification).toBeNull();
   });
 
-  it("links generated claim sentences to evidence from their run and reports stale evidence", async () => {
+  it("finds real places first, lets research pick only those, and drops a picked ID that is another place", async () => {
     const cookie = await login();
     const trip = await createTrip(cookie);
-    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "claim-brief", {
-      originalText: "Food markets at an unhurried pace.",
-      expectedVersion: null,
-    })).status).toBe(200);
-    const generation = discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "claim-run", {
-      expectedBriefVersion: 1,
-    });
-    await model.planStarted;
-    model.releasePlan();
-    const generatedResponse = await generation;
-    expect(generatedResponse.status).toBe(200);
-    const generated = parseDiscoveryWorkspaceResponse(await generatedResponse.json()).discovery;
-    const proposal = generated.proposals[0];
-    if (!proposal) throw new Error("Expected proposal");
+    await saveBrief(cookie, trip.id, "claim-brief", "Food markets at an unhurried pace.");
+    const generated = await research(cookie, trip.id, "claim-run");
 
+    // Every planned search ran before research, and research saw only what they found.
+    expect(placeDiscovery.searches).toEqual(["京都 錦市場", "京都 市場"]);
+    expect(model.researchInputs[0]!.discovered.flatMap((group) => group.placeIds)).toContain(market.providerPlaceId);
+    // Takao was written about but its ID is the hotel: a name mismatch, never shown.
+    expect(generated.latestRun?.shortfalls).toContainEqual(expect.objectContaining({ code: "name_mismatch", subject: "Takao" }));
+    expect(generated.proposals.map((proposal) => proposal.name)).toEqual(["Nishiki Market"]);
+    const job = generated.latestJob!;
+    expect(job).toMatchObject({ status: "succeeded", addedCount: 1 });
+    // Every stage ran in order; photos is partial because this module has no Commons photo finder.
+    expect(Object.values(job.stages).map((stage) => stage.state)).toEqual(["done", "done", "done", "done", "done", "partial"]);
+
+    const proposal = generated.proposals[0]!;
     expect(proposal.recommendationSentences).toEqual([{
       text: "A compact food-market stop matching the trip's main interest.",
       evidenceIds: [expect.any(String)],
@@ -834,8 +825,6 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       text: "Busy around lunch.",
       evidenceIds: [expect.any(String)],
     }]);
-    expect(proposal.recommendation).toBe("A compact food-market stop matching the trip's main interest.");
-    expect(proposal.tradeoffs).toEqual(["Busy around lunch."]);
     const evidenceIds = new Set(proposal.evidence.map((item) => item.id));
     const citedIds = [
       ...(proposal.recommendationSentences ?? []),
@@ -843,22 +832,6 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     ].flatMap((sentence) => sentence.evidenceIds);
     expect(citedIds).toHaveLength(2);
     expect(citedIds.every((id) => evidenceIds.has(id))).toBe(true);
-    expect(proposal.evidence.filter((item) => item.kind === "web-source")).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          sourceUrl: "https://kyoto.example.test/nishiki",
-          expiresAt: "2026-10-28T12:00:00.000Z",
-          isStale: false,
-        }),
-        expect.objectContaining({
-          sourceUrl: "https://travel.example.test/nishiki-crowds",
-          title: "When to visit Nishiki Market",
-          attribution: "travel.example.test",
-          expiresAt: "2026-10-28T12:00:00.000Z",
-          isStale: false,
-        }),
-      ]),
-    );
     const linkedEvidence = await database.selectFrom("candidate_proposal_evidence as link")
       .innerJoin("discovery_evidence as evidence", "evidence.id", "link.evidence_id")
       .select(["evidence.id", "evidence.run_id"])
@@ -866,6 +839,13 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       .execute();
     expect(linkedEvidence.map((item) => item.id)).toEqual(expect.arrayContaining(citedIds));
     expect(new Set(linkedEvidence.map((item) => item.run_id))).toEqual(new Set([proposal.runId]));
+    expect(proposal.evidence.filter((item) => item.kind === "web-source")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceUrl: "https://kyoto.example.test/nishiki", expiresAt: "2026-10-28T12:00:00.000Z", isStale: false }),
+      expect.objectContaining({
+        sourceUrl: "https://travel.example.test/nishiki-crowds", title: "When to visit Nishiki Market",
+        attribution: "travel.example.test", expiresAt: "2026-10-28T12:00:00.000Z", isStale: false,
+      }),
+    ]));
 
     await database.updateTable("discovery_evidence")
       .set({ expires_at: "2026-09-27T12:00:00.000Z" })
@@ -877,11 +857,185 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       .where("run_id", "=", proposal.runId)
       .where("evidence_kind", "=", "web-source")
       .execute();
-    const refreshedResponse = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
-    expect(refreshedResponse.status).toBe(200);
-    const refreshed = parseDiscoveryWorkspaceResponse(await refreshedResponse.json()).discovery.proposals[0];
+    const refreshed = (await readWorkspace(cookie, trip.id)).proposals[0];
     expect(refreshed?.evidence).not.toHaveLength(0);
     expect(refreshed?.evidence.every((item) => item.isStale)).toBe(true);
+  });
+
+  it("holds places the trip already has or rejected back from research, and keeps an undo version-checked", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie, "Restored after two rejections");
+    const ownerId = trip.members[0]!.userId;
+    provider.known.set("Shoren Garden", {}).set("Gion Garden", {});
+    // Two earlier runs proposed Shoren Garden and both proposals were rejected.
+    const rejectedIds: string[] = [];
+    for (const index of [0, 1]) {
+      const at = new Date(Date.UTC(2026, 8, 20 + index));
+      const run = await sql<{ id: string }>`
+        insert into discovery_runs (trip_id, brief_version, policy_version, model_id, status, search_plan, created_by, created_at)
+        values (${trip.id}, 1, 'historical', 'historical', 'completed', '{}'::jsonb, ${ownerId}, ${at})
+        returning id
+      `.execute(database);
+      const proposal = await sql<{ id: string }>`
+        insert into candidate_proposals (
+          trip_id, run_id, provider_place_id, name, place_type, recommendation, matched_needs,
+          tradeoffs, unknowns, confidence, status, decided_by, decided_at, version, created_at, updated_at
+        ) values (
+          ${trip.id}, ${run.rows[0]!.id}, ${idOf(index === 0 ? "Gion Garden" : "Shoren Garden")}, ${index === 0 ? "Gion Garden" : "Shoren Garden"},
+          'activity', 'Historical recommendation', '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'medium', 'rejected', ${ownerId}, ${at}, 2, ${at}, ${at}
+        ) returning id
+      `.execute(database);
+      rejectedIds.push(proposal.rows[0]!.id);
+    }
+    // An undo names the rejection it undoes: version 0 (from before restore existed) and a stale
+    // version are conflicts, not validation errors.
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${rejectedIds[1]}/restore`,
+      "restore-unknown-version", { expectedVersion: 0 })).status).toBe(409);
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${rejectedIds[1]}/restore`,
+      "restore-stale-version", { expectedVersion: 1 })).status).toBe(409);
+    // The owner restores Shoren Garden; Gion Garden stays rejected.
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${rejectedIds[1]}/restore`,
+      "restore-later", { expectedVersion: 2 })).status).toBe(200);
+    model.researchedPlaces = ["Shoren Garden", "Gion Garden"];
+    await saveBrief(cookie, trip.id, "restored-brief");
+    const workspace = await research(cookie, trip.id, "restored-run");
+
+    // The rejected place never reached research; the restored one (pending again) was not offered either.
+    // Rejected Gion Garden and restored (pending again) Shoren Garden were held back from research
+    // by Place ID, in place, so the summary's citations still line up.
+    const offered = model.researchInputs[0]!.discovered[0]!;
+    expect(offered.placeIds).not.toContain(idOf("Gion Garden"));
+    expect(offered.placeIds).not.toContain(idOf("Shoren Garden"));
+    expect(offered.placeIds.filter((id) => id === null)).toHaveLength(2);
+    expect(await database.selectFrom("candidate_proposals").select("id")
+      .where("trip_id", "=", trip.id).where("provider_place_id", "=", idOf("Shoren Garden")).execute()).toHaveLength(1);
+    expect(workspace.decided.map((decision) => decision.name)).toContain("Gion Garden");
+    expect(workspace.proposals.map((proposal) => [proposal.name, proposal.status])).toEqual([["Shoren Garden", "pending"]]);
+    expect(workspace.latestRun?.shortfalls.filter((entry) => entry.code === "rejected")).toEqual([]);
+  });
+
+  it("never proposes a closed, foreign or unmapped place, and keeps Google's facts out of storage", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    provider.known
+      .set("Shoren Garden", {})
+      .set("Ruined Garden", { businessStatus: "closed_permanently" })
+      .set("Seoul Garden", { countryCode: "KR" })
+      .set("Floating Garden", { located: false });
+    await saveBrief(cookie, trip.id, "feasible-brief");
+    // Each place is reviewed on Google and named by an official page: only Google's facts rule some out.
+    model.researchedPlaces = ["Shoren Garden", "Ruined Garden", "Seoul Garden", "Floating Garden"];
+    const workspace = await research(cookie, trip.id, "feasible-run");
+
+    expect(workspace.proposals.map((proposal) => proposal.name)).toEqual(["Shoren Garden"]);
+    const ruledOut = ["permanently_closed", "temporarily_closed", "outside_trip", "no_location"];
+    expect(workspace.latestRun?.shortfalls.filter((entry) => ruledOut.includes(entry.code))).toEqual([
+      { code: "permanently_closed", subject: "Ruined Garden", named: false, endorsements: [], count: null },
+      { code: "outside_trip", subject: "Seoul Garden", named: false, endorsements: [], count: null },
+      { code: "no_location", subject: "Floating Garden", named: false, endorsements: [], count: null },
+    ]);
+    // The facts come with the one details lookup per picked place.
+    expect(provider.lookups).toHaveLength(4);
+    // Business status and country are used to screen, never stored; nor is Google's summary.
+    const stored = await sql<{ count: string }>`
+      select count(*)::text as count from discovery_evidence
+      where facts::text ilike '%businessStatus%' or facts::text ilike '%closed_permanently%'
+        or facts::text ilike '%countryCode%' or facts::text ilike '%"KR"%' or facts::text ilike '%[0]%'
+    `.execute(database);
+    expect(stored.rows[0]?.count).toBe("0");
+  });
+
+  it("runs one research per trip at a time and caps research per trip and per member each hour", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    await database.insertInto("users").values({
+      email: "second@example.test", display_name: "second", status: "active", created_at: now(), updated_at: now(),
+    }).execute();
+    const secondCookie = await login("second@example.test");
+    const second = await database.selectFrom("users").select("id").where("email", "=", "second@example.test").executeTakeFirstOrThrow();
+    await database.insertInto("trip_members").values({ trip_id: trip.id, user_id: second.id, role: "editor", removed_at: null }).execute();
+    provider.known.set("Shoren Garden", {});
+    model.researchedPlaces = ["Shoren Garden"];
+    await saveBrief(cookie, trip.id, "limit-brief");
+    const start = (who: string, key: string, tripId = trip.id) =>
+      discoveryRequest(who, `/api/trips/${tripId}/discovery/research`, key, { expectedBriefVersion: 1 });
+
+    // The owner's research is queued when the second member asks: no second paid run.
+    expect((await queueResearch(cookie, trip.id, "limit-run-1")).status).toBe(202);
+    const blocked = await start(secondCookie, "limit-second");
+    expect(blocked.status).toBe(409);
+    expect(await blocked.json()).toMatchObject({ error: { code: "research_in_progress" } });
+    // The same trip spelled in capitals is still the same trip.
+    expect((await start(secondCookie, "limit-second-upper", trip.id.toUpperCase())).status).toBe(409);
+    expect((await runQueuedJob()).status).toBe("succeeded");
+    // Once it finished, the next one is accepted (a successful run used its checklist, so ask again).
+    expect((await queueResearch(secondCookie, trip.id, "limit-second")).status).toBe(202);
+    await runQueuedJob();
+
+    // Six runs on the trip within the hour, failed ones included: the seventh is refused before anything is queued.
+    for (const key of ["limit-run-3", "limit-run-4", "limit-run-5", "limit-run-6"]) {
+      model.researchFailure = key === "limit-run-4" ? new TypeError("unexpected") : null;
+      expect((await queueResearch(cookie, trip.id, key)).status).toBe(202);
+      await runQueuedJob();
+    }
+    model.researchFailure = null;
+    const plansAtTripLimit = model.planCalls;
+    const seventh = await queueResearch(cookie, trip.id, "limit-run-7");
+    expect(seventh.status).toBe(429);
+    expect(seventh.headers.get("retry-after")).toMatch(/^\d+$/);
+    expect(await seventh.json()).toMatchObject({ error: { code: "research_limit_reached" } });
+    expect(await database.selectFrom("discovery_jobs").select("id").where("status", "=", "queued").execute()).toEqual([]);
+    // A retry of an accepted request is answered without queueing another run.
+    expect((await start(cookie, "limit-run-3")).status).toBe(202);
+    expect(await database.selectFrom("discovery_jobs").select("id").where("status", "=", "queued").execute()).toEqual([]);
+    expect(model.planCalls).toBe(plansAtTripLimit);
+
+    // The owner started five of those; five more on another trip reach the per-member cap of ten.
+    const other = await createTrip(cookie, "Osaka week");
+    await saveBrief(cookie, other.id, "limit-other-brief");
+    for (const key of ["other-run-1", "other-run-2", "other-run-3", "other-run-4", "other-run-5"]) {
+      expect((await queueResearch(cookie, other.id, key)).status).toBe(202);
+      await runQueuedJob();
+    }
+    const eleventh = await queueResearch(cookie, other.id, "other-run-6");
+    expect(eleventh.status).toBe(429);
+    expect(await eleventh.json()).toMatchObject({ error: { code: "research_limit_reached" } });
+  });
+
+  it("fails a job on an exhausted Google quota or an unexpected error, keeping the shortlist and the answers", async () => {
+    const cookie = await login();
+    const trip = await createTrip(cookie);
+    const before = await generateLocatedProposals(cookie, trip.id, "failure-baseline", ["Gion Garden"]);
+    expect(before.proposals).toHaveLength(1);
+    await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "failure-brief-2", { originalText: "More gardens.", expectedVersion: 1 });
+
+    placeDiscovery.quota = true;
+    expect((await queueResearch(cookie, trip.id, "failure-quota", 2)).status).toBe(202);
+    const quota = await runQueuedJob();
+    expect(quota).toMatchObject({ status: "failed", error_code: "provider_quota", stage: "discover" });
+    expect(quota.stages).toMatchObject({ plan: { state: "done" }, discover: { state: "failed" }, research: { state: "pending" } });
+
+    placeDiscovery.quota = false;
+    // A new place reaches verification, where Google's Place Details quota is spent.
+    provider.known.set("Okazaki Garden", {});
+    model.researchedPlaces = ["Okazaki Garden"];
+    provider.alwaysQuota = true;
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "failure-details-quota", { expectedBriefVersion: 2 })).status).toBe(202);
+    expect(await runQueuedJob()).toMatchObject({ status: "failed", error_code: "provider_quota", stage: "verify", added_count: null });
+
+    provider.alwaysQuota = false;
+    model.researchFailure = new TypeError("unexpected");
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "failure-unexpected", { expectedBriefVersion: 2 })).status).toBe(202);
+    expect(await runQueuedJob()).toMatchObject({ status: "failed", error_code: "internal_error", stage: "research" });
+
+    // Nothing was lost: the earlier place is still listed and the checklist is kept for 重新調查.
+    const after = await readWorkspace(cookie, trip.id);
+    expect(after.proposals.map((proposal) => proposal.id)).toEqual(before.proposals.map((proposal) => proposal.id));
+    expect(after.clarification).toMatchObject({ briefVersion: 2, status: "ready" });
+    expect(after.latestJob).toMatchObject({ status: "failed", errorCode: "internal_error" });
+    model.researchFailure = null;
+    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "failure-retry", { expectedBriefVersion: 2 })).status).toBe(202);
+    expect((await runQueuedJob()).status).toBe("succeeded");
   });
 
   it("scheduling proposals is all-or-nothing and idempotent", async () => {
@@ -1017,7 +1171,6 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     });
   });
 
-
   it("returns 404 instead of replaying a proposal response through another trip", async () => {
     const cookie = await login();
     const sourceTrip = await createTrip(cookie, "Discovery replay source");
@@ -1040,253 +1193,6 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       key,
       { voted: false },
     )).status).toBe(404);
-  });
-
-  it.each([false, true])("reopens one historical acceptance per identity (latest pending: %s)", async (latestPending) => {
-    const cookie = await login();
-    const trip = await createTrip(cookie, "Repeated historical acceptances");
-    const ownerId = trip.members[0]!.userId;
-    const second = await database.insertInto("users").values({
-      email: "historical-voter@example.test", display_name: "Historical voter", status: "active",
-      created_at: now(), updated_at: now(),
-    }).returning("id").executeTakeFirstOrThrow();
-    const removed = await database.insertInto("users").values({
-      email: "historical-removed@example.test", display_name: "Removed voter", status: "active",
-      created_at: now(), updated_at: now(),
-    }).returning("id").executeTakeFirstOrThrow();
-    await database.insertInto("trip_members").values([
-      { trip_id: trip.id, user_id: second.id, role: "editor", removed_at: null },
-      { trip_id: trip.id, user_id: removed.id, role: "editor", removed_at: now() },
-    ]).execute();
-    const intake = await discoveryRequest(cookie, `/api/trips/${trip.id}/trip-places`, "historical-place", {
-      method: "search", providerPlaceId: market.providerPlaceId, sourceUrl: market.sourceUrl, originalNote: null,
-    });
-    expect(intake.status).toBe(201);
-    const wishlistPlace = parseTripPlaceResponse(await intake.json()).tripPlace;
-    const proposalIds: string[] = [];
-    const states = latestPending ? ["accepted", "accepted", "pending"] : ["accepted", "accepted"];
-    for (const [index, status] of states.entries()) {
-      const run = await sql<{ id: string }>`
-        insert into discovery_runs (trip_id, brief_version, policy_version, model_id, status, search_plan, created_by, created_at)
-        values (${trip.id}, 1, 'historical', 'historical', 'completed', '{}'::jsonb, ${ownerId},
-          ${new Date(Date.UTC(2026, 8, 20 + index))})
-        returning id
-      `.execute(database);
-      const proposal = await sql<{ id: string }>`
-        insert into candidate_proposals (
-          trip_id, run_id, provider_place_id, name, place_type, recommendation, matched_needs,
-          tradeoffs, unknowns, confidence, status, decided_by, decided_at, accepted_trip_place_id, version, created_at
-        ) values (
-          ${trip.id}, ${run.rows[0]!.id}, ${market.providerPlaceId}, ${market.name}, 'activity', 'Historical recommendation',
-          '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'medium', ${status},
-          case when ${status} = 'accepted' then ${ownerId}::uuid else null end,
-          case when ${status} = 'accepted' then now() else null end,
-          case when ${status} = 'accepted' then ${wishlistPlace.id}::uuid else null end,
-          ${status === "accepted" ? 4 : 1}, ${new Date(Date.UTC(2026, 8, 27 - index))}
-        ) returning id
-      `.execute(database);
-      const id = proposal.rows[0]!.id;
-      proposalIds.push(id);
-      // The older row has newer created_at and overlapping votes: run recency wins and votes form a union.
-      await database.insertInto("discovery_proposal_votes").values(
-        (index === 0 ? [ownerId, second.id, removed.id] : [second.id])
-          .map((member_user_id) => ({ trip_id: trip.id, proposal_id: id, member_user_id })),
-      ).execute();
-    }
-    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/trip-places/${wishlistPlace.id}/remove`,
-      "historical-remove", { expectedVersion: wishlistPlace.version })).status).toBe(204);
-    const response = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
-    expect(response.status).toBe(200);
-    const workspace = parseDiscoveryWorkspaceResponse(await response.json()).discovery;
-    expect(workspace.proposals).toHaveLength(1);
-    const canonical = workspace.proposals[0]!;
-    expect(canonical).toMatchObject({
-      id: proposalIds.at(-1), status: "pending", acceptedTripPlaceId: null,
-      version: latestPending ? 1 : 5, ownVote: true, voteCount: 2,
-    });
-    expect(canonical.voters.map((voter) => voter.memberUserId).sort()).toEqual([ownerId, second.id].sort());
-    expect(await database.selectFrom("discovery_proposal_votes").select("member_user_id")
-      .where("proposal_id", "=", canonical.id).orderBy("member_user_id").execute())
-      .toEqual([ownerId, second.id].sort().map((member_user_id) => ({ member_user_id })));
-    for (const [index, id] of proposalIds.slice(0, 2).entries()) {
-      const reopened = await database.selectFrom("candidate_proposals")
-        .select(["status", "version", "reopened_at", "decided_by", "decided_at", "accepted_trip_place_id"])
-        .where("id", "=", id).executeTakeFirstOrThrow();
-      expect(reopened).toMatchObject({
-        status: "pending", version: 5, decided_by: null, decided_at: null, accepted_trip_place_id: null,
-      });
-      expect(reopened.reopened_at !== null).toBe(!latestPending && index === 1);
-    }
-    expect(await database.selectFrom("change_events").select("target_id")
-      .where("trip_id", "=", trip.id).where("event_type", "=", "discovery.proposal_reopened").orderBy("target_id").execute())
-      .toEqual(proposalIds.slice(0, 2).sort().map((target_id) => ({ target_id })));
-    const rejected = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${canonical.id}/reject`,
-      "historical-reject", { expectedVersion: canonical.version });
-    expect(rejected.status).toBe(200);
-    expect(parseDiscoveryWorkspaceResponse(await rejected.json()).discovery.proposals)
-      .toEqual([expect.objectContaining({ id: canonical.id, status: "rejected" })]);
-    // An undo names the rejection it undoes: a request built before it is refused.
-    const stale = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${canonical.id}/restore`,
-      "historical-restore-stale", { expectedVersion: canonical.version });
-    expect(stale.status).toBe(409);
-    const restored = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${canonical.id}/restore`,
-      "historical-restore", { expectedVersion: canonical.version + 1 });
-    expect(restored.status).toBe(200);
-    expect(parseDiscoveryWorkspaceResponse(await restored.json()).discovery.proposals)
-      .toEqual([expect.objectContaining({ id: canonical.id, status: "pending" })]);
-  });
-
-  it("lets research propose a restored place again although an earlier run had rejected it too", async () => {
-    const cookie = await login();
-    const trip = await createTrip(cookie, "Restored after two rejections");
-    const ownerId = trip.members[0]!.userId;
-    model.releasePlan();
-    provider.known.set("Shoren Garden", {});
-    // Two earlier runs proposed the same place and both proposals were rejected.
-    const rejectedIds: string[] = [];
-    for (const index of [0, 1]) {
-      const at = new Date(Date.UTC(2026, 8, 20 + index));
-      const run = await sql<{ id: string }>`
-        insert into discovery_runs (trip_id, brief_version, policy_version, model_id, status, search_plan, created_by, created_at)
-        values (${trip.id}, 1, 'historical', 'historical', 'completed', '{}'::jsonb, ${ownerId}, ${at})
-        returning id
-      `.execute(database);
-      const proposal = await sql<{ id: string }>`
-        insert into candidate_proposals (
-          trip_id, run_id, provider_place_id, name, place_type, recommendation, matched_needs,
-          tradeoffs, unknowns, confidence, status, decided_by, decided_at, version, created_at, updated_at
-        ) values (
-          ${trip.id}, ${run.rows[0]!.id}, 'ChIJ-Shoren-Garden', 'Shoren Garden', 'activity', 'Historical recommendation',
-          '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, 'medium', 'rejected', ${ownerId}, ${at}, 2, ${at}, ${at}
-        ) returning id
-      `.execute(database);
-      rejectedIds.push(proposal.rows[0]!.id);
-    }
-    // Undoing the earlier rejection would not bring the place back while the later one stands.
-    const older = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${rejectedIds[0]}/restore`,
-      "restore-earlier", { expectedVersion: 2 });
-    expect(older.status).toBe(409);
-    // A decision replayed from before restore existed carries version 0: a conflict, not a validation error.
-    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${rejectedIds[1]}/restore`,
-      "restore-unknown-version", { expectedVersion: 0 })).status).toBe(409);
-    expect(await database.selectFrom("candidate_proposals").select(["status", "version"])
-      .where("id", "in", rejectedIds).orderBy("created_at").execute())
-      .toEqual([{ status: "rejected", version: 2 }, { status: "rejected", version: 2 }]);
-    // The owner restores the one the decided list shows (the later one).
-    const restored = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/proposals/${rejectedIds[1]}/restore`,
-      "restore-later", { expectedVersion: 2 });
-    expect(restored.status).toBe(200);
-    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "restored-brief", {
-      originalText: "Quiet gardens.",
-      expectedVersion: null,
-    })).status).toBe(200);
-    model.researchedPlaces = ["Shoren Garden"];
-    const response = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "restored-run", {
-      expectedBriefVersion: 1,
-    });
-    expect(response.status).toBe(200);
-    const workspace = parseDiscoveryWorkspaceResponse(await response.json()).discovery;
-    expect(workspace.proposals.map((proposal) => proposal.name)).toContain("Shoren Garden");
-    expect(workspace.latestRun?.shortfalls.filter((entry) => entry.code === "rejected")).toEqual([]);
-  });
-
-  it("never proposes a closed, foreign or unmapped place, and keeps Google's facts out of storage", async () => {
-    const cookie = await login();
-    const trip = await createTrip(cookie);
-    model.releasePlan();
-    provider.known
-      .set("Shoren Garden", {})
-      .set("Ruined Garden", { businessStatus: "closed_permanently" })
-      .set("Seoul Garden", { countryCode: "KR" })
-      .set("Floating Garden", { located: false });
-    expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "feasible-brief", {
-      originalText: "Quiet gardens.",
-      expectedVersion: null,
-    })).status).toBe(200);
-    // Each place is reviewed on Google and named by an official page: only Google's facts rule some out.
-    model.researchedPlaces = ["Shoren Garden", "Ruined Garden", "Seoul Garden", "Floating Garden"];
-    const response = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "feasible-run", {
-      expectedBriefVersion: 1,
-    });
-    expect(response.status).toBe(200);
-    const workspace = parseDiscoveryWorkspaceResponse(await response.json()).discovery;
-
-    expect(workspace.proposals.map((proposal) => proposal.name)).toEqual(["Shoren Garden"]);
-    const ruledOut = ["permanently_closed", "temporarily_closed", "outside_trip", "no_location"];
-    expect(workspace.latestRun?.shortfalls.filter((entry) => ruledOut.includes(entry.code))).toEqual([
-      { code: "permanently_closed", subject: "Ruined Garden", named: false, endorsements: [], count: null },
-      { code: "outside_trip", subject: "Seoul Garden", named: false, endorsements: [], count: null },
-      { code: "no_location", subject: "Floating Garden", named: false, endorsements: [], count: null },
-    ]);
-    // The facts come with the lookups the run already makes: one per place.
-    expect(provider.lookups).toHaveLength(4);
-    // Business status and country are used to screen, never stored.
-    const stored = await sql<{ count: string }>`
-      select count(*)::text as count from discovery_evidence
-      where facts::text ilike '%businessStatus%' or facts::text ilike '%closed_permanently%'
-        or facts::text ilike '%countryCode%' or facts::text ilike '%"KR"%'
-    `.execute(database);
-    expect(stored.rows[0]?.count).toBe("0");
-  });
-
-  it("runs one research per trip at a time and caps research per trip and per member each hour", async () => {
-    const cookie = await login();
-    const trip = await createTrip(cookie);
-    await database.insertInto("users").values({
-      email: "second@example.test", display_name: "second", status: "active", created_at: now(), updated_at: now(),
-    }).execute();
-    const secondCookie = await login("second@example.test");
-    const second = await database.selectFrom("users").select("id").where("email", "=", "second@example.test").executeTakeFirstOrThrow();
-    await database.insertInto("trip_members").values({ trip_id: trip.id, user_id: second.id, role: "editor", removed_at: null }).execute();
-    provider.known.set("Shoren Garden", {});
-    model.researchedPlaces = ["Shoren Garden"];
-    const saveBrief = async (tripId: string) => expect((await discoveryRequest(cookie, `/api/trips/${tripId}/discovery/brief`, `limit-brief-${tripId}`, {
-      originalText: "Quiet gardens.",
-      expectedVersion: null,
-    })).status).toBe(200);
-    const generate = (who: string, key: string, tripId = trip.id) =>
-      discoveryRequest(who, `/api/trips/${tripId}/discovery/generate`, key, { expectedBriefVersion: 1 });
-    await saveBrief(trip.id);
-
-    // The owner's research is still running when the second member asks: no second paid run.
-    const first = generate(cookie, "limit-run-1");
-    await model.planStarted;
-    const blocked = await generate(secondCookie, "limit-second");
-    expect(blocked.status).toBe(409);
-    expect(await blocked.json()).toMatchObject({ error: { code: "research_in_progress" } });
-    // The same trip spelled in capitals is still the same trip.
-    const blockedUpper = await generate(secondCookie, "limit-second-upper", trip.id.toUpperCase());
-    expect(blockedUpper.status).toBe(409);
-    model.releasePlan();
-    expect((await first).status).toBe(200);
-    expect(model.planCalls).toBe(1);
-    // Once it finished, the same request goes through.
-    expect((await generate(secondCookie, "limit-second")).status).toBe(200);
-
-    // Six runs on the trip within the hour: the seventh is refused before any model call.
-    for (const key of ["limit-run-3", "limit-run-4", "limit-run-5", "limit-run-6"]) {
-      expect((await generate(cookie, key)).status).toBe(200);
-    }
-    const plansAtTripLimit = model.planCalls;
-    const seventh = await generate(cookie, "limit-run-7");
-    expect(seventh.status).toBe(429);
-    expect(seventh.headers.get("retry-after")).toMatch(/^\d+$/);
-    expect(await seventh.json()).toMatchObject({ error: { code: "research_limit_reached" } });
-    expect(model.planCalls).toBe(plansAtTripLimit);
-    // A retry of a finished request is answered from what it already returned.
-    expect((await generate(cookie, "limit-run-3")).status).toBe(200);
-    expect(model.planCalls).toBe(plansAtTripLimit);
-
-    // The owner started five of those; five more on another trip reach the per-member cap of ten.
-    const other = await createTrip(cookie, "Osaka week");
-    await saveBrief(other.id);
-    for (const key of ["other-run-1", "other-run-2", "other-run-3", "other-run-4", "other-run-5"]) {
-      expect((await generate(cookie, key, other.id)).status).toBe(200);
-    }
-    const eleventh = await generate(cookie, "other-run-6", other.id);
-    expect(eleventh.status).toBe(429);
-    expect(await eleventh.json()).toMatchObject({ error: { code: "research_limit_reached" } });
-    expect(model.planCalls).toBe(plansAtTripLimit + 5);
   });
 
   it("keeps shortlists from before the quality checks readable", async () => {
@@ -1342,105 +1248,5 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       tradeoffSentences: null,
     })]);
     expect(workspace.proposals[0]).not.toHaveProperty("confidence");
-  });
-
-  it("replays a response stored before the quality checks instead of failing", async () => {
-    const cookie = await login();
-    const trip = await createTrip(cookie);
-    const owner = await database.selectFrom("users").select("id").where("email", "=", "owner@example.test")
-      .executeTakeFirstOrThrow();
-    // The previous release's shape lacks later quality and question-answer fields and includes retired feedback data.
-    await database.insertInto("mutation_requests").values({
-      actor_id: owner.id,
-      operation: `discovery:generate:${trip.id}`,
-      idempotency_key: "generate-before-deploy",
-      response: {
-        brief: {
-          originalText: "Food markets.", structured: null, unresolvedQuestions: [], version: 1,
-          updatedAt: "2026-10-03T16:38:02.000Z",
-        },
-        latestRun: {
-          id: "00000000-0000-4000-8000-000000004401", status: "completed", modelId: "gpt-old", policyVersion: "discovery-v1",
-          briefVersion: 1, generatedAt: "2026-10-03T16:38:02.000Z", errorCode: null,
-          searchPlan: { queries: ["Kyoto food markets"], areas: ["Kyoto"], categories: ["market"], exclusions: [], dateRange: { start: "2026-10-21", end: "2026-10-27" } },
-        },
-        proposals: [{
-          id: "00000000-0000-4000-8000-000000004402", runId: "00000000-0000-4000-8000-000000004401",
-          providerPlaceId: market.providerPlaceId, name: market.name, type: market.type, address: market.address,
-          latitude: market.latitude, longitude: market.longitude, sourceUrl: market.sourceUrl,
-          recommendation: "An older recommendation.", matchedNeeds: [], tradeoffs: [], unknowns: [], confidence: "medium",
-          status: "pending",
-          evidence: [{
-            id: "00000000-0000-4000-8000-000000004403",
-            kind: "google-place",
-            providerPlaceId: market.providerPlaceId,
-            sourceUrl: market.sourceUrl,
-            title: market.name,
-            attribution: market.attribution,
-            observedAt: market.observedAt,
-            expiresAt: market.expiresAt,
-          }],
-          acceptedTripPlaceId: null,
-          version: 1,
-        }],
-        feedback: [{
-          id: "00000000-0000-4000-8000-000000004403",
-          proposalId: null,
-          originalText: "More markets.",
-          interpretation: { interests: ["markets"], exclusions: [], pace: null, budget: null, summary: "More markets." },
-          status: "pending",
-          version: 1,
-          createdAt: "2026-10-03T16:38:02.000Z",
-        }],
-        // A decision as the previous release stored it: no version.
-        decided: [{
-          proposalId: "00000000-0000-4000-8000-000000004404", providerPlaceId: "ChIJ-Older-Decision",
-          name: "Older decision", status: "rejected", decidedAt: "2026-10-02T09:00:00.000Z",
-        }],
-        modelAvailable: true,
-        placeProviderAvailable: true,
-      },
-    }).execute();
-
-    const replay = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "generate-before-deploy", {
-      expectedBriefVersion: 1,
-    });
-
-    expect(replay.status).toBe(200);
-    const workspace = parseDiscoveryWorkspaceResponse(await replay.json()).discovery;
-    expect(workspace.latestRun).toMatchObject({ shortfalls: [], searchPlan: { namedPlaces: [], defaultCategories: false } });
-    expect(workspace.proposals[0]).toMatchObject({
-      category: null,
-      endorsements: [],
-      recommendationSentences: null,
-      tradeoffSentences: null,
-      evidence: [expect.objectContaining({ isStale: false })],
-    });
-    expect(workspace.proposals[0]).not.toHaveProperty("confidence");
-    expect(workspace.brief?.questionAnswers).toEqual([]);
-    expect(workspace).not.toHaveProperty("feedback");
-    expect(workspace.decided).toEqual([expect.objectContaining({ proposalId: "00000000-0000-4000-8000-000000004404", version: 0 })]);
-    expect(model.planCalls).toBe(0);
-  });
-
-
-  it("releases the request after an unexpected failure so a retry is not stuck in progress", async () => {
-    const cookie = await login();
-    const trip = await createTrip(cookie);
-    await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "brief-failure", {
-      originalText: "Food markets.",
-      expectedVersion: null,
-    });
-    model.releasePlan();
-    model.researchFailure = new TypeError("unexpected");
-    const generate = () => discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/generate`, "generate-failure", {
-      expectedBriefVersion: 1,
-    });
-
-    expect((await generate()).status).toBe(500);
-    const retry = await generate();
-
-    expect(retry.status).toBe(503);
-    expect(model.researchCalls).toBe(1);
   });
 });

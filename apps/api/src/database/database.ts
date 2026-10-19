@@ -147,6 +147,7 @@ export interface TripPlaceTable {
   longitude: number | null;
   time_zone: string | null;
   duration_minutes: number | null;
+  effort_level: Generated<number | null>;
   selected_for_itinerary: Generated<boolean>;
   unplaced_from_date: DateOnly | null;
   budget_amount_minor: BigInteger | null;
@@ -247,6 +248,38 @@ export interface DiscoveryRunTable {
   completed_at: Timestamp;
   /** DiscoveryShortfallDto[]; empty for runs from before shortfalls were recorded. */
   shortfalls: Generated<unknown>;
+}
+
+export interface DiscoveryClarificationTable {
+  trip_id: string;
+  brief_version: number;
+  status: "asking" | "ready";
+  /** StoredClarifyItem[] (discovery-clarification.ts); at most five. */
+  items: unknown;
+  rounds: Generated<number>;
+  model_id: string | null;
+  version: Generated<number>;
+  updated_by: string;
+  updated_at: Timestamp;
+}
+
+export interface DiscoveryJobTable {
+  id: Generated<string>;
+  trip_id: string;
+  brief_version: number;
+  created_by: string;
+  client_ip: string | null;
+  status: "queued" | "running" | "succeeded" | "failed";
+  stage: "plan" | "discover" | "research" | "verify" | "save" | "photos" | null;
+  /** Record<stage, { state, startedAt, endedAt, counts? }> */
+  stages: Generated<unknown>;
+  error_code: string | null;
+  run_id: string | null;
+  added_count: number | null;
+  heartbeat_at: Timestamp | null;
+  created_at: Timestamp;
+  finished_at: Timestamp | null;
+  acknowledged_at: Timestamp | null;
 }
 
 export interface DiscoveryEvidenceTable {
@@ -522,6 +555,101 @@ export interface CommonsPhotoCandidateTable {
   created_at: Generated<Timestamp>;
 }
 
+export interface PlaceGuideTable {
+  place_id: string;
+  language: string;
+  history: string | null;
+  see: unknown;
+  do: unknown;
+  eat: unknown;
+  sources: unknown;
+  model: string | null;
+  status: "generating" | "ready" | "no_sources" | "failed";
+  claim_token: string | null;
+  claimed_at: Timestamp | null;
+  generated_at: Timestamp;
+}
+
+export interface PlacePlanningProfileTable {
+  place_id: string;
+  requested_trip_id: string | null;
+  canonical_name: string | null;
+  place_type: PlaceType | null;
+  language: string;
+  visit_minutes: number | null;
+  effort_level: number | null;
+  confidence: "low" | "medium" | "high" | null;
+  rationale_zh_tw: string | null;
+  evidence_indexes: unknown;
+  sources: unknown;
+  model: string | null;
+  prompt_version: string | null;
+  policy_version: string | null;
+  evidence_hash: string | null;
+  input_hash: string | null;
+  status: "pending" | "generating" | "ready" | "no_evidence" | "failed";
+  claim_token: string | null;
+  claimed_at: Timestamp | null;
+  attempts: number;
+  next_attempt_at: Timestamp;
+  generated_at: Timestamp | null;
+  evidence_checked_at: Timestamp | null;
+  updated_at: Timestamp;
+}
+
+
+
+export interface TripPlanningSettingsTable {
+  trip_id: string;
+  pace_preset: "chill" | "balanced" | "packed" | "custom";
+  target_places_per_day: number;
+  max_places_per_day: number;
+  day_start: string;
+  day_end: string;
+  max_effort_per_day: number;
+  max_daily_straight_km: number;
+  max_hop_straight_km: number;
+  meal_reserve_minutes: number;
+  rest_minutes: number;
+  slack_percent: number;
+  travel_profile: "walk" | "transit" | "car" | "custom";
+  speed_kmh: number;
+  detour_factor: number;
+  per_leg_minutes: number;
+  light_travel_days: boolean;
+  version: Generated<number>;
+  updated_by: string;
+  updated_at: Timestamp;
+}
+
+export interface TripDayPlanningOverrideTable {
+  day_id: string;
+  trip_id: string;
+  target_places_per_day: number | null;
+  max_places_per_day: number | null;
+  day_start: string | null;
+  day_end: string | null;
+  max_effort_per_day: number | null;
+  max_daily_straight_km: number | null;
+  max_hop_straight_km: number | null;
+  meal_reserve_minutes: number | null;
+  rest_minutes: number | null;
+  slack_percent: number | null;
+  version: Generated<number>;
+  updated_by: string;
+  updated_at: Timestamp;
+}
+
+export interface WholeTripPlanProposalTable {
+  id: Generated<string>;
+  trip_id: string;
+  created_by: string;
+  input_revision: string;
+  payload: unknown;
+  created_at: Timestamp;
+  expires_at: Timestamp;
+}
+
 export interface AlongTheWayDatabase {
   users: UserTable;
   magic_link_tokens: MagicLinkTokenTable;
@@ -530,6 +658,9 @@ export interface AlongTheWayDatabase {
   trip_destinations: TripDestinationTable;
   trip_country_stops: TripCountryStopTable;
   trip_days: TripDayTable;
+  trip_planning_settings: TripPlanningSettingsTable;
+  trip_day_planning_overrides: TripDayPlanningOverrideTable;
+  whole_trip_plan_proposals: WholeTripPlanProposalTable;
   places: PlaceTable;
   legacy_place_origins: LegacyPlaceOriginTable;
   place_identities: PlaceIdentityTable;
@@ -538,6 +669,8 @@ export interface AlongTheWayDatabase {
   place_photo_blobs: PlacePhotoBlobTable;
   commons_place_photos: CommonsPlacePhotoTable;
   commons_photo_candidates: CommonsPhotoCandidateTable;
+  place_guides: PlaceGuideTable;
+  place_planning_profiles: PlacePlanningProfileTable;
   trip_places: TripPlaceTable;
   trip_place_must_items: TripPlaceMustItemTable;
   trip_place_contributions: TripPlaceContributionTable;
@@ -548,6 +681,8 @@ export interface AlongTheWayDatabase {
   trip_place_duplicate_suggestions: TripPlaceDuplicateSuggestionTable;
   discovery_briefs: DiscoveryBriefTable;
   discovery_runs: DiscoveryRunTable;
+  discovery_clarifications: DiscoveryClarificationTable;
+  discovery_jobs: DiscoveryJobTable;
   discovery_evidence: DiscoveryEvidenceTable;
   candidate_proposals: CandidateProposalTable;
   candidate_proposal_evidence: CandidateProposalEvidenceTable;
