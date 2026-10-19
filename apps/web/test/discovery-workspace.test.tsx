@@ -129,10 +129,8 @@ it("renders proposal behavior in the compact shared row without exposing the add
     return (init?.parse ? init.parse(value) : value) as T;
   };
 
-  const { container } = render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
-  const heading = await screen.findByRole("heading", { name: "AI 建議" });
-  const headingCopy = heading.closest(".pd-pagehead-copy")!;
-  expect(within(headingCopy as HTMLElement).getByText("只要說明一次旅程需求，AI 就會研究可信來源、在 Google Maps 確認每個地點，並只顯示至少有兩個獨立來源推薦的地點。", { exact: true })).toBeInTheDocument();
+  const { container } = render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} job={null} onJobStarted={vi.fn()} />);
+  await screen.findByRole("heading", { name: "幫我找" });
 
   const row = await waitFor(() => {
     const element = container.querySelector<HTMLElement>('[data-place-list-row][data-discovery-proposal="錦市場"]');
@@ -140,7 +138,6 @@ it("renders proposal behavior in the compact shared row without exposing the add
     return element!;
   });
   expect(row).toHaveTextContent("適合安排成輕鬆的市場散步。");
-  expect(row).toHaveTextContent("來源未逐句對應");
   expect(row).toHaveTextContent("待討論");
   expect(row).not.toHaveTextContent("地址未知");
   expect(row.querySelectorAll(".pd-vote-control")).toHaveLength(1);
@@ -179,7 +176,7 @@ it("renders an unsafe discovery citation as text instead of an external link", a
     return (init?.parse ? init.parse(value) : value) as T;
   };
 
-  render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} job={null} onJobStarted={vi.fn()} />);
   await waitFor(() => expect(document.querySelector(`[data-proposal-detail-trigger="${proposal.id}"]`)).not.toBeNull());
   fireEvent.click(document.querySelector(`[data-proposal-detail-trigger="${proposal.id}"]`)!);
   const detail = await screen.findByRole("dialog", { name: proposal.name });
@@ -224,7 +221,7 @@ it("shows an accepted proposal's detail as reasons then location, without wishli
     return (init?.parse ? init.parse(value) : value) as T;
   };
 
-  render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} job={null} onJobStarted={vi.fn()} />);
   await waitFor(() => expect(document.querySelector(`[data-proposal-detail-trigger="${proposal.id}"]`)).not.toBeNull());
   fireEvent.click(document.querySelector(`[data-proposal-detail-trigger="${proposal.id}"]`)!);
   const detail = await screen.findByRole("dialog", { name: "錦市場" });
@@ -283,7 +280,7 @@ it("opens proposal thumbnails during normal and selection modes with licensed ro
   };
 
   const rendered = render(
-    <DiscoveryWorkspace accountId="account" trip={trip} request={requestWithPhoto(previewPhoto)} placesRevision={0} onPlacesChanged={vi.fn()} />,
+    <DiscoveryWorkspace accountId="account" trip={trip} request={requestWithPhoto(previewPhoto)} placesRevision={0} onPlacesChanged={vi.fn()} job={null} onJobStarted={vi.fn()} />,
   );
   const row = await waitFor(() => {
     const element = rendered.container.querySelector<HTMLElement>(`[data-discovery-proposal="${selectableProposal.name}"]`);
@@ -341,11 +338,11 @@ it("updates a discovery vote immediately, blocks a double tap, never lets a late
   };
 
   const rendered = render(
-    <DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />,
+    <DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} job={null} onJobStarted={vi.fn()} />,
   );
   const button = await screen.findByRole("button", { name: "想去，0 票" });
   rendered.rerender(
-    <DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={1} onPlacesChanged={vi.fn()} />,
+    <DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={1} onPlacesChanged={vi.fn()} job={null} onJobStarted={vi.fn()} />,
   );
   await waitFor(() => expect(discoveryReads).toBe(2));
 
@@ -399,7 +396,7 @@ it("restores a failed discovery vote, announces the exact error, and reuses its 
     return (init?.parse ? init.parse(value) : value) as T;
   };
 
-  render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />);
+  render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} job={null} onJobStarted={vi.fn()} />);
   const button = await screen.findByRole("button", { name: "想去，0 票" });
   fireEvent.click(button);
   expect(button).toHaveAttribute("aria-pressed", "true");
@@ -415,4 +412,109 @@ it("restores a failed discovery vote, announces the exact error, and reuses its 
   expect(voteRequests).toBe(2);
   expect(idempotencyKeys[0]).toBeTruthy();
   expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
+});
+
+const stages = (done: string[], running: string | null) => Object.fromEntries(
+  ["plan", "discover", "research", "verify", "save", "photos"].map((stage) => [stage, {
+    state: done.includes(stage) ? "done" : stage === running ? "running" : "pending",
+    startedAt: done.includes(stage) || stage === running ? "2026-10-19T10:00:00.000Z" : null,
+    endedAt: done.includes(stage) ? "2026-10-19T10:00:05.000Z" : null,
+  }]),
+);
+
+function job(overrides: Record<string, unknown>) {
+  return {
+    id: "66666666-6666-4666-8666-666666666666", briefVersion: 1, status: "running", stage: "plan",
+    stages: stages([], "plan"), errorCode: null, addedCount: null,
+    createdAt: "2026-10-19T10:00:00.000Z", finishedAt: null, acknowledged: false, ...overrides,
+  };
+}
+
+const brief = { version: 1, originalText: "京都 寺廟", structured: null, questionAnswers: [], unresolvedQuestions: [], updatedAt: "2026-10-19T09:00:00.000Z" };
+const checklist = (status: "asking" | "ready", answer: string | null, version: number) => ({
+  briefVersion: 1, status, maxFollowUps: 2, version,
+  items: [{
+    id: "q1", text: "想看紅葉嗎？", why: "決定要不要排賞楓的寺。", options: ["想", "不用"], allowOther: false, multiple: false,
+    required: true, answer, skipped: false, verdict: answer ? "sufficient" : null, reason: null, followUps: 0,
+  }],
+});
+
+function discovery(overrides: Record<string, unknown>) {
+  return { discovery: {
+    brief, latestRun: null, proposals: [], decided: [], clarification: null, latestJob: null,
+    modelAvailable: true, placeProviderAvailable: true, ...overrides,
+  } };
+}
+
+it("walks 調查 step by step: questions first, required answers, then research handed to the trip shell", async () => {
+  const calls: Array<{ path: string; method: string; body: unknown }> = [];
+  const queued = job({ status: "queued", stage: null, stages: stages([], null) });
+  const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
+    const method = init?.method ?? "GET";
+    if (method !== "GET") calls.push({ path, method, body: JSON.parse(String(init?.body)) });
+    let value: unknown;
+    if (path.endsWith("/discovery") && method === "GET") value = discovery({});
+    else if (path.endsWith("/trip-places")) value = { tripPlaces: [] };
+    else if (path.endsWith("/discovery/clarification") && method === "POST") value = discovery({ clarification: checklist("asking", null, 1) });
+    else if (path.endsWith("/discovery/clarification/answers") && method === "PUT") value = discovery({ clarification: checklist("ready", "想", 2) });
+    else if (path.endsWith("/discovery/research") && method === "POST") value = discovery({ clarification: checklist("ready", "想", 2), latestJob: queued });
+    else throw new Error(`Unexpected request: ${method} ${path}`);
+    return (init?.parse ? init.parse(value) : value) as T;
+  };
+  const onJobStarted = vi.fn();
+  render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} job={null} onJobStarted={onJobStarted} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "下一步：讓 AI 先問幾題" }));
+  // The required question blocks research until it is answered.
+  const blocked = await screen.findByRole("button", { name: "還有 1 題必填" });
+  expect(blocked).toBeDisabled();
+  expect(calls.map((call) => call.path.split("/discovery")[1])).toEqual(["/clarification"]);
+
+  fireEvent.click(screen.getByRole("radio", { name: "想" }));
+  fireEvent.click(await screen.findByRole("button", { name: "開始找地點" }));
+
+  await waitFor(() => expect(onJobStarted).toHaveBeenCalledWith(expect.objectContaining({ id: queued.id, status: "queued" })));
+  expect(calls.map((call) => [call.method, call.path.split("/discovery")[1]])).toEqual([
+    ["POST", "/clarification"],
+    ["PUT", "/clarification/answers"],
+    ["POST", "/research"],
+  ]);
+  expect(calls[1]!.body).toEqual({ expectedVersion: 1, answers: [{ id: "q1", answer: "想" }] });
+  expect(calls[2]!.body).toEqual({ expectedBriefVersion: 1 });
+});
+
+it("shows a running job's current stage at the top, then the places that run found, marked new", async () => {
+  const runId = "77777777-7777-4777-8777-777777777777";
+  const fresh = { ...proposal, id: "88888888-8888-4888-8888-888888888888", runId, name: "東福寺", providerPlaceId: "ChIJ-Tofukuji" };
+  const saved = job({ status: "running", stage: "photos", stages: stages(["plan", "discover", "research", "verify", "save"], "photos"), addedCount: 1 });
+  let workspace = discovery({ proposals: [proposal] });
+  const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
+    let value: unknown;
+    if (path.endsWith("/discovery")) value = workspace;
+    else if (path.endsWith("/trip-places")) value = { tripPlaces: [] };
+    else if (path.includes("/place-previews?")) value = { previews: [] };
+    else throw new Error(`Unexpected request: ${path}`);
+    return (init?.parse ? init.parse(value) : value) as T;
+  };
+  const running = job({ stage: "discover", stages: stages(["plan"], "discover") });
+  const view = render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} job={running as never} onJobStarted={vi.fn()} />);
+
+  expect(await screen.findByRole("heading", { name: "AI 正在找地點" })).toBeInTheDocument();
+  expect(screen.getByText(/在地圖上找店中/)).toBeInTheDocument();
+  expect(screen.getByText("找到的地點會出現在這裡。")).toBeInTheDocument();
+
+  // The save stage finished: the page re-reads the list and the new place appears in the batch.
+  workspace = discovery({
+    proposals: [fresh, proposal],
+    latestRun: { id: runId, status: "completed", modelId: "m", policyVersion: "p", briefVersion: 1, searchPlan: { queries: [], areas: [], categories: [], defaultCategories: false, namedPlaces: [], alreadyArranged: [], exclusions: [], dateRange: { start: trip.startDate, end: trip.endDate } }, generatedAt: "2026-10-19T10:00:06.000Z", errorCode: null, shortfalls: [] },
+    latestJob: saved,
+  });
+  view.rerender(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} job={saved as never} onJobStarted={vi.fn()} />);
+
+  const batch = (await screen.findByRole("heading", { name: "AI 找到 1 個地點" })).closest("section")!;
+  await waitFor(() => expect(batch.querySelector('[data-discovery-proposal="東福寺"]')).not.toBeNull());
+  expect(batch.querySelector('[data-discovery-proposal="東福寺"]')).toHaveTextContent("新");
+  // Older places stay in the list below, not in the batch.
+  expect(batch.querySelector('[data-discovery-proposal="錦市場"]')).toBeNull();
+  expect(document.querySelector('[data-discovery-proposal="錦市場"]')).not.toBeNull();
 });

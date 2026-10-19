@@ -70,6 +70,7 @@ function place(id: string, name: string, scheduled: boolean): TripPlaceDto {
     selectedForItinerary: scheduled,
     unplacedFromDate: null,
     durationMinutes: null,
+    effortLevel: null,
     assignedDayId: null,
     dayPosition: null,
     budgetAmountMinor: null,
@@ -464,7 +465,7 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
 
   fireEvent.click(document.querySelector(`[data-place-detail-trigger="${unscheduledId}"]`)!);
   let detail = await screen.findByRole("dialog", { name: /^未排程咖啡店$/ });
-  expect(within(detail).getByRole("button", { name: /^修改原因$/ })).toBeInTheDocument();
+  expect(within(detail).getByRole("button", { name: /^編輯停留時間與體力$/ })).toBeInTheDocument();
   expect(within(detail).getByRole("button", { name: "新增" })).toBeEnabled();
   // The detail only displays; removal lives in the row's ⋯ menu.
   expect(within(detail).queryByRole("button", { name: /^從口袋名單移除$/ })).not.toBeInTheDocument();
@@ -476,7 +477,6 @@ it("hides owner-only scheduling and scheduled removal while retaining editor col
 
   fireEvent.click(document.querySelector(`[data-place-detail-trigger="${scheduledId}"]`)!);
   detail = await screen.findByRole("dialog", { name: /^固定行程餐廳$/ });
-  expect(within(detail).getByRole("button", { name: /^修改原因$/ })).toBeInTheDocument();
   expect(within(detail).queryByRole("button", { name: /^更改日期$/ })).not.toBeInTheDocument();
   expect(within(detail).queryByRole("button", { name: /^從口袋名單移除$/ })).not.toBeInTheDocument();
 
@@ -519,7 +519,7 @@ it("renders unsafe wishlist and duplicate source URLs as text instead of externa
   expect(detail.querySelector('a[href^="javascript:"], a[href^="data:"]')).toBeNull();
 });
 
-it("round-trips duration and budget values when saving only the wishlist reason", async () => {
+it("keeps the reason, duration and budget when only the effort is changed", async () => {
   const current = {
     ...place(unscheduledId, "哲學之道", false),
     durationMinutes: 75,
@@ -532,20 +532,14 @@ it("round-trips duration and budget values when saving only the wishlist reason"
     if (path.endsWith("/trip-places") && !init?.method) return { tripPlaces: [current] } as T;
     if (path.includes("/place-previews?")) return applyParser({ previews: [] }, init);
     if (path.includes("/place-details?")) return applyParser({ detail: {
-      reference: { kind: "trip-place", id: current.id },
-      canonicalPlaceId: current.placeId,
-      name: current.name,
-      asOfDate: null,
-      sections: [],
-      sources: [],
-      photos: [],
-      googlePhotos: [],
-      photosUnavailable: false,
+      reference: { kind: "trip-place", id: current.id }, canonicalPlaceId: current.placeId, name: current.name,
+      asOfDate: null, sections: [], sources: [], photos: [], googlePhotos: [], photosUnavailable: false,
     } }, init);
     if (path.endsWith("/must-items") && !init?.method) return applyParser({ items: [] }, init);
+    if (path.endsWith("/planning-load")) throw new Error("planning load unavailable in this test");
     if (path.endsWith("/planning") && init?.method === "PATCH") {
       savedPayload = JSON.parse(String(init.body)) as Record<string, unknown>;
-      return applyParser({ tripPlace: { ...current, notes: savedPayload.notes, version: 2 } }, init);
+      return applyParser({ tripPlace: { ...current, effortLevel: savedPayload.effortLevel, version: 2 } }, init);
     }
     throw new Error(`Unexpected request: ${path}`);
   };
@@ -554,16 +548,16 @@ it("round-trips duration and budget values when saving only the wishlist reason"
   await waitFor(() => expect(document.querySelector(`[data-place-detail-trigger="${current.id}"]`)).not.toBeNull());
   fireEvent.click(document.querySelector(`[data-place-detail-trigger="${current.id}"]`)!);
   const detail = await screen.findByRole("dialog", { name: "哲學之道" });
-  expect(within(detail).queryByText("停留時間和預算")).not.toBeInTheDocument();
-  fireEvent.click(within(detail).getByRole("button", { name: "修改原因" }));
-  fireEvent.change(within(detail).getByRole("textbox"), { target: { value: "想在清晨散步" } });
-  fireEvent.click(within(detail).getByRole("button", { name: "儲存" }));
+  fireEvent.click(within(detail).getByRole("button", { name: "編輯停留時間與體力" }));
+  fireEvent.click(within(detail).getByRole("radio", { name: "4・偏累" }));
+  fireEvent.click(within(detail).getByRole("button", { name: "儲存規劃資訊" }));
 
   await waitFor(() => expect(savedPayload).toEqual({
     durationMinutes: 75,
+    effortLevel: 4,
     budgetAmountMinor: 3200,
     budgetCurrency: "JPY",
-    notes: "想在清晨散步",
+    notes: "想看櫻花",
     expectedVersion: 1,
   }));
 });
