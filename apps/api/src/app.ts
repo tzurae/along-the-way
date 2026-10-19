@@ -275,11 +275,11 @@ function stringArrayField(body: Record<string, unknown>, name: string) {
   return values as string[];
 }
 
-function discoveryQuestionAnswersField(body: Record<string, unknown>) {
+function discoveryClarifyAnswersField(body: Record<string, unknown>) {
   return arrayField(body, "answers").map((value) => {
     const answer = objectBody(value);
     return {
-      question: stringField(answer, "question"),
+      id: stringField(answer, "id"),
       answer: nullableStringField(answer, "answer"),
     };
   });
@@ -1104,35 +1104,57 @@ export function createApp({
       ),
     });
   });
-  app.put("/api/trips/:tripId/discovery/brief/questions", async (context) => {
+  // 調查 step 1: the AI drafts the checklist (no web search; trip_content limited per account).
+  app.post("/api/trips/:tripId/discovery/clarification", async (context) => {
     const { user } = await authenticated(context);
     await rateLimiter.consume("trip_content", clientIp(context), user.id);
     const body = await jsonBody(context);
     return context.json({
-      discovery: await discovery.saveQuestionAnswers(
-        user.id,
-        uuidParam(context, "tripId"),
-        idempotencyKey(context),
-        {
-          expectedVersion: numberField(body, "expectedVersion"),
-          answers: discoveryQuestionAnswersField(body),
-        },
-      ),
+      discovery: await discovery.startClarification(user.id, uuidParam(context, "tripId"), {
+        expectedBriefVersion: numberField(body, "expectedBriefVersion"),
+      }),
     });
   });
 
-
-  app.post("/api/trips/:tripId/discovery/generate", async (context) => {
+  // 調查 step 2: answers are saved and reviewed by the AI reviewer.
+  app.put("/api/trips/:tripId/discovery/clarification/answers", async (context) => {
     const { user } = await authenticated(context);
     await rateLimiter.consume("trip_content", clientIp(context), user.id);
     const body = await jsonBody(context);
     return context.json({
-      discovery: await withPaidProviderIdentity(context, user.id, () => discovery.generate(
+      discovery: await discovery.answerClarification(user.id, uuidParam(context, "tripId"), {
+        expectedVersion: numberField(body, "expectedVersion"),
+        answers: discoveryClarifyAnswersField(body),
+      }),
+    });
+  });
+
+  // 調查 step 3: queues background research; the worker reports stages on the job.
+  app.post("/api/trips/:tripId/discovery/research", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    return context.json({
+      discovery: await discovery.startResearch(
         user.id,
         uuidParam(context, "tripId"),
+        clientIp(context),
         idempotencyKey(context),
         { expectedBriefVersion: numberField(body, "expectedBriefVersion") },
-      )),
+      ),
+    }, 202);
+  });
+
+  app.get("/api/trips/:tripId/discovery/jobs/latest", async (context) => {
+    const { user } = await authenticated(context);
+    context.header("Cache-Control", "private, no-store");
+    return context.json({ job: await discovery.latestJob(user.id, uuidParam(context, "tripId")) });
+  });
+
+  app.post("/api/trips/:tripId/discovery/jobs/:jobId/ack", async (context) => {
+    const { user } = await authenticated(context);
+    return context.json({
+      job: await discovery.acknowledgeJob(user.id, uuidParam(context, "tripId"), uuidParam(context, "jobId")),
     });
   });
 

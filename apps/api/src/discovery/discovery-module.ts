@@ -1,11 +1,13 @@
 import type {
+  AnswerDiscoveryClarificationInput,
   CandidateProposalDto,
   DecideCandidateProposalInput,
+  DiscoveryJobDto,
   DiscoveryWorkspaceDto,
-  GenerateDiscoveryInput,
   SaveDiscoveryBriefInput,
-  SaveDiscoveryQuestionAnswersInput,
   ScheduleDiscoveryProposalsInput,
+  StartDiscoveryClarificationInput,
+  StartDiscoveryResearchInput,
   UpdateCandidateProposalVoteInput,
 } from "@along-the-way/contracts/discovery";
 
@@ -17,18 +19,20 @@ export interface DiscoveryModule {
     idempotencyKey: string,
     input: SaveDiscoveryBriefInput,
   ): Promise<DiscoveryWorkspaceDto>;
-  saveQuestionAnswers(
+  /** 調查: the AI worker drafts the ≤5-question checklist for the current brief version. */
+  startClarification(userId: string, tripId: string, input: StartDiscoveryClarificationInput): Promise<DiscoveryWorkspaceDto>;
+  /** 調查: saves answers and has the AI reviewer judge the required ones. */
+  answerClarification(userId: string, tripId: string, input: AnswerDiscoveryClarificationInput): Promise<DiscoveryWorkspaceDto>;
+  /** 調查: queues background research once the checklist is ready. */
+  startResearch(
     userId: string,
     tripId: string,
+    clientIp: string,
     idempotencyKey: string,
-    input: SaveDiscoveryQuestionAnswersInput,
+    input: StartDiscoveryResearchInput,
   ): Promise<DiscoveryWorkspaceDto>;
-  generate(
-    userId: string,
-    tripId: string,
-    idempotencyKey: string,
-    input: GenerateDiscoveryInput,
-  ): Promise<DiscoveryWorkspaceDto>;
+  latestJob(userId: string, tripId: string): Promise<DiscoveryJobDto | null>;
+  acknowledgeJob(userId: string, tripId: string, jobId: string): Promise<DiscoveryJobDto | null>;
   setProposalVote(
     userId: string,
     tripId: string,

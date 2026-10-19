@@ -147,6 +147,60 @@ export interface DiscoveryRunDto {
 }
 
 
+export type DiscoveryClarifyVerdict = "sufficient" | "insufficient" | "unreasonable" | "unknown";
+
+/** One checklist question. `answer` null with `skipped` false means not answered yet. */
+export interface DiscoveryClarifyItemDto {
+  id: string;
+  text: string;
+  /** One plain sentence: what this answer changes in the recommendations. */
+  why: string;
+  options: string[];
+  allowOther: boolean;
+  multiple: boolean;
+  required: boolean;
+  answer: string | null;
+  skipped: boolean;
+  /** The reviewer's judgement of the latest answer; null before review. */
+  verdict: DiscoveryClarifyVerdict | null;
+  /** Why more is needed (shown under the question); null when sufficient. */
+  reason: string | null;
+  /** Times the reviewer asked back about this question; capped at maxFollowUps. */
+  followUps: number;
+}
+
+export interface DiscoveryClarificationDto {
+  briefVersion: number;
+  /** ready: every required answer was accepted, research may start. */
+  status: "asking" | "ready";
+  items: DiscoveryClarifyItemDto[];
+  maxFollowUps: number;
+  version: number;
+}
+
+export type DiscoveryStage = "plan" | "research" | "verify" | "save" | "photos";
+export const DISCOVERY_STAGES: readonly DiscoveryStage[] = ["plan", "research", "verify", "save", "photos"];
+export type DiscoveryStageState = "pending" | "running" | "done" | "partial" | "failed";
+
+export interface DiscoveryJobDto {
+  id: string;
+  briefVersion: number;
+  status: "queued" | "running" | "succeeded" | "failed";
+  stage: DiscoveryStage | null;
+  stages: Record<DiscoveryStage, { state: DiscoveryStageState; startedAt: string | null; endedAt: string | null }>;
+  errorCode: string | null;
+  /** New places added by this job; set when the save stage finishes. */
+  addedCount: number | null;
+  createdAt: string;
+  finishedAt: string | null;
+  /** The requesting member already saw the finished result. */
+  acknowledged: boolean;
+}
+
+export interface DiscoveryJobResponse {
+  job: DiscoveryJobDto | null;
+}
+
 export interface DiscoveryWorkspaceDto {
   brief: DiscoveryBriefDto | null;
   latestRun: DiscoveryRunDto | null;
@@ -156,6 +210,10 @@ export interface DiscoveryWorkspaceDto {
    * one per place; a new run replaces earlier undecided proposals.
    */
   decided: DiscoveryDecisionDto[];
+  /** The checklist for the current brief version; null until 調查 starts it. */
+  clarification: DiscoveryClarificationDto | null;
+  /** The trip's newest research job, so a reload resumes its progress. */
+  latestJob: DiscoveryJobDto | null;
   modelAvailable: boolean;
   placeProviderAvailable: boolean;
 }
@@ -168,13 +226,17 @@ export interface SaveDiscoveryBriefInput {
   originalText: string;
   expectedVersion?: number | null;
 }
-export interface SaveDiscoveryQuestionAnswersInput {
-  expectedVersion: number;
-  answers: DiscoveryQuestionAnswerDto[];
+export interface StartDiscoveryClarificationInput {
+  expectedBriefVersion: number;
 }
 
+export interface AnswerDiscoveryClarificationInput {
+  expectedVersion: number;
+  /** null skips an optional question; required questions need text. */
+  answers: Array<{ id: string; answer: string | null }>;
+}
 
-export interface GenerateDiscoveryInput {
+export interface StartDiscoveryResearchInput {
   expectedBriefVersion: number;
 }
 
@@ -414,10 +476,81 @@ export function parseDiscoveryWorkspaceResponse(value: unknown): DiscoveryWorksp
       latestRun,
       proposals: Array.isArray(root.proposals) ? root.proposals.map(proposal) : invalid(),
       decided: Array.isArray(root.decided) ? root.decided.map(decision) : invalid(),
+      // Replays stored before 調查 existed carry neither field.
+      clarification: root.clarification == null ? null : parseDiscoveryClarification(root.clarification),
+      latestJob: root.latestJob == null ? null : parseDiscoveryJob(root.latestJob),
       modelAvailable: typeof root.modelAvailable === "boolean" ? root.modelAvailable : invalid(),
       placeProviderAvailable: typeof root.placeProviderAvailable === "boolean" ? root.placeProviderAvailable : invalid(),
     },
   };
+}
+
+const CLARIFY_VERDICTS: readonly DiscoveryClarifyVerdict[] = ["sufficient", "insufficient", "unreasonable", "unknown"];
+const STAGE_STATES: readonly DiscoveryStageState[] = ["pending", "running", "done", "partial", "failed"];
+
+function boolean(value: unknown) {
+  return typeof value === "boolean" ? value : invalid();
+}
+
+export function parseDiscoveryClarification(value: unknown): DiscoveryClarificationDto {
+  const item = record(value);
+  if (item.status !== "asking" && item.status !== "ready") invalid();
+  if (!Array.isArray(item.items) || item.items.length > 5) invalid();
+  return {
+    briefVersion: integer(item.briefVersion),
+    status: item.status,
+    items: item.items.map((raw) => {
+      const question = record(raw);
+      const verdict = question.verdict === null ? null
+        : CLARIFY_VERDICTS.includes(question.verdict as DiscoveryClarifyVerdict) ? question.verdict as DiscoveryClarifyVerdict : invalid();
+      return {
+        id: text(question.id),
+        text: text(question.text),
+        why: text(question.why),
+        options: strings(question.options),
+        allowOther: boolean(question.allowOther),
+        multiple: boolean(question.multiple),
+        required: boolean(question.required),
+        answer: nullableText(question.answer),
+        skipped: boolean(question.skipped),
+        verdict,
+        reason: nullableText(question.reason),
+        followUps: integer(question.followUps),
+      };
+    }),
+    maxFollowUps: integer(item.maxFollowUps),
+    version: integer(item.version),
+  };
+}
+
+export function parseDiscoveryJob(value: unknown): DiscoveryJobDto {
+  const item = record(value);
+  if (!["queued", "running", "succeeded", "failed"].includes(String(item.status))) invalid();
+  const stage = item.stage === null ? null
+    : DISCOVERY_STAGES.includes(item.stage as DiscoveryStage) ? item.stage as DiscoveryStage : invalid();
+  const rawStages = record(item.stages);
+  const stages = Object.fromEntries(DISCOVERY_STAGES.map((name) => {
+    const entry = record(rawStages[name]);
+    const state = STAGE_STATES.includes(entry.state as DiscoveryStageState) ? entry.state as DiscoveryStageState : invalid();
+    return [name, { state, startedAt: nullableText(entry.startedAt), endedAt: nullableText(entry.endedAt) }];
+  })) as DiscoveryJobDto["stages"];
+  return {
+    id: text(item.id),
+    briefVersion: integer(item.briefVersion),
+    status: item.status as DiscoveryJobDto["status"],
+    stage,
+    stages,
+    errorCode: nullableText(item.errorCode),
+    addedCount: item.addedCount === null ? null : integer(item.addedCount),
+    createdAt: text(item.createdAt),
+    finishedAt: nullableText(item.finishedAt),
+    acknowledged: boolean(item.acknowledged),
+  };
+}
+
+export function parseDiscoveryJobResponse(value: unknown): DiscoveryJobResponse {
+  const root = record(value);
+  return { job: root.job === null ? null : parseDiscoveryJob(root.job) };
 }
 
 export function parseScheduleDiscoveryProposalsResponse(value: unknown): ScheduleDiscoveryProposalsResponse {

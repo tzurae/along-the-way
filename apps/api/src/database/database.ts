@@ -250,6 +250,38 @@ export interface DiscoveryRunTable {
   shortfalls: Generated<unknown>;
 }
 
+export interface DiscoveryClarificationTable {
+  trip_id: string;
+  brief_version: number;
+  status: "asking" | "ready";
+  /** StoredClarifyItem[] (discovery-clarification.ts); at most five. */
+  items: unknown;
+  rounds: Generated<number>;
+  model_id: string | null;
+  version: Generated<number>;
+  updated_by: string;
+  updated_at: Timestamp;
+}
+
+export interface DiscoveryJobTable {
+  id: Generated<string>;
+  trip_id: string;
+  brief_version: number;
+  created_by: string;
+  client_ip: string | null;
+  status: "queued" | "running" | "succeeded" | "failed";
+  stage: "plan" | "research" | "verify" | "save" | "photos" | null;
+  /** Record<stage, { state, startedAt, endedAt, counts? }> */
+  stages: Generated<unknown>;
+  error_code: string | null;
+  run_id: string | null;
+  added_count: number | null;
+  heartbeat_at: Timestamp | null;
+  created_at: Timestamp;
+  finished_at: Timestamp | null;
+  acknowledged_at: Timestamp | null;
+}
+
 export interface DiscoveryEvidenceTable {
   id: Generated<string>;
   trip_id: string;
@@ -649,6 +681,8 @@ export interface AlongTheWayDatabase {
   trip_place_duplicate_suggestions: TripPlaceDuplicateSuggestionTable;
   discovery_briefs: DiscoveryBriefTable;
   discovery_runs: DiscoveryRunTable;
+  discovery_clarifications: DiscoveryClarificationTable;
+  discovery_jobs: DiscoveryJobTable;
   discovery_evidence: DiscoveryEvidenceTable;
   candidate_proposals: CandidateProposalTable;
   candidate_proposal_evidence: CandidateProposalEvidenceTable;

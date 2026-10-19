@@ -97,6 +97,33 @@ export interface DiscoveryResearchResult {
   sources: DiscoveryWebSource[];
 }
 
+/** One checklist question as the clarifying worker proposes it; the server assigns ids. */
+export interface ClarifyQuestionDraft {
+  text: string;
+  why: string;
+  options: string[];
+  allowOther: boolean;
+  multiple: boolean;
+  required: boolean;
+}
+
+export interface ClarifyReviewItem {
+  id: string;
+  text: string;
+  options: string[];
+  required: boolean;
+  /** null: the traveler skipped an optional question. */
+  answer: string | null;
+}
+
+export interface ClarifyReviewVerdict {
+  id: string;
+  verdict: "sufficient" | "insufficient" | "unreasonable";
+  /** Plain ask-back shown to the traveler; null when sufficient. */
+  reason: string | null;
+  /** The answer restated as one explicit statement for research; null when nothing usable. */
+  interpretation: string | null;
+}
 
 export interface DiscoveryModel {
   readonly available: boolean;
@@ -117,6 +144,10 @@ export interface DiscoveryModel {
     knownPlaces: string[];
     outputLanguage: string;
   }): Promise<DiscoveryResearchResult>;
+  /** Worker: at most five questions whose answers materially change the recommendations. */
+  clarify(input: { brief: string; trip: DiscoveryTripFacts }): Promise<{ modelId: string; questions: ClarifyQuestionDraft[] }>;
+  /** Reviewer: judges whether each required answer is sufficient and reasonable. */
+  reviewAnswers(input: { brief: string; trip: DiscoveryTripFacts; items: ClarifyReviewItem[] }): Promise<{ verdicts: ClarifyReviewVerdict[] }>;
 }
 
 export class DiscoveryModelUnavailableError extends Error {

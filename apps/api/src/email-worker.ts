@@ -1,6 +1,14 @@
 import packageJson from "../../../package.json";
 
 import { createDatabase, requireDatabaseUrl } from "./database/database";
+import { claimNextDiscoveryJob, sweepStaleDiscoveryJobs } from "./discovery/discovery-jobs";
+import { OpenAiResponsesDiscoveryModel } from "./discovery/openai-responses-discovery-model";
+import { PostgresDiscoveryModule } from "./discovery/postgres-discovery-module";
+import { PostgresCommonsCandidateModule } from "./place-details/commons-photo-candidates";
+import { CommonsPlacePhotos } from "./place-details/commons-place-photos";
+import { PostgresRateLimiter } from "./private-trips/postgres-rate-limiter";
+import { GooglePlacesProvider } from "./trip-places/google-places-provider";
+import { PostgresTripPlaceModule } from "./trip-places/postgres-trip-place-module";
 import { OpenAiPlacePlanningProfileModel } from "./planning/openai-place-planning-profile-model";
 import { PostgresPlacePlanningProfileWorker } from "./planning/postgres-place-planning-profile-module";
 import { PlaceGuideSourceFetcher } from "./place-guides/place-guide-sources";
@@ -67,6 +75,35 @@ const planningProfileWorker = new PostgresPlacePlanningProfileWorker({
   sources: new PlaceGuideSourceFetcher({ userAgent: wikimediaUserAgent }),
 });
 const retention = new PostgresRetention(database);
+// 調查 research runs here, not in the API, so a deploy of the API cannot cut a run short.
+const tokenSecret = requireSetting("TOKEN_SECRET");
+const rateLimiter = new PostgresRateLimiter(database, tokenSecret);
+const placeProvider = new GooglePlacesProvider({
+  apiKey: optionalSetting("GOOGLE_MAPS_API_KEY"),
+  consumeBudget: () => rateLimiter.tryConsumePaidProvider("google_places"),
+});
+const commonsPhotos = new CommonsPlacePhotos({ userAgent: wikimediaUserAgent });
+const commonsCandidates = new PostgresCommonsCandidateModule({ database, photos: commonsPhotos, userAgent: wikimediaUserAgent });
+const discovery = new PostgresDiscoveryModule({
+  database,
+  model: new OpenAiResponsesDiscoveryModel({
+    apiKey: optionalSetting("OPENAI_API_KEY"),
+    model: optionalSetting("OPENAI_MODEL"),
+  }),
+  placeLookup: placeProvider,
+  // The research limit is charged when the job is queued (API); the worker never charges again.
+  claimAiRun: async () => undefined,
+  tripPlaces: new PostgresTripPlaceModule({
+    database,
+    provider: placeProvider,
+    photoCapabilitySecret: tokenSecret,
+    commonsPhotos,
+    commonsCandidates,
+  }),
+  commonsCandidates,
+});
+/** A long stage (web research can take minutes) still reports that the job is alive. */
+const DISCOVERY_HEARTBEAT_MS = 15_000;
 let stopping = false;
 
 function delay(milliseconds: number) {
@@ -90,9 +127,30 @@ async function runPlanningProfileLoop() {
   }
 }
 
+async function runDiscoveryLoop() {
+  while (!stopping) {
+    await sweepStaleDiscoveryJobs(database, new Date());
+    const job = await claimNextDiscoveryJob(database, new Date());
+    if (!job) {
+      await delay(2_000);
+      continue;
+    }
+    const heartbeat = setInterval(() => {
+      void database.updateTable("discovery_jobs").set({ heartbeat_at: new Date() })
+        .where("id", "=", job.id).where("status", "=", "running").execute().catch(() => undefined);
+    }, DISCOVERY_HEARTBEAT_MS);
+    try {
+      // Google calls are budgeted against the member and IP that queued the job.
+      await rateLimiter.withPaidProviderIdentity(job.clientIp, job.createdBy, () => discovery.runJob(job));
+    } finally {
+      clearInterval(heartbeat);
+    }
+  }
+}
+
 async function run() {
   console.info(JSON.stringify({ event: "worker_started", status: "ok" }));
-  await Promise.all([runEmailLoop(), runPlanningProfileLoop()]);
+  await Promise.all([runEmailLoop(), runPlanningProfileLoop(), runDiscoveryLoop()]);
 }
 
 function stop(signal: string) {

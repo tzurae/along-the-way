@@ -129,6 +129,7 @@ export class AppError extends Error {
       | "provider_unavailable"
       | "provider_quota"
       | "research_in_progress"
+      | "clarification_incomplete"
       | "research_limit_reached"
       | "voting_unavailable"
       | "invite_not_found"

@@ -1,14 +1,16 @@
 import type {
+  AnswerDiscoveryClarificationInput,
   CandidateProposalDto,
   DecideCandidateProposalInput,
   DiscoveryDecisionDto,
   DiscoveryEndorsement,
+  DiscoveryJobDto,
   DiscoveryShortfallDto,
   DiscoveryWorkspaceDto,
-  GenerateDiscoveryInput,
   SaveDiscoveryBriefInput,
-  SaveDiscoveryQuestionAnswersInput,
   ScheduleDiscoveryProposalsInput,
+  StartDiscoveryClarificationInput,
+  StartDiscoveryResearchInput,
   UpdateCandidateProposalVoteInput,
 } from "@along-the-way/contracts/discovery";
 import { parseDiscoveryWorkspaceResponse, parseUpdateCandidateProposalVoteResponse } from "@along-the-way/contracts/discovery";
@@ -52,6 +54,17 @@ import {
 import { PostgresTripPlaceModule } from "../trip-places/postgres-trip-place-module";
 import { upsertGooglePlaceIdentity } from "../trip-places/google-place-identity";
 import type { CommonsCandidateGenerator } from "../place-details/commons-photo-candidates";
+import {
+  applyClarifyAnswers,
+  applyClarifyReview,
+  clarificationDto,
+  clarificationQuestionAnswers,
+  clarificationReady,
+  itemsNeedingReview,
+  newClarifyItems,
+  storedClarifyItems,
+} from "./discovery-clarification";
+import { discoveryJobDto, DiscoveryJobProgress, emptyStages, type ClaimedDiscoveryJob } from "./discovery-jobs";
 
 interface PostgresDiscoveryModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
@@ -78,6 +91,8 @@ const SHORTFALL_CODES: readonly DiscoveryShortfallDto["code"][] = [
 const RESEARCH_PER_TRIP_PER_HOUR = 6;
 /** Commons photo searches run at once after a research run (background, Wikimedia polite use). */
 const SUGGESTION_PHOTO_CONCURRENCY = 3;
+/** The 找照片 stage never holds a job longer than this; unfinished places keep their type icon. */
+const SUGGESTION_PHOTO_BUDGET_MS = 90_000;
 /** Research runs one member may start across all trips per hour. */
 const RESEARCH_PER_ACCOUNT_PER_HOUR = 10;
 const GENERATE_OPERATION_PREFIX = "discovery:generate:";
@@ -209,6 +224,14 @@ function isDiscoveryWorkspaceReadback(value: unknown) {
   return jsonObject(value).type === DISCOVERY_WORKSPACE_READBACK;
 }
 
+/** Clarifying worker/reviewer failures are a temporary 503, like research; anything else is a bug. */
+function modelFailure(error: unknown): never {
+  if (error instanceof DiscoveryModelUnavailableError || error instanceof DiscoveryModelResponseError) {
+    throw new AppError("model_unavailable", error.message, 503);
+  }
+  throw error;
+}
+
 /**
  * Votes recorded before 0.8.0 stored the whole workspace as their response; newer ones store the
  * proposal. A retried old vote must still replay, so pick its proposal out of the stored workspace.
@@ -220,30 +243,6 @@ function replayedProposal(value: unknown, proposalId: string) {
     return proposal;
   }
   return parseUpdateCandidateProposalVoteResponse({ proposal: value }).proposal;
-}
-
-const AI_REQUEST_STATE = "discovery-ai-request-state";
-
-function aiRequestReplay(value: unknown) {
-  const item = jsonObject(value);
-  if (item.type !== AI_REQUEST_STATE) return replayedWorkspace(value);
-  if (item.state === "in-progress") {
-    throw new AppError("conflict", "This discovery request is already in progress", 409);
-  }
-  const message = typeof item.message === "string"
-    ? item.message
-    : "The discovery request failed and was not charged again";
-  if (item.code === "provider_unavailable") {
-    throw new AppError("provider_unavailable", message, 503);
-  }
-  if (item.code === "conflict") {
-    throw new AppError("conflict", message, 409);
-  }
-  throw new AppError("model_unavailable", message, 503);
-}
-
-function isAiRequestClaim(value: unknown) {
-  return jsonObject(value).type === AI_REQUEST_STATE;
 }
 
 export class PostgresDiscoveryModule implements DiscoveryModule {
@@ -277,18 +276,21 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
   }
 
   /**
-   * Background, three identities at a time: fast enough that photos appear within the client's
-   * two-minute wait, still a modest load on Wikimedia. A failure only leaves the type icon.
+   * The 找照片 stage: three identities at a time (a modest load on Wikimedia), at most
+   * SUGGESTION_PHOTO_BUDGET_MS. "partial" when a search failed or the budget ran out; either way
+   * the places without a photo keep their type icon and the job still succeeds.
    */
-  private findSuggestionPhotos(placeIdentityIds: readonly string[]) {
+  private async findSuggestionPhotos(placeIdentityIds: readonly string[]): Promise<"complete" | "partial"> {
     const generator = this.commonsCandidates;
-    if (!generator || placeIdentityIds.length === 0) return;
+    if (!generator) return placeIdentityIds.length === 0 ? "complete" : "partial";
     const queue = [...placeIdentityIds];
+    let failed = false;
     const worker = async () => {
       for (let placeIdentityId = queue.shift(); placeIdentityId; placeIdentityId = queue.shift()) {
         try {
           await generator.generate(placeIdentityId);
         } catch (error) {
+          failed = true;
           console.error(JSON.stringify({
             event: "commons_candidate_generation_failed",
             placeIdentityId,
@@ -297,7 +299,14 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         }
       }
     };
-    void Promise.all(Array.from({ length: Math.min(SUGGESTION_PHOTO_CONCURRENCY, queue.length) }, worker));
+    const all = Promise.all(Array.from({ length: Math.min(SUGGESTION_PHOTO_CONCURRENCY, queue.length) }, worker));
+    let timer: Timer | undefined;
+    const outOfTime = new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), SUGGESTION_PHOTO_BUDGET_MS); });
+    const finished = await Promise.race([all.then(() => "done" as const), outOfTime]);
+    clearTimeout(timer);
+    // Past the budget the remaining searches stop being started (the queue empties).
+    if (finished === "timeout") queue.length = 0;
+    return finished === "done" && !failed ? "complete" : "partial";
   }
 
   async saveBrief(
@@ -366,108 +375,199 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       return response;
     });
   }
-  async saveQuestionAnswers(
-    userId: string,
-    tripId: string,
-    rawKey: string,
-    input: SaveDiscoveryQuestionAnswersInput,
-  ) {
+  /**
+   * 調查 step 1: the worker drafts the checklist for the current brief version (once per version).
+   * No web search, so it does not count against the hourly research limit.
+   */
+  async startClarification(userId: string, tripId: string, input: StartDiscoveryClarificationInput) {
     uuid(tripId, "tripId");
-    const key = requireIdempotencyKey(rawKey);
-    const version = expectedVersion(input.expectedVersion);
-    if (!Array.isArray(input.answers) || input.answers.length > 20) {
-      throw new AppError("validation_error", "answers must contain at most 20 question answers");
-    }
-    const operation = `discovery:brief-questions:${tripId}`;
-    return this.database.transaction().execute(async (transaction) => {
-      await this.requireMember(transaction, userId, tripId);
-      await lockMutation(transaction, userId, operation, key);
-      const replay = await replayed(transaction, userId, operation, key);
-      if (replay) {
-        return isDiscoveryWorkspaceReadback(replay)
-          ? this.readWorkspace(transaction, tripId, userId)
-          : replayedWorkspace(replay);
-      }
-      const brief = await transaction.selectFrom("discovery_briefs")
-        .select(["version", "unresolved_questions", "question_answers"])
-        .where("trip_id", "=", tripId)
-        .forUpdate()
-        .executeTakeFirst();
-      if (!brief) throw new AppError("validation_error", "Save a discovery brief first");
-      if (brief.version !== version) {
-        throw new AppError("conflict", "The discovery brief changed; reload before saving answers", 409, undefined, brief.version);
-      }
-      const previous = storedQuestionAnswers(brief.question_answers);
-      const orderedQuestions = [...previous.map((entry) => entry.question)];
-      for (const question of jsonStrings(brief.unresolved_questions)) {
-        if (!orderedQuestions.includes(question)) orderedQuestions.push(question);
-      }
-      const submitted = new Map<string, string | null>();
-      for (const answer of input.answers) {
-        if (!answer || typeof answer.question !== "string" || !orderedQuestions.includes(answer.question)) {
-          throw new AppError("validation_error", "Each answer must match a question for the current brief");
-        }
-        if (submitted.has(answer.question)) {
-          throw new AppError("validation_error", "Each question may be answered once");
-        }
-        submitted.set(
-          answer.question,
-          answer.answer === null ? null : requiredText(answer.answer, "answer", 1_000),
-        );
-      }
-      const answers = orderedQuestions.flatMap((question) => {
-        if (!submitted.has(question)) return [];
-        return [{ question, answer: submitted.get(question) ?? null }];
-      });
-      await transaction.updateTable("discovery_briefs").set({
-        question_answers: JSON.stringify(answers),
-        version: sql`version + 1`,
+    const version = expectedVersion(input.expectedBriefVersion);
+    await this.requireMember(this.database, userId, tripId);
+    const brief = await this.currentBrief(version, tripId);
+    const existing = await this.database.selectFrom("discovery_clarifications").select("trip_id")
+      .where("trip_id", "=", tripId).where("brief_version", "=", version).executeTakeFirst();
+    if (!existing) {
+      if (!this.model.available) throw new AppError("model_unavailable", "AI discovery is not configured", 503);
+      const trip = await this.tripFacts(userId, tripId);
+      const drafted = await this.model.clarify({ brief: brief.original_text, trip }).catch(modelFailure);
+      const items = newClarifyItems(drafted.questions);
+      await this.database.insertInto("discovery_clarifications").values({
+        trip_id: tripId,
+        brief_version: version,
+        // With no questions there is nothing to review: research may start right away.
+        status: items.length === 0 ? "ready" : "asking",
+        items: JSON.stringify(items),
+        model_id: drafted.modelId,
         updated_by: userId,
-        updated_at: this.now(),
-      }).where("trip_id", "=", tripId).execute();
-      await recordEvent(transaction, {
-        tripId,
-        actorId: userId,
-        eventType: "discovery.questions_answered",
-        targetType: "discovery_brief",
-        targetId: tripId,
-        summary: "Saved answers to AI discovery questions",
-      });
-      const response = await this.readWorkspace(transaction, tripId, userId);
-      await remember(transaction, userId, operation, key, { type: DISCOVERY_WORKSPACE_READBACK });
-      return response;
-    });
+      }).onConflict((conflict) => conflict.columns(["trip_id", "brief_version"]).doNothing()).execute();
+    }
+    return this.readWorkspace(this.database, tripId, userId);
   }
 
+  /**
+   * 調查 step 2: saves the answers and has the reviewer judge them. A required answer the reviewer
+   * rejects gets an ask-back (at most twice), then counts as uncertain.
+   */
+  async answerClarification(userId: string, tripId: string, input: AnswerDiscoveryClarificationInput) {
+    uuid(tripId, "tripId");
+    const version = expectedVersion(input.expectedVersion);
+    if (!Array.isArray(input.answers) || input.answers.length > 5
+      || input.answers.some((answer) => !answer || typeof answer.id !== "string"
+        || (answer.answer !== null && typeof answer.answer !== "string"))) {
+      throw new AppError("validation_error", "answers must be at most five { id, answer } items");
+    }
+    await this.requireMember(this.database, userId, tripId);
+    const brief = await this.database.selectFrom("discovery_briefs").select(["original_text", "version"])
+      .where("trip_id", "=", tripId).executeTakeFirst();
+    if (!brief) throw new AppError("validation_error", "Save a discovery brief first");
+    const row = await this.database.selectFrom("discovery_clarifications").selectAll()
+      .where("trip_id", "=", tripId).where("brief_version", "=", brief.version).executeTakeFirst();
+    if (!row) throw new AppError("validation_error", "Start 調查 before answering");
+    if (row.version !== version) {
+      throw new AppError("conflict", "The checklist changed; reload before answering", 409, undefined, row.version);
+    }
+    const answered = applyClarifyAnswers(storedClarifyItems(row.items), input.answers);
+    if ("error" in answered) throw new AppError("validation_error", answered.error);
+    const pending = itemsNeedingReview(answered.items);
+    let items = answered.items;
+    if (pending.length > 0) {
+      if (!this.model.available) throw new AppError("model_unavailable", "AI discovery is not configured", 503);
+      const trip = await this.tripFacts(userId, tripId);
+      const review = await this.model.reviewAnswers({
+        brief: brief.original_text,
+        trip,
+        items: pending.map((item) => ({ id: item.id, text: item.text, options: item.options, required: item.required, answer: item.answer })),
+      }).catch(modelFailure);
+      items = applyClarifyReview(items, new Set(pending.map((item) => item.id)), review.verdicts);
+    }
+    // Optimistic write: the model call ran outside any transaction, so a concurrent answer wins once.
+    const updated = await this.database.updateTable("discovery_clarifications").set({
+      items: JSON.stringify(items),
+      status: clarificationReady(items) ? "ready" : "asking",
+      rounds: sql`rounds + 1`,
+      version: sql`version + 1`,
+      updated_by: userId,
+      updated_at: this.now(),
+    }).where("trip_id", "=", tripId).where("brief_version", "=", brief.version).where("version", "=", version)
+      .returning("version").executeTakeFirst();
+    if (!updated) throw new AppError("conflict", "The checklist changed; reload before answering", 409);
+    return this.readWorkspace(this.database, tripId, userId);
+  }
 
-  async generate(
-    userId: string,
-    tripId: string,
-    rawKey: string,
-    input: GenerateDiscoveryInput,
-  ) {
+  /**
+   * 調查 step 3: queues research once every required answer is accepted. The worker runs it; the
+   * client follows the job's stages. Counts against the hourly research limit like before.
+   */
+  async startResearch(userId: string, tripId: string, clientIp: string, rawKey: string, input: StartDiscoveryResearchInput) {
     uuid(tripId, "tripId");
     const key = requireIdempotencyKey(rawKey);
     const version = expectedVersion(input.expectedBriefVersion);
-    // Lowercase: the path accepts the UUID in any case, and the research lock and limits are
-    // keyed on this string, so another spelling must not count as another trip.
+    // Lowercase: the path accepts the UUID in any case, and the research limits are keyed on this
+    // string, so another spelling must not count as another trip.
     const operation = `${GENERATE_OPERATION_PREFIX}${tripId.toLowerCase()}`;
     await this.requireMember(this.database, userId, tripId);
-    const earlyReplay = await replayed(this.database, userId, operation, key);
-    if (earlyReplay) {
-      return isDiscoveryWorkspaceReadback(earlyReplay)
-        ? this.readWorkspace(this.database, tripId, userId)
-        : aiRequestReplay(earlyReplay);
+    if (await replayed(this.database, userId, operation, key)) return this.readWorkspace(this.database, tripId, userId);
+    await this.currentBrief(version, tripId);
+    const clarification = await this.database.selectFrom("discovery_clarifications").select("status")
+      .where("trip_id", "=", tripId).where("brief_version", "=", version).executeTakeFirst();
+    if (clarification?.status !== "ready") {
+      throw new AppError("clarification_incomplete", "Answer the required questions before research", 409);
     }
-    const brief = await this.database.selectFrom("discovery_briefs")
-      .select(["original_text", "version", "question_answers"])
-      .where("trip_id", "=", tripId)
-      .executeTakeFirst();
+    if (!this.model.available) throw new AppError("model_unavailable", "AI discovery is not configured", 503);
+    if (this.placeLookup.available === false) {
+      throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
+    }
+    const jobId = await this.database.transaction().execute(async (transaction) => {
+      await lockMutation(transaction, userId, operation, key);
+      if (await replayed(transaction, userId, operation, key)) return null;
+      await this.claimAiSlot(transaction, userId, tripId);
+      const active = await transaction.selectFrom("discovery_jobs").select("id")
+        .where("trip_id", "=", tripId).where("status", "in", ["queued", "running"]).executeTakeFirst();
+      if (active) throw new AppError("research_in_progress", "A research job for this trip is already running", 409);
+      const job = await transaction.insertInto("discovery_jobs").values({
+        trip_id: tripId,
+        brief_version: version,
+        created_by: userId,
+        client_ip: clientIp.slice(0, 64),
+        status: "queued",
+        stages: JSON.stringify(emptyStages()),
+      }).returning("id").executeTakeFirstOrThrow();
+      await remember(transaction, userId, operation, key, { type: DISCOVERY_WORKSPACE_READBACK });
+      return job.id;
+    });
+    if (jobId) {
+      try {
+        await this.claimAiRun(userId, tripId);
+      } catch (error) {
+        // The model was never called: drop the job and the claim so the limit is not spent.
+        await this.database.deleteFrom("discovery_jobs").where("id", "=", jobId).execute();
+        await this.database.deleteFrom("mutation_requests")
+          .where("actor_id", "=", userId).where("operation", "=", operation).where("idempotency_key", "=", key)
+          .execute();
+        throw error;
+      }
+    }
+    return this.readWorkspace(this.database, tripId, userId);
+  }
+
+  /** The trip's newest research job, polled by the client while one is active. */
+  async latestJob(userId: string, tripId: string): Promise<DiscoveryJobDto | null> {
+    uuid(tripId, "tripId");
+    await this.requireMember(this.database, userId, tripId);
+    const row = await this.database.selectFrom("discovery_jobs").selectAll()
+      .where("trip_id", "=", tripId).orderBy("created_at", "desc").limit(1).executeTakeFirst();
+    return row ? discoveryJobDto(row) : null;
+  }
+
+  /** Marks a finished job as seen, so its completion notice is not shown again. */
+  async acknowledgeJob(userId: string, tripId: string, jobId: string): Promise<DiscoveryJobDto | null> {
+    uuid(tripId, "tripId");
+    uuid(jobId, "jobId");
+    await this.requireMember(this.database, userId, tripId);
+    await this.database.updateTable("discovery_jobs").set({ acknowledged_at: this.now() })
+      .where("id", "=", jobId).where("trip_id", "=", tripId)
+      .where("status", "in", ["succeeded", "failed"]).where("acknowledged_at", "is", null)
+      .execute();
+    return this.latestJob(userId, tripId);
+  }
+
+  private async currentBrief(version: number, tripId: string) {
+    const brief = await this.database.selectFrom("discovery_briefs").select(["original_text", "version"])
+      .where("trip_id", "=", tripId).executeTakeFirst();
     if (!brief) throw new AppError("validation_error", "Save a discovery brief first");
     if (brief.version !== version) {
-      throw new AppError("conflict", "The discovery brief changed; reload before generating", 409, undefined, brief.version);
+      throw new AppError("conflict", "The discovery brief changed; reload before continuing", 409, undefined, brief.version);
     }
-    const questionAnswers = storedQuestionAnswers(brief.question_answers);
+    return brief;
+  }
+
+
+  /**
+   * Worker side of 調查: runs one claimed job through its stages and records each stage, so the
+   * client can show where it is. Never throws; a failure is recorded on the job.
+   */
+  async runJob(job: ClaimedDiscoveryJob): Promise<void> {
+    const tripId = job.tripId;
+    const userId = job.createdBy;
+    const version = job.briefVersion;
+    const progress = new DiscoveryJobProgress(this.database, job.id, this.now);
+    try {
+    const brief = await this.database.selectFrom("discovery_briefs")
+      .select(["original_text", "version"])
+      .where("trip_id", "=", tripId)
+      .executeTakeFirst();
+    if (!brief || brief.version !== version) {
+      throw new AppError("conflict", "The discovery brief changed before research started", 409);
+    }
+    const clarification = await this.database.selectFrom("discovery_clarifications")
+      .select(["status", "items"])
+      .where("trip_id", "=", tripId)
+      .where("brief_version", "=", version)
+      .executeTakeFirst();
+    if (!clarification || clarification.status !== "ready") {
+      throw new AppError("clarification_incomplete", "Answer the required questions before research", 409);
+    }
+    const questionAnswers = clarificationQuestionAnswers(storedClarifyItems(clarification.items));
     const trip = await this.tripFacts(userId, tripId);
     const rejected = await this.database.selectFrom("candidate_proposals")
       .select(["provider_place_id", "name"])
@@ -486,35 +586,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       .where("trip_id", "=", tripId)
       .where("archived_at", "is", null)
       .execute();
-    const claimedReplay = await this.database.transaction().execute(async (transaction) => {
-      await lockMutation(transaction, userId, operation, key);
-      const existing = await replayed(transaction, userId, operation, key);
-      if (existing) return existing;
-      await this.claimAiSlot(transaction, userId, tripId);
-      await remember(transaction, userId, operation, key, {
-        type: AI_REQUEST_STATE,
-        state: "in-progress",
-      });
-      return null;
-    });
-    if (claimedReplay) {
-      return isDiscoveryWorkspaceReadback(claimedReplay)
-        ? this.readWorkspace(this.database, tripId, userId)
-        : aiRequestReplay(claimedReplay);
-    }
-    try {
-      await this.claimAiRun(userId, tripId);
-    } catch (error) {
-      // The model was not called. Release only the idempotency claim; successful earlier model
-      // starts remain in the independent hourly accounting windows.
-      await this.database.deleteFrom("mutation_requests")
-        .where("actor_id", "=", userId)
-        .where("operation", "=", operation)
-        .where("idempotency_key", "=", key)
-        .execute();
-      throw error;
-    }
-    try {
+      await progress.start("plan");
       const stageStarted = Date.now();
       const plan = await this.model.plan({
         brief: brief.original_text,
@@ -525,6 +597,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
       }
       const planMs = Date.now() - stageStarted;
+      await progress.finish("plan");
+      await progress.start("research");
       const research = await this.model.research({
         brief: plan.structuredBrief,
         request: plan.request,
@@ -548,6 +622,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         .where("identity.provider_place_id", "is not", null)
         .execute();
       const researchMs = Date.now() - stageStarted - planMs;
+      await progress.finish("research");
+      await progress.start("verify");
       const verification = await verifyResearchedCandidates({
         candidates: research.candidates,
         request: plan.request,
@@ -566,6 +642,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         throw error;
       });
       const verifyMs = Date.now() - stageStarted - planMs - researchMs;
+      await progress.finish("verify");
+      await progress.start("save");
       const searchPlan: DiscoverySearchPlan = {
         queries: verification.queries,
         areas: plan.request.areas,
@@ -579,15 +657,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       const sourceTitles = new Map(research.sources.map((source) => [source.url, source.title]));
       // Identities created for this run's suggestions; their Commons photos are found after commit.
       const suggestionIdentityIds: string[] = [];
-      const workspace = await this.database.transaction().execute(async (transaction) => {
-        await this.requireMember(transaction, userId, tripId);
-        await lockMutation(transaction, userId, operation, key);
-        const replay = await replayed(transaction, userId, operation, key);
-        if (replay && !isAiRequestClaim(replay)) {
-          return isDiscoveryWorkspaceReadback(replay)
-            ? this.readWorkspace(transaction, tripId, userId)
-            : replayedWorkspace(replay);
-        }
+      const added = await this.database.transaction().execute(async (transaction) => {
         // Serialize against removal/voting before touching old proposals, without blocking brief writers' event FKs.
         await transaction.selectFrom("trips").select("id").where("id", "=", tripId)
           .forKeyShare().executeTakeFirstOrThrow();
@@ -751,15 +821,12 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           targetId: run.id,
           summary: `Added ${added} new place proposals vouched for by two independent sources`,
         });
-        const response = await this.readWorkspace(transaction, tripId, userId);
-        await transaction.updateTable("mutation_requests")
-          .set({ response: { type: DISCOVERY_WORKSPACE_READBACK } })
-          .where("actor_id", "=", userId)
-          .where("operation", "=", operation)
-          .where("idempotency_key", "=", key)
-          .execute();
-        return response;
+        // The results are visible as soon as this commits; photos follow as their own stage.
+        await transaction.updateTable("discovery_jobs").set({ run_id: run.id, added_count: added })
+          .where("id", "=", job.id).execute();
+        return added;
       });
+      await progress.finish("save");
       console.info(JSON.stringify({
         event: "discovery_run_timing",
         tripId,
@@ -770,61 +837,24 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         researched: research.candidates.length,
         shown: verification.gate.shown.length,
       }));
-      this.findSuggestionPhotos(suggestionIdentityIds);
-      return workspace;
+      await progress.start("photos");
+      const photos = await this.findSuggestionPhotos(suggestionIdentityIds);
+      await progress.finish("photos", photos === "complete" ? "done" : "partial");
+      await progress.succeed();
+      console.info(JSON.stringify({ event: "discovery_job_finished", jobId: job.id, tripId, added, photos }));
     } catch (error) {
-      if (error instanceof ProviderQuotaError) {
-        // A daily budget refusal is transient and made no Google request. Remove the claim so the
-        // same idempotency key can retry after capacity becomes available.
-        await this.database.deleteFrom("mutation_requests")
-          .where("actor_id", "=", userId)
-          .where("operation", "=", operation)
-          .where("idempotency_key", "=", key)
-          .execute();
-        throw new AppError("provider_unavailable", error.message, 503);
-      }
-      const failure = error instanceof AppError
-        ? error
-        : error instanceof DiscoveryModelUnavailableError
-          ? new AppError("model_unavailable", error.message, 503)
-          : error instanceof DiscoveryModelResponseError
-            ? new AppError("model_unavailable", error.message, 503)
-            : null;
-      if (!failure) {
-        // An unexpected failure must still release the claim, or every retry of this key
-        // would be told the request is in progress forever.
-        await this.database.updateTable("mutation_requests").set({
-          response: {
-            type: AI_REQUEST_STATE,
-            state: "failed",
-            code: "model_unavailable",
-            message: "The discovery request failed; try again",
-          },
-        })
-          .where("actor_id", "=", userId)
-          .where("operation", "=", operation)
-          .where("idempotency_key", "=", key)
-          .execute();
-        throw error;
-      }
-      const replayCode = failure.code === "provider_unavailable"
-        ? "provider_unavailable"
-        : failure.code === "conflict"
-          ? "conflict"
-          : "model_unavailable";
-      await this.database.updateTable("mutation_requests").set({
-        response: {
-          type: AI_REQUEST_STATE,
-          state: "failed",
-          code: replayCode,
-          message: failure.message,
-        },
-      })
-        .where("actor_id", "=", userId)
-        .where("operation", "=", operation)
-        .where("idempotency_key", "=", key)
-        .execute();
-      throw failure;
+      const code = error instanceof ProviderQuotaError ? "provider_quota"
+        : error instanceof AppError ? error.code
+          : error instanceof DiscoveryModelUnavailableError || error instanceof DiscoveryModelResponseError ? "model_unavailable"
+            : "internal_error";
+      console.error(JSON.stringify({
+        event: "discovery_job_failed",
+        jobId: job.id,
+        tripId,
+        code,
+        errorClass: error instanceof Error ? error.constructor.name : "NonErrorThrow",
+      }));
+      await progress.fail(code);
     }
   }
 
@@ -1239,8 +1269,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       .select([
         "operation",
         "actor_id",
-        sql<string | null>`response->>'state'`.as("claim_state"),
-        sql<boolean>`created_at > now() - interval '10 minutes'`.as("started_recently"),
         sql<number>`ceil(extract(epoch from (created_at + interval '1 hour' - now())))::int`.as("seconds_left"),
       ])
       .where("operation", "like", `${GENERATE_OPERATION_PREFIX}%`)
@@ -1254,10 +1282,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       ]))
       .execute();
     const forTrip = recent.filter((row) => row.operation === tripOperation);
-    // Still marked running after ten minutes means the process running it died.
-    if (forTrip.some((row) => row.started_recently && row.claim_state === "in-progress")) {
-      throw new AppError("research_in_progress", "An AI request for this trip is already running", 409);
-    }
+    // A running research job is detected by discovery_jobs (startResearch), not here.
     const byAccount = recent.filter((row) => row.actor_id === userId);
     for (const [rows, limit] of [
       [forTrip, RESEARCH_PER_TRIP_PER_HOUR],
@@ -1423,6 +1448,12 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       .orderBy("created_at", "desc")
       .orderBy("id", "desc")
       .executeTakeFirst();
+    const clarificationRow = briefRow
+      ? await executor.selectFrom("discovery_clarifications").selectAll()
+        .where("trip_id", "=", tripId).where("brief_version", "=", briefRow.version).executeTakeFirst()
+      : undefined;
+    const latestJobRow = await executor.selectFrom("discovery_jobs").selectAll()
+      .where("trip_id", "=", tripId).orderBy("created_at", "desc").limit(1).executeTakeFirst();
     const proposalRows = run
       ? await executor.selectFrom("candidate_proposals")
         .select([
@@ -1613,6 +1644,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         };
       }),
       decided,
+      clarification: clarificationRow ? clarificationDto(clarificationRow) : null,
+      latestJob: latestJobRow ? discoveryJobDto(latestJobRow) : null,
       modelAvailable: this.model.available,
       placeProviderAvailable: this.placeLookup.available !== false,
     };
