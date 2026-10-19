@@ -467,6 +467,18 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       .where("trip_id", "=", tripId)
       .where("status", "=", "rejected")
       .execute();
+    // One suggestion per place (owner decision 2026-10-19): the model is told what the trip already
+    // has, so it neither re-proposes nor rewrites those places, and the gate drops any it still does.
+    const suggested = await this.database.selectFrom("candidate_proposals")
+      .select(["provider_place_id", "name"])
+      .where("trip_id", "=", tripId)
+      .where("status", "in", ["pending", "accepted"])
+      .execute();
+    const wishlistNames = await this.database.selectFrom("trip_places")
+      .select("name")
+      .where("trip_id", "=", tripId)
+      .where("archived_at", "is", null)
+      .execute();
     const claimedReplay = await this.database.transaction().execute(async (transaction) => {
       await lockMutation(transaction, userId, operation, key);
       const existing = await replayed(transaction, userId, operation, key);
@@ -512,6 +524,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         trip,
         questionAnswers,
         rejectedPlaces: [...new Set(rejected.map((row) => row.name))],
+        knownPlaces: [...new Set([...suggested.map((row) => row.name), ...wishlistNames.map((row) => row.name)])],
         outputLanguage: plan.outputLanguage,
       });
       // Read after research, which takes minutes, so a place accepted meanwhile is not proposed again.
@@ -536,6 +549,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         sourceChecks: this.sourceChecks,
         rejectedProviderPlaceIds: new Set(rejected.map((row) => row.provider_place_id)),
         wishlistProviderPlaceIds: new Set(wishlist.flatMap((row) => row.provider_place_id ?? [])),
+        suggestedProviderPlaceIds: new Set(suggested.map((row) => row.provider_place_id)),
         tripCountryCodes: new Set(trip.countries.map((country) => country.code)),
       }).catch((error: unknown) => {
         if (error instanceof ProviderQuotaError) throw error;
@@ -636,11 +650,16 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           }
           return stored;
         };
+        // A place suggested by another run while this one researched keeps its existing row.
+        const listedNow = new Set((await transaction.selectFrom("candidate_proposals")
+          .select("provider_place_id").where("trip_id", "=", tripId).execute())
+          .map((row) => row.provider_place_id));
         for (const { index, members, endorsements } of verification.gate.shown) {
           const { researched, place } = verification.candidates[index]!;
           // Entries merged into this place may have found the pages that vouch for it.
           const merged = members.map((member) => verification.candidates[member]!);
-          if (!place) continue;
+          if (!place || listedNow.has(place.providerPlaceId)) continue;
+          listedNow.add(place.providerPlaceId);
           const googleUrl = place.sourceUrl ?? `https://www.google.com/maps/search/?api=1&query_place_id=${encodeURIComponent(place.providerPlaceId)}`;
           // Only the place identity is kept; Google's rating and review count never are.
           const googleEvidence = await transaction.insertInto("discovery_evidence").values({
@@ -712,28 +731,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
             [...new Set(evidenceIds)].map((evidenceId) => ({ proposal_id: proposal.id, evidence_id: evidenceId })),
           ).execute();
         }
-        // Reopened candidates last until the next successful run; retain only active members' interest
-        // when that run independently recommends the same identity again.
-        await sql`
-          with superseded as (
-            update candidate_proposals
-            set reopened_at = null
-            where trip_id = ${tripId} and run_id <> ${run.id}
-              and status = 'pending' and reopened_at is not null
-            returning id, provider_place_id
-          )
-          insert into discovery_proposal_votes (trip_id, proposal_id, member_user_id)
-          select distinct replacement.trip_id, replacement.id, vote.member_user_id
-          from superseded
-          join candidate_proposals as replacement
-            on replacement.provider_place_id = superseded.provider_place_id
-            and replacement.trip_id = ${tripId} and replacement.run_id = ${run.id}
-          join discovery_proposal_votes as vote on vote.proposal_id = superseded.id
-          join trip_members as member
-            on member.trip_id = vote.trip_id and member.user_id = vote.member_user_id
-          where member.removed_at is null
-          on conflict (proposal_id, member_user_id) do nothing
-        `.execute(transaction);
         await recordEvent(transaction, {
           tripId,
           actorId: userId,
@@ -1037,7 +1034,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     }
     await transaction.updateTable("candidate_proposals").set({
       status: "accepted",
-      reopened_at: null,
       accepted_trip_place_id: tripPlaceId,
       decided_by: userId,
       decided_at: this.now(),
@@ -1111,7 +1107,6 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       }
       const updated = await transaction.updateTable("candidate_proposals").set({
         status: "rejected",
-        reopened_at: null,
         decided_by: userId,
         decided_at: this.now(),
         version: sql`version + 1`,
@@ -1178,41 +1173,14 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       if (target.status !== "rejected" || target.version !== version || target.decided_at === null) {
         throw new AppError("conflict", "The candidate proposal changed; reload before restoring", 409, undefined, target.version);
       }
-      // A later rejection of the same place stands; undoing this older one would not bring it back.
-      const newer = await transaction.selectFrom("candidate_proposals").select("id")
-        .where("trip_id", "=", tripId)
-        .where("provider_place_id", "=", target.provider_place_id)
-        .where("status", "=", "rejected")
-        .where("id", "<>", proposalId)
-        .where("decided_at", ">", target.decided_at)
-        .executeTakeFirst();
-      if (newer) {
-        throw new AppError("conflict", "This place was marked not recommended again later; reload", 409, undefined, target.version);
-      }
-      // Pending with reopened_at keeps an earlier run's proposal on the current shortlist (readWorkspace).
+      // One suggestion per place, so restoring it puts the place back on the 幫我找 list as pending.
       await transaction.updateTable("candidate_proposals").set({
         status: "pending",
-        reopened_at: this.now(),
         decided_by: null,
         decided_at: null,
         version: sql`version + 1`,
         updated_at: this.now(),
       }).where("id", "=", proposalId).execute();
-      // Research leaves out any place with a rejected proposal, so this place's earlier rejections
-      // are lifted too. They stay off the shortlist (no reopened_at).
-      await transaction.updateTable("candidate_proposals").set({
-        status: "pending",
-        reopened_at: null,
-        decided_by: null,
-        decided_at: null,
-        version: sql`version + 1`,
-        updated_at: this.now(),
-      }).where("trip_id", "=", tripId)
-        .where("provider_place_id", "=", target.provider_place_id)
-        .where("status", "=", "rejected")
-        .where("id", "<>", proposalId)
-        .where("decided_at", "<=", target.decided_at)
-        .execute();
       await recordEvent(transaction, {
         tripId,
         actorId: userId,
@@ -1468,12 +1436,11 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           "endorsements",
         ])
         .where("trip_id", "=", tripId)
+        // Cumulative list (one suggestion per place): every pending suggestion of the trip, plus the
+        // latest run's decided ones so their 已加入行程／不要再推薦 state stays visible in place.
         .where((expression) => expression.or([
           expression("run_id", "=", run.id),
-          expression.and([
-            expression("status", "=", "pending"),
-            expression("reopened_at", "is not", null),
-          ]),
+          expression("status", "=", "pending"),
         ]))
         // Newest first; votes are shown but never reorder the list (owner decision 2026-10-19).
         .orderBy("candidate_proposals.created_at", "desc")

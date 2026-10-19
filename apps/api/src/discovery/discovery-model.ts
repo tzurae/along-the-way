@@ -113,6 +113,8 @@ export interface DiscoveryModel {
     questionAnswers: DiscoveryQuestionAnswer[];
     /** Names of places the traveler already rejected. */
     rejectedPlaces: string[];
+    /** Names of places the trip already has (earlier suggestions and the wishlist); never re-proposed. */
+    knownPlaces: string[];
     outputLanguage: string;
   }): Promise<DiscoveryResearchResult>;
 }

@@ -95,6 +95,7 @@ export async function verifyResearchedCandidates(input: {
   sourceChecks: RecommendationSourceChecks;
   rejectedProviderPlaceIds: ReadonlySet<string>;
   wishlistProviderPlaceIds: ReadonlySet<string>;
+  suggestedProviderPlaceIds: ReadonlySet<string>;
   tripCountryCodes: ReadonlySet<string>;
 }): Promise<VerificationResult> {
   const queries: string[] = [];
@@ -240,6 +241,7 @@ export async function verifyResearchedCandidates(input: {
       categories: input.request.categories,
       rejectedProviderPlaceIds: input.rejectedProviderPlaceIds,
       wishlistProviderPlaceIds: input.wishlistProviderPlaceIds,
+      suggestedProviderPlaceIds: input.suggestedProviderPlaceIds,
       tripCountryCodes: input.tripCountryCodes,
     }),
   };
