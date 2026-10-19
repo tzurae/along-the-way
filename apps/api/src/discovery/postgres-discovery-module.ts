@@ -654,6 +654,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         const listedNow = new Set((await transaction.selectFrom("candidate_proposals")
           .select("provider_place_id").where("trip_id", "=", tripId).execute())
           .map((row) => row.provider_place_id));
+        let added = 0;
         for (const { index, members, endorsements } of verification.gate.shown) {
           const { researched, place } = verification.candidates[index]!;
           // Entries merged into this place may have found the pages that vouch for it.
@@ -722,7 +723,11 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
             endorsements: JSON.stringify(endorsements),
             recommendation_sentences: JSON.stringify(recommendationSentences),
             tradeoff_sentences: JSON.stringify(tradeoffSentences),
-          }).returning("id").executeTakeFirstOrThrow();
+          }).onConflict((conflict) => conflict.columns(["trip_id", "provider_place_id"]).doNothing())
+            .returning("id").executeTakeFirst();
+          // An overlapping run listed this place first: keep its row and votes.
+          if (!proposal) continue;
+          added += 1;
           // Owner decision 2026-10-19: a suggestion gets its place identity now, not on acceptance,
           // so the Commons pipeline can give it a list photo. Acceptance reuses this identity.
           const identity = await upsertGooglePlaceIdentity(transaction, place, this.now());
@@ -737,7 +742,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           eventType: "discovery.generated",
           targetType: "discovery_run",
           targetId: run.id,
-          summary: `Generated ${verification.gate.shown.length} place proposals vouched for by two independent sources`,
+          summary: `Added ${added} new place proposals vouched for by two independent sources`,
         });
         const response = await this.readWorkspace(transaction, tripId, userId);
         await transaction.updateTable("mutation_requests")
