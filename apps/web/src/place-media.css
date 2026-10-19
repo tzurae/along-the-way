@@ -11,11 +11,22 @@
   color: var(--color-muted-foreground);
 }
 
+/* A soft light sweep: the photo is still being found (also used while previews load). */
 .place-thumbnail__loading {
   width: 100%;
   height: 100%;
-  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-  background: var(--color-surface-subtle);
+  /* Darker warm base + near-white sweep: the earlier surface-on-surface sweep was invisible. */
+  background:
+    linear-gradient(100deg, transparent 15%, color-mix(in srgb, white 75%, transparent) 50%, transparent 85%)
+      color-mix(in srgb, var(--color-ink) 12%, var(--color-surface));
+  background-size: 220% 100%, auto;
+  background-repeat: no-repeat;
+  animation: place-thumbnail-shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes place-thumbnail-shimmer {
+  from { background-position: 120% 0, 0 0; }
+  to { background-position: -120% 0, 0 0; }
 }
 
 .place-thumbnail__image {

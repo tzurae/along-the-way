@@ -471,6 +471,7 @@ export class PostgresCommonsCandidateModule implements CommonsCandidateModule {
       .leftJoin("commons_place_photos as photo", "photo.place_id", "identity.id")
       .select([
         "identity.canonical_name",
+        "identity.canonical_type",
         "identity.latitude",
         "identity.longitude",
         "photo.place_id as photo_place_id",
@@ -484,10 +485,10 @@ export class PostgresCommonsCandidateModule implements CommonsCandidateModule {
       .orderBy("archived_at", "desc")
       .orderBy("created_at")
       .executeTakeFirst();
-    if (!tripPlace) throw new Error("Place identity has no trip place");
+    // An AI 建議 identity has no trip place until someone adds it; its canonical facts suffice.
     return {
-      name: tripPlace.name || identity.canonical_name,
-      placeType: tripPlace.place_type,
+      name: tripPlace?.name || identity.canonical_name,
+      placeType: tripPlace?.place_type ?? identity.canonical_type,
       coordinate: identity.latitude === null || identity.longitude === null
         ? null
         : { latitude: identity.latitude, longitude: identity.longitude },

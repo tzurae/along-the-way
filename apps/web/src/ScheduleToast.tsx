@@ -3,15 +3,22 @@ import { Check } from "lucide-react";
 
 import "./schedule-flow.css";
 
+/** `navigate` switches the page in-app; without it the link loads `href`. */
+export interface ToastAction {
+  label: string;
+  href: string;
+  navigate?(): void;
+}
+
 interface ToastPayload {
   id: number;
   message: string;
-  action?: { label: string; href: string };
+  action?: ToastAction;
 }
 
 export function useScheduleToast(): {
   toast: ReactNode;
-  show(message: string, action?: { label: string; href: string }): void;
+  show(message: string, action?: ToastAction): void;
 } {
   const [payload, setPayload] = useState<ToastPayload | null>(null);
   const [visible, setVisible] = useState(false);
@@ -31,7 +38,7 @@ export function useScheduleToast(): {
 
   useEffect(() => clearTimers, [clearTimers]);
 
-  const show = useCallback((message: string, action?: { label: string; href: string }) => {
+  const show = useCallback((message: string, action?: ToastAction) => {
     clearTimers();
     setVisible(false);
     const id = ++nextId.current;
@@ -63,6 +70,12 @@ export function useScheduleToast(): {
           className="schedule-toast__action"
           href={payload.action.href}
           tabIndex={visible ? undefined : -1}
+          onClick={payload.action.navigate ? (event) => {
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+            event.preventDefault();
+            payload.action?.navigate?.();
+            setVisible(false);
+          } : undefined}
         >
           {payload.action.label}
         </a>

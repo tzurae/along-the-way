@@ -39,10 +39,9 @@ it("filters multiple days, ignores foreign dates, and keeps pending collapsed", 
   history.replaceState({}, "", "/?trip=A&tab=itinerary&segment=daily&days=2026-10-21,2099-01-01");
   renderOverview(todayWishlist());
   const group = await screen.findByRole("group", { name: "篩選日期" });
-  const pending = document.querySelector<HTMLDetailsElement>("details.plan-pending");
-  expect(pending).toBeInTheDocument();
-  expect(pending).not.toHaveAttribute("open");
-  expect(pending).toHaveTextContent("待安排");
+  const pendingToggle = document.querySelector<HTMLButtonElement>(".plan-pending-toggle");
+  expect(pendingToggle).toHaveTextContent("待安排");
+  expect(pendingToggle).toHaveAttribute("aria-expanded", "false");
   expect(document.querySelectorAll(".day-column")).toHaveLength(1);
   expect(document.querySelector('.day-column[data-date="2026-10-21"]')).toBeInTheDocument();
 
@@ -89,7 +88,7 @@ it("moves a place between two visible non-adjacent days with versioned assignmen
     return (init?.parse ? init.parse(value) : value) as T;
   };
   render(<TripSkeletonWorkspace trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} onTravelEdit={vi.fn()} />);
-  await screen.findByRole("heading", { name: "行程" });
+  await screen.findByRole("heading", { name: "安排" });
   const target = document.querySelector<HTMLElement>('[data-drop-day="day23"]')!;
   Object.defineProperty(document, "elementFromPoint", { configurable: true, value: () => target });
   const handle = document.querySelector<HTMLButtonElement>('[data-drag-place="FIRST"] .plan-drag-handle')!;
@@ -141,6 +140,6 @@ it("repairs a wishlist location through its distinct legacy skeleton place", asy
 
   await waitFor(() => expect(savedBody).toMatchObject({ latitude: 35.01, longitude: 135.76, expectedVersion: 1 }));
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "編輯地點" })).not.toBeInTheDocument());
-  fireEvent.click(document.querySelector(".plan-pending summary")!);
+  fireEvent.click(document.querySelector(".plan-pending-toggle")!);
   expect(await screen.findByRole("button", { name: "安排日期" })).toBeInTheDocument();
 });

@@ -35,6 +35,7 @@ const base = {
   categories: [],
   rejectedProviderPlaceIds: new Set<string>(),
   wishlistProviderPlaceIds: new Set<string>(),
+  suggestedProviderPlaceIds: new Set<string>(),
   tripCountryCodes: new Set(["JP"]),
 };
 
@@ -217,6 +218,16 @@ describe("recommendation quality gate", () => {
       ],
     });
     expect(result.shown.map(({ index }) => index)).toEqual([0, 2]);
+    expect(result.shortfalls).toEqual([]);
+  });
+
+  it("never shows a place this trip already has as a pending suggestion, without calling it a failure", () => {
+    const result = gateRecommendations({
+      ...base,
+      suggestedProviderPlaceIds: new Set(["Kiyomizu"]),
+      candidates: [candidate({ id: "Kiyomizu" }), candidate({ id: "Kinkakuji" })],
+    });
+    expect(result.shown.map(({ index }) => index)).toEqual([1]);
     expect(result.shortfalls).toEqual([]);
   });
 

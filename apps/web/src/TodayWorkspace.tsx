@@ -582,7 +582,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     : false;
   const emptyDay = timelineEntries.length === 0;
 
-  return <section className="today-workspace" aria-label={text.title}>
+  return <section className="today-workspace" aria-label={t.app.tabs.today}>
     <header className="today-pagehead">
       <div><h2>{heading}</h2><p>{headingContext}</p></div>
       <div className="today-headnav">

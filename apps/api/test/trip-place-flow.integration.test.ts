@@ -1524,7 +1524,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect((await response).status).toBe(201);
   });
 
-  it("orders active votes descending, ignores removed members, and keeps voting for a single member", async () => {
+  it("lists newest first whatever the votes, ignores removed members, and keeps voting for a single member", async () => {
     const owner = await login("owner@example.test");
     const second = await login("second@example.test");
     const third = await login("third@example.test");
@@ -1549,7 +1549,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     });
     expect((await remove(third.user.id)).status).toBe(204);
     expect((await list(owner.cookie, trip.id)).map((place) => [place.id, place.voteCount]))
-      .toEqual([[two.id, 2], [one.id, 1], [tie.id, 1], [zero.id, 0]]);
+      // Votes never reorder the list (owner decision): newest added first.
+      .toEqual([[tie.id, 1], [two.id, 2], [one.id, 1], [zero.id, 0]]);
     const impersonated = await app.request(`/api/trips/${trip.id}/trip-places/${one.id}/vote`, {
       method: "PUT",
       headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": "cannot-vote-for-another", origin: "https://app.example.test" },

@@ -4,6 +4,8 @@ import { createDatabase, requireDatabaseUrl } from "./database/database";
 import { OpenAiResponsesDiscoveryModel } from "./discovery/openai-responses-discovery-model";
 import { PostgresDiscoveryModule } from "./discovery/postgres-discovery-module";
 import { PostgresDayPlanModule } from "./planning/postgres-day-plan-module";
+import { PostgresPlanningSettingsModule } from "./planning/postgres-planning-settings-module";
+import { PostgresWholeTripPlanModule } from "./planning/postgres-whole-trip-plan-module";
 import { PostgresIdentityAccessModule } from "./private-trips/postgres-identity-access-module";
 import { PostgresRateLimiter } from "./private-trips/postgres-rate-limiter";
 import { PostgresReadinessProbe } from "./private-trips/postgres-readiness-probe";
@@ -11,6 +13,7 @@ import { PostgresTripWorkspaceModule } from "./private-trips/postgres-trip-works
 import { TokenIssuer } from "./private-trips/token-issuer";
 import { PostgresTripSkeletonModule } from "./trip-skeleton/postgres-trip-skeleton-module";
 import { GooglePlacesProvider } from "./trip-places/google-places-provider";
+import { MapsGroundingLite } from "./discovery/maps-grounding-lite";
 import { PostgresTripPlaceModule } from "./trip-places/postgres-trip-place-module";
 import { PostgresPlaceDetailModule } from "./place-details/postgres-place-detail-module";
 import { packagedPhotoRoot } from "./place-details/photo-assets";
@@ -61,6 +64,11 @@ const placeProvider = new GooglePlacesProvider({
   apiKey: process.env.GOOGLE_MAPS_API_KEY,
   consumeBudget: () => rateLimiter.tryConsumePaidProvider("google_places"),
 });
+// The API only reports whether 調查 can run; the worker makes the Grounding Lite calls.
+const placeDiscovery = new MapsGroundingLite({
+  apiKey: process.env.GOOGLE_MAPS_API_KEY,
+  consumeBudget: () => rateLimiter.tryConsumePaidProvider("google_places"),
+});
 const wikimediaUserAgent = `AlongTheWay/${packageJson.version} (https://github.com/tzurae/along-the-way)`;
 const commonsPhotos = new CommonsPlacePhotos({ userAgent: wikimediaUserAgent });
 const commonsCandidates = new PostgresCommonsCandidateModule({
@@ -90,8 +98,10 @@ const discovery = new PostgresDiscoveryModule({
     model: process.env.OPENAI_MODEL,
   }),
   placeLookup: placeProvider,
+  placeDiscovery,
   claimAiRun: (userId, tripId) => rateLimiter.claimDiscoveryAiRun(userId, tripId),
   tripPlaces,
+  commonsCandidates,
 });
 const dayPlans = new PostgresDayPlanModule({
   database,
@@ -115,6 +125,8 @@ const app = createApp({
     photoCapabilitySecret: tokenSecret,
   }),
   placeGuides,
+  planningSettings: new PostgresPlanningSettingsModule({ database }),
+  wholeTripPlans: new PostgresWholeTripPlanModule({ database }),
   rateLimiter,
   readiness,
   siteAddress,

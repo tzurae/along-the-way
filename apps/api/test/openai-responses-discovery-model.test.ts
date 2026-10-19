@@ -38,12 +38,20 @@ const request = {
   areas: ["Kyoto"],
   exclusions: [],
   localLanguage: "ja",
+  searchQueries: [],
 };
 
 const brief = { interests: ["temples"], pace: null, budget: null, exclusions: [], areas: ["Kyoto"] };
 
+const discovered = [{
+  query: "京都 寺", area: "Kyoto", category: "Temples", namedPlace: null,
+  summary: "Tofuku-ji [0], Saiho-ji [1], Nishiki Market [2], Kinkaku-ji [3], Ginkaku-ji [4], Arashiyama [5]",
+  placeIds: ["ChIJ-tofukuji", "ChIJ-saihoji", "ChIJ-nishiki", "ChIJ-kinkakuji", "ChIJ-ginkakuji", "ChIJ-arashiyama"],
+}];
+
 function researched(overrides: Record<string, unknown>) {
   return {
+    placeId: "ChIJ-tofukuji",
     name: "Tofuku-ji",
     localName: "東福寺",
     englishName: "Tofuku-ji",
@@ -95,7 +103,16 @@ describe("OpenAI Responses discovery model", () => {
 
     expect(result.modelId).toBe("gpt-test-2026-01-01");
     expect(result.outputLanguage).toBe("zh-TW");
-    expect(result.request).toEqual({ ...request, localLanguage: "ja" });
+    expect(result.request).toEqual({
+      ...request,
+      localLanguage: "ja",
+      // The model listed no searches: every named place and area × kind still gets one.
+      searchQueries: [
+        { query: "Kyoto Saihoji", area: "Kyoto", category: null, namedPlace: "Saihoji" },
+        { query: "Kyoto Temples", area: "Kyoto", category: "Temples", namedPlace: null },
+        { query: "Kyoto Local food", area: "Kyoto", category: "Local food", namedPlace: null },
+      ],
+    });
     const [url, init] = fetch.mock.calls[0] ?? [];
     expect(url).toBe("https://openai.example.test/v1/responses");
     expect(init?.headers).toMatchObject({ Authorization: "Bearer test-key" });
@@ -104,7 +121,6 @@ describe("OpenAI Responses discovery model", () => {
     expect(body.text.format).toMatchObject({ type: "json_schema", name: "trip_discovery_plan", strict: true });
     expect(body.tools).toBeUndefined();
     expect(JSON.parse(body.input[1].content)).toMatchObject({ questionAnswers });
-    expect(body.input[0].content).toContain("Never ask any question already present in questionAnswers again");
   });
 
   it("uses default kinds of place when the model returns none", async () => {
@@ -168,7 +184,7 @@ describe("OpenAI Responses discovery model", () => {
       { question: "How much walking?", answer: null },
     ];
     const result = await model(fetch).research({
-      trip: facts, brief, request, questionAnswers, rejectedPlaces: [], outputLanguage: "en",
+      trip: facts, brief, request, questionAnswers, discovered, outputLanguage: "en",
     });
 
     expect(result.candidates).toEqual([expect.objectContaining({
@@ -192,6 +208,7 @@ describe("OpenAI Responses discovery model", () => {
     const item = body.text.format.schema.properties.candidates.items.properties;
     expect(item.category.anyOf[0].enum).toEqual(["Temples", "Local food"]);
     expect(item.namedPlace.anyOf[0].enum).toEqual(["Saihoji"]);
+    expect(item.placeId.enum).toEqual(discovered[0]!.placeIds);
     expect(item).not.toHaveProperty("confidence");
   });
 
@@ -199,27 +216,31 @@ describe("OpenAI Responses discovery model", () => {
     const result = await model(vi.fn(async () => completed({
       candidates: [
         researched({
+          placeId: "ChIJ-kinkakuji",
           name: "Citation-only place",
           recommendation: [{ text: "【3†source】", sourceUrls: [] }],
         }),
-        researched({ name: "Empty recommendation place", recommendation: [] }),
-        researched({ name: "Nishiki Market", category: "Local food" }),
+        researched({ placeId: "ChIJ-ginkakuji", name: "Empty recommendation place", recommendation: [] }),
+        researched({ placeId: "ChIJ-nishiki", name: "Nishiki Market", category: "Local food" }),
       ],
-    }))).research({ trip: facts, brief, request, questionAnswers: [], rejectedPlaces: [], outputLanguage: "en" });
+    }))).research({ trip: facts, brief, request, questionAnswers: [], discovered, outputLanguage: "en" });
 
     expect(result.candidates.map((entry) => entry.name)).toEqual(["Nishiki Market"]);
   });
 
-  it("drops repeated places and places filed under kinds or named places the request lacks", async () => {
+  it("drops repeated places, places not discovered, and places filed under kinds or named places the request lacks", async () => {
     const result = await model(vi.fn(async () => completed({
       candidates: [
-        researched({ name: "Saiho-ji", namedPlace: "Saihoji" }),
-        researched({ name: "saiho ji" }),
-        researched({ name: "Kinkaku-ji", category: "Gardens" }),
-        researched({ name: "Ginkaku-ji", namedPlace: "Eikando" }),
-        researched({ name: "Nishiki Market", category: "Local food" }),
+        researched({ placeId: "ChIJ-saihoji", name: "Saiho-ji", namedPlace: "Saihoji" }),
+        // The same place picked twice under another spelling.
+        researched({ placeId: "ChIJ-saihoji", name: "saiho ji" }),
+        researched({ placeId: "ChIJ-kinkakuji", name: "Kinkaku-ji", category: "Gardens" }),
+        researched({ placeId: "ChIJ-ginkakuji", name: "Ginkaku-ji", namedPlace: "Eikando" }),
+        // A Place ID this run did not discover: the model cannot add a place of its own.
+        researched({ placeId: "ChIJ-invented", name: "Invented Temple" }),
+        researched({ placeId: "ChIJ-nishiki", name: "Nishiki Market", category: "Local food" }),
       ],
-    }))).research({ trip: facts, brief, request, questionAnswers: [], rejectedPlaces: [], outputLanguage: "en" });
+    }))).research({ trip: facts, brief, request, questionAnswers: [], discovered, outputLanguage: "en" });
 
     expect(result.candidates.map((entry) => [entry.name, entry.namedPlace])).toEqual([
       ["Saiho-ji", "Saihoji"],
@@ -230,10 +251,10 @@ describe("OpenAI Responses discovery model", () => {
   it("keeps a named place of none of the requested kinds without a kind, and drops any other place without one", async () => {
     const result = await model(vi.fn(async () => completed({
       candidates: [
-        researched({ name: "Saiho-ji", namedPlace: "Saihoji", category: null }),
-        researched({ name: "Arashiyama", category: null }),
+        researched({ placeId: "ChIJ-saihoji", name: "Saiho-ji", namedPlace: "Saihoji", category: null }),
+        researched({ placeId: "ChIJ-arashiyama", name: "Arashiyama", category: null }),
       ],
-    }))).research({ trip: facts, brief, request, questionAnswers: [], rejectedPlaces: [], outputLanguage: "en" });
+    }))).research({ trip: facts, brief, request, questionAnswers: [], discovered, outputLanguage: "en" });
 
     expect(result.candidates.map((entry) => [entry.name, entry.category])).toEqual([["Saiho-ji", null]]);
   });
@@ -248,6 +269,43 @@ describe("OpenAI Responses discovery model", () => {
     }))).plan({ trip: facts, brief: "Gardens", questionAnswers: [] });
 
     expect(result.request.categories).toEqual([long.slice(0, 80).trim(), "Local food"]);
+  });
+
+  it("validates the plan's searches, fills missing coverage, and shares the search cap round-robin", async () => {
+    const searches = [
+      // Valid, for Kyoto temples: three of them.
+      { query: "京都 紅葉 寺", area: "Kyoto", category: "Temples", namedPlace: null },
+      { query: "京都 庭園 寺", area: "Kyoto", category: "Temples", namedPlace: null },
+      { query: "京都 禅寺", area: "Kyoto", category: "Temples", namedPlace: null },
+      // Dropped: a kind the request lacks, both kind and named place, and an empty query.
+      { query: "京都 カフェ", area: "Kyoto", category: "Cafes", namedPlace: null },
+      { query: "京都 西芳寺", area: "Kyoto", category: "Temples", namedPlace: "Saihoji" },
+      { query: "   ", area: "Kyoto", category: "Temples", namedPlace: null },
+      { query: "西芳寺 苔寺", area: "Kyoto", category: null, namedPlace: "Saihoji" },
+    ];
+    const result = await model(vi.fn(async () => completed({
+      structuredBrief: brief,
+      unresolvedQuestions: [],
+      request: { ...request, searchQueries: searches },
+      outputLanguage: "en",
+    }))).plan({ trip: facts, brief: "Temples and food", questionAnswers: [] });
+
+    expect(result.request.searchQueries.map((entry) => entry.query)).toEqual([
+      // Round 1: the named place, each kind once (food had no search: the fallback).
+      "西芳寺 苔寺", "京都 紅葉 寺", "Kyoto Local food",
+      // Later rounds: the remaining temple searches.
+      "京都 庭園 寺", "京都 禅寺",
+    ]);
+  });
+
+  it("never calls the model when discovery found no place to pick from", async () => {
+    const fetch = vi.fn(async () => completed({ candidates: [] }));
+    const result = await model(fetch).research({
+      trip: facts, brief, request, questionAnswers: [], outputLanguage: "en",
+      discovered: [{ ...discovered[0]!, placeIds: [null, null] }],
+    });
+    expect(result.candidates).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("fails closed before making a request when no server credential is configured", async () => {

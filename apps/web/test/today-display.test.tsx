@@ -129,9 +129,8 @@ it("marks a retained historical participant after that member is removed from th
   expect(details).toHaveTextContent("參與者：已退出的旅伴・已移除");
 });
 
-it("distinguishes online synchronization from offline reconnect", () => {
+it("offers reconnect only while offline", () => {
   const model = createTodayModel(trip, todaySkeleton(trip), [], todayUser.id);
-  expect(display(model).querySelector(".today-sync-status")).toHaveTextContent(/^已同步$/);
   expect(display(model).querySelector(".today-zone button")).toBeNull();
   expect(display(model, true).querySelector(".today-zone button")).toHaveTextContent(/^重新連線並同步$/);
 });

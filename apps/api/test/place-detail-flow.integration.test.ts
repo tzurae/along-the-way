@@ -289,7 +289,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
     ]);
     expect(other.googlePhotos[0]?.imageUrl).not.toContain("server-only");
     const previews = await app.request(`/api/trips/${tripId}/place-previews?kind=trip-place&ids=${branch.id},${place.id}`, { headers: { cookie: owner.cookie } });
-    expect(previews.headers.get("cache-control")).toBe("private, max-age=3600");
+    expect(previews.headers.get("cache-control")).toBe("private, no-cache");
     const parsed = parsePlacePreviewResponse(await previews.json()).previews;
     expect(parsed.map((item) => item.reference.id)).toEqual([branch.id, place.id]);
     expect(parsed[0]).toMatchObject({ photo: null, photoCount: 0 });
@@ -313,7 +313,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
       { headers: { cookie: owner.cookie } },
     );
     expect(response.status).toBe(200);
-    expect(response.headers.get("cache-control")).toBe("private, max-age=3600");
+    expect(response.headers.get("cache-control")).toBe("private, no-cache");
     const previews = parsePlacePreviewResponse(await response.json()).previews;
     expect(previews[0]?.photo).toBeNull();
     expect(previews[1]?.photo).toMatchObject({ source: "curated", id: "original-test-pixel" });
@@ -453,7 +453,7 @@ describe("curated place detail publication and authenticated HTTP reads", () => 
       { headers: { cookie: owner.cookie } },
     );
     expect(previewResponse.status).toBe(200);
-    expect(previewResponse.headers.get("cache-control")).toBe("private, max-age=3600");
+    expect(previewResponse.headers.get("cache-control")).toBe("private, no-cache");
     const previews = parsePlacePreviewResponse(await previewResponse.json()).previews;
     expect(previews[0]).toMatchObject({ photo: null, photoCount: 0 });
     expect(previews[1]).toMatchObject({ photo: { source: "curated", id: "original-test-pixel" }, photoCount: 1 });

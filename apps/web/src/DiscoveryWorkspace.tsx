@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Ban, CalendarCheck, CalendarPlus, Check, ChevronRight, ExternalLink, Images, MapPin, MapPinOff, Pencil, RotateCw, Search } from "lucide-react";
+import { ArrowRight, Ban, CalendarCheck, CalendarPlus, Check, ChevronRight, ExternalLink, Images, MapPin, MapPinOff, Pencil, Search } from "lucide-react";
 
 import {
   parseDiscoveryWorkspaceResponse,
@@ -8,8 +8,7 @@ import {
   type CandidateProposalDto,
   type DiscoveryClaimSentenceDto,
   type DiscoveryEndorsement,
-  type DiscoveryQuestionAnswerDto,
-  type DiscoveryShortfallDto,
+  type DiscoveryJobDto,
   type DiscoveryWorkspaceDto,
   type ScheduleDiscoveryProposalsInput,
   type ScheduleDiscoveryProposalsResponse,
@@ -37,6 +36,8 @@ import { SchedulePlacesSheet } from "./SchedulePlacesSheet";
 import { SelectionBar } from "./SelectionBar";
 import { useScheduleToast } from "./ScheduleToast";
 import { assignPlacesToDay } from "./schedule-assignments";
+import { ClarifyChecklist, ResearchBatch, ThinkingIndicator, clarifyAnswers, clarifyDrafts, clarifySummary, focusDiscoveryBatch, prefersReducedMotion, type ClarifyDraft } from "./DiscoveryInvestigate";
+import { discoveryJobActive } from "./useDiscoveryJob";
 import "./pocket-discovery.css";
 
 
@@ -47,9 +48,15 @@ interface DiscoveryWorkspaceProps {
   photoRevision?: number;
   placesRevision: number;
   onPlacesChanged(): void;
+  /** The trip's newest 調查 job, followed by the trip shell even while this page is hidden. */
+  job: DiscoveryJobDto | null;
+  /** Hands a job this page queued (or found running) to the trip shell to follow. */
+  onJobStarted(job: DiscoveryJobDto | null): void;
 }
 
 type RetryKeys = Map<string, { fingerprint: string; key: string }>;
+/** Below this many places the shortlist is read at a glance, so search and filter chips stay hidden. */
+const FILTER_MIN_PLACES = 8;
 
 function retryKey(store: RetryKeys, operation: string, payload: unknown) {
   const fingerprint = JSON.stringify(payload);
@@ -100,38 +107,6 @@ function endorsementLabel(
   }
 }
 
-function shortfallText(shortfall: DiscoveryShortfallDto, t: Messages["discovery"]) {
-  switch (shortfall.code) {
-    case "not_researched":
-      return t.shortfall.notResearched;
-    case "not_found":
-      return t.shortfall.notFound;
-    case "name_mismatch":
-      return t.shortfall.nameMismatch;
-    case "single_source": {
-      // Fewer than two by definition: none, or exactly one.
-      const vouched = shortfall.endorsements.map((endorsement) =>
-        endorsementLabel(endorsement, t)
-      ).join("、");
-      return vouched ? t.shortfall.oneSource(vouched) : t.shortfall.noSource;
-    }
-    case "category_short":
-      return shortfall.count ? t.shortfall.onePassed : t.shortfall.nonePassed;
-    case "in_wishlist":
-      return t.shortfall.inWishlist;
-    case "rejected":
-      return t.shortfall.rejectedBefore;
-    case "permanently_closed":
-      return t.shortfall.permanentlyClosed;
-    case "temporarily_closed":
-      return t.shortfall.temporarilyClosed;
-    case "outside_trip":
-      return t.shortfall.outsideTrip;
-    case "no_location":
-      return t.shortfall.noLocation;
-  }
-}
-
 function discoveryRunFailureReason(errorCode: string | null, t: Messages["discovery"]) {
   switch (errorCode?.toLowerCase()) {
     case "model_unavailable":
@@ -144,6 +119,10 @@ function discoveryRunFailureReason(errorCode: string | null, t: Messages["discov
       return t.runFailure.researchLimitReached;
     case "conflict":
       return t.runFailure.conflict;
+    case "interrupted":
+      return t.runFailure.interrupted;
+    case "expired":
+      return t.runFailure.expired;
     default:
       return t.runFailure.unknown;
   }
@@ -220,27 +199,13 @@ function ClaimSentenceList({
 }
 
 
-interface QuestionDraft {
-  answer: string;
-  skipped: boolean;
-}
-
-
-function resolvedQuestionAnswers(drafts: Record<string, QuestionDraft>): DiscoveryQuestionAnswerDto[] {
-  return Object.entries(drafts).flatMap(([question, draft]): DiscoveryQuestionAnswerDto[] => {
-    if (draft.skipped) return [{ question, answer: null }];
-    const answer = draft.answer.trim();
-    return answer ? [{ question, answer }] : [];
-  });
-}
-
 function ResearchPanel({ first, open, onClose, children, footer }: { first: boolean; open: boolean; onClose: () => void; children: ReactNode; footer: ReactNode }) {
   if (first) return <section className="order-3 pd-first-run">{children}{footer}</section>;
   return <PlaceDetailSheet appearance="workspace" open={open} title="你的需求" onClose={onClose} footer={footer}>{children}</PlaceDetailSheet>;
 }
 
 
-export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0, placesRevision, onPlacesChanged }: DiscoveryWorkspaceProps) {
+export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0, placesRevision, onPlacesChanged, job, onJobStarted }: DiscoveryWorkspaceProps) {
   const { locale, t: { discovery: t, schedule: scheduleT, tripPlaces: tripPlacesT } } = useI18n();
   const [workspace, setWorkspace] = useState<DiscoveryWorkspaceDto | null>(null);
   const photoRequest = useCallback(<T,>(url: string, options?: PlaceDetailRequestOptions): Promise<T> => request<T>(
@@ -249,7 +214,17 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
   ), [photoRevision, request]);
   const [tripPlaces, setTripPlaces] = useState<TripPlaceDto[]>([]);
   const [briefDraft, setBriefDraft] = useState("");
-  const [questionDrafts, setQuestionDrafts] = useState<Record<string, QuestionDraft>>({});
+  const [draftState, setDraftState] = useState<{ briefVersion: number | null; items: Record<string, ClarifyDraft> }>({ briefVersion: null, items: {} });
+  // Drafts belong to one checklist. Ids are positional (q1…q5), so a newer brief's questions start
+  // from the server's answers instead of inheriting answers typed for different questions.
+  const serverDrafts = clarifyDrafts(workspace?.clarification ?? null);
+  const drafts: Record<string, ClarifyDraft> = draftState.briefVersion === (workspace?.clarification?.briefVersion ?? null)
+    ? Object.fromEntries(Object.entries(serverDrafts).map(([id, draft]) => [id, draftState.items[id] ?? draft]))
+    : serverDrafts;
+  /** The whole 調查 chain (save brief → questions → review → queue) is one busy period. */
+  const [investigating, setInvestigating] = useState(false);
+  /** While the checklist is up the request shows as one line; 編輯 reopens the text. */
+  const [briefOpen, setBriefOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [optimisticVotes, setOptimisticVotes] = useState<Record<string, { ownVote: boolean; voteCount: number }>>({});
   const [pendingProposalVotes, setPendingProposalVotes] = useState<Record<string, true>>({});
@@ -319,7 +294,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
   const pendingProposalVoteIds = useRef(new Set<string>());
   const workspaceReadGeneration = useRef(0);
   const briefBase = useRef<DiscoveryWorkspaceDto["brief"]>(null);
-  const answersBase = useRef<DiscoveryWorkspaceDto["brief"]>(null);
   const conflictLatest = useRef<DiscoveryWorkspaceDto | null>(null);
   const resolution = useVersionConflict<Record<string, unknown>>();
   const conflictAction = useRef<{ operation: string; path: string; payload: Record<string, unknown>; area: NoticeArea; after?: () => void; method?: "POST" | "PUT" } | null>(null);
@@ -338,34 +312,18 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
       });
     }
   }
-  const researchLabel = (idle: string) =>
-    pending === "save-brief" || pending === "save-questions"
-      ? t.progress.saving
-      : pending === "generate" ? t.progress.researching : idle;
-  const apply = useCallback((value: unknown, inputs: "all" | "brief" | "questions" = "all") => {
+  /**
+   * "all" re-fills the brief and checklist drafts from the server (initial load and the 調查
+   * steps); "brief" only the brief; "projection" neither, so a vote or decision never erases
+   * what the member is typing.
+   */
+  const apply = useCallback((value: unknown, inputs: "all" | "brief" | "projection" = "all") => {
     const next = parseDiscoveryWorkspaceResponse(value).discovery;
     setWorkspace(next);
-    if (inputs === "all" || inputs === "brief") {
-      briefBase.current = next.brief;
-      setBriefDraft(next.brief?.originalText ?? "");
-    }
-    if (inputs === "all" || inputs === "questions") {
-      answersBase.current = next.brief;
-      const savedAnswers = Object.fromEntries(
-        (next.brief?.questionAnswers ?? []).map((entry) => [entry.question, entry.answer]),
-      );
-      const questions = [
-        ...(next.brief?.questionAnswers.map((entry) => entry.question) ?? []),
-        ...(next.brief?.unresolvedQuestions ?? []),
-      ].filter((question, index, all) => all.indexOf(question) === index);
-      setQuestionDrafts(Object.fromEntries(questions.map((question) => [
-        question,
-        {
-          answer: typeof savedAnswers[question] === "string" ? savedAnswers[question] : "",
-          skipped: savedAnswers[question] === null,
-        },
-      ])));
-    }
+    if (inputs === "projection") return next;
+    briefBase.current = next.brief;
+    setBriefDraft(next.brief?.originalText ?? "");
+    if (inputs === "all") setDraftState({ briefVersion: next.clarification?.briefVersion ?? null, items: clarifyDrafts(next.clarification) });
     return next;
   }, []);
 
@@ -448,30 +406,28 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
     setPending(operation);
     try {
       const next = apply(await request(path, {
-        method: method ?? (operation === "save-brief" || operation === "save-questions" ? "PUT" : "POST"),
+        method: method ?? (operation === "save-brief" ? "PUT" : "POST"),
         headers: {
           "Content-Type": "application/json",
           "Idempotency-Key": retryKey(retryKeys.current, operation, payload),
           ...(conflictBase ? { "Conflict-Base-Version": String(conflictBase) } : {}),
         },
         body: JSON.stringify(payload),
-      }), operation === "save-questions" ? "questions" : "all");
+      }), ["save-brief", "clarify", "answer", "research"].includes(operation) ? "all" : "projection");
       clearRetryKey(retryKeys.current, operation);
       resolution.clear();
       after?.();
       return next;
     } catch (error) {
-      if (operation === "save-brief" || operation === "save-questions") {
+      if (operation === "save-brief") {
         const { expectedVersion, ...attempted } = payload;
-        const base = operation === "save-brief"
-          ? { originalText: briefBase.current?.originalText ?? "" }
-          : { answers: answersBase.current?.questionAnswers ?? [] };
+        const base = { originalText: briefBase.current?.originalText ?? "" };
         try {
           const captured = await resolution.capture(error, { input: base, version: typeof expectedVersion === "number" ? expectedVersion : 1 }, attempted, async () => {
             const latest = parseDiscoveryWorkspaceResponse(await request(`/api/trips/${trip.id}/discovery`)).discovery;
             conflictLatest.current = latest;
             return latest.brief ? {
-              input: operation === "save-brief" ? { originalText: latest.brief.originalText } : { answers: latest.brief.questionAnswers },
+              input: { originalText: latest.brief.originalText },
               version: latest.brief.version,
             } : null;
           });
@@ -482,55 +438,142 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
         }
       }
       if (shouldStartFreshRequest(error)) clearRetryKey(retryKeys.current, operation);
+      // The checklist moved on (another member answered, or a newer brief): re-read it; drafts stay.
+      if (operation === "answer" && error instanceof ApiRequestError && error.status === 409) void refresh();
       notify("error", operation.startsWith("reject:")
         && error instanceof ApiRequestError
         && (error.code === "forbidden" || error.status === 403)
         ? t.errors.ownerOnly
-        // Answers refused because the brief's questions changed: explain it in zh-TW, not "要求內容有誤".
-        : operation === "save-questions" && error instanceof ApiRequestError && error.code === "validation_error"
-          ? t.errors.questionsChanged
+        : error instanceof ApiRequestError && error.code === "clarification_incomplete"
+          ? t.errors.clarifyIncomplete
           : errorMessage(error, t.errors.failed));
     } finally {
       setPending(null);
     }
   }
 
-  // One action: explain missing server configuration, persist changed brief text or
-  // clarification answers, then research the exact resulting brief version.
-  async function research(area: "find" | "again") {
-    if (pending || !workspace) return;
+  // 調查: save changed brief text, have the AI draft its checklist, send the answers to the
+  // reviewer, and queue research once every required answer is accepted. Each click advances
+  // as far as it can; questions or ask-backs stop it until the member answers.
+  async function investigate() {
+    if (pending || investigating || !workspace || discoveryJobActive(job)) return;
     const missing = missingServices(workspace, true, t);
     if (missing.length > 0) {
       notify("error", t.errors.researchUnavailable(missing.join(t.services.separator)));
       return;
     }
-    // Generation uses the saved aggregate; each editable field keeps its own base.
-    let brief = workspace.brief;
-    if (!brief || !briefBase.current || briefBase.current.originalText !== briefDraft) {
-      const saved = await mutate("save-brief", `/api/trips/${trip.id}/discovery/brief`, {
-        originalText: briefDraft,
-        expectedVersion: briefBase.current?.version ?? null,
-      }, area);
-      if (!saved?.brief) return;
-      brief = saved.brief;
-    } else {
-      const answers = resolvedQuestionAnswers(questionDrafts);
-      if (answersBase.current && JSON.stringify(answers) !== JSON.stringify(answersBase.current.questionAnswers)) {
-        const saved = await mutate(
-          "save-questions",
-          `/api/trips/${trip.id}/discovery/brief/questions`,
-          { expectedVersion: answersBase.current.version, answers },
-          area,
-        );
+    setInvestigating(true);
+    try {
+      let current = workspace;
+      if (!current.brief || !briefBase.current || briefBase.current.originalText !== briefDraft) {
+        const saved = await mutate("save-brief", `/api/trips/${trip.id}/discovery/brief`, {
+          originalText: briefDraft,
+          expectedVersion: briefBase.current?.version ?? null,
+        }, "find");
         if (!saved?.brief) return;
-        brief = saved.brief;
+        current = saved;
       }
+      const brief = current.brief;
+      if (!brief) return;
+      const clarification = current.clarification?.briefVersion === brief.version ? current.clarification : null;
+      if (!clarification) {
+        const asked = await mutate("clarify", `/api/trips/${trip.id}/discovery/clarification`, {
+          expectedBriefVersion: brief.version,
+        }, "find");
+        setBriefOpen(false);
+        // With questions the member answers first, in the dialog (also when 重新調查 started this
+        // from the page); with none, research starts right away.
+        if (asked?.clarification?.status !== "ready") {
+          if (asked?.clarification) setResearchSettingsOpen(true);
+          return;
+        }
+      } else if (clarification.status !== "ready" || clarifySummary(clarification, drafts).changed) {
+        const answered = await mutate("answer", `/api/trips/${trip.id}/discovery/clarification/answers`, {
+          expectedVersion: clarification.version,
+          answers: clarifyAnswers(clarification, drafts),
+        }, "find", undefined, "PUT");
+        if (!answered?.clarification) return;
+        if (answered.clarification.status !== "ready") {
+          setResearchSettingsOpen(true);
+          const first = answered.clarification.items.find((item) => item.required
+            && (item.verdict === "insufficient" || item.verdict === "unreasonable"));
+          if (first) window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+            const target = document.querySelector<HTMLElement>(`[data-clarify-item="${first.id}"]`);
+            target?.scrollIntoView({ block: "center", behavior: prefersReducedMotion() ? "auto" : "smooth" });
+            target?.querySelector<HTMLElement>("input")?.focus({ preventScroll: true });
+          }));
+          return;
+        }
+      }
+      const started = await mutate("research", `/api/trips/${trip.id}/discovery/research`, {
+        expectedBriefVersion: brief.version,
+      }, "find");
+      if (!started) return;
+      onJobStarted(started.latestJob);
+      // The dialog closes at once; the batch at the top of the list carries the progress from here.
+      setResearchSettingsOpen(false);
+      focusDiscoveryBatch();
+    } finally {
+      setInvestigating(false);
     }
-    const researched = await mutate("generate", `/api/trips/${trip.id}/discovery/generate`, {
-      expectedBriefVersion: brief.version,
-    }, area);
-    if (researched) setResearchSettingsOpen(false);
   }
+
+  // A job someone else queued (or one still running after a reload) is followed by the trip shell,
+  // unless the shell already follows that job or a newer one.
+  const workspaceJob = workspace?.latestJob ?? null;
+  const followedJobCreatedAt = job?.createdAt ?? null;
+  useEffect(() => {
+    if (!workspaceJob || !discoveryJobActive(workspaceJob)) return;
+    if (followedJobCreatedAt !== null && Date.parse(workspaceJob.createdAt) <= Date.parse(followedJobCreatedAt)) return;
+    onJobStarted(workspaceJob);
+  }, [followedJobCreatedAt, onJobStarted, workspaceJob]);
+
+  // The list changes once the save stage finishes: re-read it then, and keep the new rows'
+  // thumbnails loading while the photos stage looks for Commons photos. Only jobs seen before
+  // their save finished count; a job that finished earlier is already in the first read.
+  const unsavedJobIds = useRef(new Set<string>());
+  const refreshedJobIds = useRef(new Set<string>());
+  const jobId = job?.id ?? null;
+  const jobSaved = job?.stages.save.state === "done";
+  useEffect(() => {
+    if (!jobId) return;
+    if (!jobSaved) {
+      unsavedJobIds.current.add(jobId);
+      return;
+    }
+    if (!unsavedJobIds.current.has(jobId) || refreshedJobIds.current.has(jobId)) return;
+    refreshedJobIds.current.add(jobId);
+    void refresh();
+    setPhotosExpectedUntil(Date.now() + 120_000);
+  }, [jobId, jobSaved, refresh]);
+  // A successful run uses up its checklist on the server; re-read once it finishes so 你的需求
+  // starts from fresh questions instead of the answered ones still held here. Only for jobs seen
+  // unfinished here: a run that finished earlier is already reflected in the first read.
+  const jobFinished = job?.status === "succeeded";
+  const unfinishedJobIds = useRef(new Set<string>());
+  useEffect(() => {
+    if (!jobId) return;
+    if (!jobFinished) {
+      unfinishedJobIds.current.add(jobId);
+      return;
+    }
+    if (!unfinishedJobIds.current.delete(jobId)) return;
+    void refresh();
+  }, [jobId, jobFinished, refresh]);
+
+  // 本次新增: the newest job stays at the top of the list, from its first stage to the places it
+  // found, until the member collapses it. A job counts once it was seen running or its result
+  // was not yet seen; a result already seen elsewhere does not come back on the next visit.
+  const shownJob = job ?? workspace?.latestJob ?? null;
+  const jobRunning = discoveryJobActive(shownJob);
+  const [watchedJobId, setWatchedJobId] = useState<string | null>(null);
+  const [dismissedJobId, setDismissedJobId] = useState<string | null>(null);
+  const shownJobId = shownJob?.id ?? null;
+  const shownJobUnseen = Boolean(shownJob && (jobRunning || !shownJob.acknowledged));
+  useEffect(() => {
+    if (shownJobId && shownJobUnseen) setWatchedJobId(shownJobId);
+  }, [shownJobId, shownJobUnseen]);
+
 
   async function rejectProposal(proposal: CandidateProposalDto) {
     return mutate(
@@ -639,27 +682,18 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
     }
   }
 
-
-  async function saveQuestionAnswers() {
-    if (!answersBase.current) return;
-    const answers = resolvedQuestionAnswers(questionDrafts);
-    await mutate(
-      "save-questions",
-      `/api/trips/${trip.id}/discovery/brief/questions`,
-      { expectedVersion: answersBase.current.version, answers },
-      "questions",
-    );
-  }
   const selectedProposal = workspace?.proposals.find((proposal) => proposal.id === selectedProposalId) ?? null;
   const proposalNameCounts = new Map<string, number>();
   for (const proposal of workspace?.proposals ?? []) {
     proposalNameCounts.set(proposal.name, (proposalNameCounts.get(proposal.name) ?? 0) + 1);
   }
+  const [photosExpectedUntil, setPhotosExpectedUntil] = useState<number | null>(null);
   const previews = usePlacePreviews({
     tripId: trip.id,
     kind: "proposal",
     ids: workspace?.proposals.map((proposal) => proposal.id) ?? [],
     request: photoRequest,
+    waitForPhotosUntil: photosExpectedUntil,
   });
 
   function proposalDetail(proposal: CandidateProposalDto) {
@@ -721,8 +755,16 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
   ];
   const acceptedPlaceFor = (proposal: CandidateProposalDto) =>
     proposal.acceptedTripPlaceId ? tripPlacesById.get(proposal.acceptedTripPlaceId) ?? null : null;
+  const batchJob = shownJob && shownJob.id !== dismissedJobId && (jobRunning || watchedJobId === shownJob.id) ? shownJob : null;
+  // Only a workspace read made after this job's save stage has its run as the latest run; an
+  // earlier read would put the previous run's places in this batch.
+  const batchRunId = batchJob && workspace?.latestJob?.id === batchJob.id && workspace.latestJob.stages.save.state === "done"
+    ? workspace.latestRun?.id ?? null : null;
+  const batchProposals = batchRunId ? listedProposals.filter((proposal) => proposal.runId === batchRunId) : [];
+  const batchProposalIds = new Set(batchProposals.map((proposal) => proposal.id));
+  const restProposals = listedProposals.filter((proposal) => !batchProposalIds.has(proposal.id));
   // Filter by the coarse place type (景點、餐廳…): AI categories are free text and too varied for chips.
-  const proposalFilters = usePlaceFilters(listedProposals.map((proposal) => {
+  const proposalFilters = usePlaceFilters(restProposals.map((proposal) => {
     const place = acceptedPlaceFor(proposal);
     return {
       id: proposal.id,
@@ -733,7 +775,25 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
       mine: proposal.status === "pending" ? proposal.ownVote : Boolean(place?.ownVote),
     };
   }), `along-the-way:place-filters:${accountId}:${trip.id}:discovery`);
-  const filteredProposals = listedProposals.filter((proposal) => proposalFilters.visibleIds.has(proposal.id));
+  // A short list is read at a glance; search and chips only help once it gets long. Remembered
+  // filters do not apply while the bar is hidden, or rows would vanish with no way to clear them.
+  const filtersShown = restProposals.length >= FILTER_MIN_PLACES;
+  const visibleRestProposals = filtersShown
+    ? restProposals.filter((proposal) => proposalFilters.visibleIds.has(proposal.id))
+    : restProposals;
+  // Filters remembered from a longer list would hide rows the moment the list grows back, with
+  // chips the member never chose; a hidden bar forgets them.
+  const filtersActive = proposalFilters.active;
+  const clearFilters = proposalFilters.clear;
+  // Not before the first read: an empty list while loading is not a short list.
+  const listLoaded = workspace !== null;
+  useEffect(() => {
+    if (listLoaded && !filtersShown && filtersActive) clearFilters();
+  }, [clearFilters, filtersActive, filtersShown, listLoaded]);
+  // Opening 你的需求 again starts from the one-line summary while questions are up.
+  useEffect(() => {
+    if (researchSettingsOpen) setBriefOpen(false);
+  }, [researchSettingsOpen]);
   /** Status label; an accepted proposal whose wishlist place is scheduled reads 「已加入行程」. */
   const proposalStatusLabel = (proposal: CandidateProposalDto, status: CandidateProposalDto["status"] = proposal.status) => {
     const place = status === "accepted" ? acceptedPlaceFor(proposal) : null;
@@ -937,6 +997,170 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
       setBulkBusy(false);
     }
   }
+
+  /** One shortlist row; `fresh` marks a place the newest 調查 just added (shown in its batch). */
+  function renderProposalRow(proposal: CandidateProposalDto, fresh = false) {
+    const firstSentence = proposal.recommendationSentences?.[0];
+    const repeatedName = (proposalNameCounts.get(proposal.name) ?? 0) > 1;
+    const selectable = proposalCanBeSelected(proposal);
+    const selected = selectedProposalIds.has(proposal.id);
+    const assignedDayId = proposalDayId(proposal);
+    const selectionLabel = scheduleT.selectPlace(proposal.name);
+    const preview = previews.previews.get(proposal.id);
+    const state = selecting
+      ? selected ? "selected" : selectable ? "selectable" : "selecting"
+      : "default";
+    const selectionControl = selecting && selectable ? (
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked={selected}
+        aria-label={selectionLabel}
+        className="schedule-selection-check"
+        disabled={pending !== null}
+        onClick={() => changeSelection(proposal, !selected)}
+      >
+        <Check aria-hidden="true" size={16} strokeWidth={3} />
+      </button>
+    ) : undefined;
+    const displayStatus: CandidateProposalDto["status"] = proposal.status;
+    const tradeoffs = proposal.tradeoffSentences !== null
+      ? proposal.tradeoffSentences.map((sentence) => sentence.text)
+      : proposal.tradeoffs;
+    const caution = proposal.unknowns[0]
+      ? t.proposal.unknownPrefix(proposal.unknowns[0])
+      : tradeoffs[0]
+        ? t.proposal.tradeoffPrefix(tradeoffs[0])
+        : null;
+    const cautionCount = proposal.unknowns.length + tradeoffs.length;
+    const optimisticVote = optimisticVotes[proposal.id];
+    const votePending = Boolean(pendingProposalVotes[proposal.id]);
+    const voteAction = proposal.status === "pending" ? (
+      <VoteControl
+        compact
+        name={proposal.name}
+        voters={proposal.voters}
+        voteCount={optimisticVote?.voteCount ?? proposal.voteCount}
+        ownVote={optimisticVote?.ownVote ?? proposal.ownVote}
+        votingAvailable={proposal.votingAvailable}
+        disabled={votePending}
+        busy={votePending}
+        onChange={(voted) => void setProposalVote(proposal, voted)}
+      />
+    ) : acceptedPlaceFor(proposal) ? (
+      // In the itinerary: the like is the trip place's own vote.
+      <VoteControl
+        compact
+        name={proposal.name}
+        voters={acceptedPlaceFor(proposal)!.voters}
+        voteCount={acceptedPlaceFor(proposal)!.voteCount}
+        ownVote={acceptedPlaceFor(proposal)!.ownVote}
+        votingAvailable={acceptedPlaceFor(proposal)!.votingAvailable}
+        disabled={false}
+        onChange={(voted) => void setAcceptedPlaceVote(acceptedPlaceFor(proposal)!.id, voted)}
+      />
+    ) : undefined;
+    // AI 建議 only go into the itinerary (排入行程); 口袋名單 is for places members add themselves.
+    const acceptedPlace = proposal.status === "accepted" ? acceptedPlaceFor(proposal) : null;
+    // Pending: put it into the itinerary. Accepted but no day yet: pick its day.
+    const canScheduleRow = canArrangeItinerary(trip) && proposalIsLocated(proposal)
+      && (proposal.status === "pending" || Boolean(acceptedPlace && acceptedPlace.assignedDayId === null));
+    const canDecline = proposal.status === "pending" && trip.role === "owner";
+    const rowActions = canScheduleRow || canDecline ? (
+      <>
+        {canDecline ? (
+          <button
+            type="button"
+            className="pd-danger-link"
+            disabled={pending !== null}
+            onClick={() => {
+              openProposalDetail(proposal.id);
+              setRejectConfirmation(proposal);
+            }}
+          >
+            <Ban aria-hidden="true" className="size-4" />
+            {t.proposal.decline}
+          </button>
+        ) : null}
+        {canScheduleRow ? (
+          <button
+            type="button"
+            className="pd-primary"
+            disabled={pending !== null}
+            onClick={() => openProposalSchedule(proposal)}
+          >
+            <CalendarPlus aria-hidden="true" className="size-4" />
+            {proposal.status === "pending" ? scheduleT.pageAction : t.proposal.pickDay}
+          </button>
+        ) : null}
+      </>
+    ) : undefined;
+    return (
+      <PlaceListRow
+        key={proposal.id}
+        variant="proposal"
+        name={proposal.name}
+        typeLabel={t.placeType[proposal.type]}
+        placeType={proposal.type}
+        stateLabel={fresh && proposal.status === "pending" ? t.run.fresh : proposalStatusLabel(proposal, displayStatus)}
+        secondary={firstSentence?.text ?? proposal.recommendation}
+        caution={caution ?? undefined}
+        cautionAction={caution && cautionCount > 1 ? <span className="list-place-row__caution-action">・<button type="button" className="list-place-row__inline-action" onClick={() => openProposalDetail(proposal.id, "cautions")}>{t.proposal.moreItems(cautionCount - 1)}</button></span> : undefined}
+        photo={preview?.photo}
+        photoCount={preview?.photoCount ?? 0}
+        loadingPhoto={previews.loading || (previews.waiting && !preview?.photo)}
+        voteAction={voteAction}
+        rowActions={rowActions}
+        selectionControl={selectionControl}
+        ariaLabel={repeatedName ? t.proposal.proposalAtAddress(proposal.name, proposal.address ?? t.proposal.unknownAddress) : t.proposal.ariaLabel(proposal.name)}
+        current={!selecting && proposal.id === selectedProposalId}
+        state={state}
+        scheduled={Boolean(assignedDayId)}
+        changed={!selecting && changedProposalIds.has(proposal.id)}
+        onOpen={() => openProposalDetail(proposal.id)}
+        onActivate={() => {
+          if (selecting) changeSelection(proposal, !selected);
+          else openProposalDetail(proposal.id);
+        }}
+        openLabel={t.proposal.viewDetail(proposal.name)}
+        openDataAttribute={{ name: "proposal-detail-trigger", value: proposal.id }}
+        dataAttribute={{ name: "discovery-proposal", value: proposal.name }}
+      />
+    );
+  }
+
+  const busy = investigating || jobRunning;
+  // An edited brief makes the checklist stale: the next step saves it and asks again.
+  const briefDirty = !briefBase.current || briefBase.current.originalText !== briefDraft;
+  const clarification = !briefDirty && workspace?.clarification && workspace.clarification.briefVersion === workspace.brief?.version
+    ? workspace.clarification : null;
+  const summary = clarification ? clarifySummary(clarification, drafts) : null;
+  const thinking = pending === "save-brief" || pending === "clarify" ? t.clarify.askingThinking
+    : pending === "answer" ? t.clarify.reviewingThinking : null;
+  const requiredLeft = summary ? summary.requiredTotal - summary.requiredAnswered : 0;
+  const statusText = !clarification || clarification.items.length === 0 ? null
+    : summary && summary.askBack > 0 ? t.clarify.askBack(summary.askBack)
+      : summary && summary.requiredTotal > 0 && requiredLeft > 0 ? t.clarify.progress(summary.requiredAnswered, summary.requiredTotal)
+        : t.clarify.costNote;
+  // One label per step: ask for questions, finish the required ones, then start.
+  const investigateLabel = investigating ? t.thinkingButton
+    : jobRunning ? t.searchingButton
+      : !clarification ? t.clarify.askFirst
+        : requiredLeft > 0 ? t.clarify.requiredLeft(requiredLeft)
+          : t.clarify.start;
+  const investigateButton = (
+    <button
+      className="pd-primary"
+      disabled={busy || pending !== null || !briefDraft.trim() || requiredLeft > 0}
+      aria-busy={busy || undefined}
+      onClick={() => void investigate()}
+    >
+      {busy ? <span className="pd-thinking-dots" aria-hidden="true"><i /><i /><i /></span>
+        : clarification ? <Search aria-hidden="true" className="size-4" /> : <ArrowRight aria-hidden="true" className="size-4" />}
+      {investigateLabel}
+    </button>
+  );
+  const briefCollapsed = clarification !== null && clarification.items.length > 0 && !briefOpen;
   return (
     <section className="pd-workspace pd-discovery" data-selecting={selecting ? "true" : undefined} aria-labelledby="ai-discovery-heading">
       <div className={`pd-pagehead${selecting ? " pd-pagehead--selecting" : ""}`}>
@@ -974,7 +1198,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
                 </button>
               ) : null}
               {workspace?.latestRun?.status === "completed" ? (
-                <button className="schedule-secondary-button" onClick={() => setResearchSettingsOpen(true)}>
+                <button className="schedule-secondary-button" disabled={busy} onClick={() => setResearchSettingsOpen(true)}>
                   <Pencil aria-hidden="true" className="size-4" />
                   <span>{t.brief.editRequirements}</span>
                 </button>
@@ -991,8 +1215,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
           const operation = conflictAction.current?.operation;
           if (conflictLatest.current && operation === "save-brief") {
             apply({ discovery: conflictLatest.current }, "brief");
-          } else if (conflictLatest.current && operation === "save-questions") {
-            apply({ discovery: conflictLatest.current }, "questions");
           }
           resolution.clear();
         }}
@@ -1004,7 +1226,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
         onEdit={() => {
           const operation = conflictAction.current?.operation;
           if (operation === "save-brief") briefBase.current = conflictLatest.current?.brief ?? null;
-          else if (operation === "save-questions") answersBase.current = conflictLatest.current?.brief ?? null;
           resolution.resume();
         }}
       /> : null}
@@ -1013,70 +1234,40 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
 
       {!loading ? (
         <div hidden={Boolean(resolution.conflict)} className="grid gap-5">
-          {Object.keys(questionDrafts).length ? (
-            <section className="order-1 rounded-panel border border-ink/10 p-4" aria-label={t.brief.questions}>
-                  <strong>{t.brief.questions}</strong>
-                  <ul className="mt-2 grid gap-3">
-                    {Object.entries(questionDrafts).map(([question, draft]) => (
-                      <li key={question} className="rounded-xl bg-surface-subtle p-3">
-                        <label className="grid gap-2 font-bold">
-                          {question}
-                          <input
-                            className="min-h-10 rounded-lg border bg-surface px-3 font-normal"
-                            value={draft.answer}
-                            disabled={draft.skipped}
-                            onChange={(event) => setQuestionDrafts((drafts) => ({
-                              ...drafts,
-                              [question]: { answer: event.target.value, skipped: false },
-                            }))}
-                            placeholder={t.brief.answerPlaceholder}
-                          />
-                        </label>
-                        <button
-                          className="mt-2 min-h-10 rounded-lg border px-3 font-bold"
-                          type="button"
-                          onClick={() => setQuestionDrafts((drafts) => ({
-                            ...drafts,
-                            [question]: { answer: "", skipped: !draft.skipped },
-                          }))}
-                        >
-                          {draft.skipped ? t.brief.answerInstead : t.brief.skipQuestion}
-                        </button>
-                        {draft.skipped ? <span className="ml-2 text-sm font-bold text-muted-foreground">{t.brief.skippedUnknown}</span> : null}
-                      </li>
-                    ))}
-                  </ul>
-                  <button
-                    className="mt-3 min-h-11 rounded-xl border px-4 font-bold"
-                    disabled={pending !== null || !Object.values(questionDrafts).some((draft) => draft.skipped || draft.answer.trim())}
-                    onClick={() => void saveQuestionAnswers()}
-                  >
-                    {pending === "save-questions" ? t.progress.saving : t.brief.saveAnswers}
-                  </button>
-            </section>
-          ) : null}
           <ResearchPanel
             first={!workspace?.latestRun}
             open={researchSettingsOpen}
             onClose={() => setResearchSettingsOpen(false)}
-            footer={workspace?.latestRun ? (
+            footer={(
               <div className="pd-research-footer">
-                <span>{t.brief.updateConsequence}</span>
-                <button className="pd-primary" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research("again")}><RotateCw aria-hidden="true" className="size-4" />{researchLabel(t.brief.updateCandidates)}</button>
+                <span role="status" aria-live="polite">{thinking ? <ThinkingIndicator text={thinking} /> : statusText}</span>
+                {investigateButton}
               </div>
-            ) : <button className="pd-primary" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research("find")}><Search aria-hidden="true" className="size-4" />{researchLabel(t.brief.findCandidates)}</button>}
+            )}
           >
             <div className="pd-brief-editor">
               <section aria-label={t.brief.areaLabel}>
-                <label className="grid gap-2 font-bold">{t.brief.prompt}
-                  <textarea
-                    className="min-h-32 rounded-xl border bg-surface p-3 font-normal"
-                    value={briefDraft}
-                    onChange={(event) => setBriefDraft(event.target.value)}
-                    placeholder={t.brief.placeholder}
-                  />
-                </label>
-                <p className="pd-field-help">{t.brief.suggestionOnly}</p>
+                {briefCollapsed ? (
+                  // While answering, the request shrinks to one line; 編輯 brings the text back.
+                  <div className="pd-brief-summary">
+                    <span className="pd-brief-summary-label">{t.clarify.briefSummary}</span>
+                    <span className="pd-brief-summary-text">{briefDraft}</span>
+                    <button type="button" className="pd-batch-link" disabled={busy} onClick={() => setBriefOpen(true)}>{t.clarify.editBrief}</button>
+                  </div>
+                ) : (
+                  <>
+                    <label className="grid gap-2 font-bold">{t.brief.prompt}
+                      <textarea
+                        className="min-h-32 rounded-xl border bg-surface p-3 font-normal"
+                        value={briefDraft}
+                        readOnly={busy}
+                        onChange={(event) => setBriefDraft(event.target.value)}
+                        placeholder={t.brief.placeholder}
+                      />
+                    </label>
+                    <p className="pd-field-help">{workspace?.latestRun ? t.brief.updateConsequence : t.brief.suggestionOnly}</p>
+                  </>
+                )}
                 {!workspace?.latestRun && !workspace?.modelAvailable ? <p className="mt-3 text-sm text-muted-foreground">{t.brief.modelUnavailable}</p> : null}
                 {!workspace?.latestRun && !workspace?.placeProviderAvailable ? <p className="mt-2 text-sm text-muted-foreground">{t.brief.placesUnavailable}</p> : null}
               </section>
@@ -1092,169 +1283,50 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
                   </dl>
                 </section>
               ) : null}
+              {clarification ? (
+                <ClarifyChecklist
+                  clarification={clarification}
+                  drafts={drafts}
+                  readOnly={busy}
+                  onChange={(id, draft) => setDraftState({ briefVersion: clarification.briefVersion, items: { ...drafts, [id]: draft } })}
+                  t={t.clarify}
+                />
+              ) : null}
             </div>
           </ResearchPanel>
 
-          {workspace?.latestRun?.status === "failed" ? (
-            <section className="order-1 rounded-panel border border-destructive/30 bg-surface p-4" role="alert" aria-labelledby="discovery-run-failed-heading">
-              <h3 id="discovery-run-failed-heading" className="font-display text-2xl">{t.runFailure.title}</h3>
-              <p className="mt-1 text-sm">{discoveryRunFailureReason(workspace.latestRun.errorCode, t)}</p>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button className="pd-secondary" disabled={pending !== null} onClick={() => setResearchSettingsOpen(true)}><Pencil aria-hidden="true" className="size-4" />{t.brief.editRequirements}</button>
-                <button className="pd-primary" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research("again")}><RotateCw aria-hidden="true" className="size-4" />{researchLabel(t.runFailure.regenerate)}</button>
-              </div>
-            </section>
+          {batchJob ? (
+            <ResearchBatch
+              job={batchJob}
+              failureReason={discoveryRunFailureReason(batchJob.errorCode, t)}
+              busy={busy || pending !== null}
+              canRetry={Boolean(briefDraft.trim())}
+              onDismiss={() => setDismissedJobId(batchJob.id)}
+              onAgain={() => setResearchSettingsOpen(true)}
+              onRetry={() => void investigate()}
+              onEdit={workspace?.latestRun ? () => setResearchSettingsOpen(true) : undefined}
+              t={t}
+            >
+              {batchRunId === null ? undefined : batchProposals.length ? (
+                <FlipList className="pd-list" ariaLabel={t.run.doneTitle(batchProposals.length)}>
+                  {batchProposals.map((proposal) => renderProposalRow(proposal, true))}
+                </FlipList>
+              ) : false}
+            </ResearchBatch>
           ) : null}
 
-          {listedProposals.length ? (
+          {restProposals.length ? (
             <section className="order-2" aria-label={t.proposal.shortlistLabel}>
               <h3 className="sr-only">{t.proposal.shortlistTitle}</h3>
-              {listedProposals.length > 1 ? <PlaceFilterBar filters={proposalFilters} total={listedProposals.length} label="搜尋 AI 建議" /> : null}
-              {filteredProposals.length === 0 ? <PlaceFilterEmpty onClear={proposalFilters.clear} /> : (
+              {filtersShown ? <PlaceFilterBar filters={proposalFilters} total={restProposals.length} label="搜尋 AI 找到的地點" /> : null}
+              {visibleRestProposals.length === 0 ? <PlaceFilterEmpty onClear={proposalFilters.clear} /> : (
               <FlipList className="pd-list" ariaLabel={t.proposal.shortlistLabel}>
-                {/* Same order as 口袋名單: most confirmed votes first (stable). Confirmed counts, not the
-                    optimistic overlay, so a tapped row does not jump before the server confirms. */}
-                {[...filteredProposals].sort((left, right) => right.voteCount - left.voteCount).map((proposal) => {
-                  const firstSentence = proposal.recommendationSentences?.[0];
-                  const repeatedName = (proposalNameCounts.get(proposal.name) ?? 0) > 1;
-                  const selectable = proposalCanBeSelected(proposal);
-                  const selected = selectedProposalIds.has(proposal.id);
-                  const assignedDayId = proposalDayId(proposal);
-                  const selectionLabel = scheduleT.selectPlace(proposal.name);
-                  const preview = previews.previews.get(proposal.id);
-                  const state = selecting
-                    ? selected ? "selected" : selectable ? "selectable" : "selecting"
-                    : "default";
-                  const selectionControl = selecting && selectable ? (
-                    <button
-                      type="button"
-                      role="checkbox"
-                      aria-checked={selected}
-                      aria-label={selectionLabel}
-                      className="schedule-selection-check"
-                      disabled={pending !== null}
-                      onClick={() => changeSelection(proposal, !selected)}
-                    >
-                      <Check aria-hidden="true" size={16} strokeWidth={3} />
-                    </button>
-                  ) : undefined;
-                  const displayStatus: CandidateProposalDto["status"] = proposal.status;
-                  const evidenceLabel = proposal.evidence.some((item) => item.isStale)
-                    ? t.proposal.rowEvidenceStale
-                    : proposal.evidence.length > 0
-                      ? t.proposal.rowEvidenceCount(proposal.evidence.length)
-                      : proposal.recommendationSentences === null
-                        ? t.proposal.rowLegacyEvidence
-                        : t.proposal.rowInference;
-                  const tradeoffs = proposal.tradeoffSentences !== null
-                    ? proposal.tradeoffSentences.map((sentence) => sentence.text)
-                    : proposal.tradeoffs;
-                  const caution = proposal.unknowns[0]
-                    ? t.proposal.unknownPrefix(proposal.unknowns[0])
-                    : tradeoffs[0]
-                      ? t.proposal.tradeoffPrefix(tradeoffs[0])
-                      : null;
-                  const cautionCount = proposal.unknowns.length + tradeoffs.length;
-                  const optimisticVote = optimisticVotes[proposal.id];
-                  const votePending = Boolean(pendingProposalVotes[proposal.id]);
-                  const voteAction = proposal.status === "pending" ? (
-                    <VoteControl
-                      compact
-                      name={proposal.name}
-                      voters={proposal.voters}
-                      voteCount={optimisticVote?.voteCount ?? proposal.voteCount}
-                      ownVote={optimisticVote?.ownVote ?? proposal.ownVote}
-                      votingAvailable={proposal.votingAvailable}
-                      disabled={votePending}
-                      busy={votePending}
-                      onChange={(voted) => void setProposalVote(proposal, voted)}
-                    />
-                  ) : acceptedPlaceFor(proposal) ? (
-                    // In the itinerary: the like is the trip place's own vote.
-                    <VoteControl
-                      compact
-                      name={proposal.name}
-                      voters={acceptedPlaceFor(proposal)!.voters}
-                      voteCount={acceptedPlaceFor(proposal)!.voteCount}
-                      ownVote={acceptedPlaceFor(proposal)!.ownVote}
-                      votingAvailable={acceptedPlaceFor(proposal)!.votingAvailable}
-                      disabled={false}
-                      onChange={(voted) => void setAcceptedPlaceVote(acceptedPlaceFor(proposal)!.id, voted)}
-                    />
-                  ) : undefined;
-                  // AI 建議 only go into the itinerary (排入行程); 口袋名單 is for places members add themselves.
-                  const acceptedPlace = proposal.status === "accepted" ? acceptedPlaceFor(proposal) : null;
-                  // Pending: put it into the itinerary. Accepted but no day yet: pick its day.
-                  const canScheduleRow = canArrangeItinerary(trip) && proposalIsLocated(proposal)
-                    && (proposal.status === "pending" || Boolean(acceptedPlace && acceptedPlace.assignedDayId === null));
-                  const canDecline = proposal.status === "pending" && trip.role === "owner";
-                  const rowActions = canScheduleRow || canDecline ? (
-                    <>
-                      {canDecline ? (
-                        <button
-                          type="button"
-                          className="pd-danger-link"
-                          disabled={pending !== null}
-                          onClick={() => {
-                            openProposalDetail(proposal.id);
-                            setRejectConfirmation(proposal);
-                          }}
-                        >
-                          <Ban aria-hidden="true" className="size-4" />
-                          {t.proposal.decline}
-                        </button>
-                      ) : null}
-                      {canScheduleRow ? (
-                        <button
-                          type="button"
-                          className="pd-primary"
-                          disabled={pending !== null}
-                          onClick={() => openProposalSchedule(proposal)}
-                        >
-                          <CalendarPlus aria-hidden="true" className="size-4" />
-                          {proposal.status === "pending" ? scheduleT.pageAction : t.proposal.pickDay}
-                        </button>
-                      ) : null}
-                    </>
-                  ) : undefined;
-                  return (
-                    <PlaceListRow
-                      key={proposal.id}
-                      variant="proposal"
-                      name={proposal.name}
-                      typeLabel={t.placeType[proposal.type]}
-                      placeType={proposal.type}
-                      stateLabel={proposalStatusLabel(proposal, displayStatus)}
-                      secondary={firstSentence?.text ?? proposal.recommendation}
-                      evidence={<span>{evidenceLabel}</span>}
-                      caution={caution ?? undefined}
-                      cautionAction={caution && cautionCount > 1 ? <span className="list-place-row__caution-action">・<button type="button" className="list-place-row__inline-action" onClick={() => openProposalDetail(proposal.id, "cautions")}>{t.proposal.moreItems(cautionCount - 1)}</button></span> : undefined}
-                      photo={preview?.photo}
-                      photoCount={preview?.photoCount ?? 0}
-                      loadingPhoto={previews.loading}
-                      voteAction={voteAction}
-                      rowActions={rowActions}
-                      selectionControl={selectionControl}
-                      ariaLabel={repeatedName ? t.proposal.proposalAtAddress(proposal.name, proposal.address ?? t.proposal.unknownAddress) : t.proposal.ariaLabel(proposal.name)}
-                      current={!selecting && proposal.id === selectedProposalId}
-                      state={state}
-                      scheduled={Boolean(assignedDayId)}
-                      changed={!selecting && changedProposalIds.has(proposal.id)}
-                      onOpen={() => openProposalDetail(proposal.id)}
-                      onActivate={() => {
-                        if (selecting) changeSelection(proposal, !selected);
-                        else openProposalDetail(proposal.id);
-                      }}
-                      openLabel={t.proposal.viewDetail(proposal.name)}
-                      openDataAttribute={{ name: "proposal-detail-trigger", value: proposal.id }}
-                      dataAttribute={{ name: "discovery-proposal", value: proposal.name }}
-                    />
-                  );
-                })}
+                {/* Same order as 口袋名單: newest first as the API returns it; votes never reorder. */}
+                {visibleRestProposals.map((proposal) => renderProposalRow(proposal))}
               </FlipList>
               )}
             </section>
-          ) : workspace?.proposals.length ? null : workspace?.latestRun?.status === "completed" ? <p className="order-2 rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.length ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}
+          ) : workspace?.proposals.length || batchJob ? null : workspace?.latestRun?.status === "completed" ? <p className="order-2 rounded-panel border border-dashed p-5 text-center text-muted-foreground">{t.proposal.nonePassed}</p> : null}
 
           {selectedProposal ? (
             <PlaceDetailSheet
@@ -1301,14 +1373,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
               <h3 className="font-display text-2xl">{t.decided.title}</h3>
               <p className="mt-1 text-sm text-muted-foreground">{t.decided.description}</p>
               <ul className="mt-3 grid gap-2">{decisions.map((decision) => <li key={decision.proposalId} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-surface-subtle p-3"><strong>{decision.name}</strong><span className="flex items-center gap-2 text-sm">{decision.status === "accepted" ? t.decided.accepted : t.decided.rejected}{decision.decidedAt ? `・${t.decided.decidedAt(new Date(decision.decidedAt).toLocaleDateString(locale))}` : null}{decision.status === "rejected" && trip.role === "owner" ? <button type="button" className="pd-secondary" disabled={pending !== null} aria-label={t.decided.restoreLabel(decision.name)} onClick={() => void restoreProposal(decision)}>{t.decided.restore}</button> : null}</span></li>)}</ul>
-            </section>
-          ) : null}
-
-          {workspace?.latestRun?.status === "completed" && workspace.latestRun.shortfalls.length ? (
-            <section className="order-4 rounded-panel border border-ink/10 p-4" aria-label={t.missing.areaLabel}>
-              <h3 className="font-display text-2xl">{t.missing.title}</h3>
-              <p className="mt-1 text-sm text-muted-foreground">{t.missing.description}</p>
-              <ul className="mt-3 grid gap-2">{workspace.latestRun.shortfalls.map((shortfall) => <li key={`${shortfall.code}:${shortfall.subject}`} className="rounded-lg bg-surface-subtle p-3"><strong>{shortfall.subject}</strong>{shortfall.named ? <span className="ml-2 text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{t.missing.requested}</span> : null}<span className="block text-sm">{shortfallText(shortfall, t)}</span></li>)}</ul>
             </section>
           ) : null}
 

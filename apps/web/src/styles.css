@@ -487,6 +487,15 @@
 @media (min-width: 1024px) { .atw-segments { margin: 24px 0 32px; } }
 .atw-segments button { min-width: 0; min-height: 46px; padding: 8px; border-radius: 14px; font-size: 16px; font-weight: 700; color: var(--muted-foreground); }
 .atw-segments button.is-active { background: var(--card); color: #9a4a2c; box-shadow: 0 2px 8px -4px #1f302940; }
+/* 調查 status badge on 地點 (rail, bottom bar) and the 幫我找 segment. */
+.atw-nav-badge { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--accent); color: #fffaf2; font-size: 11px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+.atw-nav-badge[data-kind="failed"] { background: var(--destructive); }
+.atw-nav-badge[data-kind="running"] { min-width: 10px; width: 10px; height: 10px; padding: 0; animation: atw-nav-badge-pulse 1.4s ease-in-out infinite; }
+@keyframes atw-nav-badge-pulse { 50% { opacity: .35; transform: scale(.8); } }
+@media (prefers-reduced-motion: reduce) { .atw-nav-badge[data-kind="running"] { animation: none; } }
+.atw-bottomnav button { position: relative; }
+.atw-bottomnav .atw-nav-badge { position: absolute; top: 4px; left: calc(50% + 8px); }
+.atw-segments .atw-nav-badge { margin-left: 6px; vertical-align: 1px; }
 .today-workspace { width: 100%; min-width: 0; max-width: 900px; overflow-wrap: anywhere; }
 .today-pagehead { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px 16px; margin: 0 2px 12px; }
 .today-pagehead h2 { font-family: var(--font-display); font-size: 26px; font-weight: 700; line-height: 1.2; letter-spacing: -.015em; text-wrap: balance; }
@@ -613,6 +622,7 @@ span.today-sync-status { flex: none; font-weight: 600; white-space: nowrap; }
   .atw-railnav { display: block; }
   .atw-railnav > div { display: grid; gap: 6px; }
   .atw-railnav button { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 10px 12px; border-radius: 14px; text-align: left; font-size: 15px; font-weight: 700; }
+  .atw-railnav .atw-nav-badge { margin-left: auto; }
   /* 反饋 sits under the destinations, separated so it reads as an action, not another page. */
   .atw-railnav .atw-nav-feedback { width: 100%; margin-top: 12px; padding-top: 14px; border-top: 1px solid var(--border); border-radius: 0 0 14px 14px; color: var(--muted-foreground); }
   .atw-railnav .atw-nav-feedback:hover { color: var(--color-ink); background: color-mix(in srgb, var(--card) 60%, transparent); }
@@ -629,7 +639,10 @@ span.today-sync-status { flex: none; font-weight: 600; white-space: nowrap; }
   .atw-railnav .atw-railnav__children button { min-height: 40px; padding: 8px 12px; border-radius: 12px; font-size: 14px; font-weight: 600; color: var(--muted-foreground); }
   .atw-railnav .atw-railnav__children button:hover { color: var(--color-ink); background: color-mix(in srgb, var(--card) 60%, transparent); }
   .atw-railnav .atw-railnav__children button.is-active { color: #9a4a2c; background: var(--card); }
-  .atw-main { min-width: 0; padding: 4px 0 80px; }
+  /* Wide screens: one centered content column (pages already cap themselves at 900px), so content
+     no longer hugs the rail. 後台 keeps the full width for its tables. */
+  .atw-main { min-width: 0; width: 100%; max-width: 900px; justify-self: center; padding: 4px 0 80px; }
+  .atw-shell[data-active-tab="admin"] .atw-main { max-width: none; justify-self: stretch; }
   .today-grid { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   .today-lead { padding: 26px 28px; }
   .today-lead h3, .today-pagehead h2 { font-size: 30px; }
