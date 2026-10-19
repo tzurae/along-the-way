@@ -1,7 +1,12 @@
 import { isRecord, type TripFlightInput } from "@along-the-way/contracts/private-trips";
 import {
+  MAX_TRIP_DAY_ALTERNATIVES,
+  MAX_TRIP_DAY_NOTE_LENGTH,
+  MAX_TRIP_DAY_TITLE_LENGTH,
   parseItineraryItemResponse,
   parsePlaceResponse,
+  parseTripDayAlternativesResponse,
+  parseTripDayDetailsResponse,
   type ConstraintDto,
   type ConstraintInput,
   type CreateItineraryItemInput,
@@ -15,9 +20,13 @@ import {
   type PlaceType,
   type PlaceLocationStatus,
   type TimelineDayDto,
+  type TripDayAlternativesDto,
+  type TripDayDetailsDto,
   type TripSkeletonDto,
   type TripLodgingInput,
   type UpdateItineraryItemInput,
+  type UpdateTripDayAlternativesInput,
+  type UpdateTripDayDetailsInput,
   type UpdatePlaceInput,
   type ZonedEndpointDto,
 } from "@along-the-way/contracts/trip-skeleton";
@@ -340,6 +349,59 @@ function replayedItem(value: unknown) {
   }
 }
 
+function tripDayDetails(row: { id: string; date: Date | string; title: string | null; note: string | null; details_version: number }): TripDayDetailsDto {
+  return { id: row.id, date: dateOnly(row.date), title: row.title, note: row.note, detailsVersion: row.details_version };
+}
+
+/** Blank means "no title / no note"; lengths are counted in characters, like Postgres char_length. */
+function dayDetailsText(value: unknown, field: "title" | "note", maxLength: number): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string") throw new AppError("validation_error", `${field} must be a string or null`);
+  const normalized = field === "title"
+    ? value.replace(/\s+/g, " ").trim()
+    : value.replace(/\r\n?/g, "\n").trim();
+  if (!normalized) return null;
+  if ([...normalized].length > maxLength) {
+    throw new AppError("validation_error", `${field} must be at most ${maxLength} characters`);
+  }
+  return normalized;
+}
+
+function replayedDayDetails(value: unknown) {
+  try {
+    return parseTripDayDetailsResponse({ day: value }).day;
+  } catch {
+    throw new AppError("conflict", "Stored mutation result is invalid", 409);
+  }
+}
+
+function replayedDayAlternatives(value: unknown) {
+  try {
+    return parseTripDayAlternativesResponse({ day: value }).day;
+  } catch {
+    throw new AppError("conflict", "Stored mutation result is invalid", 409);
+  }
+}
+
+/** Active 備案 per day, in display order; archived places drop out without a write. */
+async function readDayAlternatives(executor: DatabaseExecutor, tripId: string, dayId?: string) {
+  let query = executor.selectFrom("trip_day_alternatives as alternative")
+    .innerJoin("trip_places as place", (join) => join
+      .onRef("place.trip_id", "=", "alternative.trip_id")
+      .onRef("place.id", "=", "alternative.trip_place_id"))
+    .select(["alternative.trip_day_id", "alternative.trip_place_id"])
+    .where("alternative.trip_id", "=", tripId)
+    .where("place.archived_at", "is", null);
+  if (dayId) query = query.where("alternative.trip_day_id", "=", dayId);
+  const rows = await query.orderBy("alternative.trip_day_id").orderBy("alternative.position").execute();
+  const byDay = new Map<string, string[]>();
+  for (const row of rows) {
+    const ids = byDay.get(row.trip_day_id);
+    if (ids) ids.push(row.trip_place_id); else byDay.set(row.trip_day_id, [row.trip_place_id]);
+  }
+  return byDay;
+}
+
 export class PostgresTripSkeletonModule implements TripSkeletonModule {
   private readonly database: Kysely<AlongTheWayDatabase>;
   private readonly now: () => Date;
@@ -356,26 +418,169 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
       .execute((transaction) => this.readSkeleton(transaction, userId, tripId));
   }
 
+  /** Rename a day or change its 玩法 note. Same permission as arranging the itinerary. */
+  async updateDayDetails(
+    userId: string,
+    tripId: string,
+    dayId: string,
+    rawKey: string,
+    input: UpdateTripDayDetailsInput,
+  ): Promise<TripDayDetailsDto> {
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `dd:${tripId.toLowerCase()}:${dayId.toLowerCase()}`;
+    const title = dayDetailsText(input.title, "title", MAX_TRIP_DAY_TITLE_LENGTH);
+    const note = dayDetailsText(input.note, "note", MAX_TRIP_DAY_NOTE_LENGTH);
+    return this.database.transaction().execute(async (transaction) => {
+      await requireScheduler(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return replayedDayDetails(replay);
+      const current = await transaction.selectFrom("trip_days")
+        .select("details_version")
+        .where("trip_id", "=", tripId)
+        .where("id", "=", dayId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!current) throw new AppError("trip_day_not_found", "Trip day not found", 404);
+      this.requireExpectedVersion(current.details_version, input.expectedVersion);
+      const updated = await transaction.updateTable("trip_days")
+        .set({ title, note, details_version: sql<number>`details_version + 1` })
+        .where("trip_id", "=", tripId)
+        .where("id", "=", dayId)
+        .returning(["id", "date", "title", "note", "details_version"])
+        .executeTakeFirstOrThrow();
+      await recordEvent(transaction, {
+        tripId,
+        actorId: userId,
+        eventType: "trip_day.details_updated",
+        targetType: "trip_day",
+        targetId: dayId,
+        summary: "Updated the day's title and notes",
+      });
+      const response = tripDayDetails(updated);
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
+  /**
+   * Replace a day's 「備案」 list. A place newly added must still be in 口袋名單 (not chosen for the
+   * itinerary, not on any day), so 全部排行程 never turns a backup into a stop. Places already in
+   * the list stay even if their state changed since; the itinerary hides one that is now a stop.
+   */
+  async updateDayAlternatives(
+    userId: string,
+    tripId: string,
+    dayId: string,
+    rawKey: string,
+    input: UpdateTripDayAlternativesInput,
+  ): Promise<TripDayAlternativesDto> {
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `da:${tripId.toLowerCase()}:${dayId.toLowerCase()}`;
+    if (!Array.isArray(input.tripPlaceIds) || input.tripPlaceIds.some((id) => typeof id !== "string" || !UUID.test(id))) {
+      throw new AppError("validation_error", "tripPlaceIds must be trip place ids");
+    }
+    const tripPlaceIds = input.tripPlaceIds.map((id) => id.toLowerCase());
+    if (new Set(tripPlaceIds).size !== tripPlaceIds.length) {
+      throw new AppError("validation_error", "tripPlaceIds must not repeat");
+    }
+    if (tripPlaceIds.length > MAX_TRIP_DAY_ALTERNATIVES) {
+      throw new AppError("validation_error", `A day can keep at most ${MAX_TRIP_DAY_ALTERNATIVES} alternatives`);
+    }
+    return this.database.transaction().execute(async (transaction) => {
+      await requireScheduler(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return replayedDayAlternatives(replay);
+      const current = await transaction.selectFrom("trip_days")
+        .select("alternatives_version")
+        .where("trip_id", "=", tripId)
+        .where("id", "=", dayId)
+        .forUpdate()
+        .executeTakeFirst();
+      if (!current) throw new AppError("trip_day_not_found", "Trip day not found", 404);
+      this.requireExpectedVersion(current.alternatives_version, input.expectedVersion);
+      const existing = new Set((await transaction.selectFrom("trip_day_alternatives")
+        .select("trip_place_id")
+        .where("trip_day_id", "=", dayId)
+        .execute()).map((row) => row.trip_place_id));
+      const added = tripPlaceIds.filter((id) => !existing.has(id));
+      if (added.length > 0) {
+        const eligible = await transaction.selectFrom("trip_places as place")
+          .leftJoin("trip_place_day_assignments as assignment", "assignment.trip_place_id", "place.id")
+          .select("place.id")
+          .where("place.trip_id", "=", tripId)
+          .where("place.id", "in", added)
+          .where("place.archived_at", "is", null)
+          .where("place.selected_for_itinerary", "=", false)
+          .where("assignment.trip_place_id", "is", null)
+          .execute();
+        if (eligible.length !== added.length) {
+          throw new AppError("validation_error", "Only places in 口袋名單 that are not on a day can become alternatives");
+        }
+      }
+      await transaction.deleteFrom("trip_day_alternatives").where("trip_day_id", "=", dayId).execute();
+      if (tripPlaceIds.length > 0) {
+        await transaction.insertInto("trip_day_alternatives")
+          .values(tripPlaceIds.map((tripPlaceId, position) => ({
+            trip_id: tripId,
+            trip_day_id: dayId,
+            trip_place_id: tripPlaceId,
+            position,
+            created_by: userId,
+          })))
+          .execute();
+      }
+      const updated = await transaction.updateTable("trip_days")
+        .set({ alternatives_version: sql<number>`alternatives_version + 1` })
+        .where("trip_id", "=", tripId)
+        .where("id", "=", dayId)
+        .returning(["id", "alternatives_version"])
+        .executeTakeFirstOrThrow();
+      await recordEvent(transaction, {
+        tripId,
+        actorId: userId,
+        eventType: "trip_day.alternatives_updated",
+        targetType: "trip_day",
+        targetId: dayId,
+        summary: "Updated the day's alternatives",
+      });
+      const response: TripDayAlternativesDto = {
+        id: updated.id,
+        alternativeTripPlaceIds: (await readDayAlternatives(transaction, tripId, dayId)).get(updated.id) ?? [],
+        alternativesVersion: updated.alternatives_version,
+      };
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
   private async readSkeleton(
     executor: DatabaseExecutor,
     userId: string,
     tripId: string,
   ): Promise<TripSkeletonDto> {
     const requesterRole = await this.requireMember(executor, userId, tripId);
-    const [trip, places, items, dayRows] = await Promise.all([
+    const [trip, places, items, dayRows, alternatives] = await Promise.all([
       executor.selectFrom("trips").select("version").where("id", "=", tripId).executeTakeFirstOrThrow(),
       this.readPlaces(executor, tripId),
       this.readItems(executor, userId, tripId, requesterRole),
       executor
         .selectFrom("trip_days")
-        .select(["id", "date"])
+        .select(["id", "date", "title", "note", "details_version", "alternatives_version"])
         .where("trip_id", "=", tripId)
         .orderBy("date")
         .execute(),
+      readDayAlternatives(executor, tripId),
     ]);
     const dayByDate = new Map<string, TimelineDayDto>();
     const days = dayRows.map((day) => {
-      const value: TimelineDayDto = { id: day.id, date: dateOnly(day.date), entries: [] };
+      const value: TimelineDayDto = {
+        ...tripDayDetails(day),
+        alternativeTripPlaceIds: alternatives.get(day.id) ?? [],
+        alternativesVersion: day.alternatives_version,
+        entries: [],
+      };
       dayByDate.set(value.date, value);
       return value;
     });

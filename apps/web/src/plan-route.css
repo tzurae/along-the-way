@@ -309,6 +309,189 @@
   margin: 0;
 }
 
+.plan-workspace .day-heading h3 .plan-day-title::before {
+  content: "・";
+}
+
+.plan-workspace .plan-day-details-link {
+  min-height: 44px;
+  margin-top: 2px;
+  padding: 0;
+  color: var(--muted-foreground);
+  font-weight: 650;
+}
+
+.plan-add-new-place {
+  width: 100%;
+  margin-top: 14px;
+}
+
+.plan-alternatives {
+  margin: 10px 2px 0;
+}
+
+.plan-alternatives h4 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.plan-alternatives h4 svg {
+  width: 16px;
+  height: 16px;
+  color: var(--accent);
+}
+
+.plan-alternatives h4 span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.plan-alternatives ul {
+  margin: 0;
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  list-style: none;
+  padding: 2px 12px;
+}
+
+.plan-alternatives li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 52px;
+}
+
+.plan-alternatives li + li {
+  border-top: 1px dashed var(--border);
+}
+
+.plan-alternative-main {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.plan-alternative-main strong {
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-alternative-main span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.plan-alternative-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+}
+
+.plan-icon-button {
+  display: inline-flex;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+.plan-icon-button:hover {
+  background: color-mix(in srgb, var(--color-ink) 6%, transparent);
+  color: var(--foreground);
+}
+
+.plan-icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.plan-icon-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.plan-workspace .plan-alternatives-add {
+  padding: 0;
+  color: var(--muted-foreground);
+  font-weight: 650;
+}
+
+.plan-day-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 2px 12px;
+  border-left: 3px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  padding: 2px 0 2px 12px;
+}
+
+.plan-day-note > svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  margin-top: 2px;
+  color: var(--accent);
+}
+
+.plan-day-note > p {
+  min-width: 0;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.plan-day-details-form {
+  display: grid;
+  gap: 12px;
+  margin: 0 2px 14px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--color-surface);
+  padding: 14px 16px;
+}
+
+.plan-day-details-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.plan-day-details-form label > span {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.plan-day-details-form input {
+  min-height: 44px;
+}
+
+.plan-day-details-error {
+  margin: 0;
+  color: var(--destructive);
+  font-size: 13px;
+}
+
+.plan-day-details-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 
 .plan-route-link,
 .plan-outline-button,
