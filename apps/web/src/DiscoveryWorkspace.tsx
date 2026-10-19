@@ -8,7 +8,7 @@ import {
   type CandidateProposalDto,
   type DiscoveryClaimSentenceDto,
   type DiscoveryEndorsement,
-  type DiscoveryQuestionAnswerDto,
+  type DiscoveryJobDto,
   type DiscoveryWorkspaceDto,
   type ScheduleDiscoveryProposalsInput,
   type ScheduleDiscoveryProposalsResponse,
@@ -36,6 +36,8 @@ import { SchedulePlacesSheet } from "./SchedulePlacesSheet";
 import { SelectionBar } from "./SelectionBar";
 import { useScheduleToast } from "./ScheduleToast";
 import { assignPlacesToDay } from "./schedule-assignments";
+import { ClarifyChecklist, ResearchProgress, ThinkingIndicator, clarifyAnswers, clarifyDrafts, clarifySummary, type ClarifyDraft } from "./DiscoveryInvestigate";
+import { discoveryJobActive } from "./useDiscoveryJob";
 import "./pocket-discovery.css";
 
 
@@ -46,6 +48,10 @@ interface DiscoveryWorkspaceProps {
   photoRevision?: number;
   placesRevision: number;
   onPlacesChanged(): void;
+  /** The trip's newest 調查 job, followed by the trip shell even while this page is hidden. */
+  job: DiscoveryJobDto | null;
+  /** Hands a job this page queued (or found running) to the trip shell to follow. */
+  onJobStarted(job: DiscoveryJobDto | null): void;
 }
 
 type RetryKeys = Map<string, { fingerprint: string; key: string }>;
@@ -111,6 +117,10 @@ function discoveryRunFailureReason(errorCode: string | null, t: Messages["discov
       return t.runFailure.researchLimitReached;
     case "conflict":
       return t.runFailure.conflict;
+    case "interrupted":
+      return t.runFailure.interrupted;
+    case "expired":
+      return t.runFailure.expired;
     default:
       return t.runFailure.unknown;
   }
@@ -187,27 +197,13 @@ function ClaimSentenceList({
 }
 
 
-interface QuestionDraft {
-  answer: string;
-  skipped: boolean;
-}
-
-
-function resolvedQuestionAnswers(drafts: Record<string, QuestionDraft>): DiscoveryQuestionAnswerDto[] {
-  return Object.entries(drafts).flatMap(([question, draft]): DiscoveryQuestionAnswerDto[] => {
-    if (draft.skipped) return [{ question, answer: null }];
-    const answer = draft.answer.trim();
-    return answer ? [{ question, answer }] : [];
-  });
-}
-
 function ResearchPanel({ first, open, onClose, children, footer }: { first: boolean; open: boolean; onClose: () => void; children: ReactNode; footer: ReactNode }) {
   if (first) return <section className="order-3 pd-first-run">{children}{footer}</section>;
   return <PlaceDetailSheet appearance="workspace" open={open} title="你的需求" onClose={onClose} footer={footer}>{children}</PlaceDetailSheet>;
 }
 
 
-export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0, placesRevision, onPlacesChanged }: DiscoveryWorkspaceProps) {
+export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0, placesRevision, onPlacesChanged, job, onJobStarted }: DiscoveryWorkspaceProps) {
   const { locale, t: { discovery: t, schedule: scheduleT, tripPlaces: tripPlacesT } } = useI18n();
   const [workspace, setWorkspace] = useState<DiscoveryWorkspaceDto | null>(null);
   const photoRequest = useCallback(<T,>(url: string, options?: PlaceDetailRequestOptions): Promise<T> => request<T>(
@@ -216,7 +212,15 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
   ), [photoRevision, request]);
   const [tripPlaces, setTripPlaces] = useState<TripPlaceDto[]>([]);
   const [briefDraft, setBriefDraft] = useState("");
-  const [questionDrafts, setQuestionDrafts] = useState<Record<string, QuestionDraft>>({});
+  const [draftState, setDraftState] = useState<{ briefVersion: number | null; items: Record<string, ClarifyDraft> }>({ briefVersion: null, items: {} });
+  // Drafts belong to one checklist. Ids are positional (q1…q5), so a newer brief's questions start
+  // from the server's answers instead of inheriting answers typed for different questions.
+  const serverDrafts = clarifyDrafts(workspace?.clarification ?? null);
+  const drafts: Record<string, ClarifyDraft> = draftState.briefVersion === (workspace?.clarification?.briefVersion ?? null)
+    ? Object.fromEntries(Object.entries(serverDrafts).map(([id, draft]) => [id, draftState.items[id] ?? draft]))
+    : serverDrafts;
+  /** The whole 調查 chain (save brief → questions → review → queue) is one busy period. */
+  const [investigating, setInvestigating] = useState(false);
   const [loading, setLoading] = useState(true);
   const [optimisticVotes, setOptimisticVotes] = useState<Record<string, { ownVote: boolean; voteCount: number }>>({});
   const [pendingProposalVotes, setPendingProposalVotes] = useState<Record<string, true>>({});
@@ -286,7 +290,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
   const pendingProposalVoteIds = useRef(new Set<string>());
   const workspaceReadGeneration = useRef(0);
   const briefBase = useRef<DiscoveryWorkspaceDto["brief"]>(null);
-  const answersBase = useRef<DiscoveryWorkspaceDto["brief"]>(null);
   const conflictLatest = useRef<DiscoveryWorkspaceDto | null>(null);
   const resolution = useVersionConflict<Record<string, unknown>>();
   const conflictAction = useRef<{ operation: string; path: string; payload: Record<string, unknown>; area: NoticeArea; after?: () => void; method?: "POST" | "PUT" } | null>(null);
@@ -305,34 +308,18 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
       });
     }
   }
-  const researchLabel = (idle: string) =>
-    pending === "save-brief" || pending === "save-questions"
-      ? t.progress.saving
-      : pending === "generate" ? t.progress.researching : idle;
-  const apply = useCallback((value: unknown, inputs: "all" | "brief" | "questions" = "all") => {
+  /**
+   * "all" re-fills the brief and checklist drafts from the server (initial load and the 調查
+   * steps); "brief" only the brief; "projection" neither, so a vote or decision never erases
+   * what the member is typing.
+   */
+  const apply = useCallback((value: unknown, inputs: "all" | "brief" | "projection" = "all") => {
     const next = parseDiscoveryWorkspaceResponse(value).discovery;
     setWorkspace(next);
-    if (inputs === "all" || inputs === "brief") {
-      briefBase.current = next.brief;
-      setBriefDraft(next.brief?.originalText ?? "");
-    }
-    if (inputs === "all" || inputs === "questions") {
-      answersBase.current = next.brief;
-      const savedAnswers = Object.fromEntries(
-        (next.brief?.questionAnswers ?? []).map((entry) => [entry.question, entry.answer]),
-      );
-      const questions = [
-        ...(next.brief?.questionAnswers.map((entry) => entry.question) ?? []),
-        ...(next.brief?.unresolvedQuestions ?? []),
-      ].filter((question, index, all) => all.indexOf(question) === index);
-      setQuestionDrafts(Object.fromEntries(questions.map((question) => [
-        question,
-        {
-          answer: typeof savedAnswers[question] === "string" ? savedAnswers[question] : "",
-          skipped: savedAnswers[question] === null,
-        },
-      ])));
-    }
+    if (inputs === "projection") return next;
+    briefBase.current = next.brief;
+    setBriefDraft(next.brief?.originalText ?? "");
+    if (inputs === "all") setDraftState({ briefVersion: next.clarification?.briefVersion ?? null, items: clarifyDrafts(next.clarification) });
     return next;
   }, []);
 
@@ -415,30 +402,28 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
     setPending(operation);
     try {
       const next = apply(await request(path, {
-        method: method ?? (operation === "save-brief" || operation === "save-questions" ? "PUT" : "POST"),
+        method: method ?? (operation === "save-brief" ? "PUT" : "POST"),
         headers: {
           "Content-Type": "application/json",
           "Idempotency-Key": retryKey(retryKeys.current, operation, payload),
           ...(conflictBase ? { "Conflict-Base-Version": String(conflictBase) } : {}),
         },
         body: JSON.stringify(payload),
-      }), operation === "save-questions" ? "questions" : "all");
+      }), ["save-brief", "clarify", "answer", "research"].includes(operation) ? "all" : "projection");
       clearRetryKey(retryKeys.current, operation);
       resolution.clear();
       after?.();
       return next;
     } catch (error) {
-      if (operation === "save-brief" || operation === "save-questions") {
+      if (operation === "save-brief") {
         const { expectedVersion, ...attempted } = payload;
-        const base = operation === "save-brief"
-          ? { originalText: briefBase.current?.originalText ?? "" }
-          : { answers: answersBase.current?.questionAnswers ?? [] };
+        const base = { originalText: briefBase.current?.originalText ?? "" };
         try {
           const captured = await resolution.capture(error, { input: base, version: typeof expectedVersion === "number" ? expectedVersion : 1 }, attempted, async () => {
             const latest = parseDiscoveryWorkspaceResponse(await request(`/api/trips/${trip.id}/discovery`)).discovery;
             conflictLatest.current = latest;
             return latest.brief ? {
-              input: operation === "save-brief" ? { originalText: latest.brief.originalText } : { answers: latest.brief.questionAnswers },
+              input: { originalText: latest.brief.originalText },
               version: latest.brief.version,
             } : null;
           });
@@ -449,60 +434,108 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
         }
       }
       if (shouldStartFreshRequest(error)) clearRetryKey(retryKeys.current, operation);
+      // The checklist moved on (another member answered, or a newer brief): re-read it; drafts stay.
+      if (operation === "answer" && error instanceof ApiRequestError && error.status === 409) void refresh();
       notify("error", operation.startsWith("reject:")
         && error instanceof ApiRequestError
         && (error.code === "forbidden" || error.status === 403)
         ? t.errors.ownerOnly
-        // Answers refused because the brief's questions changed: explain it in zh-TW, not "要求內容有誤".
-        : operation === "save-questions" && error instanceof ApiRequestError && error.code === "validation_error"
-          ? t.errors.questionsChanged
+        : error instanceof ApiRequestError && error.code === "clarification_incomplete"
+          ? t.errors.clarifyIncomplete
           : errorMessage(error, t.errors.failed));
     } finally {
       setPending(null);
     }
   }
 
-  // One action: explain missing server configuration, persist changed brief text or
-  // clarification answers, then research the exact resulting brief version.
-  async function research(area: "find" | "again") {
-    if (pending || !workspace) return;
+  // 調查: save changed brief text, have the AI draft its checklist, send the answers to the
+  // reviewer, and queue research once every required answer is accepted. Each click advances
+  // as far as it can; questions or ask-backs stop it until the member answers.
+  async function investigate() {
+    if (pending || investigating || !workspace || discoveryJobActive(job)) return;
     const missing = missingServices(workspace, true, t);
     if (missing.length > 0) {
       notify("error", t.errors.researchUnavailable(missing.join(t.services.separator)));
       return;
     }
-    // Generation uses the saved aggregate; each editable field keeps its own base.
-    let brief = workspace.brief;
-    if (!brief || !briefBase.current || briefBase.current.originalText !== briefDraft) {
-      const saved = await mutate("save-brief", `/api/trips/${trip.id}/discovery/brief`, {
-        originalText: briefDraft,
-        expectedVersion: briefBase.current?.version ?? null,
-      }, area);
-      if (!saved?.brief) return;
-      brief = saved.brief;
-    } else {
-      const answers = resolvedQuestionAnswers(questionDrafts);
-      if (answersBase.current && JSON.stringify(answers) !== JSON.stringify(answersBase.current.questionAnswers)) {
-        const saved = await mutate(
-          "save-questions",
-          `/api/trips/${trip.id}/discovery/brief/questions`,
-          { expectedVersion: answersBase.current.version, answers },
-          area,
-        );
+    setInvestigating(true);
+    try {
+      let current = workspace;
+      if (!current.brief || !briefBase.current || briefBase.current.originalText !== briefDraft) {
+        const saved = await mutate("save-brief", `/api/trips/${trip.id}/discovery/brief`, {
+          originalText: briefDraft,
+          expectedVersion: briefBase.current?.version ?? null,
+        }, "find");
         if (!saved?.brief) return;
-        brief = saved.brief;
+        current = saved;
       }
-    }
-    const researched = await mutate("generate", `/api/trips/${trip.id}/discovery/generate`, {
-      expectedBriefVersion: brief.version,
-    }, area);
-    if (researched) {
-      // The server finds new places' Commons photos in the background right after this; keep their
-      // thumbnails in the loading shimmer and re-check for two minutes.
-      setPhotosExpectedUntil(Date.now() + 120_000);
+      const brief = current.brief;
+      if (!brief) return;
+      const clarification = current.clarification?.briefVersion === brief.version ? current.clarification : null;
+      if (!clarification) {
+        const asked = await mutate("clarify", `/api/trips/${trip.id}/discovery/clarification`, {
+          expectedBriefVersion: brief.version,
+        }, "find");
+        // With questions the member answers first; with none, research starts right away.
+        if (asked?.clarification?.status !== "ready") return;
+      } else if (clarification.status !== "ready" || clarifySummary(clarification, drafts).changed) {
+        const answered = await mutate("answer", `/api/trips/${trip.id}/discovery/clarification/answers`, {
+          expectedVersion: clarification.version,
+          answers: clarifyAnswers(clarification, drafts),
+        }, "find", undefined, "PUT");
+        if (!answered?.clarification) return;
+        if (answered.clarification.status !== "ready") {
+          const first = answered.clarification.items.find((item) => item.required
+            && (item.verdict === "insufficient" || item.verdict === "unreasonable"));
+          if (first) window.requestAnimationFrame(() => {
+            const target = document.querySelector<HTMLElement>(`[data-clarify-item="${first.id}"]`);
+            target?.scrollIntoView({ block: "center", behavior: "smooth" });
+            target?.querySelector<HTMLElement>("input")?.focus({ preventScroll: true });
+          });
+          return;
+        }
+      }
+      const started = await mutate("research", `/api/trips/${trip.id}/discovery/research`, {
+        expectedBriefVersion: brief.version,
+      }, "find");
+      if (!started) return;
+      onJobStarted(started.latestJob);
       setResearchSettingsOpen(false);
+    } finally {
+      setInvestigating(false);
     }
   }
+
+  // A job someone else queued (or one still running after a reload) is followed by the trip shell,
+  // unless the shell already follows that job or a newer one.
+  const workspaceJob = workspace?.latestJob ?? null;
+  const followedJobCreatedAt = job?.createdAt ?? null;
+  useEffect(() => {
+    if (!workspaceJob || !discoveryJobActive(workspaceJob)) return;
+    if (followedJobCreatedAt !== null && Date.parse(workspaceJob.createdAt) <= Date.parse(followedJobCreatedAt)) return;
+    onJobStarted(workspaceJob);
+  }, [followedJobCreatedAt, onJobStarted, workspaceJob]);
+
+  // The list changes once the save stage finishes: re-read it then, and keep the new rows'
+  // thumbnails loading while the photos stage looks for Commons photos. Only jobs seen before
+  // their save finished count; a job that finished earlier is already in the first read. Those
+  // jobs also keep their progress card (collapsed to 「調查完成」) for the rest of this visit.
+  const watchedJobIds = useRef(new Set<string>());
+  const refreshedJobIds = useRef(new Set<string>());
+  const jobId = job?.id ?? null;
+  const jobSaved = job?.stages.save.state === "done";
+  useEffect(() => {
+    if (!jobId) return;
+    if (!jobSaved) {
+      watchedJobIds.current.add(jobId);
+      return;
+    }
+    if (!watchedJobIds.current.has(jobId) || refreshedJobIds.current.has(jobId)) return;
+    refreshedJobIds.current.add(jobId);
+    void refresh();
+    setPhotosExpectedUntil(Date.now() + 120_000);
+  }, [jobId, jobSaved, refresh]);
+
 
   async function rejectProposal(proposal: CandidateProposalDto) {
     return mutate(
@@ -611,17 +644,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
     }
   }
 
-
-  async function saveQuestionAnswers() {
-    if (!answersBase.current) return;
-    const answers = resolvedQuestionAnswers(questionDrafts);
-    await mutate(
-      "save-questions",
-      `/api/trips/${trip.id}/discovery/brief/questions`,
-      { expectedVersion: answersBase.current.version, answers },
-      "questions",
-    );
-  }
   const selectedProposal = workspace?.proposals.find((proposal) => proposal.id === selectedProposalId) ?? null;
   const proposalNameCounts = new Map<string, number>();
   for (const proposal of workspace?.proposals ?? []) {
@@ -911,6 +933,33 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
       setBulkBusy(false);
     }
   }
+
+  const shownJob = job ?? workspace?.latestJob ?? null;
+  const jobRunning = discoveryJobActive(shownJob);
+  const busy = investigating || jobRunning;
+  // An edited brief makes the checklist stale: 調查 saves it and asks again.
+  const briefDirty = !briefBase.current || briefBase.current.originalText !== briefDraft;
+  const clarification = !briefDirty && workspace?.clarification && workspace.clarification.briefVersion === workspace.brief?.version
+    ? workspace.clarification : null;
+  const summary = clarification ? clarifySummary(clarification, drafts) : null;
+  const thinking = pending === "save-brief" || pending === "clarify" ? t.clarify.askingThinking
+    : pending === "answer" ? t.clarify.reviewingThinking : null;
+  const missingRequired = summary !== null && summary.requiredAnswered < summary.requiredTotal;
+  const statusText = !clarification || clarification.items.length === 0 ? t.clarify.idleHint
+    : summary && summary.askBack > 0 ? t.clarify.askBack(summary.askBack)
+      : summary && summary.requiredTotal > 0 ? t.clarify.progress(summary.requiredAnswered, summary.requiredTotal)
+        : t.clarify.costNote;
+  const investigateButton = (
+    <button
+      className="pd-primary"
+      disabled={busy || pending !== null || !briefDraft.trim() || missingRequired}
+      aria-busy={busy || undefined}
+      onClick={() => void investigate()}
+    >
+      {busy ? <span className="pd-thinking-dots" aria-hidden="true"><i /><i /><i /></span> : <Search aria-hidden="true" className="size-4" />}
+      {busy ? t.investigating : shownJob?.status === "failed" ? t.investigateAgain : t.investigate}
+    </button>
+  );
   return (
     <section className="pd-workspace pd-discovery" data-selecting={selecting ? "true" : undefined} aria-labelledby="ai-discovery-heading">
       <div className={`pd-pagehead${selecting ? " pd-pagehead--selecting" : ""}`}>
@@ -965,8 +1014,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
           const operation = conflictAction.current?.operation;
           if (conflictLatest.current && operation === "save-brief") {
             apply({ discovery: conflictLatest.current }, "brief");
-          } else if (conflictLatest.current && operation === "save-questions") {
-            apply({ discovery: conflictLatest.current }, "questions");
           }
           resolution.clear();
         }}
@@ -978,7 +1025,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
         onEdit={() => {
           const operation = conflictAction.current?.operation;
           if (operation === "save-brief") briefBase.current = conflictLatest.current?.brief ?? null;
-          else if (operation === "save-questions") answersBase.current = conflictLatest.current?.brief ?? null;
           resolution.resume();
         }}
       /> : null}
@@ -987,58 +1033,16 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
 
       {!loading ? (
         <div hidden={Boolean(resolution.conflict)} className="grid gap-5">
-          {Object.keys(questionDrafts).length ? (
-            <section className="order-1 rounded-panel border border-ink/10 p-4" aria-label={t.brief.questions}>
-                  <strong>{t.brief.questions}</strong>
-                  <ul className="mt-2 grid gap-3">
-                    {Object.entries(questionDrafts).map(([question, draft]) => (
-                      <li key={question} className="rounded-xl bg-surface-subtle p-3">
-                        <label className="grid gap-2 font-bold">
-                          {question}
-                          <input
-                            className="min-h-10 rounded-lg border bg-surface px-3 font-normal"
-                            value={draft.answer}
-                            disabled={draft.skipped}
-                            onChange={(event) => setQuestionDrafts((drafts) => ({
-                              ...drafts,
-                              [question]: { answer: event.target.value, skipped: false },
-                            }))}
-                            placeholder={t.brief.answerPlaceholder}
-                          />
-                        </label>
-                        <button
-                          className="mt-2 min-h-10 rounded-lg border px-3 font-bold"
-                          type="button"
-                          onClick={() => setQuestionDrafts((drafts) => ({
-                            ...drafts,
-                            [question]: { answer: "", skipped: !draft.skipped },
-                          }))}
-                        >
-                          {draft.skipped ? t.brief.answerInstead : t.brief.skipQuestion}
-                        </button>
-                        {draft.skipped ? <span className="ml-2 text-sm font-bold text-muted-foreground">{t.brief.skippedUnknown}</span> : null}
-                      </li>
-                    ))}
-                  </ul>
-                  <button
-                    className="mt-3 min-h-11 rounded-xl border px-4 font-bold"
-                    disabled={pending !== null || !Object.values(questionDrafts).some((draft) => draft.skipped || draft.answer.trim())}
-                    onClick={() => void saveQuestionAnswers()}
-                  >
-                    {pending === "save-questions" ? t.progress.saving : t.brief.saveAnswers}
-                  </button>
-            </section>
-          ) : null}
           <ResearchPanel
             first={!workspace?.latestRun}
             open={researchSettingsOpen}
             onClose={() => setResearchSettingsOpen(false)}
-            footer={workspace?.latestRun ? (
+            footer={(
               <div className="pd-research-footer">
-                <span>{t.brief.updateConsequence}</span>
-                <button className="pd-primary" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research("again")}><RotateCw aria-hidden="true" className="size-4" />{researchLabel(t.brief.updateCandidates)}</button>
+                <span role="status" aria-live="polite">{thinking ? <ThinkingIndicator text={thinking} /> : statusText}</span>
+                {investigateButton}
               </div>
-            ) : <button className="pd-primary" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research("find")}><Search aria-hidden="true" className="size-4" />{researchLabel(t.brief.findCandidates)}</button>}
+            )}
           >
             <div className="pd-brief-editor">
               <section aria-label={t.brief.areaLabel}>
@@ -1046,11 +1050,12 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
                   <textarea
                     className="min-h-32 rounded-xl border bg-surface p-3 font-normal"
                     value={briefDraft}
+                    readOnly={busy}
                     onChange={(event) => setBriefDraft(event.target.value)}
                     placeholder={t.brief.placeholder}
                   />
                 </label>
-                <p className="pd-field-help">{t.brief.suggestionOnly}</p>
+                <p className="pd-field-help">{workspace?.latestRun ? t.brief.updateConsequence : t.brief.suggestionOnly}</p>
                 {!workspace?.latestRun && !workspace?.modelAvailable ? <p className="mt-3 text-sm text-muted-foreground">{t.brief.modelUnavailable}</p> : null}
                 {!workspace?.latestRun && !workspace?.placeProviderAvailable ? <p className="mt-2 text-sm text-muted-foreground">{t.brief.placesUnavailable}</p> : null}
               </section>
@@ -1066,18 +1071,30 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
                   </dl>
                 </section>
               ) : null}
+              {clarification ? (
+                <ClarifyChecklist
+                  clarification={clarification}
+                  drafts={drafts}
+                  readOnly={busy}
+                  onChange={(id, draft) => setDraftState({ briefVersion: clarification.briefVersion, items: { ...drafts, [id]: draft } })}
+                  t={t.clarify}
+                />
+              ) : null}
             </div>
           </ResearchPanel>
 
-          {workspace?.latestRun?.status === "failed" ? (
-            <section className="order-1 rounded-panel border border-destructive/30 bg-surface p-4" role="alert" aria-labelledby="discovery-run-failed-heading">
-              <h3 id="discovery-run-failed-heading" className="font-display text-2xl">{t.runFailure.title}</h3>
-              <p className="mt-1 text-sm">{discoveryRunFailureReason(workspace.latestRun.errorCode, t)}</p>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button className="pd-secondary" disabled={pending !== null} onClick={() => setResearchSettingsOpen(true)}><Pencil aria-hidden="true" className="size-4" />{t.brief.editRequirements}</button>
-                <button className="pd-primary" disabled={pending !== null || !briefDraft.trim()} onClick={() => void research("again")}><RotateCw aria-hidden="true" className="size-4" />{researchLabel(t.runFailure.regenerate)}</button>
-              </div>
-            </section>
+          {shownJob && (jobRunning || shownJob.status === "failed" || watchedJobIds.current.has(shownJob.id)) ? (
+            <ResearchProgress
+              job={shownJob}
+              failureReason={discoveryRunFailureReason(shownJob.errorCode, t)}
+              t={t}
+              actions={(
+                <>
+                  {workspace?.latestRun ? <button className="pd-secondary" disabled={busy || pending !== null} onClick={() => setResearchSettingsOpen(true)}><Pencil aria-hidden="true" className="size-4" />{t.brief.editRequirements}</button> : null}
+                  <button className="pd-primary" disabled={busy || pending !== null || !briefDraft.trim()} onClick={() => void investigate()}><RotateCw aria-hidden="true" className="size-4" />{t.investigateAgain}</button>
+                </>
+              )}
+            />
           ) : null}
 
           {listedProposals.length ? (
