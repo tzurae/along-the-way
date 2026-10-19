@@ -6,9 +6,6 @@ export const planningSettings = {
   retry: "重試",
   firstUse: "這趟旅程還沒有設定。先選一個節奏，再確認數值。",
   readOnly: "你可以查看這趟旅程的設定，但只有能安排行程的成員可以修改。",
-  notTimetableTitle: "這不是時間表",
-  notTimetableBody: "出門和回住宿的時間，只用來算一天有多少可用時間。系統不會排每一站幾點到，也不會查即時路況或班次。",
-  straightLineNote: "移動時間用直線距離、繞路係數和假設速度估算。",
   paceLegend: "選擇行程節奏",
   presets: {
     chill: { label: "輕鬆", description: "晚點出門、早點回來；每天少排幾個，保留最多休息。" },

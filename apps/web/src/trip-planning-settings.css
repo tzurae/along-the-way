@@ -29,7 +29,6 @@
 
 .planning-settings__notice,
 .planning-settings__error,
-.planning-settings__explanation,
 .planning-settings__impact {
   margin: 0 0 18px;
   border: 1px solid var(--color-border);
@@ -49,7 +48,6 @@
 
 .planning-settings__error p,
 .planning-settings__notice p,
-.planning-settings__explanation p,
 .planning-settings__impact p {
   margin: 0;
 }
@@ -58,13 +56,6 @@
   margin-top: 12px;
 }
 
-.planning-settings__explanation {
-  display: grid;
-  gap: 8px;
-  background: var(--color-surface-subtle);
-}
-
-.planning-settings__explanation h3,
 .planning-settings__impact h3 {
   margin: 0;
   color: var(--color-ink-strong);
@@ -72,7 +63,6 @@
   font-weight: 800;
 }
 
-.planning-settings__explanation p,
 .planning-settings__impact p,
 .planning-settings__impact li {
   max-width: 70ch;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Info, RotateCcw } from "lucide-react";
+import { AlertTriangle, RotateCcw } from "lucide-react";
 
 import {
   PACE_PRESETS,
@@ -413,10 +413,6 @@ export function TripPlanningSettings({ tripId, revision, canEdit, request, onCre
       <div className="planning-settings__head"><h2 id="planning-settings-heading">{t.title}</h2><p>{t.description}</p></div>
       {firstUse ? <div className="planning-settings__notice" role="status"><p>{t.firstUse}</p></div> : null}
       {!canEdit ? <div className="planning-settings__notice"><p>{t.readOnly}</p></div> : null}
-      <aside className="planning-settings__explanation" aria-labelledby="planning-not-timetable">
-        <h3 id="planning-not-timetable"><Info aria-hidden="true" className="mr-2 inline size-5" />{t.notTimetableTitle}</h3>
-        <p>{t.notTimetableBody}</p><p>{t.straightLineNote}</p>
-      </aside>
       {Object.values(errors).some(Boolean) ? <div ref={errorSummary} tabIndex={-1} className="planning-settings__error" role="alert"><p>{t.validationSummary} {Object.values(errors).find(Boolean)}</p></div> : null}
       {saveError ? <div className="planning-settings__error" role="alert"><p>{saveError}</p></div> : null}
       {conflict ? <ConflictPanel
