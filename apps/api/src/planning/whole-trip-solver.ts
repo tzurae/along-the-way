@@ -386,8 +386,7 @@ function reasonsForPlace(context: Context, state: State, place: PlannerPlace) {
     }
     for (const check of best?.checks ?? []) {
       const previous = check.code === "count" ? current.count : check.code === "effort" ? current.effort
-        : check.code === "budget" ? current.loadMinutes : check.code === "daily_km" ? current.straightMetres / 1000
-          : check.code === "max_hop" ? current.maxHopMetres / 1000 : check.current;
+        : check.code === "budget" ? current.loadMinutes : check.current;
       reasons.push({ ...check, current: previous, added: check.current - previous });
     }
   }
@@ -452,16 +451,11 @@ function suggestionsForPlaces(context: Context, state: State, unplaced: readonly
           maxPlacesPerDay: load.count > original.maxPlacesPerDay
             ? Math.max(load.count, original.targetPlacesPerDay) : original.maxPlacesPerDay,
           maxEffortPerDay: Math.max(original.maxEffortPerDay, load.effort),
-          maxDailyStraightKm: Math.max(original.maxDailyStraightKm, load.straightMetres / 1000),
-          maxHopStraightKm: Math.max(original.maxHopStraightKm, load.maxHopMetres / 1000),
         };
-        // Preserve exact integer-metre inequalities at a floating-point representation boundary.
-        if (caps.maxDailyStraightKm * 1000 < load.straightMetres) caps.maxDailyStraightKm += Number.EPSILON * Math.max(1, caps.maxDailyStraightKm);
-        if (caps.maxHopStraightKm * 1000 < load.maxHopMetres) caps.maxHopStraightKm += Number.EPSILON * Math.max(1, caps.maxHopStraightKm);
-        if (caps.maxPlacesPerDay > 12 || caps.maxEffortPerDay > 25 || caps.maxDailyStraightKm > 100 || caps.maxHopStraightKm > 50) continue;
+        if (caps.maxPlacesPerDay > 12 || caps.maxEffortPerDay > 25) continue;
         const overrides: PlannerSuggestion["overrides"] = {};
         let capRelativeIncrease = 0;
-        for (const key of ["maxPlacesPerDay", "maxEffortPerDay", "maxDailyStraightKm", "maxHopStraightKm"] as const) {
+        for (const key of ["maxPlacesPerDay", "maxEffortPerDay"] as const) {
           if (caps[key] === original[key]) continue;
           overrides[key] = caps[key];
           capRelativeIncrease = Math.max(capRelativeIncrease, (caps[key] - original[key]) / original[key]);

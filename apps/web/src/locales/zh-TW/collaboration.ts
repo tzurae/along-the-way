@@ -20,7 +20,6 @@ export const collaboration = {
     sourceUrl: "來源連結", notes: "共同備註", durationMinutes: "停留分鐘", effortLevel: "體力", budgetAmountMinor: "預算最小單位", budgetCurrency: "預算幣別",
     pacePreset: "節奏", targetPlacesPerDay: "每天希望地點", maxPlacesPerDay: "每天最多地點",
     dayStart: "出門時間", dayEnd: "回住宿時間", maxEffortPerDay: "每日體力上限",
-    maxDailyStraightKm: "每日直線距離上限", maxHopStraightKm: "單段直線距離上限",
     mealReserveMinutes: "用餐預留", restMinutes: "另外休息", slackPercent: "保留餘裕",
     travelProfile: "主要移動方式", speedKmh: "估算速度", detourFactor: "繞路係數",
     perLegMinutes: "每段進出站／停車", lightTravelDays: "抵達／離開日少排一點",

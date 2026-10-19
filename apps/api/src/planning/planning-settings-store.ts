@@ -11,8 +11,7 @@ import type { DatabaseExecutor } from "../private-trips/postgres-private-trip-st
 export function planningSettingsFromRow(row: Selectable<TripPlanningSettingsTable>): PlanningSettings {
   return { pacePreset: row.pace_preset, targetPlacesPerDay: row.target_places_per_day,
     maxPlacesPerDay: row.max_places_per_day, dayStart: row.day_start, dayEnd: row.day_end,
-    maxEffortPerDay: row.max_effort_per_day, maxDailyStraightKm: row.max_daily_straight_km,
-    maxHopStraightKm: row.max_hop_straight_km, mealReserveMinutes: row.meal_reserve_minutes,
+    maxEffortPerDay: row.max_effort_per_day, mealReserveMinutes: row.meal_reserve_minutes,
     restMinutes: row.rest_minutes, slackPercent: row.slack_percent, travelProfile: row.travel_profile,
     speedKmh: row.speed_kmh, detourFactor: row.detour_factor, perLegMinutes: row.per_leg_minutes,
     lightTravelDays: row.light_travel_days };
@@ -20,14 +19,15 @@ export function planningSettingsFromRow(row: Selectable<TripPlanningSettingsTabl
 export function planningOverrideFromRow(row: Selectable<TripDayPlanningOverrideTable>): PlanningOverride | null {
   const values: PlanningOverride = { targetPlacesPerDay: row.target_places_per_day, maxPlacesPerDay: row.max_places_per_day,
     dayStart: row.day_start, dayEnd: row.day_end, maxEffortPerDay: row.max_effort_per_day,
-    maxDailyStraightKm: row.max_daily_straight_km, maxHopStraightKm: row.max_hop_straight_km,
+    // max_daily_straight_km / max_hop_straight_km are no longer read (km caps removed 2026-10-19).
     mealReserveMinutes: row.meal_reserve_minutes, restMinutes: row.rest_minutes, slackPercent: row.slack_percent };
   return Object.values(values).every((value) => value === null) ? null : values;
 }
 function overrideColumns(value: PlanningOverride) {
   return { target_places_per_day: value.targetPlacesPerDay, max_places_per_day: value.maxPlacesPerDay,
     day_start: value.dayStart, day_end: value.dayEnd, max_effort_per_day: value.maxEffortPerDay,
-    max_daily_straight_km: value.maxDailyStraightKm, max_hop_straight_km: value.maxHopStraightKm,
+    // Unused km columns stay null (owner decision 2026-10-19: keep columns, no new migration yet).
+    max_daily_straight_km: null, max_hop_straight_km: null,
     meal_reserve_minutes: value.mealReserveMinutes, rest_minutes: value.restMinutes, slack_percent: value.slackPercent };
 }
 export async function readPlanningSettings(executor: DatabaseExecutor, tripId: string) {
@@ -84,7 +84,9 @@ export async function savePlanningDrafts(transaction: Transaction<AlongTheWayDat
     const columns = {
       target_places_per_day: values.targetPlacesPerDay, max_places_per_day: values.maxPlacesPerDay,
       day_start: values.dayStart, day_end: values.dayEnd, max_effort_per_day: values.maxEffortPerDay,
-      max_daily_straight_km: values.maxDailyStraightKm, max_hop_straight_km: values.maxHopStraightKm,
+      // Unused since the km caps were removed (2026-10-19). The columns are NOT NULL in 037, so
+      // they get the old maxima until a cleanup migration drops them.
+      max_daily_straight_km: 100, max_hop_straight_km: 50,
       meal_reserve_minutes: values.mealReserveMinutes, rest_minutes: values.restMinutes, slack_percent: values.slackPercent,
       pace_preset: pacePreset, travel_profile: values.travelProfile, speed_kmh: values.speedKmh,
       detour_factor: values.detourFactor, per_leg_minutes: values.perLegMinutes, light_travel_days: values.lightTravelDays,

@@ -84,7 +84,7 @@ export interface PlannerInput {
 }
 
 export type PlannerDayStatus = "valid" | "over_cap" | "unverifiable_distance" | "baseline_unverifiable";
-export type PlannerCheckCode = "count" | "effort" | "budget" | "daily_km" | "max_hop" | "unverifiable_distance" | "baseline_unverifiable";
+export type PlannerCheckCode = "count" | "effort" | "budget" | "unverifiable_distance" | "baseline_unverifiable";
 
 export interface PlannerBlockingCheck {
   dayId: string;
@@ -92,9 +92,6 @@ export interface PlannerBlockingCheck {
   current: number;
   added: number;
   cap: number;
-  fromId?: string;
-  toId?: string;
-  km?: number;
 }
 
 export interface PlannerLeg {
@@ -130,7 +127,6 @@ export interface PlannerDayLoad {
   count: number;
   effort: number;
   straightMetres: number;
-  maxHopMetres: number;
   utilisation: number;
   noLodging: boolean;
   missingCoordinateIds: string[];
@@ -149,7 +145,7 @@ export interface PlannerOutputDay {
 
 export type PlannerConflictCode = "fixed_baseline_over_cap" | "baseline_unverifiable"
   | "existing_count_over_cap" | "existing_effort_over_cap" | "existing_budget_over_cap"
-  | "existing_daily_km_over_cap" | "existing_max_hop_over_cap" | "existing_unverifiable_distance"
+  | "existing_unverifiable_distance"
   | "missing_coordinates" | "total_capacity" | "place_exceeds_every_day";
 
 export interface PlannerConflict {

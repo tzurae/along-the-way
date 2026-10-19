@@ -196,7 +196,6 @@ export function createDayLoadEvaluator(day: PlannerDaySnapshot, distance: Planne
     }
     const legs: PlannerDayLoad["legs"] = [];
     let straightMetres = 0;
-    let maxHopMetres = 0;
     let travelMinutes = 0;
     const speedMpm = caps.speedKmh * 1000 / 60;
     for (let index = 1; index < route.length; index += 1) {
@@ -207,7 +206,6 @@ export function createDayLoadEvaluator(day: PlannerDaySnapshot, distance: Planne
       const minutes = Math.ceil(metres * caps.detourFactor / speedMpm) + caps.perLegMinutes;
       legs.push({ fromId: from.id, toId: to.id, metres, travelMinutes: minutes });
       straightMetres += metres;
-      maxHopMetres = Math.max(maxHopMetres, metres);
       travelMinutes += minutes;
     }
     const loadMinutes = visitMinutes + travelMinutes;
@@ -224,13 +222,6 @@ export function createDayLoadEvaluator(day: PlannerDaySnapshot, distance: Planne
     const hasFlexible = count > fixed.length;
     if (hasFlexible && budgetMinutes <= 0) checks.push({ dayId: day.id, code: "budget", current: loadMinutes, added: 0, cap: budgetMinutes });
     else if (hasFlexible) check("budget", loadMinutes, budgetMinutes);
-    check("daily_km", straightMetres / 1000, caps.maxDailyStraightKm);
-    for (const leg of legs) {
-      if (leg.metres > caps.maxHopStraightKm * 1000) checks.push({
-        dayId: day.id, code: "max_hop", current: leg.metres / 1000, added: 0,
-        cap: caps.maxHopStraightKm, fromId: leg.fromId, toId: leg.toId, km: leg.metres / 1000,
-      });
-    }
     if (missingCoordinates.size > 0) checks.push({ dayId: day.id, code: "unverifiable_distance", current: missingCoordinates.size, added: 0, cap: 0 });
     if (unresolvedItemIds.length > 0) checks.push({ dayId: day.id, code: "baseline_unverifiable", current: unresolvedItemIds.length, added: 0, cap: 0 });
     const status = unresolvedItemIds.length > 0 ? "baseline_unverifiable"
@@ -240,10 +231,10 @@ export function createDayLoadEvaluator(day: PlannerDaySnapshot, distance: Planne
       mealReserveMinutes, restMinutes: caps.restMinutes, slackMinutes, budgetMinutes,
       visitMinutes, travelMinutes, loadMinutes,
       totalMinutes: loadMinutes + window.fixedOccupancyMinutes + mealReserveMinutes + caps.restMinutes + slackMinutes,
-      count, effort, straightMetres, maxHopMetres,
+      count, effort, straightMetres,
+      // Distance is not a cap (km caps removed 2026-10-19); it binds only through travel minutes in the budget.
       utilisation: Math.max(ratio(count, caps.maxPlacesPerDay), ratio(effort, caps.maxEffortPerDay),
-        hasFlexible || budgetMinutes > 0 ? ratio(loadMinutes, budgetMinutes) : 0, ratio(straightMetres, caps.maxDailyStraightKm * 1000),
-        ratio(maxHopMetres, caps.maxHopStraightKm * 1000)),
+        hasFlexible || budgetMinutes > 0 ? ratio(loadMinutes, budgetMinutes) : 0),
       noLodging: day.previousLodging === null || day.nightLodging === null,
       missingCoordinateIds: [...missingCoordinates].sort(comparePlannerIds), unresolvedItemIds,
       route, legs, checks,

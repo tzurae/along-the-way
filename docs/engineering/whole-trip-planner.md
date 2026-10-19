@@ -1,6 +1,8 @@
 # 全旅程容量規劃器
 
-契約：GitHub `tzurae/along-the-way#158`。這是容量檢查與分日，不是時間表。所有移動數字都是直線距離估算；不產生抵達時間，不查付費路線，也不使用營業時間。政策版本由 contracts 的 `PLANNING_POLICY_VERSION = "whole-trip-planner-v1"` 單一定義。
+契約：GitHub `tzurae/along-the-way#158`。這是容量檢查與分日，不是時間表。所有移動數字都是直線距離估算；不產生抵達時間，不查付費路線，也不使用營業時間。政策版本由 contracts 的 `PLANNING_POLICY_VERSION = "whole-trip-planner-v2"` 單一定義。
+
+**2026-10-19 owner 決定：拿掉「每日直線距離上限」與「單段直線距離上限」**（沒有人知道自己一天能走幾公里）。設定、每日調整、總覽、原因與放寬建議都不再有公里上限；排程只剩 count、effort、budget 三個 hard check。距離仍換算成移動分鐘進 budget，所以跑太遠會因估計總時數超標而排不進去。DB 的 `max_daily_straight_km`／`max_hop_straight_km` 欄位依 owner 決定暫時保留不讀，日後再用 migration 移除。
 
 ## 系統邊界與不變條件
 
@@ -34,31 +36,31 @@ day-load 使用既有 `@js-temporal/polyfill`，以輸入日期和 IANA timezone
 - `DEPARTURE_BUFFER_MINUTES = 120`，end 取所有 departure start 減 120 後的最小值。
 - 固定占用與時窗取交集後做聯集。住宿只做錨點，不做占用。
 - meal contribution 的 id 代表同一餐／餐廳地點。重複 key 取最大分鐘，並與 fixed-selected restaurant/cafe 的同一 place id 去重；flexible 餐飲也用 place id。剩餘用餐預留為 `max(0, reserve − covered)`。
-- budget 保留原公式，不把負值偷偷 clamp 成 0。**只有固定基線的一天（沒有 flexible）不做 budget 比較，utilisation 的 budget 項在 budget ≤ 0 時為 0**：依 spec §2，短或空的時窗（晚到、早走、整天的固定行程）只承載固定基線，否則 reserve 造成的負 budget 會讓整趟行程變成 baseline conflict。只要放進任何 flexible，budget 就照公式檢查，非正 budget 一定超標。count、effort、daily/hop km 的固定基線超標仍回 `fixed_baseline_over_cap`（2026-10-19 審查修正）。
+- budget 保留原公式，不把負值偷偷 clamp 成 0。**只有固定基線的一天（沒有 flexible）不做 budget 比較，utilisation 的 budget 項在 budget ≤ 0 時為 0**：依 spec §2，短或空的時窗（晚到、早走、整天的固定行程）只承載固定基線，否則 reserve 造成的負 budget 會讓整趟行程變成 baseline conflict。只要放進任何 flexible，budget 就照公式檢查，非正 budget 一定超標。count、effort 的固定基線超標仍回 `fixed_baseline_over_cap`（2026-10-19 審查修正）。
 - `noLodging` 表示兩端至少一端完全沒有輸入住宿。不存在的端點可以省略；已輸入但缺座標的住宿不能省略。
 
 ## 直線距離與路線
 
 每對不同座標的 Haversine 距離只算一次，四捨五入成 integer metres，放在共享矩陣。使用座標當矩陣 key，不把不同座標但同 id 的 endpoint 混為一談。每日路線是：前晚住宿 → 中午前固定錨點 → flexible+pinned 中段 → 中午後固定錨點 → 當晚住宿。
 
-進入固定錨點用 start endpoint，離開用 end endpoint。固定服務內部的 start→end 不是 leg；時間已在 occupancy，服務距離不能再進 daily/hop caps。即使兩個節點座標相同，它們仍是兩個路線節點，該段依設定收 `perLegMinutes`。
+進入固定錨點用 start endpoint，離開用 end endpoint。固定服務內部的 start→end 不是 leg；時間已在 occupancy，服務距離不能再算進移動時間。即使兩個節點座標相同，它們仍是兩個路線節點，該段依設定收 `perLegMinutes`。
 
-每段 `ceil(metres × detourFactor ÷ (speedKmh × 1000 / 60)) + perLegMinutes`。daily/hop cap 比的是未乘 detour 的原始直線 metres。距離未知時仍回傳可解釋的已知部分，但 status 必須是 `unverifiable_distance`，不能把缺的路段當成通過。
+每段 `ceil(metres × detourFactor ÷ (speedKmh × 1000 / 60)) + perLegMinutes`。距離只透過這個移動分鐘影響 budget，沒有公里上限。距離未知時仍回傳可解釋的已知部分，但 status 必須是 `unverifiable_distance`，不能把缺的路段當成通過。
 
-utilisation 是 count、effort、load/budget、daily metres、max hop 五個 hard ratio 的最大值。`UTILISATION_BAND = 0.05`。0/0 視為 0；非正 budget 但有負荷或赤字時，用有限的超標值，不輸出 JSON Infinity。比 band 前只加 `1e-9` 抵消二進位浮點邊界，不改 hard check。
+utilisation 是 count、effort、load/budget 三個 hard ratio 的最大值。`UTILISATION_BAND = 0.05`。0/0 視為 0；非正 budget 但有負荷或赤字時，用有限的超標值，不輸出 JSON Infinity。比 band 前只加 `1e-9` 抵消二進位浮點邊界，不改 hard check。
 
 ## 搜尋順序與固定額度
 
 所有字串 id 使用 code-unit ascending 比較，不依執行機器 locale。days 先按日期、再按 dayId 排序（輸出順序就是畫面上的第 N 天）。
 
-1. Preflight 先看固定基線，再看 keep 的既有安排。缺 flexible 座標是 `missing_coordinates`；固定錨點／住宿缺座標或固定時間無法解析是 `baseline_unverifiable`。keep 依各 hard check 回 `existing_*`，不偷搬既有地點。count/effort 照原樣檢查；若既有順序超出 budget、daily km 或 hop，先用最後那一次相同的日內 reorder 重排（keep 模式本來就允許改順序），再用重排後的負荷判斷 route 相關 `existing_*`，並以重排結果作為搜尋起點（2026-10-19 coordinator 裁定）。
+1. Preflight 先看固定基線，再看 keep 的既有安排。缺 flexible 座標是 `missing_coordinates`；固定錨點／住宿缺座標或固定時間無法解析是 `baseline_unverifiable`。keep 依各 hard check 回 `existing_*`，不偷搬既有地點。count/effort 照原樣檢查；若既有順序超出 budget，先用最後那一次相同的日內 reorder 重排（keep 模式本來就允許改順序），再用重排後的負荷判斷 `existing_budget_over_cap`，並以重排結果作為搜尋起點（2026-10-19 coordinator 裁定）。
 2. 只有總剩餘數量容量、單一地點超過每一天的保守下界能產生 `proven_infeasible`。單地點時間證明使用 **零 travel、完整 meal cover** 的樂觀下界；這比較弱，但絕不把 greedy 插不進去當成無解證明。kept visit/effort 仍是不可移動負荷。
 3. 主 construction order：可行日最少 → normalized size 最大 → votes 最多 → placeId。size 取各日 `max(effort/maxEffort, visit/max(1,budget))` 的最大值。
 4. 最便宜的有效插入以新增 integer metres 排序，再比插入後 day utilisation band、dayId、position。新增距離只查前→新、新→後、前→後三個矩陣值；搜尋內不跑日內 exact reorder。
 5. Repair 先重新插入 unplaced，再用深度最多 2 的 ejection chains。可以移出一個或同時兩個 movable 地點，插入未排地點，再把移出的地點放到別天。只有整個 queue 放回且所有日有效才比較最終 objective；不要求中間狀態改善平衡。keep 與 pinned 不得被 eject。
 6. 接著做跨日 relocate/swap。swap 移除後的中間狀態不拿來當最後可行性，兩邊放回後才比較。
 7. 主 order 之外再跑 3 個固定 alternative，保留找到的最佳結果。
-8. 最後每個 day 只跑一次 `orderByStraightLine`：中段 ≤8 是 exhaustive，>8 是 nearest-neighbour + capped 2-opt。使用同一 integer matrix，固定錨點只提供前／後 boundary。重排後再驗；若總距離較短卻多出過長 hop 或 rounded travel 超標，就保留之前已有效的順序。最後獨立 validator 再重算整個結果。
+8. 最後每個 day 只跑一次 `orderByStraightLine`：中段 ≤8 是 exhaustive，>8 是 nearest-neighbour + capped 2-opt。使用同一 integer matrix，固定錨點只提供前／後 boundary。重排後再驗；若總距離較短卻讓 rounded travel 超出 budget，就保留之前已有效的順序。最後獨立 validator 再重算整個結果。
 
 | Named constant | 值與意義 |
 |---|---|
@@ -84,9 +86,9 @@ objective 是 lexicographic：placed count 最大 → 最大 utilisation band �
 
 ## 放寬建議
 
-2026-10-19 Main 明確確認：只放寬 hard caps，也就是 count、effort、daily/hop km、dayStart 更早、dayEnd 更晚。**不減少 meal/rest/slack，不改 soft target 或 travel profile。**
+2026-10-19 Main 明確確認：只放寬 hard caps，也就是 count、effort、dayStart 更早、dayEnd 更晚（公里上限已移除）。**不減少 meal/rest/slack，不改 soft target 或 travel profile。**
 
-每個 unplaced、每個日子、每個中段插入位置都看候選。count/effort/km/hop 設成剛好可行且不低於原值的最小合法 cap；若要明確覆寫 flight-reduced maxPlaces，還要符合 raw `target ≤ max`。超過 count 12、effort 25、daily 100 km、hop 50 km 的候選直接丟掉。
+每個 unplaced、每個日子、每個中段插入位置都看候選。count/effort 設成剛好可行且不低於原值的最小合法 cap；若要明確覆寫 flight-reduced maxPlaces，還要符合 raw `target ≤ max`。超過 count 12、effort 25 的候選直接丟掉。
 
 時窗以 1 分鐘枚舉可能的更早開始，為每個開始找最早的可行結束。end capacity 用 prefix maximum，所以擴大時窗撞上固定占用、反而暫時減少可用容量時，不會假裝容量單調增加。候選仍逐一跑 day-load，從不只信代數推導。
 

@@ -10,8 +10,6 @@ export interface PlanningSettings {
   dayStart: string;
   dayEnd: string;
   maxEffortPerDay: number;
-  maxDailyStraightKm: number;
-  maxHopStraightKm: number;
   mealReserveMinutes: number;
   restMinutes: number;
   slackPercent: number;
@@ -23,13 +21,13 @@ export interface PlanningSettings {
 }
 export const OVERRIDABLE_PLANNING_FIELDS = [
   "targetPlacesPerDay", "maxPlacesPerDay", "dayStart", "dayEnd", "maxEffortPerDay",
-  "maxDailyStraightKm", "maxHopStraightKm", "mealReserveMinutes", "restMinutes", "slackPercent",
+  "mealReserveMinutes", "restMinutes", "slackPercent",
 ] as const;
 export type PlanningOverrideField = typeof OVERRIDABLE_PLANNING_FIELDS[number];
 export type PlanningOverride = { [K in PlanningOverrideField]: PlanningSettings[K] | null };
 export const EMPTY_PLANNING_OVERRIDE: PlanningOverride = {
   targetPlacesPerDay: null, maxPlacesPerDay: null, dayStart: null, dayEnd: null,
-  maxEffortPerDay: null, maxDailyStraightKm: null, maxHopStraightKm: null,
+  maxEffortPerDay: null,
   mealReserveMinutes: null, restMinutes: null, slackPercent: null,
 };
 export const TRAVEL_PROFILES = {
@@ -38,9 +36,9 @@ export const TRAVEL_PROFILES = {
   car: { speedKmh: 25, detourFactor: 1.4, perLegMinutes: 5 },
 } as const;
 export const PACE_PRESETS = {
-  chill: { targetPlacesPerDay: 2, maxPlacesPerDay: 3, dayStart: "10:00", dayEnd: "18:00", maxEffortPerDay: 6, maxDailyStraightKm: 12, maxHopStraightKm: 4, mealReserveMinutes: 60, restMinutes: 60, slackPercent: 20 },
-  balanced: { targetPlacesPerDay: 3, maxPlacesPerDay: 4, dayStart: "09:00", dayEnd: "19:00", maxEffortPerDay: 10, maxDailyStraightKm: 24, maxHopStraightKm: 8, mealReserveMinutes: 60, restMinutes: 30, slackPercent: 15 },
-  packed: { targetPlacesPerDay: 5, maxPlacesPerDay: 6, dayStart: "08:00", dayEnd: "21:00", maxEffortPerDay: 15, maxDailyStraightKm: 40, maxHopStraightKm: 15, mealReserveMinutes: 45, restMinutes: 15, slackPercent: 10 },
+  chill: { targetPlacesPerDay: 2, maxPlacesPerDay: 3, dayStart: "10:00", dayEnd: "18:00", maxEffortPerDay: 6, mealReserveMinutes: 60, restMinutes: 60, slackPercent: 20 },
+  balanced: { targetPlacesPerDay: 3, maxPlacesPerDay: 4, dayStart: "09:00", dayEnd: "19:00", maxEffortPerDay: 10, mealReserveMinutes: 60, restMinutes: 30, slackPercent: 15 },
+  packed: { targetPlacesPerDay: 5, maxPlacesPerDay: 6, dayStart: "08:00", dayEnd: "21:00", maxEffortPerDay: 15, mealReserveMinutes: 45, restMinutes: 15, slackPercent: 10 },
 } as const;
 export const DEFAULT_PLANNING_SETTINGS: PlanningSettings = {
   pacePreset: "balanced", ...PACE_PRESETS.balanced,
@@ -72,7 +70,8 @@ export interface PlanningEstimateDto {
   visitSource: PlanningEstimateSource;
   effortSource: PlanningEstimateSource;
 }
-export const PLANNING_POLICY_VERSION = "whole-trip-planner-v1";
+// v2 (2026-10-19): the straight-line km caps were removed; v1 proposals become stale.
+export const PLANNING_POLICY_VERSION = "whole-trip-planner-v2";
 
 function invalid(field = "response"): never { throw new Error(`Invalid planning ${field}`); }
 function record(value: unknown): Record<string, unknown> { return isRecord(value) ? value : invalid(); }
@@ -103,8 +102,6 @@ function fields(value: Record<string, unknown>): Pick<PlanningSettings, Planning
     maxPlacesPerDay: number(value.maxPlacesPerDay, 1, 12, true),
     dayStart: clock(value.dayStart), dayEnd: clock(value.dayEnd, true),
     maxEffortPerDay: number(value.maxEffortPerDay, 1, 25, true),
-    maxDailyStraightKm: number(value.maxDailyStraightKm, 1, 100),
-    maxHopStraightKm: number(value.maxHopStraightKm, 0.5, 50),
     mealReserveMinutes: number(value.mealReserveMinutes, 0, 180, true),
     restMinutes: number(value.restMinutes, 0, 180, true),
     slackPercent: number(value.slackPercent, 0, 40, true),
@@ -175,10 +172,9 @@ export function parsePlanningOverrideResponse(value: unknown): PlanningOverrideR
 }
 
 export type PlanningDayStatus = "valid" | "over_cap" | "unverifiable_distance" | "baseline_unverifiable";
-export type PlanningCheckCode = "count" | "effort" | "budget" | "daily_km" | "max_hop" | "unverifiable_distance" | "baseline_unverifiable";
+export type PlanningCheckCode = "count" | "effort" | "budget" | "unverifiable_distance" | "baseline_unverifiable";
 export interface PlanningBlockingCheckDto {
   dayId: string; code: PlanningCheckCode; current: number; added: number; cap: number;
-  fromId?: string; toId?: string; km?: number;
 }
 export interface PlanningEndpointDto { id: string; coordinates: { latitude: number; longitude: number } | null }
 export interface PlanningRouteNodeDto { id: string; kind: "lodging" | "anchor" | "flexible" | "pinned"; start: PlanningEndpointDto; end: PlanningEndpointDto }
@@ -188,7 +184,7 @@ export interface PlanningDayLoadDto {
   windowStartMinute: number; windowEndMinute: number; windowMinutes: number;
   fixedOccupancyMinutes: number; mealReserveMinutes: number; restMinutes: number; slackMinutes: number;
   budgetMinutes: number; visitMinutes: number; travelMinutes: number; loadMinutes: number; totalMinutes: number;
-  count: number; effort: number; straightMetres: number; maxHopMetres: number; utilisation: number;
+  count: number; effort: number; straightMetres: number; utilisation: number;
   noLodging: boolean; missingCoordinateIds: string[]; unresolvedItemIds: string[];
   route: PlanningRouteNodeDto[];
   legs: { fromId: string; toId: string; metres: number; travelMinutes: number }[];
@@ -203,7 +199,7 @@ export interface PlanningLoadResponse {
 export type WholeTripPlanStatus = "complete" | "baseline_conflict" | "proven_infeasible" | "search_incomplete";
 export type PlanningConflictCode = "fixed_baseline_over_cap" | "baseline_unverifiable"
   | "existing_count_over_cap" | "existing_effort_over_cap" | "existing_budget_over_cap"
-  | "existing_daily_km_over_cap" | "existing_max_hop_over_cap" | "existing_unverifiable_distance"
+  | "existing_unverifiable_distance"
   | "missing_coordinates" | "total_capacity" | "place_exceeds_every_day";
 export interface WholeTripPlanResultDto {
   status: WholeTripPlanStatus;
@@ -236,11 +232,8 @@ function estimates(value: unknown): Record<string, PlanningEstimateDto> {
 }
 function check(value: unknown): PlanningBlockingCheckDto {
   const row = record(value);
-  return { dayId: text(row.dayId), code: oneOf(row.code, ["count", "effort", "budget", "daily_km", "max_hop", "unverifiable_distance", "baseline_unverifiable"]),
-    current: finite(row.current), added: finite(row.added), cap: finite(row.cap),
-    ...(row.fromId === undefined ? {} : { fromId: text(row.fromId) }),
-    ...(row.toId === undefined ? {} : { toId: text(row.toId) }),
-    ...(row.km === undefined ? {} : { km: number(row.km, 0, Number.MAX_VALUE) }) };
+  return { dayId: text(row.dayId), code: oneOf(row.code, ["count", "effort", "budget", "unverifiable_distance", "baseline_unverifiable"]),
+    current: finite(row.current), added: finite(row.added), cap: finite(row.cap) };
 }
 function endpoint(value: unknown): PlanningEndpointDto {
   const row = record(value);
@@ -261,7 +254,7 @@ export function parsePlanningDayLoad(value: unknown): PlanningDayLoadDto {
     mealReserveMinutes: finite(row.mealReserveMinutes), restMinutes: finite(row.restMinutes), slackMinutes: finite(row.slackMinutes),
     budgetMinutes: finite(row.budgetMinutes), visitMinutes: finite(row.visitMinutes), travelMinutes: finite(row.travelMinutes),
     loadMinutes: finite(row.loadMinutes), totalMinutes: finite(row.totalMinutes), count: version(row.count), effort: version(row.effort),
-    straightMetres: version(row.straightMetres), maxHopMetres: version(row.maxHopMetres), utilisation: finite(row.utilisation),
+    straightMetres: version(row.straightMetres), utilisation: finite(row.utilisation),
     noLodging: boolean(row.noLodging), missingCoordinateIds: array(row.missingCoordinateIds, text), unresolvedItemIds: array(row.unresolvedItemIds, text),
     route: array(row.route, (value) => { const node = record(value); return { id: text(node.id), kind: oneOf(node.kind, ["lodging", "anchor", "flexible", "pinned"] as const), start: endpoint(node.start), end: endpoint(node.end) }; }),
     legs: array(row.legs, (value) => { const leg = record(value); return { fromId: text(leg.fromId), toId: text(leg.toId), metres: version(leg.metres), travelMinutes: version(leg.travelMinutes) }; }),
@@ -293,7 +286,7 @@ export function parseWholeTripPlanResult(value: unknown): WholeTripPlanResultDto
     days: array(row.days, (value) => { const day = record(value); return { dayId: text(day.dayId), orderedPlaceIds: array(day.orderedPlaceIds, text), load: parsePlanningDayLoad(day.load) }; }),
     conflicts: array(row.conflicts, (value) => {
       const conflict = record(value);
-      return { code: oneOf(conflict.code, ["fixed_baseline_over_cap", "baseline_unverifiable", "existing_count_over_cap", "existing_effort_over_cap", "existing_budget_over_cap", "existing_daily_km_over_cap", "existing_max_hop_over_cap", "existing_unverifiable_distance", "missing_coordinates", "total_capacity", "place_exceeds_every_day"] as const),
+      return { code: oneOf(conflict.code, ["fixed_baseline_over_cap", "baseline_unverifiable", "existing_count_over_cap", "existing_effort_over_cap", "existing_budget_over_cap", "existing_unverifiable_distance", "missing_coordinates", "total_capacity", "place_exceeds_every_day"] as const),
         ...(conflict.dayId === undefined ? {} : { dayId: text(conflict.dayId) }), ...(conflict.placeId === undefined ? {} : { placeId: text(conflict.placeId) }), checks: array(conflict.checks, check) };
     }),
     unplaced: array(row.unplaced, (value) => { const place = record(value); return { placeId: text(place.placeId), reasons: array(place.reasons, check) }; }),

@@ -4,7 +4,7 @@ import type { PlannerDayLoad, PlannerInput, PlannerPlace, PlannerResult, Planner
 const VERIFIED_LOAD_FIELDS = [
   "windowStartMinute", "windowEndMinute", "windowMinutes", "fixedOccupancyMinutes", "mealReserveMinutes",
   "restMinutes", "slackMinutes", "budgetMinutes", "visitMinutes", "travelMinutes", "loadMinutes", "totalMinutes",
-  "count", "effort", "straightMetres", "maxHopMetres", "status",
+  "count", "effort", "straightMetres", "status",
 ] as const satisfies readonly (keyof PlannerDayLoad)[];
 
 /** Independent of construction and its distance matrix, cached loads, search state and moves. */

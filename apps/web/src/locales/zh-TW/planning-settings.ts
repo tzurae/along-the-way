@@ -27,8 +27,6 @@ export const planningSettings = {
     dayStart: { label: "一天最早幾點出門", help: "使用當地時間。" },
     dayEnd: { label: "最晚幾點回住宿", help: "使用當地時間，只用來計算可用時數。" },
     maxEffortPerDay: { label: "每日體力上限", unit: "點", help: "每個地點是 1–5 點，整天相加不能超過這裡。" },
-    maxDailyStraightKm: { label: "每日直線距離上限", unit: "公里", help: "這是地圖上的直線距離，不是實際步行或車程。" },
-    maxHopStraightKm: { label: "單段直線距離上限", unit: "公里", help: "任兩個相鄰地點之間的直線距離。" },
     mealReserveMinutes: { label: "用餐預留", unit: "分鐘／日", help: "當天已有餐廳、咖啡廳或餐食安排時，會扣掉重複的部分。" },
     restMinutes: { label: "另外休息", unit: "分鐘／日", help: "地點停留以外，另外保留的休息時間。" },
     slackPercent: { label: "保留餘裕", unit: "%", help: "留給排隊、迷路和臨時停留，不會排進地點。" },

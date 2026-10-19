@@ -40,8 +40,6 @@ type NumericField =
   | "targetPlacesPerDay"
   | "maxPlacesPerDay"
   | "maxEffortPerDay"
-  | "maxDailyStraightKm"
-  | "maxHopStraightKm"
   | "mealReserveMinutes"
   | "restMinutes"
   | "slackPercent"
@@ -53,8 +51,6 @@ const NUMERIC_FIELDS: Record<NumericField, { min: number; max: number; step: num
   targetPlacesPerDay: { min: 0, max: 10, step: 1 },
   maxPlacesPerDay: { min: 1, max: 12, step: 1 },
   maxEffortPerDay: { min: 1, max: 25, step: 1 },
-  maxDailyStraightKm: { min: 1, max: 100, step: 1 },
-  maxHopStraightKm: { min: 0.5, max: 50, step: 0.5 },
   mealReserveMinutes: { min: 0, max: 180, step: 5 },
   restMinutes: { min: 0, max: 180, step: 5 },
   slackPercent: { min: 0, max: 40, step: 1 },
@@ -65,7 +61,7 @@ const NUMERIC_FIELDS: Record<NumericField, { min: number; max: number; step: num
 
 const PACE_FIELDS: Partial<Record<keyof PlanningSettings, true>> = {
   targetPlacesPerDay: true, maxPlacesPerDay: true, dayStart: true, dayEnd: true,
-  maxEffortPerDay: true, maxDailyStraightKm: true, maxHopStraightKm: true,
+  maxEffortPerDay: true,
   mealReserveMinutes: true, restMinutes: true, slackPercent: true, lightTravelDays: true,
 };
 
@@ -97,7 +93,6 @@ function impactLine(day: PlanningDayLoadDto) {
     `地點 ${day.count}/${day.caps.maxPlacesPerDay}`,
     `體力 ${day.effort}/${day.caps.maxEffortPerDay}`,
     `估計總時數 ${formatDuration(day.totalMinutes)}/${formatDuration(day.windowMinutes)}`,
-    `直線距離 ${(day.straightMetres / 1_000).toFixed(1)}/${day.caps.maxDailyStraightKm} 公里`,
   ].join("・");
 }
 
@@ -390,10 +385,10 @@ export function TripPlanningSettings({ tripId, revision, canEdit, request, onCre
   }
 
   const basicNumericFields = useMemo(() => [
-    "targetPlacesPerDay", "maxPlacesPerDay", "maxEffortPerDay", "maxDailyStraightKm",
+    "targetPlacesPerDay", "maxPlacesPerDay", "maxEffortPerDay",
   ] as const, []);
   const advancedNumericFields = useMemo(() => [
-    "mealReserveMinutes", "restMinutes", "slackPercent", "maxHopStraightKm",
+    "mealReserveMinutes", "restMinutes", "slackPercent",
   ] as const, []);
   const travelNumericFields = useMemo(() => ["speedKmh", "detourFactor", "perLegMinutes"] as const, []);
 

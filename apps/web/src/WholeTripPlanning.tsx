@@ -153,7 +153,6 @@ function shortcutOverride(effective: PlanningSettings, kind: "relaxed" | "heavie
     maxPlacesPerDay,
     maxEffortPerDay: clamp(effective.maxEffortPerDay + (relaxed ? -3 : 5), 1, 25),
     dayEnd: addClockHours(effective.dayEnd, relaxed ? -1 : 2),
-    maxDailyStraightKm: clamp(effective.maxDailyStraightKm + (relaxed ? -8 : 10), 1, 100),
     restMinutes: clamp(effective.restMinutes + (relaxed ? 15 : -15), 0, 180),
   };
 }
@@ -175,11 +174,6 @@ function durationLabel(minutes: number) {
   const remainder = rounded % 60;
   if (hours === 0) return `${remainder} 分`;
   return remainder === 0 ? `${hours} 小時` : `${hours} 小時 ${remainder} 分`;
-}
-
-function distanceLabel(metres: number) {
-  const kilometres = metres / 1000;
-  return `${kilometres < 10 ? kilometres.toFixed(1) : Math.round(kilometres)} 公里`;
 }
 
 function dateLabel(date: string, locale: string) {
@@ -527,7 +521,6 @@ function PlanningMeter({ label, actual, cap, display, level }: {
 export function PlanningMeters({ day }: { day: PlanningDayLoadDto }) {
   const { t } = useI18n();
   const copy = t.wholeTripPlanner.meters;
-  const distanceUnverifiable = day.status === "unverifiable_distance" || day.missingCoordinateIds.length > 0;
   const meters = [
     {
       label: copy.places,
@@ -550,13 +543,6 @@ export function PlanningMeters({ day }: { day: PlanningDayLoadDto }) {
       display: `${durationLabel(day.totalMinutes)} / ${durationLabel(day.windowMinutes)}`,
       level: statusLevel(day.totalMinutes, day.windowMinutes),
     },
-    {
-      label: copy.straightDistance,
-      actual: day.straightMetres,
-      cap: day.caps.maxDailyStraightKm * 1000,
-      display: distanceUnverifiable ? "—" : `${distanceLabel(day.straightMetres)} / ${day.caps.maxDailyStraightKm} 公里`,
-      level: statusLevel(day.straightMetres, day.caps.maxDailyStraightKm * 1000, distanceUnverifiable),
-    },
   ] as const;
   return (
     <>
@@ -572,7 +558,6 @@ export function PlanningMeters({ day }: { day: PlanningDayLoadDto }) {
           <div><dt>{copy.parts.meal}</dt><dd>{durationLabel(day.mealReserveMinutes)}</dd></div>
           <div><dt>{copy.parts.rest}</dt><dd>{durationLabel(day.restMinutes)}</dd></div>
           <div><dt>{copy.parts.slack}</dt><dd>{durationLabel(day.slackMinutes)}</dd></div>
-          <div><dt>{copy.longestHop}</dt><dd>{distanceUnverifiable ? "—" : `${distanceLabel(day.maxHopMetres)} / ${day.caps.maxHopStraightKm} 公里`}</dd></div>
           <div><dt>{copy.parts.window}</dt><dd>{durationLabel(day.windowMinutes)}</dd></div>
           <p className="planning-load-note">{copy.straightLineNote}</p>
           {day.noLodging ? <p className="planning-load-note">{copy.noLodging}</p> : null}
@@ -642,7 +627,7 @@ interface OverrideFieldDefinition {
   minimum?: number;
   maximum?: number;
   step?: number;
-  unit: "places" | "effort" | "km" | "minutes" | "percent" | "time";
+  unit: "places" | "effort" | "minutes" | "percent" | "time";
 }
 
 const OVERRIDE_FIELDS: OverrideFieldDefinition[] = [
@@ -651,8 +636,6 @@ const OVERRIDE_FIELDS: OverrideFieldDefinition[] = [
   { key: "dayStart", unit: "time" },
   { key: "dayEnd", unit: "time" },
   { key: "maxEffortPerDay", minimum: 1, maximum: 25, step: 1, unit: "effort" },
-  { key: "maxDailyStraightKm", minimum: 1, maximum: 100, step: 0.5, unit: "km" },
-  { key: "maxHopStraightKm", minimum: 0.5, maximum: 50, step: 0.5, unit: "km" },
   { key: "mealReserveMinutes", minimum: 0, maximum: 180, step: 15, unit: "minutes" },
   { key: "restMinutes", minimum: 0, maximum: 180, step: 15, unit: "minutes" },
   { key: "slackPercent", minimum: 0, maximum: 40, step: 1, unit: "percent" },
@@ -872,7 +855,6 @@ function OverrideSheet() {
             effective.maxPlacesPerDay,
             effective.maxEffortPerDay,
             durationLabel(planningClockMinutes(effective.dayEnd) - planningClockMinutes(effective.dayStart)),
-            effective.maxDailyStraightKm,
           )}
         </p>
         {impact ? (
@@ -897,8 +879,6 @@ function reasonLabel(check: PlanningBlockingCheckDto, copy: PlannerCopy) {
   if (check.code === "count") return `${copy.reasons.max_places}（${check.current} + ${check.added} / ${check.cap} 個）`;
   if (check.code === "effort") return `${copy.reasons.effort}（${check.current} + ${check.added} / ${check.cap} 點）`;
   if (check.code === "budget") return `${copy.reasons.budget}（${durationLabel(check.current)} + ${durationLabel(check.added)} / ${durationLabel(check.cap)}）`;
-  if (check.code === "daily_km") return `${copy.reasons.daily_km}（${(check.current / 1000).toFixed(1)} + ${(check.added / 1000).toFixed(1)} / ${(check.cap / 1000).toFixed(1)} 公里）`;
-  if (check.code === "max_hop") return `${copy.reasons.max_hop}（${check.km?.toFixed(1) ?? (check.added / 1000).toFixed(1)} / ${check.cap / 1000} 公里）`;
   if (check.code === "unverifiable_distance") return copy.reasons.missing_coordinates;
   return copy.reasons.baseline_unverifiable;
 }
