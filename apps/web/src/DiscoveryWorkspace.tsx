@@ -9,7 +9,6 @@ import {
   type DiscoveryClaimSentenceDto,
   type DiscoveryEndorsement,
   type DiscoveryQuestionAnswerDto,
-  type DiscoveryShortfallDto,
   type DiscoveryWorkspaceDto,
   type ScheduleDiscoveryProposalsInput,
   type ScheduleDiscoveryProposalsResponse,
@@ -97,38 +96,6 @@ function endorsementLabel(
     case "google_reviews": return t.endorsement.googleReviews;
     case "wikivoyage": return t.endorsement.wikivoyage;
     case "official_tourism": return t.endorsement.officialTourism;
-  }
-}
-
-function shortfallText(shortfall: DiscoveryShortfallDto, t: Messages["discovery"]) {
-  switch (shortfall.code) {
-    case "not_researched":
-      return t.shortfall.notResearched;
-    case "not_found":
-      return t.shortfall.notFound;
-    case "name_mismatch":
-      return t.shortfall.nameMismatch;
-    case "single_source": {
-      // Fewer than two by definition: none, or exactly one.
-      const vouched = shortfall.endorsements.map((endorsement) =>
-        endorsementLabel(endorsement, t)
-      ).join("、");
-      return vouched ? t.shortfall.oneSource(vouched) : t.shortfall.noSource;
-    }
-    case "category_short":
-      return shortfall.count ? t.shortfall.onePassed : t.shortfall.nonePassed;
-    case "in_wishlist":
-      return t.shortfall.inWishlist;
-    case "rejected":
-      return t.shortfall.rejectedBefore;
-    case "permanently_closed":
-      return t.shortfall.permanentlyClosed;
-    case "temporarily_closed":
-      return t.shortfall.temporarilyClosed;
-    case "outside_trip":
-      return t.shortfall.outsideTrip;
-    case "no_location":
-      return t.shortfall.noLocation;
   }
 }
 
@@ -1260,7 +1227,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
               </FlipList>
               )}
             </section>
-          ) : workspace?.proposals.length ? null : workspace?.latestRun?.status === "completed" ? <p className="order-2 rounded-panel border border-dashed p-5 text-center text-muted-foreground">{workspace.latestRun.shortfalls.length ? t.proposal.noneNew : t.proposal.nonePassed}</p> : null}
+          ) : workspace?.proposals.length ? null : workspace?.latestRun?.status === "completed" ? <p className="order-2 rounded-panel border border-dashed p-5 text-center text-muted-foreground">{t.proposal.nonePassed}</p> : null}
 
           {selectedProposal ? (
             <PlaceDetailSheet
@@ -1307,14 +1274,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
               <h3 className="font-display text-2xl">{t.decided.title}</h3>
               <p className="mt-1 text-sm text-muted-foreground">{t.decided.description}</p>
               <ul className="mt-3 grid gap-2">{decisions.map((decision) => <li key={decision.proposalId} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-surface-subtle p-3"><strong>{decision.name}</strong><span className="flex items-center gap-2 text-sm">{decision.status === "accepted" ? t.decided.accepted : t.decided.rejected}{decision.decidedAt ? `・${t.decided.decidedAt(new Date(decision.decidedAt).toLocaleDateString(locale))}` : null}{decision.status === "rejected" && trip.role === "owner" ? <button type="button" className="pd-secondary" disabled={pending !== null} aria-label={t.decided.restoreLabel(decision.name)} onClick={() => void restoreProposal(decision)}>{t.decided.restore}</button> : null}</span></li>)}</ul>
-            </section>
-          ) : null}
-
-          {workspace?.latestRun?.status === "completed" && workspace.latestRun.shortfalls.length ? (
-            <section className="order-4 rounded-panel border border-ink/10 p-4" aria-label={t.missing.areaLabel}>
-              <h3 className="font-display text-2xl">{t.missing.title}</h3>
-              <p className="mt-1 text-sm text-muted-foreground">{t.missing.description}</p>
-              <ul className="mt-3 grid gap-2">{workspace.latestRun.shortfalls.map((shortfall) => <li key={`${shortfall.code}:${shortfall.subject}`} className="rounded-lg bg-surface-subtle p-3"><strong>{shortfall.subject}</strong>{shortfall.named ? <span className="ml-2 text-xs font-bold uppercase tracking-[0.12em] text-accent-strong">{t.missing.requested}</span> : null}<span className="block text-sm">{shortfallText(shortfall, t)}</span></li>)}</ul>
             </section>
           ) : null}
 
