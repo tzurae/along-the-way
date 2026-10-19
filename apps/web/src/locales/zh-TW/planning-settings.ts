@@ -38,6 +38,7 @@ export const planningSettings = {
   lightTravelDays: "抵達／離開日少排一點",
   lightTravelDaysHelp: "有航班的日期會自動降低地點和體力上限；有單日覆寫的欄位不受影響。",
   travelProfileLegend: "主要怎麼移動",
+  travelProfileHelp: "用來估地點之間要花多少時間。走路比搭車慢，同一天能排的地點就比較少。",
   travelProfiles: {
     walk: { label: "步行", description: "4 km/h・繞路 1.3 倍・每段 0 分鐘" },
     transit: { label: "大眾運輸", description: "15 km/h・繞路 1.35 倍・每段 10 分鐘" },

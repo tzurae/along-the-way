@@ -497,8 +497,9 @@ export function TripPlanningSettings({ tripId, revision, canEdit, request, onCre
                 {advancedNumericFields.map((field) => <NumberField key={field} field={field} value={draft[field]} disabled={!canEdit || busy} error={errors[field]} {...t.fields[field]} onChange={(value) => update(field, value)} />)}
               </div>
             </section>
-            <fieldset className="planning-settings__section" disabled={!canEdit || busy}>
+            <fieldset className="planning-settings__section" disabled={!canEdit || busy} aria-describedby="planning-travel-profile-help">
               <legend>{t.travelProfileLegend}</legend>
+              <p id="planning-travel-profile-help" className="planning-settings__section-help">{t.travelProfileHelp}</p>
               <div className="planning-settings__profiles">
                 {(["walk", "transit", "car", "custom"] as const).map((profile) => <label key={profile} className="planning-settings__choice">
                   <input type="radio" name="travel-profile" value={profile} checked={draft.travelProfile === profile} onChange={() => chooseTravelProfile(profile)} />

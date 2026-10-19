@@ -103,6 +103,14 @@
   font-weight: 700;
 }
 
+.planning-settings__section-help {
+  max-width: 65ch;
+  margin: -4px 0 12px;
+  color: var(--color-muted-foreground);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
 .planning-settings__presets,
 .planning-settings__profiles {
   display: grid;
