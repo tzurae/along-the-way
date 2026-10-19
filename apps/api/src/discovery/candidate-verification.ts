@@ -3,7 +3,6 @@ import type { ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-pl
 import {
   ProviderQuotaError,
   ProviderUnavailableError,
-  type RatedPlaceCandidate,
   type RatedPlaceLookup,
 } from "../trip-places/google-places-provider";
 import type { DiscoveryRequest, ResearchedCandidate } from "./discovery-model";
@@ -13,7 +12,7 @@ import {
   pageMentions,
 } from "./official-pages";
 import { placeNameMatch } from "./place-names";
-import { gateRecommendations, infeasible, type GateCandidate, type GateResult } from "./recommendation-gate";
+import { gateRecommendations, type GateCandidate, type GateResult } from "./recommendation-gate";
 import { WikivoyageVerifier, type WikivoyagePage } from "./wikivoyage";
 
 /** External checks, injectable so tests never reach Wikivoyage or arbitrary web pages. */
@@ -33,11 +32,11 @@ const OUTBOUND_CONCURRENCY = 6;
 /** Official pages fetched per place; the first that mentions it is enough. */
 const MAX_OFFICIAL_PAGES = 3;
 /**
- * Google lookups per research run (Text Search Enterprise, US$35 per 1,000 after the free tier):
- * at most about US$0.70. Every researched place gets its first lookup; second-language
- * retries use only what is left.
+ * Place Details lookups per research run (Enterprise, for rating and status): one per picked
+ * place in the traveler's language, plus, while it lasts, one in the local language for a name
+ * that did not match. Twice the research cap, so every picked place gets its first lookup.
  */
-export const MAX_GOOGLE_LOOKUPS = 20;
+export const MAX_GOOGLE_LOOKUPS = 40;
 
 export interface VerifiedCandidate {
   researched: ResearchedCandidate;
@@ -47,8 +46,6 @@ export interface VerifiedCandidate {
 }
 
 export interface VerificationResult {
-  /** Google lookups made, in order, for the persisted search plan. */
-  queries: string[];
   candidates: VerifiedCandidate[];
   gate: GateResult;
 }
@@ -84,7 +81,7 @@ function languages(outputLanguage: string, localLanguage: string) {
 }
 
 /**
- * Looks every researched place up on Google by a short "area name" query, checks which
+ * Looks every picked place up on Google by the Place ID discovery returned, checks which
  * independent sources really vouch for it, and applies the deterministic quality gate.
  */
 export async function verifyResearchedCandidates(input: {
@@ -95,19 +92,17 @@ export async function verifyResearchedCandidates(input: {
   sourceChecks: RecommendationSourceChecks;
   rejectedProviderPlaceIds: ReadonlySet<string>;
   wishlistProviderPlaceIds: ReadonlySet<string>;
+  suggestedProviderPlaceIds: ReadonlySet<string>;
   tripCountryCodes: ReadonlySet<string>;
 }): Promise<VerificationResult> {
-  const queries: string[] = [];
   let lookups = 0;
   let unavailable = 0;
-  const lookup = async (query: string, languageCode: string) => {
+  const details = async (providerPlaceId: string, languageCode: string) => {
     // Reserved before awaiting, so concurrent lookups can never exceed the budget.
     if (lookups >= MAX_GOOGLE_LOOKUPS) return null;
     lookups += 1;
-    // The same text may be asked in two languages; the plan lists each text once.
-    if (!queries.includes(query)) queries.push(query);
     try {
-      return await input.placeLookup.lookup(query, { languageCode });
+      return await input.placeLookup.details(providerPlaceId, { languageCode });
     } catch (error) {
       if (error instanceof ProviderQuotaError) throw error;
       if (!(error instanceof ProviderUnavailableError)) throw error;
@@ -116,67 +111,28 @@ export async function verifyResearchedCandidates(input: {
     }
   };
   const sameLanguage = baseLanguage(input.request.localLanguage) === baseLanguage(input.outputLanguage);
-  // Traveler-named places first, so a tight budget is spent on what they asked for.
-  const order = input.candidates
-    .map((candidate, index) => ({ candidate, index }))
-    .sort((left, right) => Number(right.candidate.namedPlace !== null) - Number(left.candidate.namedPlace !== null));
-  // An exact name anywhere in Google's answer beats a close one earlier in it; the order
-  // Google returns is not stable, and a close match is the weaker identification. Among equal
-  // matches, a listing that could be visited beats a closed, foreign or unmapped one, such as
-  // the old listing of a business that moved.
-  const visitable = (entry: RatedPlaceCandidate) => infeasible({
-    businessStatus: entry.businessStatus,
-    countryCode: entry.countryCode,
-    located: entry.candidate.latitude !== null && entry.candidate.longitude !== null,
-  }, input.tripCountryCodes) === null;
-  const best = (candidate: ResearchedCandidate, results: readonly RatedPlaceCandidate[] | null) => {
-    if (!results) return null;
-    const graded = results.map((entry) => ({ entry, match: placeNameMatch(names(candidate), entry.candidate.name) }));
-    const pick = (match: "exact" | "close") =>
-      graded.find((item) => item.match === match && visitable(item.entry)) ?? graded.find((item) => item.match === match);
-    return (pick("exact") ?? pick("close"))?.entry ?? null;
-  };
-
-  // 1. Every place: its name in the traveler's language, answered in that language.
-  const firsts = new Map<number, RatedPlaceCandidate[] | null>();
-  await mapLimit(order, OUTBOUND_CONCURRENCY, async ({ candidate, index }) => {
-    firsts.set(index, await lookup(`${candidate.area} ${candidate.name}`.trim(), input.outputLanguage));
-  });
-  // 2. Places still unmatched, while the budget lasts.
-  const matches = await mapLimit(order, OUTBOUND_CONCURRENCY, async ({ candidate, index }) => {
-    const first = firsts.get(index) ?? null;
-    let returned = Boolean(first?.length);
-    let match = best(candidate, first);
-    // The local name, answered in the local language: Google's "廣藏市場" cannot be compared
-    // with the researched "광장시장", but its Korean answer can. This also covers a model that
-    // wrote the local name as the name. When the first lookup returned the same place, keep
-    // that answer so the card shows the traveler's language.
-    const localName = candidate.localName ?? candidate.name;
-    if (!match && (localName !== candidate.name || !sameLanguage)) {
-      const local = await lookup(`${candidate.area} ${localName}`.trim(), input.request.localLanguage);
-      returned ||= Boolean(local?.length);
-      const localMatch = best(candidate, local);
-      const translated = localMatch
-        ? first?.find((entry) => entry.candidate.providerPlaceId === localMatch.candidate.providerPlaceId)
-        : undefined;
-      match = localMatch && translated ? { ...localMatch, candidate: translated.candidate } : localMatch;
+  // 1. Every picked place: its Google details, and a check that the Place ID is the place the
+  // model wrote about. The summary cites places by position, so the model can pick the ID of a
+  // neighbouring result; its sentences and sources would then describe another place.
+  const matches = await mapLimit(input.candidates, OUTBOUND_CONCURRENCY, async (candidate) => {
+    const first = await details(candidate.providerPlaceId, input.outputLanguage);
+    if (!first) return { match: null, returned: false };
+    if (placeNameMatch(names(candidate), first.candidate.name)) return { match: first, returned: true };
+    // Google may answer in the local script ("千とせ") where the model wrote another; the card
+    // keeps the traveler-language answer.
+    if (!sameLanguage) {
+      const local = await details(candidate.providerPlaceId, input.request.localLanguage);
+      if (local && placeNameMatch(names(candidate), local.candidate.name)) return { match: first, returned: true };
     }
-    // The English name, answered in the traveler's language.
-    if (!match && candidate.englishName && candidate.englishName !== candidate.name) {
-      const english = await lookup(`${candidate.area} ${candidate.englishName}`.trim(), input.outputLanguage);
-      returned ||= Boolean(english?.length);
-      match = best(candidate, english);
-    }
-    return { index, match, returned };
+    return { match: null, returned: true };
   });
-  const matchByIndex = new Map(matches.map((entry) => [entry.index, entry]));
-
-  // 3. Independent sources, only for places Google confirmed.
+  const matchByIndex = new Map(matches.map((entry, index) => [index, entry]));
+  // 2. Independent sources, only for places Google returned details for.
   const wikivoyage = input.sourceChecks.wikivoyage();
   const editions = languages(input.outputLanguage, input.request.localLanguage);
   const results = await mapLimit(input.candidates.map((candidate, index) => ({ candidate, index })), OUTBOUND_CONCURRENCY, async ({ candidate, index }) => {
     const candidateNames = names(candidate);
-    const { match, returned } = matchByIndex.get(index)!;
+    const { match, returned } = matchByIndex.get(index) ?? { match: null, returned: false };
     if (!match) {
       return {
         verified: { researched: candidate, place: null, wikivoyagePage: null, officialPage: null },
@@ -232,7 +188,6 @@ export async function verifyResearchedCandidates(input: {
   });
   if (lookups > 0 && unavailable === lookups) throw new ProviderUnavailableError();
   return {
-    queries,
     candidates: results.map((result) => result.verified),
     gate: gateRecommendations({
       candidates: results.map((result) => result.gate),
@@ -240,6 +195,7 @@ export async function verifyResearchedCandidates(input: {
       categories: input.request.categories,
       rejectedProviderPlaceIds: input.rejectedProviderPlaceIds,
       wishlistProviderPlaceIds: input.wishlistProviderPlaceIds,
+      suggestedProviderPlaceIds: input.suggestedProviderPlaceIds,
       tripCountryCodes: input.tripCountryCodes,
     }),
   };

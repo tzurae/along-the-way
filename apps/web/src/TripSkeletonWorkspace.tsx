@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Temporal } from "@js-temporal/polyfill";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import {
@@ -43,6 +43,13 @@ import { safeExternalUrl } from "./external-url";
 import "./plan-route.css";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import { readTripOverviewFilter, TRIP_OVERVIEW_FILTER_CHANGE_EVENT, writeTripOverviewFilter } from "./trip-location";
+import {
+  PlanningDaySummary,
+  WholeTripPlannerButton,
+  WholeTripPlanningOverlays,
+  WholeTripPlanningProvider,
+  type WholeTripPlannerLaunch,
+} from "./WholeTripPlanning";
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -51,10 +58,12 @@ interface RequestOptions extends RequestInit {
 
 type JsonRequest = <T>(url: string, options?: RequestOptions) => Promise<T>;
 
-interface TripSkeletonWorkspaceProps {
+export interface TripSkeletonWorkspaceProps {
   trip: TripDto;
   request: JsonRequest;
   placesRevision: number;
+  plannerLaunch?: WholeTripPlannerLaunch | null;
+  onPlannerLaunchConsumed?(): void;
   onPlacesChanged(): void;
   onTravelEdit(type: "flight" | "lodging"): void;
 }
@@ -296,14 +305,12 @@ function DayAssignmentPicker({
                   <span className="plan-kind-chip">{t.tripSkeleton.placeTypes[place.type]}</span>
                 </div>
                 <div className="plan-place-meta">
-                  <span className="plan-place-status">
-                    {blocked ? <MapPinOff aria-hidden="true" /> : <CalendarClock aria-hidden="true" />}
-                    {blocked
-                      ? t.tripSkeleton.locationRequired
-                      : source === "pending"
-                        ? t.tripSkeleton.pendingArrangement
-                        : t.tripSkeleton.notScheduled}
-                  </span>
+                  {blocked || source === "pending" ? (
+                    <span className="plan-place-status">
+                      {blocked ? <MapPinOff aria-hidden="true" /> : <CalendarClock aria-hidden="true" />}
+                      {blocked ? t.tripSkeleton.locationRequired : t.tripSkeleton.pendingArrangement}
+                    </span>
+                  ) : null}
                   {source === "pending" ? (
                     <span>
                       {place.unplacedFromDate === null
@@ -372,6 +379,8 @@ export function TripSkeletonWorkspace({
   trip,
   request,
   placesRevision,
+  plannerLaunch,
+  onPlannerLaunchConsumed,
   onPlacesChanged,
   onTravelEdit,
 }: TripSkeletonWorkspaceProps) {
@@ -391,6 +400,9 @@ export function TripSkeletonWorkspace({
   const assignmentErrorPlaceIdRef = useRef<string | null>(null);
   const [viewingAssignedPlaceId, setViewingAssignedPlaceId] = useState<string | null>(null);
   const [repairingPlaceId, setRepairingPlaceId] = useState<string | null>(null);
+  // 待安排 expands/collapses with a height animation, so it is a button + grid rows instead of <details>.
+  const [pendingOpen, setPendingOpen] = useState(false);
+  const pendingBodyId = useId();
   const viewingAssignedPlace = viewingAssignedPlaceId ? tripPlaces.find((place) => place.id === viewingAssignedPlaceId) : undefined;
   const repairingPlace = repairingPlaceId ? tripPlaces.find((place) => place.id === repairingPlaceId) : undefined;
   const actionKeys = useRef(new Map<string, string>());
@@ -506,6 +518,18 @@ export function TripSkeletonWorkspace({
     () => new Map(skeleton?.items.map((item) => [item.id, item]) ?? []),
     [skeleton?.items],
   );
+  const plannerFlightDayIds = useMemo(() => new Set(
+    skeleton?.days
+      .filter((day) => day.entries.some((entry) => itemsById.get(entry.itemId)?.type === "flight"))
+      .map((day) => day.id) ?? [],
+  ), [itemsById, skeleton?.days]);
+  const planningEntityNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const place of tripPlaces) names.set(place.id, place.name);
+    for (const place of skeleton?.places ?? []) names.set(place.id, place.name);
+    for (const item of skeleton?.items ?? []) names.set(item.id, item.title);
+    return names;
+  }, [skeleton?.items, skeleton?.places, tripPlaces]);
 
   async function savePlace(input: UpdatePlaceInput, place: PlaceDto, conflictBase?: number) {
     if (!skeleton) throw new Error(t.tripSkeleton.loadingError);
@@ -1008,11 +1032,35 @@ export function TripSkeletonWorkspace({
     writeTripOverviewFilter(days);
   }
   return (
-    <>
+    <WholeTripPlanningProvider
+      tripId={trip.id}
+      request={request}
+      days={skeleton.days}
+      flightDayIds={plannerFlightDayIds}
+      entityNames={planningEntityNames}
+      hasSelectedPlaces={tripPlaces.some((place) => place.selectedForItinerary)}
+      canArrange={canArrange}
+      refreshToken={placesRevision}
+      plannerLaunch={plannerLaunch}
+      onPlannerLaunchConsumed={onPlannerLaunchConsumed}
+      onEditPlace={(placeId) => {
+        setRepairingPlaceId(placeId);
+        setError("");
+      }}
+      onApplied={async () => {
+        await load();
+        onPlacesChanged();
+      }}
+    >
       <section className="trip-skeleton-shell plan-workspace" aria-labelledby="itinerary-heading">
         <header className="plan-pagehead">
-          <h2 id="itinerary-heading">{t.tripSkeleton.heading}</h2>
-          <p>{t.tripSkeleton.introduction}</p>
+          <div className="plan-pagehead__main">
+            <div>
+              <h2 id="itinerary-heading">{t.tripSkeleton.heading}</h2>
+              <p>{t.tripSkeleton.introduction}</p>
+            </div>
+            <WholeTripPlannerButton />
+          </div>
         </header>
 
         {!canArrange ? (
@@ -1025,8 +1073,14 @@ export function TripSkeletonWorkspace({
           <p role="alert" className="plan-page-error">{error}</p>
         ) : null}
 
-        <details className="plan-pending">
-          <summary>
+        <section className="plan-pending" data-open={pendingOpen}>
+          <button
+            type="button"
+            className="plan-pending-toggle"
+            aria-expanded={pendingOpen}
+            aria-controls={pendingBodyId}
+            onClick={() => setPendingOpen((open) => !open)}
+          >
             <span className="plan-pending-title">
               <strong>{t.tripSkeleton.pendingTitle}</strong>
               <span>{t.tripSkeleton.pendingHelper}</span>
@@ -1038,8 +1092,10 @@ export function TripSkeletonWorkspace({
               {pendingPlaces.length}
             </span>
             <ChevronDown aria-hidden="true" className="plan-pending-chevron" />
-          </summary>
-          <div className="plan-pending-body">
+          </button>
+          <div className="plan-pending-expander" inert={!pendingOpen}>
+          <div className="plan-pending-clip">
+          <div id={pendingBodyId} className="plan-pending-body">
             {pendingPlaces.length === 0 ? (
               <div className="plan-pending-empty">
                 <CalendarDays aria-hidden="true" />
@@ -1092,7 +1148,9 @@ export function TripSkeletonWorkspace({
               </ul>
             )}
           </div>
-        </details>
+          </div>
+          </div>
+        </section>
 
         <div
           className="plan-day-filter"
@@ -1201,6 +1259,7 @@ export function TripSkeletonWorkspace({
                     ) : null}
                   </div>
                 </header>
+                <PlanningDaySummary dayId={day.id} />
                 {missingLodging ? (
                   <aside className="plan-lodging-notice">
                     <BedDouble aria-hidden="true" />
@@ -1478,8 +1537,8 @@ export function TripSkeletonWorkspace({
         />
 
         {repairingPlace ? renderLocationEditor(repairingPlace, true) : null}
-
+        <WholeTripPlanningOverlays />
       </section>
-    </>
+    </WholeTripPlanningProvider>
   );
 }

@@ -25,6 +25,6 @@ export function todayWishlist(saved = false): TripPlaceDto[] {
   return ["FIRST", "SECOND"].map((name, index) => ({ id: name, tripId: "A", placeId: `canonical-${name}`, legacyPlaceId: `legacy-${name}`, provider: "manual", aiProposalId: null,
     providerPlaceId: null, providerObservedAt: null, providerExpiresAt: null, providerAttribution: null, factsSource: "member", providerFactsExpired: false,
     name, type: "activity", address: null, latitude: 34 + index, longitude: 135, timeZone: index === 0 ? "Asia/Tokyo" : "Europe/Paris",
-    status: "ready", scheduled: false, selectedForItinerary: true, unplacedFromDate: null, durationMinutes: 60, assignedDayId: "day21", dayPosition: saved ? 1 - index : index,
+    status: "ready", scheduled: false, selectedForItinerary: true, unplacedFromDate: null, durationMinutes: 60, effortLevel: null, assignedDayId: "day21", dayPosition: saved ? 1 - index : index,
     budgetAmountMinor: null, budgetCurrency: null, notes: null, sourceUrl: null, voters: [], voteCount: 0, ownVote: false, votingAvailable: false, duplicateSuggestions: [], version: 1 }));
 }

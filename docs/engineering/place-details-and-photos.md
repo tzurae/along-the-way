@@ -30,7 +30,7 @@ GET /api/trips/:tripId/google-place-photos/<providerPlaceId>?index=0|1|2&photo=<
 
 每條 route 先驗證登入與有效旅程成員資格，再解析同一旅程的 reference。策展照片雜湊不是公開憑證：仍需登入、旅程成員資格，以及 reference 與照片的關聯；其回應使用 private／no-store。Google 代理一律要求綁定旅程、使用者、provider place id、index、fingerprint、完整 photo resource 與到期時間的 HMAC capability，不能只憑地點已屬於旅程略過驗章。代理按帳號每小時 600 次、IP 每小時 1,200 次限流，回應使用 `Cache-Control: private, max-age=86400` 及 `X-Content-Type-Options: nosniff`。未知檔案、缺失或毀損不冒充正常圖片。
 
-已接受提案優先使用 `accepted_trip_place_id` 的 canonical identity；未接受提案的 Google provider id 直接來自該提案，無須為顯示照片建立 `place_identities`。legacy 行程地點只能經同旅程既有 `trip_places.legacy_place_id` 關聯解析。地點名稱不作為身分匹配鍵；不建立或合併身分來湊內容。手動地點、未知店、同名分店及未關聯的 travel-only 地點不借用其他地點的內容或照片；原有可確認的行程資料仍保留。
+已接受提案優先使用 `accepted_trip_place_id` 的 canonical identity；未接受提案用該提案的 Google provider id 對應 `place_identities`。**2026-10-19 owner 決定：AI 建議在建立時就用它的 Google place id upsert 地點身分**（`upsertGooglePlaceIdentity`，與口袋名單共用；只存 id 與基本事實，不存 Google 照片或評論），並在交易提交後於背景逐一觸發 Commons 候選，讓清單縮圖不必呼叫 Google；被拒絕的建議會留下身分列，畫面上看不到。既有建議由 `backfill-commons-candidates.ts` 先依已存的 google-place evidence 補建身分。legacy 行程地點只能經同旅程既有 `trip_places.legacy_place_id` 關聯解析。地點名稱不作為身分匹配鍵；不建立或合併身分來湊內容。手動地點、未知店、同名分店及未關聯的 travel-only 地點不借用其他地點的內容或照片；原有可確認的行程資料仍保留。
 
 完整策展內容與依 position 排序的前兩張照片由同一 SQL statement 讀取 publication snapshot，且在 JSON aggregation 前即限制為 2。預覽批次只取首張策展 metadata 及 capped count，沒有策展照片時查儲存的 Commons 代表照片，再沒有就回 null。三種 preview reference 都不呼叫 Google、不消耗 `place_photo_metadata` 額度；詳情有 provider identity 時才先走下述 Google 路徑，無照片、失敗或受限時再依序使用策展與 Commons。
 

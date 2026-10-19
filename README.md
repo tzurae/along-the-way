@@ -261,6 +261,42 @@ These migrations are expand-only; older application code ignores the new table.
 Rollback requires retaining these migration files in the rollback build because
 Kysely rejects a migration history containing files missing from that build.
 
+### Today place guides (migration 036)
+
+Deploy `036_place_guides` before enabling the Today guide API. The first member
+read claims one background generation per place identity and waits for up to
+eight seconds. The claim is stored in PostgreSQL, so API processes and the
+backfill cannot generate or overwrite the same place concurrently; an abandoned
+claim becomes retryable after two minutes. Later reads reuse the stored zh-TW
+guide. Generation is limited to 30 starts per account per hour, and a failed
+generation may retry after one hour. Without `OPENAI_API_KEY` or `OPENAI_MODEL`,
+the API returns the 「暫時沒有導覽」 state and does not store a failure.
+
+`GET /api/trips/:tripId/trip-places/:tripPlaceId/guide` is the trip-place route.
+Today itinerary endpoints use
+`GET /api/trips/:tripId/place-guide?kind=itinerary-place&id=:placeId`; the same
+query route also accepts `kind=trip-place`. Both require Trip membership.
+`POST /api/admin/places/:placeId/guide/regenerate` clears the stored guide and
+starts a fresh claimed generation for an administrator.
+
+Generation first uses a confirmed QID from `commons_place_photos` or
+`commons_photo_candidates` to resolve Japanese, Chinese and English Wikipedia
+sitelinks. Without a QID it searches Wikipedia by the stored place name. It also
+searches Wikivoyage, sends only those bounded article extracts to the configured
+OpenAI model, and stores only strict source-grounded JSON. No source means a
+stored `no_sources` result and no model call.
+
+Backfill existing identities serially after the migration:
+
+```sh
+DATABASE_URL=... OPENAI_API_KEY=... OPENAI_MODEL=... \
+  bun apps/api/src/database/backfill-place-guides.ts
+```
+
+The command skips identities with terminal `place_guides` rows, resumes a
+`generating` claim left by an interrupted process, waits between identities,
+and logs each outcome plus final counts. It is safe to rerun.
+
 ### Members and scheduling permission (migration 026)
 
 成員 has sub-pages 成員, 我的資料, 邀請 (owner only) and 權限. Each member edits

@@ -52,6 +52,8 @@ export interface GateInput {
   rejectedProviderPlaceIds: ReadonlySet<string>;
   /** Places already on the trip's shared wishlist, however they got there. */
   wishlistProviderPlaceIds: ReadonlySet<string>;
+  /** Places already on this trip's 幫我找 list (one suggestion per place); never added twice. */
+  suggestedProviderPlaceIds: ReadonlySet<string>;
   /** Country codes of the trip's stops; a place in another country is never proposed. */
   tripCountryCodes: ReadonlySet<string>;
 }
@@ -145,8 +147,10 @@ export function gateRecommendations(input: GateInput): GateResult {
     const endorsements = (["google_reviews", "wikivoyage", "official_tourism"] as const)
       .filter((endorsement) => place.endorsements.has(endorsement));
     const decided = decidedAs(resolution.providerPlaceId);
-    if (decided) {
-      shortfalls.push(shortfall(decided, candidate.displayName, named));
+    const alreadySuggested = !decided && input.suggestedProviderPlaceIds.has(resolution.providerPlaceId);
+    if (decided || alreadySuggested) {
+      // Already listed: not a quality failure, so no shortfall; a decision still explains itself.
+      if (decided) shortfalls.push(shortfall(decided, candidate.displayName, named));
       // The decision is the reason given; it still covers its kind only if it could be visited.
       if (endorsements.length >= MIN_ENDORSEMENTS && infeasible(resolution, input.tripCountryCodes) === null) {
         passedDecided.push(place.members);

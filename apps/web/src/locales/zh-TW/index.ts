@@ -10,11 +10,13 @@ import { feedback } from "./feedback";
 import { itemDialog } from "./item-dialog";
 import { placeDialog } from "./place-dialog";
 import { placeDetail } from "./place-detail";
+import { planningSettings } from "./planning-settings";
 import { schedule } from "./schedule";
 import { tripPlaces } from "./trip-places";
 import { tripSkeleton } from "./trip-skeleton";
 import { travel } from "./travel";
 import { today } from "./today";
+import { wholeTripPlanner } from "./whole-trip-planner";
 
 /** Traditional Chinese (Taiwan): the site's first language and the shape every other follows. */
 export const zhTW = {
@@ -30,9 +32,11 @@ export const zhTW = {
   itemDialog,
   placeDetail,
   placeDialog,
+  planningSettings,
   schedule,
   tripPlaces,
   tripSkeleton,
   travel,
   today,
+  wholeTripPlanner,
 };

@@ -2761,7 +2761,7 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         const downgraded = await migrator.migrateTo("016_travel_places");
         if (downgraded.error) throw downgraded.error;
         expect(await database.selectFrom("trip_places").selectAll().orderBy("id").execute())
-          .toEqual(placesAfter.map(({ selected_for_itinerary: _selected, unplaced_from_date: _unplaced, ...place }) => place));
+          .toEqual(placesAfter.map(({ selected_for_itinerary: _selected, unplaced_from_date: _unplaced, effort_level: _effort, ...place }) => place));
         expect(await database.selectFrom("candidate_proposals").selectAll().orderBy("id").execute())
           .toEqual(proposalsAfter.map(({ reopened_at: _reopenedAt, ...proposal }) => proposal));
       } finally {

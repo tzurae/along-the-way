@@ -54,8 +54,13 @@ const PLACE_TYPE_ICONS: Record<PlaceType, LucideIcon> = {
 
 interface PreviewState {
   loading: boolean;
+  /** True while photos are still expected from the server's background search (see waitForPhotosUntil). */
+  waiting: boolean;
   previews: Map<string, PlacePreviewValue>;
 }
+
+/** Re-check interval while waiting for background photos; one batched request per tick. */
+const PHOTO_WAIT_POLL_MS = 5_000;
 
 export function usePlacePreviews({
   tripId,
@@ -63,24 +68,31 @@ export function usePlacePreviews({
   ids,
   request,
   enabled = true,
+  waitForPhotosUntil = null,
 }: {
   tripId: string;
   kind: PlaceDetailReferenceKind;
   ids: string[];
   request?: PlaceDetailRequest;
   enabled?: boolean;
+  /**
+   * Epoch ms. Until then, places without a photo are re-checked every 5 s (one batched request)
+   * because the server is still finding their Commons photos in the background.
+   */
+  waitForPhotosUntil?: number | null;
 }) {
   const stableIds = useMemo(() => [...new Set(ids)].sort(), [ids.join("\u0000")]);
   const key = stableIds.join("\u0000");
-  const [state, setState] = useState<PreviewState>(() => ({ loading: Boolean(enabled && request && stableIds.length), previews: new Map() }));
+  const [state, setState] = useState<PreviewState>(() => ({ loading: Boolean(enabled && request && stableIds.length), waiting: false, previews: new Map() }));
 
   useEffect(() => {
     if (!enabled || !request || stableIds.length === 0) {
-      setState({ loading: false, previews: new Map() });
+      setState({ loading: false, waiting: false, previews: new Map() });
       return;
     }
     const controller = new AbortController();
-    setState({ loading: true, previews: new Map() });
+    let timer: number | undefined;
+    setState({ loading: true, waiting: false, previews: new Map() });
     const requestedIds = new Set(stableIds);
     const batches = Array.from({ length: Math.ceil(stableIds.length / 100) }, (_, index) => stableIds.slice(index * 100, index * 100 + 100));
     async function loadBatch(batch: string[]): Promise<PlacePreviewResponse | null> {
@@ -98,9 +110,11 @@ export function usePlacePreviews({
       }
       return null;
     }
-    void Promise.all(batches.map(loadBatch)).then((responses) => {
+    async function load(previous: Map<string, PlacePreviewValue>) {
+      const responses = await Promise.all(batches.map(loadBatch));
       if (controller.signal.aborted) return;
-      const previews = new Map<string, PlacePreviewValue>();
+      // A failed refresh keeps what was already shown instead of blanking found photos.
+      const previews = new Map(previous);
       for (const response of responses) {
         if (!response) continue;
         for (const preview of response.previews) {
@@ -109,13 +123,24 @@ export function usePlacePreviews({
           }
         }
       }
-      setState({ loading: false, previews });
-    }).catch((error: unknown) => {
+      const missing = stableIds.some((id) => !previews.get(id)?.photo);
+      const keepWaiting = missing && waitForPhotosUntil !== null && Date.now() + PHOTO_WAIT_POLL_MS <= waitForPhotosUntil;
+      setState({ loading: false, waiting: keepWaiting, previews });
+      if (keepWaiting) {
+        timer = window.setTimeout(() => {
+          void load(previews).catch(() => { if (!controller.signal.aborted) setState((current) => ({ ...current, waiting: false })); });
+        }, PHOTO_WAIT_POLL_MS);
+      }
+    }
+    void load(new Map()).catch((error: unknown) => {
       if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) return;
-      setState({ loading: false, previews: new Map() });
+      setState({ loading: false, waiting: false, previews: new Map() });
     });
-    return () => controller.abort();
-  }, [enabled, key, kind, request, stableIds, tripId]);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [enabled, key, kind, request, stableIds, tripId, waitForPhotosUntil]);
 
   return state;
 }
@@ -208,5 +233,17 @@ export function PlacePhotoCredit({ photo }: { photo: PlaceDisplayPhoto | null | 
   const authorHref = safeExternalUrl(photo.authorUrl);
   const licenseHref = safeExternalUrl(photo.licenseUrl);
   const license = compactLicenseLabel(photo.licenseUrl, photo.licenseName);
-  return <small className="place-photo-credit"><span className="place-photo-credit__text">{authorHref ? <a className="place-photo-credit__link" href={authorHref} target="_blank" rel="noreferrer">{photo.author}</a> : photo.author}・{licenseHref ? <a className="place-photo-credit__link" href={licenseHref} target="_blank" rel="noreferrer">{license}</a> : license}</span></small>;
+  const author = displayPhotoAuthor(photo.author);
+  return <small className="place-photo-credit"><span className="place-photo-credit__text">{authorHref ? <a className="place-photo-credit__link" href={authorHref} target="_blank" rel="noreferrer">{author}</a> : author}・{licenseHref ? <a className="place-photo-credit__link" href={licenseHref} target="_blank" rel="noreferrer">{license}</a> : license}</span></small>;
+}
+
+/**
+ * Commons fills its Artist field with "No machine-readable author provided. Name~commonswiki
+ * assumed (based on copyright claims)." when an uploader skips the author template. The license
+ * still needs the author named, so show just that name (or Wikimedia Commons when there is none).
+ */
+export function displayPhotoAuthor(author: string) {
+  const assumed = /^No machine-readable author provided\.\s*(.+?)\s+assumed\b/i.exec(author.trim());
+  const name = (assumed ? assumed[1]! : author).replace(/~commonswiki\b/gi, "").trim();
+  return name || "Wikimedia Commons";
 }

@@ -17,7 +17,6 @@ export const schedule = {
   confirmMany: (count: number, date: string) => `將 ${count} 個地點排入 ${date}`,
   confirmUnscheduled: (name: string) => `將「${name}」設為先不安排`,
   saving: "排入中…",
-  notScheduled: "尚未排入",
   scheduledOn: (date: string) => `已排入 ${date}`,
   missingLocation: "缺少位置",
   addLocation: "補上位置",

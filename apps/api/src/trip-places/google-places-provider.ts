@@ -120,8 +120,8 @@ export interface RatedPlaceCandidate {
 export interface RatedPlaceLookup {
   readonly attribution: string;
   readonly available?: boolean;
-  /** Text Search Enterprise: a few best matches for a short "area name" query. */
-  lookup(query: string, options?: PlaceSearchOptions): Promise<RatedPlaceCandidate[]>;
+  /** Place Details Enterprise for one Place ID that discovery returned. */
+  details(providerPlaceId: string, options?: Pick<PlaceSearchOptions, "languageCode">): Promise<RatedPlaceCandidate>;
 }
 
 interface GooglePlacesProviderOptions {
@@ -159,13 +159,18 @@ const SEARCH_FIELD_MASK = [
 ].join(",");
 // rating, userRatingCount and websiteUri move the request to the Enterprise SKU; the
 // businessStatus and addressComponents (Pro) fields then cost nothing more.
-const LOOKUP_FIELD_MASK = [
-  ...PLACE_FIELD_MASK,
-  "places.rating",
-  "places.userRatingCount",
-  "places.websiteUri",
-  "places.businessStatus",
-  "places.addressComponents",
+const RATED_DETAILS_FIELD_MASK = [
+  "id",
+  "displayName",
+  "formattedAddress",
+  "location",
+  "primaryType",
+  "googleMapsUri",
+  "rating",
+  "userRatingCount",
+  "websiteUri",
+  "businessStatus",
+  "addressComponents",
 ].join(",");
 
 /** The two-letter country code among Google address components, or null when absent. */
@@ -180,7 +185,6 @@ function addressCountry(value: unknown): string | null {
   return null;
 }
 
-const LOOKUP_RESULT_COUNT = 3;
 // displayName and primaryTypeDisplayName are Pro fields; photos is Essentials IDs Only.
 const DETAILS_FIELD_MASK = [
   "id",
@@ -342,41 +346,24 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup {
     return places.map((place) => this.candidate(place, true));
   }
 
-  async lookup(rawQuery: string, options: PlaceSearchOptions = {}): Promise<RatedPlaceCandidate[]> {
-    const query = rawQuery.trim();
-    if (!query || query.length > 300) {
-      throw new TypeError("Search query must contain 1 to 300 characters");
-    }
+  async details(rawProviderPlaceId: string, options: Pick<PlaceSearchOptions, "languageCode"> = {}): Promise<RatedPlaceCandidate> {
+    const providerPlaceId = this.placeId(rawProviderPlaceId);
+    const query = options.languageCode ? `?${new URLSearchParams({ languageCode: options.languageCode })}` : "";
     const value = await this.request(
-      "https://places.googleapis.com/v1/places:searchText",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          textQuery: query,
-          maxResultCount: LOOKUP_RESULT_COUNT,
-          ...(options.languageCode ? { languageCode: options.languageCode } : {}),
-        }),
-        headers: {
-          "Content-Type": "application/json",
-          "X-Goog-FieldMask": LOOKUP_FIELD_MASK,
-        },
-      },
+      `https://places.googleapis.com/v1/places/${encodeURIComponent(providerPlaceId)}${query}`,
+      { headers: { "X-Goog-FieldMask": RATED_DETAILS_FIELD_MASK } },
     );
-    const places = record(value)?.places;
-    if (!Array.isArray(places)) return [];
-    return places.map((place) => {
-      const item = record(place);
-      const rating = typeof item?.rating === "number" && item.rating >= 1 && item.rating <= 5 ? item.rating : null;
-      const count = item?.userRatingCount;
-      return {
-        candidate: this.candidate(place),
-        rating,
-        userRatingCount: typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : null,
-        websiteUri: typeof item?.websiteUri === "string" ? item.websiteUri : null,
-        businessStatus: typeof item?.businessStatus === "string" ? BUSINESS_STATUS[item.businessStatus] ?? null : null,
-        countryCode: addressCountry(item?.addressComponents),
-      };
-    });
+    const item = record(value);
+    const rating = typeof item?.rating === "number" && item.rating >= 1 && item.rating <= 5 ? item.rating : null;
+    const count = item?.userRatingCount;
+    return {
+      candidate: this.candidate(value),
+      rating,
+      userRatingCount: typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : null,
+      websiteUri: typeof item?.websiteUri === "string" ? item.websiteUri : null,
+      businessStatus: typeof item?.businessStatus === "string" ? BUSINESS_STATUS[item.businessStatus] ?? null : null,
+      countryCode: addressCountry(item?.addressComponents),
+    };
   }
 
 

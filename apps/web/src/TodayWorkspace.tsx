@@ -1,6 +1,5 @@
 import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, BedDouble, BellRing, CalendarDays, Check, ChevronRight, CircleDot, Clock3, ExternalLink, ListOrdered, Lock, MapPin, Navigation, Plane, TriangleAlert, Users, WifiOff } from "lucide-react";
-import type { PlaceDetailReference } from "@along-the-way/contracts/place-details";
+import { ArrowLeft, ArrowRight, BedDouble, BellRing, CalendarDays, ChevronRight, CircleDot, Clock3, ExternalLink, ListOrdered, Lock, MapPin, Navigation, Plane, TriangleAlert, Users, WifiOff } from "lucide-react";
 import { useI18n } from "./i18n";
 import { googleMapsCoordinatesUrl, googleMapsDirectionsUrl, googleMapsNavigationUrl } from "./google-maps";
 import { safeExternalUrl } from "./external-url";
@@ -9,10 +8,11 @@ import { readTripLocation } from "./trip-location";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest, type PlaceDetailRequestOptions, type PlacePreviewValue } from "./PlaceThumbnail";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
+import { TodayPlaceGuide, type TodayPlaceGuideReference } from "./TodayPlaceGuide";
 import { NativeSelect } from "./components/ui/native-select";
 
 interface TodayDetailSelection {
-  reference: PlaceDetailReference;
+  reference: TodayPlaceGuideReference;
   name: string;
   triggerKey: string;
   date: string;
@@ -461,6 +461,12 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
       date={selectedDetail.date}
       photoRevision={photoRevision}
       request={detailRequest}
+      interlude={<TodayPlaceGuide
+        tripId={model.tripId}
+        reference={selectedDetail.reference}
+        placeName={selectedDetail.name}
+        request={detailRequest}
+      />}
     />
   ) : null;
   const formattedDay = new Intl.DateTimeFormat(locale, { timeZone: "UTC", month: "long", day: "numeric", weekday: "short" }).format(new Date(`${day.date}T12:00:00Z`));
@@ -576,7 +582,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     : false;
   const emptyDay = timelineEntries.length === 0;
 
-  return <section className="today-workspace" aria-label={text.title}>
+  return <section className="today-workspace" aria-label={t.app.tabs.today}>
     <header className="today-pagehead">
       <div><h2>{heading}</h2><p>{headingContext}</p></div>
       <div className="today-headnav">
@@ -585,12 +591,12 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
           <NativeSelect aria-label={text.chooseDay} value={day.date} onChange={(event) => onDayChanged(event.target.value)}>{model.days.map((entry) => <option key={entry.id} value={entry.date}>{new Intl.DateTimeFormat(locale, { timeZone: "UTC", month: "numeric", day: "numeric", weekday: "short" }).format(new Date(`${entry.date}T12:00:00Z`))}</option>)}</NativeSelect>
           <button type="button" aria-label={text.nextDay} disabled={index === model.days.length - 1} onClick={() => onDayChanged(model.days[index + 1]!.date)}><span>{text.nextDay}</span><ArrowRight size={16} /></button>
         </nav>
-        <div className="today-zone">
-          <span><Clock3 size={13} />{day.timeZone ? text.localTime(day.timeZone) : text.zoneUnknown}</span>
-          {offline || retrying
-            ? <button type="button" onClick={retry} disabled={retrying}>{retrying ? text.retrying : text.retry}</button>
-            : <span className="today-sync-status"><Check size={14} aria-hidden="true" />{text.synced}</span>}
-        </div>
+        {offline || retrying ? (
+          <div className="today-zone">
+            <span />
+            <button type="button" onClick={retry} disabled={retrying}>{retrying ? text.retrying : text.retry}</button>
+          </div>
+        ) : null}
       </div>
     </header>
     {offline ? <aside className="today-notice" role="status"><WifiOff size={20} /><div><strong>{text.offline}</strong><p>{text.offlineHelp}</p><small>{text.fetchedAt(snapshotTime)}</small></div></aside> : null}

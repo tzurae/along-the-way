@@ -7,6 +7,8 @@ export interface GeoPoint {
 const EARTH_RADIUS_METERS = 6_371_000;
 // Exhaustive search is exact and fast up to 8 stops (8! = 40,320 orders).
 const EXHAUSTIVE_LIMIT = 8;
+export const TWO_OPT_MAX_PASSES = 12;
+type RouteDistance = (from: GeoPoint, to: GeoPoint) => number;
 
 export function straightLineMeters(a: GeoPoint, b: GeoPoint) {
   const radians = (degrees: number) => degrees * Math.PI / 180;
@@ -22,41 +24,34 @@ export function straightLineMeters(a: GeoPoint, b: GeoPoint) {
  * to `end` (the night's lodging); a missing end adds nothing. The same lodging at both ends makes
  * a round trip.
  */
-export function routeLength(order: GeoPoint[], start: GeoPoint | null, end: GeoPoint | null) {
+export function routeLength(order: GeoPoint[], start: GeoPoint | null, end: GeoPoint | null, distance: RouteDistance = straightLineMeters) {
   if (order.length === 0) return 0;
-  let total = start ? straightLineMeters(start, order[0]!) : 0;
-  for (let index = 1; index < order.length; index += 1) total += straightLineMeters(order[index - 1]!, order[index]!);
-  return total + (end ? straightLineMeters(order.at(-1)!, end) : 0);
+  let total = start ? distance(start, order[0]!) : 0;
+  for (let index = 1; index < order.length; index += 1) total += distance(order[index - 1]!, order[index]!);
+  return total + (end ? distance(order.at(-1)!, end) : 0);
 }
 
-function* permutations(items: GeoPoint[]): Generator<GeoPoint[]> {
-  if (items.length <= 1) {
-    yield items;
-    return;
-  }
-  for (let index = 0; index < items.length; index += 1) {
-    const rest = [...items.slice(0, index), ...items.slice(index + 1)];
-    for (const tail of permutations(rest)) yield [items[index]!, ...tail];
-  }
-}
 
-function improveByTwoOpt(order: GeoPoint[], start: GeoPoint | null, end: GeoPoint | null) {
-  let best = order;
-  let bestLength = routeLength(best, start, end);
-  let improved = true;
-  while (improved) {
-    improved = false;
+function improveByTwoOpt(order: GeoPoint[], start: GeoPoint | null, end: GeoPoint | null, distance: RouteDistance) {
+  const best = [...order];
+  for (let pass = 0; pass < TWO_OPT_MAX_PASSES; pass += 1) {
+    let improved = false;
     for (let from = 0; from < best.length - 1; from += 1) {
       for (let to = from + 1; to < best.length; to += 1) {
-        const candidate = [...best.slice(0, from), ...best.slice(from, to + 1).reverse(), ...best.slice(to + 1)];
-        const length = routeLength(candidate, start, end);
-        if (length + 1e-6 < bestLength) {
-          best = candidate;
-          bestLength = length;
-          improved = true;
+        const before = from === 0 ? start : best[from - 1]!;
+        const after = to === best.length - 1 ? end : best[to + 1]!;
+        const first = best[from]!;
+        const last = best[to]!;
+        const removed = (before ? distance(before, first) : 0) + (after ? distance(last, after) : 0);
+        const added = (before ? distance(before, last) : 0) + (after ? distance(first, after) : 0);
+        if (added + 1e-6 >= removed) continue;
+        for (let left = from, right = to; left < right; left += 1, right -= 1) {
+          [best[left], best[right]] = [best[right]!, best[left]!];
         }
+        improved = true;
       }
     }
+    if (!improved) break;
   }
   return best;
 }
@@ -66,19 +61,42 @@ function improveByTwoOpt(order: GeoPoint[], start: GeoPoint | null, end: GeoPoin
  * lines, exactly up to EXHAUSTIVE_LIMIT stops and by nearest neighbour plus 2-opt beyond it.
  * Ties keep the earliest order by stop id, so equal inputs give equal output.
  */
-export function orderByStraightLine(stops: GeoPoint[], start: GeoPoint | null, end: GeoPoint | null): string[] {
-  const sorted = [...stops].sort((left, right) => left.id.localeCompare(right.id));
+export function orderByStraightLine(
+  stops: GeoPoint[],
+  start: GeoPoint | null,
+  end: GeoPoint | null,
+  distance: RouteDistance = straightLineMeters,
+): string[] {
+  const sorted = [...stops].sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
   if (sorted.length <= 1) return sorted.map((stop) => stop.id);
   if (sorted.length <= EXHAUSTIVE_LIMIT) {
     let best = sorted;
     let bestLength = Number.POSITIVE_INFINITY;
-    for (const order of permutations(sorted)) {
-      const length = routeLength(order, start, end);
-      if (length + 1e-6 < bestLength) {
-        best = order;
-        bestLength = length;
+    const order: GeoPoint[] = [];
+    const used = new Uint8Array(sorted.length);
+    const visit = (length: number) => {
+      if (order.length === sorted.length) {
+        const total = length + (end ? distance(order.at(-1)!, end) : 0);
+        if (total + 1e-6 < bestLength) {
+          best = [...order];
+          bestLength = total;
+        }
+        return;
       }
-    }
+      for (let index = 0; index < sorted.length; index += 1) {
+        if (used[index]) continue;
+        const next = sorted[index]!;
+        const previous = order.at(-1) ?? start;
+        const nextLength = length + (previous ? distance(previous, next) : 0);
+        if (nextLength > bestLength) continue;
+        used[index] = 1;
+        order.push(next);
+        visit(nextLength);
+        order.pop();
+        used[index] = 0;
+      }
+    };
+    visit(0);
     return best.map((stop) => stop.id);
   }
   // Larger days: nearest neighbour from the start (or the first stop), then 2-opt.
@@ -89,10 +107,10 @@ export function orderByStraightLine(stops: GeoPoint[], start: GeoPoint | null, e
   while (remaining.length > 0) {
     let nearest = 0;
     for (let index = 1; index < remaining.length; index += 1) {
-      if (straightLineMeters(current, remaining[index]!) < straightLineMeters(current, remaining[nearest]!)) nearest = index;
+      if (distance(current, remaining[index]!) < distance(current, remaining[nearest]!)) nearest = index;
     }
     current = remaining.splice(nearest, 1)[0]!;
     order.push(current);
   }
-  return improveByTwoOpt(order, start, end).map((stop) => stop.id);
+  return improveByTwoOpt(order, start, end, distance).map((stop) => stop.id);
 }

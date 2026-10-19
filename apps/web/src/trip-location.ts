@@ -1,7 +1,7 @@
 export const tripTabIds = ["today", "itinerary", "places", "members"] as const;
 export type TripTab = (typeof tripTabIds)[number];
 
-export const itinerarySegmentIds = ["daily", "flight", "lodging"] as const;
+export const itinerarySegmentIds = ["daily", "flight", "lodging", "settings"] as const;
 export type ItinerarySegment = (typeof itinerarySegmentIds)[number];
 export const placesSegmentIds = ["wishlist", "discovery"] as const;
 export type PlacesSegment = (typeof placesSegmentIds)[number];
