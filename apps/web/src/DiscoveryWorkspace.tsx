@@ -529,7 +529,12 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
     const researched = await mutate("generate", `/api/trips/${trip.id}/discovery/generate`, {
       expectedBriefVersion: brief.version,
     }, area);
-    if (researched) setResearchSettingsOpen(false);
+    if (researched) {
+      // The server finds new places' Commons photos in the background right after this; keep their
+      // thumbnails in the loading shimmer and re-check for two minutes.
+      setPhotosExpectedUntil(Date.now() + 120_000);
+      setResearchSettingsOpen(false);
+    }
   }
 
   async function rejectProposal(proposal: CandidateProposalDto) {
@@ -655,11 +660,13 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
   for (const proposal of workspace?.proposals ?? []) {
     proposalNameCounts.set(proposal.name, (proposalNameCounts.get(proposal.name) ?? 0) + 1);
   }
+  const [photosExpectedUntil, setPhotosExpectedUntil] = useState<number | null>(null);
   const previews = usePlacePreviews({
     tripId: trip.id,
     kind: "proposal",
     ids: workspace?.proposals.map((proposal) => proposal.id) ?? [],
     request: photoRequest,
+    waitForPhotosUntil: photosExpectedUntil,
   });
 
   function proposalDetail(proposal: CandidateProposalDto) {
@@ -1230,7 +1237,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
                       cautionAction={caution && cautionCount > 1 ? <span className="list-place-row__caution-action">・<button type="button" className="list-place-row__inline-action" onClick={() => openProposalDetail(proposal.id, "cautions")}>{t.proposal.moreItems(cautionCount - 1)}</button></span> : undefined}
                       photo={preview?.photo}
                       photoCount={preview?.photoCount ?? 0}
-                      loadingPhoto={previews.loading}
+                      loadingPhoto={previews.loading || (previews.waiting && !preview?.photo)}
                       voteAction={voteAction}
                       rowActions={rowActions}
                       selectionControl={selectionControl}

@@ -76,6 +76,8 @@ const SHORTFALL_CODES: readonly DiscoveryShortfallDto["code"][] = [
 
 /** Research runs one trip may start per hour; each run also incurs Google calls. */
 const RESEARCH_PER_TRIP_PER_HOUR = 6;
+/** Commons photo searches run at once after a research run (background, Wikimedia polite use). */
+const SUGGESTION_PHOTO_CONCURRENCY = 3;
 /** Research runs one member may start across all trips per hour. */
 const RESEARCH_PER_ACCOUNT_PER_HOUR = 10;
 const GENERATE_OPERATION_PREFIX = "discovery:generate:";
@@ -274,12 +276,16 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     return this.readWorkspace(this.database, tripId, userId);
   }
 
-  /** Background and serial (Wikimedia is polite-use only); a failure only leaves the type icon. */
+  /**
+   * Background, three identities at a time: fast enough that photos appear within the client's
+   * two-minute wait, still a modest load on Wikimedia. A failure only leaves the type icon.
+   */
   private findSuggestionPhotos(placeIdentityIds: readonly string[]) {
     const generator = this.commonsCandidates;
     if (!generator || placeIdentityIds.length === 0) return;
-    void (async () => {
-      for (const placeIdentityId of placeIdentityIds) {
+    const queue = [...placeIdentityIds];
+    const worker = async () => {
+      for (let placeIdentityId = queue.shift(); placeIdentityId; placeIdentityId = queue.shift()) {
         try {
           await generator.generate(placeIdentityId);
         } catch (error) {
@@ -290,7 +296,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           }));
         }
       }
-    })();
+    };
+    void Promise.all(Array.from({ length: Math.min(SUGGESTION_PHOTO_CONCURRENCY, queue.length) }, worker));
   }
 
   async saveBrief(
