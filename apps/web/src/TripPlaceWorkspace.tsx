@@ -1394,7 +1394,7 @@ export function TripPlaceWorkspace({
 
   const foldersShown = placeView === "area" && listedPlaces.length >= PLACE_FOLDER_MINIMUM;
   const areaFolders = foldersShown ? groupPlacesByArea(filteredPlaces) : [];
-  const filtering = filteredPlaces.length !== listedPlaces.length;
+  const allFoldersOpen = filteredPlaces.length !== listedPlaces.length || selecting;
   // Until someone opens or closes a folder, only the one holding the newest place is open.
   const openAreas = openAreaKeys ?? new Set(areaFolders.slice(0, 1).map((group) => group.area ?? ""));
 
@@ -1473,8 +1473,8 @@ export function TripPlaceWorkspace({
         <div className="pd-folders">
           {areaFolders.map((group) => {
             const key = group.area ?? "";
-            // A search or chip filter opens every folder, so no match hides inside a closed one.
-            const open = filtering || openAreas.has(key);
+            // A search, chip filter or 排行程 selection opens every folder, so no row hides inside a closed one.
+            const open = allFoldersOpen || openAreas.has(key);
             return (
               <details
                 key={key}
@@ -1482,7 +1482,12 @@ export function TripPlaceWorkspace({
                 open={open}
                 onToggle={(event) => {
                   const nowOpen = event.currentTarget.open;
-                  if (filtering || nowOpen === open) return;
+                  if (allFoldersOpen) {
+                    // React only re-applies `open` when the prop changes, so put the DOM back itself.
+                    if (!nowOpen) event.currentTarget.open = true;
+                    return;
+                  }
+                  if (nowOpen === open) return;
                   setOpenAreaKeys((current) => {
                     const next = new Set(current ?? openAreas);
                     if (nowOpen) next.add(key); else next.delete(key);

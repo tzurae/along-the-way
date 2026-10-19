@@ -219,7 +219,8 @@ export interface TripDayAlternativeTable {
   trip_day_id: string;
   trip_place_id: string;
   position: number;
-  created_by: string;
+  /** Null once that account is deleted; the 備案 stays for the rest of the trip. */
+  created_by: string | null;
   created_at: Generated<Timestamp>;
 }
 

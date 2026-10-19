@@ -15,6 +15,10 @@ import { placeArea } from "./PlaceFilters";
 
 type JsonRequest = <T>(url: string, options?: RequestInit & { parse?: (value: unknown) => unknown }) => Promise<T>;
 
+// Same day, version and list reuse one key: resending after a dropped response replays the saved
+// result instead of tripping its own version check.
+const alternativeKeys = new Map<string, string>();
+
 /** Replaces the day's whole 備案 list; the caller re-reads the itinerary afterwards. */
 export async function saveDayAlternatives(
   request: JsonRequest,
@@ -22,12 +26,16 @@ export async function saveDayAlternatives(
   day: Pick<TimelineDayDto, "id" | "alternativesVersion">,
   tripPlaceIds: string[],
 ) {
+  const identity = `${day.id}:${day.alternativesVersion}:${tripPlaceIds.join(",")}`;
+  const key = alternativeKeys.get(identity) ?? crypto.randomUUID();
+  alternativeKeys.set(identity, key);
   await request<TripDayAlternativesResponse>(`/api/trips/${tripId}/days/${day.id}/alternatives`, {
     method: "PUT",
-    headers: { "Idempotency-Key": crypto.randomUUID() },
+    headers: { "Idempotency-Key": key },
     body: JSON.stringify({ expectedVersion: day.alternativesVersion, tripPlaceIds }),
     parse: parseTripDayAlternativesResponse,
   });
+  alternativeKeys.delete(identity);
 }
 
 /** 口袋名單 places that may become a 備案: not chosen for the itinerary and on no day. */

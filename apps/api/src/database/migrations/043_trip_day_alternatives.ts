@@ -10,7 +10,7 @@ export async function up(database: Kysely<unknown>) {
       trip_day_id uuid not null,
       trip_place_id uuid not null,
       position integer not null check (position >= 0),
-      created_by uuid not null references users(id) on delete cascade,
+      created_by uuid references users(id) on delete set null,
       created_at timestamptz not null default now(),
       primary key (trip_day_id, trip_place_id),
       unique (trip_day_id, position),
