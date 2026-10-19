@@ -26,7 +26,7 @@ export const planningSettings = {
     maxPlacesPerDay: { label: "每天最多幾個地點", unit: "個", help: "住宿、航班和固定交通不算在這個數量裡。" },
     dayStart: { label: "一天最早幾點出門", help: "使用當地時間。" },
     dayEnd: { label: "最晚幾點回住宿", help: "使用當地時間，只用來計算可用時數。" },
-    maxEffortPerDay: { label: "每日體力上限", unit: "點", help: "每個地點是 1–5 點，整天相加不能超過這裡。" },
+    maxEffortPerDay: { label: "每日體力上限", unit: "點", help: "每個地點是 1–5 點，整天相加不能超過這裡。平衡是 10 點，大約是 2 個普通景點（3 點）加 1 個偏累的（4 點）。" },
     mealReserveMinutes: { label: "用餐預留", unit: "分鐘／日", help: "當天已有餐廳、咖啡廳或餐食安排時，會扣掉重複的部分。" },
     restMinutes: { label: "另外休息", unit: "分鐘／日", help: "地點停留以外，另外保留的休息時間。" },
     slackPercent: { label: "保留餘裕", unit: "%", help: "留給排隊、迷路和臨時停留，不會排進地點。" },

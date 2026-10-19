@@ -43,7 +43,7 @@ export const wholeTripPlanner = {
       relaxed: "這天放輕鬆",
       relaxedDescription: "少排一些、早點回來，也多留一點休息。",
       heavier: "這天可以累一點",
-      heavierDescription: "多排一些，也接受比較長的移動和較晚回來。",
+      heavierDescription: "多排一些、體力上限高一點，也可以晚點回住宿。",
       custom: "自訂",
       customDescription: "逐項決定這天要另外使用哪些上限。",
     },

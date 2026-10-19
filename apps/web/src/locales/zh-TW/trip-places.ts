@@ -73,9 +73,9 @@ export const tripPlaces = {
     saved: "規劃資訊已儲存。",
     summary: "停留時間與體力",
     durationMinutes: "停留時間（分鐘）",
-    durationHelp: "留空時會使用 AI 或系統估算；手動填寫的值優先。",
+    durationHelp: "留空時會使用 AI 或系統估算；手動填寫的值優先。用來算這一天排不排得下。",
     effortLevel: "體力",
-    effortHelp: "請評估走路、站立、爬坡與整體疲累程度。",
+    effortHelp: "請評估走路、站立、爬坡與整體疲累程度。用來算這一天排不排得下。",
     effortLabels: {
       1: "1・幾乎不累",
       2: "2・輕鬆",
