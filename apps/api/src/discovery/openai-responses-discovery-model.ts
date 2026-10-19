@@ -373,6 +373,7 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
         // Each web search is billed; this bounds one research run's searches.
         body.max_tool_calls = MAX_WEB_SEARCHES;
       }
+      const startedAt = Date.now();
       const response = await this.fetch(`${this.baseUrl}/responses`, {
         method: "POST",
         signal: controller.signal,
@@ -386,6 +387,19 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
       if (!response.ok) throw new DiscoveryModelUnavailableError();
       const payload: unknown = await response.json();
       const root = asObject(payload, "OpenAI returned an invalid response");
+      // Timing evidence for 幫我找 speed work: duration, web searches and token usage per model call.
+      const usage = isRecord(root.usage) ? root.usage : {};
+      const outputDetails = isRecord(usage.output_tokens_details) ? usage.output_tokens_details : {};
+      console.info(JSON.stringify({
+        event: "discovery_model_call",
+        schema: schemaName,
+        ms: Date.now() - startedAt,
+        webSearches: Array.isArray(root.output) ? root.output.filter((item) => isRecord(item) && item.type === "web_search_call").length : 0,
+        inputTokens: usage.input_tokens ?? null,
+        outputTokens: usage.output_tokens ?? null,
+        reasoningTokens: outputDetails.reasoning_tokens ?? null,
+        status: root.status ?? null,
+      }));
       if (root.status !== "completed" || !Array.isArray(root.output)) {
         throw new DiscoveryModelResponseError("OpenAI did not complete the structured response");
       }

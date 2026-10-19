@@ -496,6 +496,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       throw error;
     }
     try {
+      const stageStarted = Date.now();
       const plan = await this.model.plan({
         brief: brief.original_text,
         trip,
@@ -504,6 +505,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       if (this.placeLookup.available === false) {
         throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
       }
+      const planMs = Date.now() - stageStarted;
       const research = await this.model.research({
         brief: plan.structuredBrief,
         request: plan.request,
@@ -525,6 +527,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         ]))
         .where("identity.provider_place_id", "is not", null)
         .execute();
+      const researchMs = Date.now() - stageStarted - planMs;
       const verification = await verifyResearchedCandidates({
         candidates: research.candidates,
         request: plan.request,
@@ -541,6 +544,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         }
         throw error;
       });
+      const verifyMs = Date.now() - stageStarted - planMs - researchMs;
       const searchPlan: DiscoverySearchPlan = {
         queries: verification.queries,
         areas: plan.request.areas,
@@ -747,6 +751,16 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           .execute();
         return response;
       });
+      console.info(JSON.stringify({
+        event: "discovery_run_timing",
+        tripId,
+        planMs,
+        researchMs,
+        verifyMs,
+        saveMs: Date.now() - stageStarted - planMs - researchMs - verifyMs,
+        researched: research.candidates.length,
+        shown: verification.gate.shown.length,
+      }));
       this.findSuggestionPhotos(suggestionIdentityIds);
       return workspace;
     } catch (error) {
