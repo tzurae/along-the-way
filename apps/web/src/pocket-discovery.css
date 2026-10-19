@@ -149,6 +149,102 @@
   z-index: 3;
 }
 
+.pd-view-toggle {
+  display: inline-flex;
+  gap: 4px;
+  margin: 0 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  padding: 3px;
+}
+
+.pd-view-toggle button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  padding-inline: 14px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.pd-view-toggle button[aria-pressed="true"] {
+  background: var(--color-ink-strong);
+  color: var(--color-on-dark);
+}
+
+.pd-view-toggle svg {
+  width: 15px;
+  height: 15px;
+}
+
+.pd-folders {
+  display: grid;
+  gap: 10px;
+}
+
+.pd-folder > summary {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 1.125rem;
+  background: var(--color-surface);
+  padding-inline: 16px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.pd-folder > summary::-webkit-details-marker {
+  display: none;
+}
+
+.pd-folder[open] > summary {
+  margin-bottom: 8px;
+}
+
+.pd-folder > summary > svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  color: var(--accent);
+}
+
+.pd-folder-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pd-folder-count {
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.pd-folder > summary > .pd-folder-chevron {
+  color: var(--muted-foreground);
+  transition: transform 160ms ease;
+}
+
+.pd-folder[open] > summary > .pd-folder-chevron {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pd-folder > summary > .pd-folder-chevron {
+    transition: none;
+  }
+}
+
 
 .pd-pagehead-copy {
   min-width: 0;
