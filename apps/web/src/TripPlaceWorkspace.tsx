@@ -914,10 +914,8 @@ export function TripPlaceWorkspace({
         },
       );
       setReadModel((previous) => {
+        // Voting never reorders the list; it stays newest first as the API returned it.
         const current = previous.current.map((candidate) => candidate.id === updated.id ? updated : candidate);
-        if (updated.votingAvailable) {
-          current.sort((left, right) => right.voteCount - left.voteCount);
-        }
         return {
           current,
           retained: previous.retained.map((candidate) => candidate.id === updated.id ? updated : candidate),

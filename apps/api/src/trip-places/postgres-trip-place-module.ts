@@ -2024,7 +2024,8 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         "place.time_zone as canonical_time_zone",
       ]).where("tripPlace.trip_id", "=", tripId)
       .where("tripPlace.archived_at", "is", null)
-      .orderBy("tripPlace.created_at").execute();
+      // Newest first; votes are shown but never reorder the list (owner decision 2026-10-19).
+      .orderBy("tripPlace.created_at", "desc").orderBy("tripPlace.id", "desc").execute();
     if (placeRows.length === 0) return [];
     const ids = placeRows.map((row) => row.id);
     const legacyPlaceIds = placeRows.map((row) => row.legacy_place_id);
@@ -2143,7 +2144,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         version: row.version,
       };
     });
-    return members.length >= 1 ? places.sort((left, right) => right.voteCount - left.voteCount) : places;
+    return places;
   }
 
   private async readOne(

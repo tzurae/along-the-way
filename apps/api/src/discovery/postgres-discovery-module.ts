@@ -1428,8 +1428,9 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
             expression("reopened_at", "is not", null),
           ]),
         ]))
-        .orderBy("candidate_proposals.created_at")
-        .orderBy("candidate_proposals.id")
+        // Newest first; votes are shown but never reorder the list (owner decision 2026-10-19).
+        .orderBy("candidate_proposals.created_at", "desc")
+        .orderBy("candidate_proposals.id", "desc")
         .execute()
       : [];
     const proposalIds = proposalRows.map((proposal) => proposal.id);

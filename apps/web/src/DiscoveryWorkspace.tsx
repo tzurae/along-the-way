@@ -1112,9 +1112,8 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
               {listedProposals.length > 1 ? <PlaceFilterBar filters={proposalFilters} total={listedProposals.length} label="搜尋 AI 建議" /> : null}
               {filteredProposals.length === 0 ? <PlaceFilterEmpty onClear={proposalFilters.clear} /> : (
               <FlipList className="pd-list" ariaLabel={t.proposal.shortlistLabel}>
-                {/* Same order as 口袋名單: most confirmed votes first (stable). Confirmed counts, not the
-                    optimistic overlay, so a tapped row does not jump before the server confirms. */}
-                {[...filteredProposals].sort((left, right) => right.voteCount - left.voteCount).map((proposal) => {
+                {/* Same order as 口袋名單: newest first as the API returns it; votes never reorder. */}
+                {filteredProposals.map((proposal) => {
                   const firstSentence = proposal.recommendationSentences?.[0];
                   const repeatedName = (proposalNameCounts.get(proposal.name) ?? 0) > 1;
                   const selectable = proposalCanBeSelected(proposal);
