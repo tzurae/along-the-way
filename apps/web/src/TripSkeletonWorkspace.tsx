@@ -305,14 +305,12 @@ function DayAssignmentPicker({
                   <span className="plan-kind-chip">{t.tripSkeleton.placeTypes[place.type]}</span>
                 </div>
                 <div className="plan-place-meta">
-                  <span className="plan-place-status">
-                    {blocked ? <MapPinOff aria-hidden="true" /> : <CalendarClock aria-hidden="true" />}
-                    {blocked
-                      ? t.tripSkeleton.locationRequired
-                      : source === "pending"
-                        ? t.tripSkeleton.pendingArrangement
-                        : t.tripSkeleton.notScheduled}
-                  </span>
+                  {blocked || source === "pending" ? (
+                    <span className="plan-place-status">
+                      {blocked ? <MapPinOff aria-hidden="true" /> : <CalendarClock aria-hidden="true" />}
+                      {blocked ? t.tripSkeleton.locationRequired : t.tripSkeleton.pendingArrangement}
+                    </span>
+                  ) : null}
                   {source === "pending" ? (
                     <span>
                       {place.unplacedFromDate === null

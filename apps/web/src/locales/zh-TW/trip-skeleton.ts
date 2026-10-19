@@ -75,7 +75,6 @@ export const tripSkeleton = {
   pocketSourceTitle: "口袋名單",
   pocketSourceHelper: "排入後也會正式選進行程。",
   pendingArrangement: "待安排",
-  notScheduled: "尚未排入",
   priorDate: (date: string) => `原安排日期：${date}`,
   priorDateUnknown: "原安排日期未知",
   locationRequired: "缺少位置",

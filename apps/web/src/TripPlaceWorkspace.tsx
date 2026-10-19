@@ -1,7 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarCheck,
-  CalendarClock,
   ChevronRight,
   CalendarPlus,
   Check,
@@ -1340,9 +1339,7 @@ export function TripPlaceWorkspace({
               <span className="pd-schedule-meta pd-schedule-meta--missing"><MapPinOff aria-hidden="true" />{t.workspace.missingLocationForSchedule}</span>
             ) : scheduled ? (
               <span className="pd-schedule-meta schedule-status-pill"><CalendarCheck aria-hidden="true" />{place.assignedDayId ? schedule.scheduledOn(dayLabel(place.assignedDayId)!) : t.workspace.selectedPendingDate}</span>
-            ) : (
-              <span className="pd-schedule-meta"><CalendarClock aria-hidden="true" />{schedule.notScheduled}</span>
-            );
+            ) : null;
             const state = selecting
               ? selected ? "selected" : eligible ? "selectable" : "selecting"
               : "default";
@@ -1423,7 +1420,7 @@ export function TripPlaceWorkspace({
                 ? <span className="schedule-status-pill"><CalendarCheck aria-hidden="true" />{schedule.scheduledOn(dayLabel(selectedPlace.assignedDayId)!)}</span>
                 : selectedPlace.scheduled
                   ? <span className="schedule-status-pill"><CalendarCheck aria-hidden="true" />{t.status.scheduled}</span>
-                  : <span className="pd-state"><CalendarClock aria-hidden="true" className="size-3.5" />{schedule.notScheduled}</span>}
+                  : null}
             {selectedPlace.status === "possible-duplicate"
               ? <span className="pd-state"><CircleAlert aria-hidden="true" className="size-3.5" />{t.status.possibleDuplicate}</span>
               : selectedPlace.status === "provider-unavailable"
