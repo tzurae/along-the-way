@@ -1025,7 +1025,9 @@ export function createApp({
       kind,
       ids,
     );
-    context.header("Cache-Control", "private, max-age=3600");
+    // Previews change when a Commons photo is found in the background (e.g. seconds after an AI
+    // run), so the browser must not reuse an older "no photo" answer. The query is cheap.
+    context.header("Cache-Control", "private, no-cache");
     return context.json({ previews: result.previews });
   });
 
