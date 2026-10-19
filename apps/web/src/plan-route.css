@@ -120,17 +120,18 @@
   text-align: left;
 }
 
-/* Same open/close motion as the rail's child bars: rows grow 0fr → 1fr while the body fades in. */
+/* Height grows 0fr → 1fr with a soft ease (no fast first frame), while the list slides down a
+   few pixels and fades in just behind it. Closing is shorter and fades the list out first, so the
+   panel never shows half-cut rows. */
 .plan-pending-expander {
   display: grid;
   grid-template-rows: 0fr;
-  opacity: 0;
-  transition: grid-template-rows 260ms cubic-bezier(0.16, 1, 0.3, 1), opacity 180ms ease;
+  transition: grid-template-rows 240ms cubic-bezier(0.4, 0, 0.6, 1);
 }
 
 .plan-pending[data-open="true"] .plan-pending-expander {
   grid-template-rows: 1fr;
-  opacity: 1;
+  transition: grid-template-rows 340ms cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
 .plan-pending-clip {
@@ -138,8 +139,23 @@
   overflow: hidden;
 }
 
+.plan-pending-body {
+  opacity: 0;
+  transform: translateY(-8px);
+  transition: opacity 140ms ease, transform 200ms cubic-bezier(0.4, 0, 0.6, 1);
+}
+
+.plan-pending[data-open="true"] .plan-pending-body {
+  opacity: 1;
+  transform: none;
+  transition: opacity 240ms ease 80ms, transform 320ms cubic-bezier(0.25, 0.8, 0.25, 1) 40ms;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .plan-pending-expander,
+  .plan-pending[data-open="true"] .plan-pending-expander,
+  .plan-pending-body,
+  .plan-pending[data-open="true"] .plan-pending-body,
   .plan-pending-chevron {
     transition: none;
   }
@@ -187,7 +203,7 @@
 
 
 .plan-pending-chevron {
-  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform 300ms cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
 .plan-pending[data-open="true"] .plan-pending-chevron {
