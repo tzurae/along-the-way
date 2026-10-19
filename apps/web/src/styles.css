@@ -629,7 +629,10 @@ span.today-sync-status { flex: none; font-weight: 600; white-space: nowrap; }
   .atw-railnav .atw-railnav__children button { min-height: 40px; padding: 8px 12px; border-radius: 12px; font-size: 14px; font-weight: 600; color: var(--muted-foreground); }
   .atw-railnav .atw-railnav__children button:hover { color: var(--color-ink); background: color-mix(in srgb, var(--card) 60%, transparent); }
   .atw-railnav .atw-railnav__children button.is-active { color: #9a4a2c; background: var(--card); }
-  .atw-main { min-width: 0; padding: 4px 0 80px; }
+  /* Wide screens: one centered content column (pages already cap themselves at 900px), so content
+     no longer hugs the rail. 後台 keeps the full width for its tables. */
+  .atw-main { min-width: 0; width: 100%; max-width: 900px; justify-self: center; padding: 4px 0 80px; }
+  .atw-shell[data-active-tab="admin"] .atw-main { max-width: none; justify-self: stretch; }
   .today-grid { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   .today-lead { padding: 26px 28px; }
   .today-lead h3, .today-pagehead h2 { font-size: 30px; }
