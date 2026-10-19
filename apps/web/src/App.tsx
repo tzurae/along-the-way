@@ -1473,7 +1473,7 @@ export function App() {
 
   if (offline) {
     return <main className="mx-auto min-h-screen w-[min(100%-1.25rem,58rem)] py-5">
-      <header className="mb-5 flex flex-wrap items-center justify-between gap-3"><h1 className="text-xl font-bold">{todaySnapshot?.model.tripName ?? t.today.title}</h1><button className="min-h-11 rounded-lg border px-4 font-bold" onClick={() => void logout()}>{t.app.signOut}</button></header>
+      <header className="mb-5 flex flex-wrap items-center justify-between gap-3"><h1 className="text-xl font-bold">{todaySnapshot?.model.tripName ?? t.app.tabs.today}</h1><button className="min-h-11 rounded-lg border px-4 font-bold" onClick={() => void logout()}>{t.app.signOut}</button></header>
       <p className="mb-4 text-sm">{t.today.offlineAccount}</p>
       {error ? <p className="mb-4" role="alert">{error}</p> : null}
       {todaySnapshot ? <>

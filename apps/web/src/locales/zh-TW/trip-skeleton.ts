@@ -61,7 +61,7 @@ export const tripSkeleton = {
   delete: "刪除",
   loadingItinerary: "正在載入行程…",
   eyebrow: "行程骨架",
-  heading: "行程",
+  heading: "安排",
   introduction: "先看已經選進旅程的地點，再決定要放在哪一天。固定航班、住宿和訂位不會被移動。",
   dayFilterLabel: "篩選日期",
   allDays: "全部",
