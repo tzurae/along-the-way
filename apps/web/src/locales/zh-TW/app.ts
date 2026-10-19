@@ -65,7 +65,7 @@ export const app = {
   },
   placesSegments: {
     wishlist: "口袋名單",
-    discovery: "AI 建議",
+    discovery: "靈感",
   },
   membersSegments: {
     people: "成員",

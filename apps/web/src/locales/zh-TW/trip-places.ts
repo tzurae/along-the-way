@@ -114,7 +114,7 @@ export const tripPlaces = {
     emptyTitle: "先把想考慮的地方收進來",
     emptyDescription: "口袋名單是全家排入行程前共用的候選清單；放進來不代表已經安排日期。",
     emptyAiPrefix: "也可以從",
-    emptyAiLink: "AI 建議",
+    emptyAiLink: "靈感",
     emptyAiSuffix: "挑選。",
     addFirstPlace: "加入第一個地點",
     tableLabel: "口袋名單地點",

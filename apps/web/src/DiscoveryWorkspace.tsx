@@ -1109,7 +1109,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
           {listedProposals.length ? (
             <section className="order-2" aria-label={t.proposal.shortlistLabel}>
               <h3 className="sr-only">{t.proposal.shortlistTitle}</h3>
-              {listedProposals.length > 1 ? <PlaceFilterBar filters={proposalFilters} total={listedProposals.length} label="搜尋 AI 建議" /> : null}
+              {listedProposals.length > 1 ? <PlaceFilterBar filters={proposalFilters} total={listedProposals.length} label="搜尋靈感" /> : null}
               {filteredProposals.length === 0 ? <PlaceFilterEmpty onClear={proposalFilters.clear} /> : (
               <FlipList className="pd-list" ariaLabel={t.proposal.shortlistLabel}>
                 {/* Same order as 口袋名單: newest first as the API returns it; votes never reorder. */}
