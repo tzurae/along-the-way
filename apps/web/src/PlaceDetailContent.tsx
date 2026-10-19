@@ -19,7 +19,7 @@ import {
   DialogTitle,
 } from "./components/ui/dialog";
 import { useI18n, type Locale, type Messages } from "./i18n";
-import type { PlaceDetailRequest, PlaceDisplayPhoto } from "./PlaceThumbnail";
+import { displayPhotoAuthor, type PlaceDetailRequest, type PlaceDisplayPhoto } from "./PlaceThumbnail";
 import { PhotoFeedbackDialog } from "./PhotoFeedbackDialog";
 import { safeExternalUrl } from "./external-url";
 import "./place-detail.css";
@@ -117,8 +117,8 @@ function PhotoMetadata({ photo }: { photo: PlacePhotoDto }) {
     <dl className="grid min-w-0 gap-3 text-sm leading-6 @sm:grid-cols-[8rem_minmax(0,1fr)]" data-photo-metadata={photo.id}>
       <dt className="font-bold">{t.placeDetail.workTitle}</dt><dd className="break-words">{photo.title}</dd>
       <dt className="font-bold">{t.placeDetail.description}</dt><dd className="whitespace-pre-wrap break-words">{photo.description}</dd>
-      <dt className="font-bold">{t.placeDetail.author}</dt><dd className="break-words">{authorUrl ? <a className="underline underline-offset-2" href={authorUrl} target="_blank" rel="noreferrer">{photo.author}</a> : photo.author}</dd>
-      <dt className="font-bold">{t.placeDetail.source}</dt><dd className="break-words">{sourceUrl ? <a className="place-detail__inline-link underline underline-offset-2" href={sourceUrl} target="_blank" rel="noreferrer">{photo.creditText}<ExternalLink aria-hidden="true" className="size-3.5" /></a> : photo.creditText}</dd>
+      <dt className="font-bold">{t.placeDetail.author}</dt><dd className="break-words">{authorUrl ? <a className="underline underline-offset-2" href={authorUrl} target="_blank" rel="noreferrer">{displayPhotoAuthor(photo.author)}</a> : displayPhotoAuthor(photo.author)}</dd>
+      <dt className="font-bold">{t.placeDetail.source}</dt><dd className="break-words">{sourceUrl ? <a className="place-detail__inline-link underline underline-offset-2" href={sourceUrl} target="_blank" rel="noreferrer">{photo.creditText.replace(photo.author, displayPhotoAuthor(photo.author))}<ExternalLink aria-hidden="true" className="size-3.5" /></a> : photo.creditText.replace(photo.author, displayPhotoAuthor(photo.author))}</dd>
       <dt className="font-bold">{t.placeDetail.fileSource}</dt><dd className="break-all">{fileSourceUrl ? <a className="underline underline-offset-2" href={fileSourceUrl} target="_blank" rel="noreferrer">{fileSourceUrl}</a> : photo.fileSourceUrl}</dd>
       <dt className="font-bold">{t.placeDetail.suppliedBy}</dt><dd className="break-words">{photo.sourceName}</dd>
       <dt className="font-bold">{t.placeDetail.license}</dt><dd className="break-words">{licenseUrl ? <a className="underline underline-offset-2" href={licenseUrl} target="_blank" rel="noreferrer">{photo.licenseName}</a> : photo.licenseName}</dd>

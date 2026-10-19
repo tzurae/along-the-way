@@ -233,5 +233,17 @@ export function PlacePhotoCredit({ photo }: { photo: PlaceDisplayPhoto | null | 
   const authorHref = safeExternalUrl(photo.authorUrl);
   const licenseHref = safeExternalUrl(photo.licenseUrl);
   const license = compactLicenseLabel(photo.licenseUrl, photo.licenseName);
-  return <small className="place-photo-credit"><span className="place-photo-credit__text">{authorHref ? <a className="place-photo-credit__link" href={authorHref} target="_blank" rel="noreferrer">{photo.author}</a> : photo.author}・{licenseHref ? <a className="place-photo-credit__link" href={licenseHref} target="_blank" rel="noreferrer">{license}</a> : license}</span></small>;
+  const author = displayPhotoAuthor(photo.author);
+  return <small className="place-photo-credit"><span className="place-photo-credit__text">{authorHref ? <a className="place-photo-credit__link" href={authorHref} target="_blank" rel="noreferrer">{author}</a> : author}・{licenseHref ? <a className="place-photo-credit__link" href={licenseHref} target="_blank" rel="noreferrer">{license}</a> : license}</span></small>;
+}
+
+/**
+ * Commons fills its Artist field with "No machine-readable author provided. Name~commonswiki
+ * assumed (based on copyright claims)." when an uploader skips the author template. The license
+ * still needs the author named, so show just that name (or Wikimedia Commons when there is none).
+ */
+export function displayPhotoAuthor(author: string) {
+  const assumed = /^No machine-readable author provided\.\s*(.+?)\s+assumed\b/i.exec(author.trim());
+  const name = (assumed ? assumed[1]! : author).replace(/~commonswiki\b/gi, "").trim();
+  return name || "Wikimedia Commons";
 }

@@ -15,9 +15,10 @@
 .place-thumbnail__loading {
   width: 100%;
   height: 100%;
+  /* Darker warm base + near-white sweep: the earlier surface-on-surface sweep was invisible. */
   background:
-    linear-gradient(100deg, transparent 20%, color-mix(in srgb, var(--color-surface) 70%, transparent) 50%, transparent 80%)
-      var(--color-surface-subtle);
+    linear-gradient(100deg, transparent 15%, color-mix(in srgb, white 75%, transparent) 50%, transparent 85%)
+      color-mix(in srgb, var(--color-ink) 12%, var(--color-surface));
   background-size: 220% 100%, auto;
   background-repeat: no-repeat;
   animation: place-thumbnail-shimmer 1.6s ease-in-out infinite;

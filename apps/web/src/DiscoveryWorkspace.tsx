@@ -1112,13 +1112,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
                     </button>
                   ) : undefined;
                   const displayStatus: CandidateProposalDto["status"] = proposal.status;
-                  const evidenceLabel = proposal.evidence.some((item) => item.isStale)
-                    ? t.proposal.rowEvidenceStale
-                    : proposal.evidence.length > 0
-                      ? t.proposal.rowEvidenceCount(proposal.evidence.length)
-                      : proposal.recommendationSentences === null
-                        ? t.proposal.rowLegacyEvidence
-                        : t.proposal.rowInference;
                   const tradeoffs = proposal.tradeoffSentences !== null
                     ? proposal.tradeoffSentences.map((sentence) => sentence.text)
                     : proposal.tradeoffs;
@@ -1199,7 +1192,6 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
                       placeType={proposal.type}
                       stateLabel={proposalStatusLabel(proposal, displayStatus)}
                       secondary={firstSentence?.text ?? proposal.recommendation}
-                      evidence={<span>{evidenceLabel}</span>}
                       caution={caution ?? undefined}
                       cautionAction={caution && cautionCount > 1 ? <span className="list-place-row__caution-action">・<button type="button" className="list-place-row__inline-action" onClick={() => openProposalDetail(proposal.id, "cautions")}>{t.proposal.moreItems(cautionCount - 1)}</button></span> : undefined}
                       photo={preview?.photo}
