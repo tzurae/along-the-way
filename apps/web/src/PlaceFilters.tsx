@@ -88,9 +88,10 @@ export function usePlaceFilters(places: FilterablePlace[], storageKey: string) {
       if (place.area) add("area", place.area);
       if (place.mine) counts.set(MINE_KEY, { key: MINE_KEY, group: "mine", label: "我按過讚", count: (counts.get(MINE_KEY)?.count ?? 0) + 1 });
     }
-    // Only values that occur appear, each with its count; nothing with 0 places is offered.
+    // Only values that narrow the list appear, each with its count: nothing with 0 places, and
+    // nothing every place shares, since choosing it would change nothing.
     const order: Group[] = ["mine", "status", "type", "area"];
-    return [...counts.values()].sort((left, right) =>
+    return [...counts.values()].filter((facet) => facet.count < places.length).sort((left, right) =>
       order.indexOf(left.group) - order.indexOf(right.group) || right.count - left.count || left.label.localeCompare(right.label));
   }, [places]);
 
@@ -221,6 +222,11 @@ export function PlaceFilterEmpty({ onClear }: { onClear(): void }) {
   );
 }
 
+/** The ward, city, town or village for filters and rows, written the zh-TW way (区 → 區). */
+export function placeArea(address: string | null): string | null {
+  return addressArea(address)?.replace(/区/gu, "區") ?? null;
+}
+
 /**
  * Derive only a Japanese municipality-level area. Japanese addresses are parsed
  * structurally: remove the country/postal prefix, cross the prefecture boundary,
@@ -229,7 +235,7 @@ export function PlaceFilterEmpty({ onClear }: { onClear(): void }) {
  * Romanized addresses normalize Ward/-ku/City/Town/District components. Country
  * names, postal codes and street text are never fallback labels.
  */
-export function placeArea(address: string | null): string | null {
+function addressArea(address: string | null): string | null {
   if (!address) return null;
   const compact = address.replace(/[\s　]/gu, "")
     .replace(/^(?:(?:日本)|(?:〒?\d{3}-?\d{4}))+/u, "");

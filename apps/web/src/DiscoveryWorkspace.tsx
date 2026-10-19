@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Ban, CalendarCheck, CalendarPlus, Check, ChevronRight, ExternalLink, Images, MapPin, MapPinOff, Pencil, RotateCw, Search } from "lucide-react";
+import { ArrowRight, Ban, CalendarCheck, CalendarPlus, Check, ChevronRight, ExternalLink, Images, MapPin, MapPinOff, Pencil, Search } from "lucide-react";
 
 import {
   parseDiscoveryWorkspaceResponse,
@@ -36,7 +36,7 @@ import { SchedulePlacesSheet } from "./SchedulePlacesSheet";
 import { SelectionBar } from "./SelectionBar";
 import { useScheduleToast } from "./ScheduleToast";
 import { assignPlacesToDay } from "./schedule-assignments";
-import { ClarifyChecklist, ResearchProgress, ThinkingIndicator, clarifyAnswers, clarifyDrafts, clarifySummary, type ClarifyDraft } from "./DiscoveryInvestigate";
+import { ClarifyChecklist, ResearchBatch, ThinkingIndicator, clarifyAnswers, clarifyDrafts, clarifySummary, focusDiscoveryBatch, prefersReducedMotion, type ClarifyDraft } from "./DiscoveryInvestigate";
 import { discoveryJobActive } from "./useDiscoveryJob";
 import "./pocket-discovery.css";
 
@@ -55,6 +55,8 @@ interface DiscoveryWorkspaceProps {
 }
 
 type RetryKeys = Map<string, { fingerprint: string; key: string }>;
+/** Below this many places the shortlist is read at a glance, so search and filter chips stay hidden. */
+const FILTER_MIN_PLACES = 8;
 
 function retryKey(store: RetryKeys, operation: string, payload: unknown) {
   const fingerprint = JSON.stringify(payload);
@@ -221,6 +223,8 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
     : serverDrafts;
   /** The whole 調查 chain (save brief → questions → review → queue) is one busy period. */
   const [investigating, setInvestigating] = useState(false);
+  /** While the checklist is up the request shows as one line; 編輯 reopens the text. */
+  const [briefOpen, setBriefOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [optimisticVotes, setOptimisticVotes] = useState<Record<string, { ownVote: boolean; voteCount: number }>>({});
   const [pendingProposalVotes, setPendingProposalVotes] = useState<Record<string, true>>({});
@@ -476,8 +480,13 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
         const asked = await mutate("clarify", `/api/trips/${trip.id}/discovery/clarification`, {
           expectedBriefVersion: brief.version,
         }, "find");
-        // With questions the member answers first; with none, research starts right away.
-        if (asked?.clarification?.status !== "ready") return;
+        setBriefOpen(false);
+        // With questions the member answers first, in the dialog (also when 重新調查 started this
+        // from the page); with none, research starts right away.
+        if (asked?.clarification?.status !== "ready") {
+          if (asked?.clarification) setResearchSettingsOpen(true);
+          return;
+        }
       } else if (clarification.status !== "ready" || clarifySummary(clarification, drafts).changed) {
         const answered = await mutate("answer", `/api/trips/${trip.id}/discovery/clarification/answers`, {
           expectedVersion: clarification.version,
@@ -485,13 +494,14 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
         }, "find", undefined, "PUT");
         if (!answered?.clarification) return;
         if (answered.clarification.status !== "ready") {
+          setResearchSettingsOpen(true);
           const first = answered.clarification.items.find((item) => item.required
             && (item.verdict === "insufficient" || item.verdict === "unreasonable"));
-          if (first) window.requestAnimationFrame(() => {
+          if (first) window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
             const target = document.querySelector<HTMLElement>(`[data-clarify-item="${first.id}"]`);
-            target?.scrollIntoView({ block: "center", behavior: "smooth" });
+            target?.scrollIntoView({ block: "center", behavior: prefersReducedMotion() ? "auto" : "smooth" });
             target?.querySelector<HTMLElement>("input")?.focus({ preventScroll: true });
-          });
+          }));
           return;
         }
       }
@@ -500,7 +510,9 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
       }, "find");
       if (!started) return;
       onJobStarted(started.latestJob);
+      // The dialog closes at once; the batch at the top of the list carries the progress from here.
       setResearchSettingsOpen(false);
+      focusDiscoveryBatch();
     } finally {
       setInvestigating(false);
     }
@@ -518,23 +530,35 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
 
   // The list changes once the save stage finishes: re-read it then, and keep the new rows'
   // thumbnails loading while the photos stage looks for Commons photos. Only jobs seen before
-  // their save finished count; a job that finished earlier is already in the first read. Those
-  // jobs also keep their progress card (collapsed to 「調查完成」) for the rest of this visit.
-  const watchedJobIds = useRef(new Set<string>());
+  // their save finished count; a job that finished earlier is already in the first read.
+  const unsavedJobIds = useRef(new Set<string>());
   const refreshedJobIds = useRef(new Set<string>());
   const jobId = job?.id ?? null;
   const jobSaved = job?.stages.save.state === "done";
   useEffect(() => {
     if (!jobId) return;
     if (!jobSaved) {
-      watchedJobIds.current.add(jobId);
+      unsavedJobIds.current.add(jobId);
       return;
     }
-    if (!watchedJobIds.current.has(jobId) || refreshedJobIds.current.has(jobId)) return;
+    if (!unsavedJobIds.current.has(jobId) || refreshedJobIds.current.has(jobId)) return;
     refreshedJobIds.current.add(jobId);
     void refresh();
     setPhotosExpectedUntil(Date.now() + 120_000);
   }, [jobId, jobSaved, refresh]);
+
+  // 本次新增: the newest job stays at the top of the list, from its first stage to the places it
+  // found, until the member collapses it. A job counts once it was seen running or its result
+  // was not yet seen; a result already seen elsewhere does not come back on the next visit.
+  const shownJob = job ?? workspace?.latestJob ?? null;
+  const jobRunning = discoveryJobActive(shownJob);
+  const [watchedJobId, setWatchedJobId] = useState<string | null>(null);
+  const [dismissedJobId, setDismissedJobId] = useState<string | null>(null);
+  const shownJobId = shownJob?.id ?? null;
+  const shownJobUnseen = Boolean(shownJob && (jobRunning || !shownJob.acknowledged));
+  useEffect(() => {
+    if (shownJobId && shownJobUnseen) setWatchedJobId(shownJobId);
+  }, [shownJobId, shownJobUnseen]);
 
 
   async function rejectProposal(proposal: CandidateProposalDto) {
@@ -717,8 +741,16 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
   ];
   const acceptedPlaceFor = (proposal: CandidateProposalDto) =>
     proposal.acceptedTripPlaceId ? tripPlacesById.get(proposal.acceptedTripPlaceId) ?? null : null;
+  const batchJob = shownJob && shownJob.id !== dismissedJobId && (jobRunning || watchedJobId === shownJob.id) ? shownJob : null;
+  // Only a workspace read made after this job's save stage has its run as the latest run; an
+  // earlier read would put the previous run's places in this batch.
+  const batchRunId = batchJob && workspace?.latestJob?.id === batchJob.id && workspace.latestJob.stages.save.state === "done"
+    ? workspace.latestRun?.id ?? null : null;
+  const batchProposals = batchRunId ? listedProposals.filter((proposal) => proposal.runId === batchRunId) : [];
+  const batchProposalIds = new Set(batchProposals.map((proposal) => proposal.id));
+  const restProposals = listedProposals.filter((proposal) => !batchProposalIds.has(proposal.id));
   // Filter by the coarse place type (景點、餐廳…): AI categories are free text and too varied for chips.
-  const proposalFilters = usePlaceFilters(listedProposals.map((proposal) => {
+  const proposalFilters = usePlaceFilters(restProposals.map((proposal) => {
     const place = acceptedPlaceFor(proposal);
     return {
       id: proposal.id,
@@ -729,7 +761,25 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
       mine: proposal.status === "pending" ? proposal.ownVote : Boolean(place?.ownVote),
     };
   }), `along-the-way:place-filters:${accountId}:${trip.id}:discovery`);
-  const filteredProposals = listedProposals.filter((proposal) => proposalFilters.visibleIds.has(proposal.id));
+  // A short list is read at a glance; search and chips only help once it gets long. Remembered
+  // filters do not apply while the bar is hidden, or rows would vanish with no way to clear them.
+  const filtersShown = restProposals.length >= FILTER_MIN_PLACES;
+  const visibleRestProposals = filtersShown
+    ? restProposals.filter((proposal) => proposalFilters.visibleIds.has(proposal.id))
+    : restProposals;
+  // Filters remembered from a longer list would hide rows the moment the list grows back, with
+  // chips the member never chose; a hidden bar forgets them.
+  const filtersActive = proposalFilters.active;
+  const clearFilters = proposalFilters.clear;
+  // Not before the first read: an empty list while loading is not a short list.
+  const listLoaded = workspace !== null;
+  useEffect(() => {
+    if (listLoaded && !filtersShown && filtersActive) clearFilters();
+  }, [clearFilters, filtersActive, filtersShown, listLoaded]);
+  // Opening 你的需求 again starts from the one-line summary while questions are up.
+  useEffect(() => {
+    if (researchSettingsOpen) setBriefOpen(false);
+  }, [researchSettingsOpen]);
   /** Status label; an accepted proposal whose wishlist place is scheduled reads 「已加入行程」. */
   const proposalStatusLabel = (proposal: CandidateProposalDto, status: CandidateProposalDto["status"] = proposal.status) => {
     const place = status === "accepted" ? acceptedPlaceFor(proposal) : null;
@@ -934,32 +984,169 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
     }
   }
 
-  const shownJob = job ?? workspace?.latestJob ?? null;
-  const jobRunning = discoveryJobActive(shownJob);
+  /** One shortlist row; `fresh` marks a place the newest 調查 just added (shown in its batch). */
+  function renderProposalRow(proposal: CandidateProposalDto, fresh = false) {
+    const firstSentence = proposal.recommendationSentences?.[0];
+    const repeatedName = (proposalNameCounts.get(proposal.name) ?? 0) > 1;
+    const selectable = proposalCanBeSelected(proposal);
+    const selected = selectedProposalIds.has(proposal.id);
+    const assignedDayId = proposalDayId(proposal);
+    const selectionLabel = scheduleT.selectPlace(proposal.name);
+    const preview = previews.previews.get(proposal.id);
+    const state = selecting
+      ? selected ? "selected" : selectable ? "selectable" : "selecting"
+      : "default";
+    const selectionControl = selecting && selectable ? (
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked={selected}
+        aria-label={selectionLabel}
+        className="schedule-selection-check"
+        disabled={pending !== null}
+        onClick={() => changeSelection(proposal, !selected)}
+      >
+        <Check aria-hidden="true" size={16} strokeWidth={3} />
+      </button>
+    ) : undefined;
+    const displayStatus: CandidateProposalDto["status"] = proposal.status;
+    const tradeoffs = proposal.tradeoffSentences !== null
+      ? proposal.tradeoffSentences.map((sentence) => sentence.text)
+      : proposal.tradeoffs;
+    const caution = proposal.unknowns[0]
+      ? t.proposal.unknownPrefix(proposal.unknowns[0])
+      : tradeoffs[0]
+        ? t.proposal.tradeoffPrefix(tradeoffs[0])
+        : null;
+    const cautionCount = proposal.unknowns.length + tradeoffs.length;
+    const optimisticVote = optimisticVotes[proposal.id];
+    const votePending = Boolean(pendingProposalVotes[proposal.id]);
+    const voteAction = proposal.status === "pending" ? (
+      <VoteControl
+        compact
+        name={proposal.name}
+        voters={proposal.voters}
+        voteCount={optimisticVote?.voteCount ?? proposal.voteCount}
+        ownVote={optimisticVote?.ownVote ?? proposal.ownVote}
+        votingAvailable={proposal.votingAvailable}
+        disabled={votePending}
+        busy={votePending}
+        onChange={(voted) => void setProposalVote(proposal, voted)}
+      />
+    ) : acceptedPlaceFor(proposal) ? (
+      // In the itinerary: the like is the trip place's own vote.
+      <VoteControl
+        compact
+        name={proposal.name}
+        voters={acceptedPlaceFor(proposal)!.voters}
+        voteCount={acceptedPlaceFor(proposal)!.voteCount}
+        ownVote={acceptedPlaceFor(proposal)!.ownVote}
+        votingAvailable={acceptedPlaceFor(proposal)!.votingAvailable}
+        disabled={false}
+        onChange={(voted) => void setAcceptedPlaceVote(acceptedPlaceFor(proposal)!.id, voted)}
+      />
+    ) : undefined;
+    // AI 建議 only go into the itinerary (排入行程); 口袋名單 is for places members add themselves.
+    const acceptedPlace = proposal.status === "accepted" ? acceptedPlaceFor(proposal) : null;
+    // Pending: put it into the itinerary. Accepted but no day yet: pick its day.
+    const canScheduleRow = canArrangeItinerary(trip) && proposalIsLocated(proposal)
+      && (proposal.status === "pending" || Boolean(acceptedPlace && acceptedPlace.assignedDayId === null));
+    const canDecline = proposal.status === "pending" && trip.role === "owner";
+    const rowActions = canScheduleRow || canDecline ? (
+      <>
+        {canDecline ? (
+          <button
+            type="button"
+            className="pd-danger-link"
+            disabled={pending !== null}
+            onClick={() => {
+              openProposalDetail(proposal.id);
+              setRejectConfirmation(proposal);
+            }}
+          >
+            <Ban aria-hidden="true" className="size-4" />
+            {t.proposal.decline}
+          </button>
+        ) : null}
+        {canScheduleRow ? (
+          <button
+            type="button"
+            className="pd-primary"
+            disabled={pending !== null}
+            onClick={() => openProposalSchedule(proposal)}
+          >
+            <CalendarPlus aria-hidden="true" className="size-4" />
+            {proposal.status === "pending" ? scheduleT.pageAction : t.proposal.pickDay}
+          </button>
+        ) : null}
+      </>
+    ) : undefined;
+    return (
+      <PlaceListRow
+        key={proposal.id}
+        variant="proposal"
+        name={proposal.name}
+        typeLabel={t.placeType[proposal.type]}
+        placeType={proposal.type}
+        stateLabel={fresh && proposal.status === "pending" ? t.run.fresh : proposalStatusLabel(proposal, displayStatus)}
+        secondary={firstSentence?.text ?? proposal.recommendation}
+        caution={caution ?? undefined}
+        cautionAction={caution && cautionCount > 1 ? <span className="list-place-row__caution-action">・<button type="button" className="list-place-row__inline-action" onClick={() => openProposalDetail(proposal.id, "cautions")}>{t.proposal.moreItems(cautionCount - 1)}</button></span> : undefined}
+        photo={preview?.photo}
+        photoCount={preview?.photoCount ?? 0}
+        loadingPhoto={previews.loading || (previews.waiting && !preview?.photo)}
+        voteAction={voteAction}
+        rowActions={rowActions}
+        selectionControl={selectionControl}
+        ariaLabel={repeatedName ? t.proposal.proposalAtAddress(proposal.name, proposal.address ?? t.proposal.unknownAddress) : t.proposal.ariaLabel(proposal.name)}
+        current={!selecting && proposal.id === selectedProposalId}
+        state={state}
+        scheduled={Boolean(assignedDayId)}
+        changed={!selecting && changedProposalIds.has(proposal.id)}
+        onOpen={() => openProposalDetail(proposal.id)}
+        onActivate={() => {
+          if (selecting) changeSelection(proposal, !selected);
+          else openProposalDetail(proposal.id);
+        }}
+        openLabel={t.proposal.viewDetail(proposal.name)}
+        openDataAttribute={{ name: "proposal-detail-trigger", value: proposal.id }}
+        dataAttribute={{ name: "discovery-proposal", value: proposal.name }}
+      />
+    );
+  }
+
   const busy = investigating || jobRunning;
-  // An edited brief makes the checklist stale: 調查 saves it and asks again.
+  // An edited brief makes the checklist stale: the next step saves it and asks again.
   const briefDirty = !briefBase.current || briefBase.current.originalText !== briefDraft;
   const clarification = !briefDirty && workspace?.clarification && workspace.clarification.briefVersion === workspace.brief?.version
     ? workspace.clarification : null;
   const summary = clarification ? clarifySummary(clarification, drafts) : null;
   const thinking = pending === "save-brief" || pending === "clarify" ? t.clarify.askingThinking
     : pending === "answer" ? t.clarify.reviewingThinking : null;
-  const missingRequired = summary !== null && summary.requiredAnswered < summary.requiredTotal;
-  const statusText = !clarification || clarification.items.length === 0 ? t.clarify.idleHint
+  const requiredLeft = summary ? summary.requiredTotal - summary.requiredAnswered : 0;
+  const statusText = !clarification || clarification.items.length === 0 ? null
     : summary && summary.askBack > 0 ? t.clarify.askBack(summary.askBack)
-      : summary && summary.requiredTotal > 0 ? t.clarify.progress(summary.requiredAnswered, summary.requiredTotal)
+      : summary && summary.requiredTotal > 0 && requiredLeft > 0 ? t.clarify.progress(summary.requiredAnswered, summary.requiredTotal)
         : t.clarify.costNote;
+  // One label per step: ask for questions, finish the required ones, then start.
+  const investigateLabel = investigating ? t.thinkingButton
+    : jobRunning ? t.searchingButton
+      : !clarification ? t.clarify.askFirst
+        : requiredLeft > 0 ? t.clarify.requiredLeft(requiredLeft)
+          : t.clarify.start;
   const investigateButton = (
     <button
       className="pd-primary"
-      disabled={busy || pending !== null || !briefDraft.trim() || missingRequired}
+      disabled={busy || pending !== null || !briefDraft.trim() || requiredLeft > 0}
       aria-busy={busy || undefined}
       onClick={() => void investigate()}
     >
-      {busy ? <span className="pd-thinking-dots" aria-hidden="true"><i /><i /><i /></span> : <Search aria-hidden="true" className="size-4" />}
-      {busy ? t.investigating : shownJob?.status === "failed" ? t.investigateAgain : t.investigate}
+      {busy ? <span className="pd-thinking-dots" aria-hidden="true"><i /><i /><i /></span>
+        : clarification ? <Search aria-hidden="true" className="size-4" /> : <ArrowRight aria-hidden="true" className="size-4" />}
+      {investigateLabel}
     </button>
   );
+  const briefCollapsed = clarification !== null && clarification.items.length > 0 && !briefOpen;
   return (
     <section className="pd-workspace pd-discovery" data-selecting={selecting ? "true" : undefined} aria-labelledby="ai-discovery-heading">
       <div className={`pd-pagehead${selecting ? " pd-pagehead--selecting" : ""}`}>
@@ -997,7 +1184,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
                 </button>
               ) : null}
               {workspace?.latestRun?.status === "completed" ? (
-                <button className="schedule-secondary-button" onClick={() => setResearchSettingsOpen(true)}>
+                <button className="schedule-secondary-button" disabled={busy} onClick={() => setResearchSettingsOpen(true)}>
                   <Pencil aria-hidden="true" className="size-4" />
                   <span>{t.brief.editRequirements}</span>
                 </button>
@@ -1046,16 +1233,27 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
           >
             <div className="pd-brief-editor">
               <section aria-label={t.brief.areaLabel}>
-                <label className="grid gap-2 font-bold">{t.brief.prompt}
-                  <textarea
-                    className="min-h-32 rounded-xl border bg-surface p-3 font-normal"
-                    value={briefDraft}
-                    readOnly={busy}
-                    onChange={(event) => setBriefDraft(event.target.value)}
-                    placeholder={t.brief.placeholder}
-                  />
-                </label>
-                <p className="pd-field-help">{workspace?.latestRun ? t.brief.updateConsequence : t.brief.suggestionOnly}</p>
+                {briefCollapsed ? (
+                  // While answering, the request shrinks to one line; 編輯 brings the text back.
+                  <div className="pd-brief-summary">
+                    <span className="pd-brief-summary-label">{t.clarify.briefSummary}</span>
+                    <span className="pd-brief-summary-text">{briefDraft}</span>
+                    <button type="button" className="pd-batch-link" disabled={busy} onClick={() => setBriefOpen(true)}>{t.clarify.editBrief}</button>
+                  </div>
+                ) : (
+                  <>
+                    <label className="grid gap-2 font-bold">{t.brief.prompt}
+                      <textarea
+                        className="min-h-32 rounded-xl border bg-surface p-3 font-normal"
+                        value={briefDraft}
+                        readOnly={busy}
+                        onChange={(event) => setBriefDraft(event.target.value)}
+                        placeholder={t.brief.placeholder}
+                      />
+                    </label>
+                    <p className="pd-field-help">{workspace?.latestRun ? t.brief.updateConsequence : t.brief.suggestionOnly}</p>
+                  </>
+                )}
                 {!workspace?.latestRun && !workspace?.modelAvailable ? <p className="mt-3 text-sm text-muted-foreground">{t.brief.modelUnavailable}</p> : null}
                 {!workspace?.latestRun && !workspace?.placeProviderAvailable ? <p className="mt-2 text-sm text-muted-foreground">{t.brief.placesUnavailable}</p> : null}
               </section>
@@ -1083,160 +1281,38 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
             </div>
           </ResearchPanel>
 
-          {shownJob && (jobRunning || shownJob.status === "failed" || watchedJobIds.current.has(shownJob.id)) ? (
-            <ResearchProgress
-              job={shownJob}
-              failureReason={discoveryRunFailureReason(shownJob.errorCode, t)}
+          {batchJob ? (
+            <ResearchBatch
+              job={batchJob}
+              failureReason={discoveryRunFailureReason(batchJob.errorCode, t)}
+              busy={busy || pending !== null}
+              canRetry={Boolean(briefDraft.trim())}
+              onDismiss={() => setDismissedJobId(batchJob.id)}
+              onAgain={() => setResearchSettingsOpen(true)}
+              onRetry={() => void investigate()}
+              onEdit={workspace?.latestRun ? () => setResearchSettingsOpen(true) : undefined}
               t={t}
-              actions={(
-                <>
-                  {workspace?.latestRun ? <button className="pd-secondary" disabled={busy || pending !== null} onClick={() => setResearchSettingsOpen(true)}><Pencil aria-hidden="true" className="size-4" />{t.brief.editRequirements}</button> : null}
-                  <button className="pd-primary" disabled={busy || pending !== null || !briefDraft.trim()} onClick={() => void investigate()}><RotateCw aria-hidden="true" className="size-4" />{t.investigateAgain}</button>
-                </>
-              )}
-            />
+            >
+              {batchRunId === null ? undefined : batchProposals.length ? (
+                <FlipList className="pd-list" ariaLabel={t.run.doneTitle(batchProposals.length)}>
+                  {batchProposals.map((proposal) => renderProposalRow(proposal, true))}
+                </FlipList>
+              ) : false}
+            </ResearchBatch>
           ) : null}
 
-          {listedProposals.length ? (
+          {restProposals.length ? (
             <section className="order-2" aria-label={t.proposal.shortlistLabel}>
               <h3 className="sr-only">{t.proposal.shortlistTitle}</h3>
-              {listedProposals.length > 1 ? <PlaceFilterBar filters={proposalFilters} total={listedProposals.length} label="搜尋 AI 找到的地點" /> : null}
-              {filteredProposals.length === 0 ? <PlaceFilterEmpty onClear={proposalFilters.clear} /> : (
+              {filtersShown ? <PlaceFilterBar filters={proposalFilters} total={restProposals.length} label="搜尋 AI 找到的地點" /> : null}
+              {visibleRestProposals.length === 0 ? <PlaceFilterEmpty onClear={proposalFilters.clear} /> : (
               <FlipList className="pd-list" ariaLabel={t.proposal.shortlistLabel}>
                 {/* Same order as 口袋名單: newest first as the API returns it; votes never reorder. */}
-                {filteredProposals.map((proposal) => {
-                  const firstSentence = proposal.recommendationSentences?.[0];
-                  const repeatedName = (proposalNameCounts.get(proposal.name) ?? 0) > 1;
-                  const selectable = proposalCanBeSelected(proposal);
-                  const selected = selectedProposalIds.has(proposal.id);
-                  const assignedDayId = proposalDayId(proposal);
-                  const selectionLabel = scheduleT.selectPlace(proposal.name);
-                  const preview = previews.previews.get(proposal.id);
-                  const state = selecting
-                    ? selected ? "selected" : selectable ? "selectable" : "selecting"
-                    : "default";
-                  const selectionControl = selecting && selectable ? (
-                    <button
-                      type="button"
-                      role="checkbox"
-                      aria-checked={selected}
-                      aria-label={selectionLabel}
-                      className="schedule-selection-check"
-                      disabled={pending !== null}
-                      onClick={() => changeSelection(proposal, !selected)}
-                    >
-                      <Check aria-hidden="true" size={16} strokeWidth={3} />
-                    </button>
-                  ) : undefined;
-                  const displayStatus: CandidateProposalDto["status"] = proposal.status;
-                  const tradeoffs = proposal.tradeoffSentences !== null
-                    ? proposal.tradeoffSentences.map((sentence) => sentence.text)
-                    : proposal.tradeoffs;
-                  const caution = proposal.unknowns[0]
-                    ? t.proposal.unknownPrefix(proposal.unknowns[0])
-                    : tradeoffs[0]
-                      ? t.proposal.tradeoffPrefix(tradeoffs[0])
-                      : null;
-                  const cautionCount = proposal.unknowns.length + tradeoffs.length;
-                  const optimisticVote = optimisticVotes[proposal.id];
-                  const votePending = Boolean(pendingProposalVotes[proposal.id]);
-                  const voteAction = proposal.status === "pending" ? (
-                    <VoteControl
-                      compact
-                      name={proposal.name}
-                      voters={proposal.voters}
-                      voteCount={optimisticVote?.voteCount ?? proposal.voteCount}
-                      ownVote={optimisticVote?.ownVote ?? proposal.ownVote}
-                      votingAvailable={proposal.votingAvailable}
-                      disabled={votePending}
-                      busy={votePending}
-                      onChange={(voted) => void setProposalVote(proposal, voted)}
-                    />
-                  ) : acceptedPlaceFor(proposal) ? (
-                    // In the itinerary: the like is the trip place's own vote.
-                    <VoteControl
-                      compact
-                      name={proposal.name}
-                      voters={acceptedPlaceFor(proposal)!.voters}
-                      voteCount={acceptedPlaceFor(proposal)!.voteCount}
-                      ownVote={acceptedPlaceFor(proposal)!.ownVote}
-                      votingAvailable={acceptedPlaceFor(proposal)!.votingAvailable}
-                      disabled={false}
-                      onChange={(voted) => void setAcceptedPlaceVote(acceptedPlaceFor(proposal)!.id, voted)}
-                    />
-                  ) : undefined;
-                  // AI 建議 only go into the itinerary (排入行程); 口袋名單 is for places members add themselves.
-                  const acceptedPlace = proposal.status === "accepted" ? acceptedPlaceFor(proposal) : null;
-                  // Pending: put it into the itinerary. Accepted but no day yet: pick its day.
-                  const canScheduleRow = canArrangeItinerary(trip) && proposalIsLocated(proposal)
-                    && (proposal.status === "pending" || Boolean(acceptedPlace && acceptedPlace.assignedDayId === null));
-                  const canDecline = proposal.status === "pending" && trip.role === "owner";
-                  const rowActions = canScheduleRow || canDecline ? (
-                    <>
-                      {canDecline ? (
-                        <button
-                          type="button"
-                          className="pd-danger-link"
-                          disabled={pending !== null}
-                          onClick={() => {
-                            openProposalDetail(proposal.id);
-                            setRejectConfirmation(proposal);
-                          }}
-                        >
-                          <Ban aria-hidden="true" className="size-4" />
-                          {t.proposal.decline}
-                        </button>
-                      ) : null}
-                      {canScheduleRow ? (
-                        <button
-                          type="button"
-                          className="pd-primary"
-                          disabled={pending !== null}
-                          onClick={() => openProposalSchedule(proposal)}
-                        >
-                          <CalendarPlus aria-hidden="true" className="size-4" />
-                          {proposal.status === "pending" ? scheduleT.pageAction : t.proposal.pickDay}
-                        </button>
-                      ) : null}
-                    </>
-                  ) : undefined;
-                  return (
-                    <PlaceListRow
-                      key={proposal.id}
-                      variant="proposal"
-                      name={proposal.name}
-                      typeLabel={t.placeType[proposal.type]}
-                      placeType={proposal.type}
-                      stateLabel={proposalStatusLabel(proposal, displayStatus)}
-                      secondary={firstSentence?.text ?? proposal.recommendation}
-                      caution={caution ?? undefined}
-                      cautionAction={caution && cautionCount > 1 ? <span className="list-place-row__caution-action">・<button type="button" className="list-place-row__inline-action" onClick={() => openProposalDetail(proposal.id, "cautions")}>{t.proposal.moreItems(cautionCount - 1)}</button></span> : undefined}
-                      photo={preview?.photo}
-                      photoCount={preview?.photoCount ?? 0}
-                      loadingPhoto={previews.loading || (previews.waiting && !preview?.photo)}
-                      voteAction={voteAction}
-                      rowActions={rowActions}
-                      selectionControl={selectionControl}
-                      ariaLabel={repeatedName ? t.proposal.proposalAtAddress(proposal.name, proposal.address ?? t.proposal.unknownAddress) : t.proposal.ariaLabel(proposal.name)}
-                      current={!selecting && proposal.id === selectedProposalId}
-                      state={state}
-                      scheduled={Boolean(assignedDayId)}
-                      changed={!selecting && changedProposalIds.has(proposal.id)}
-                      onOpen={() => openProposalDetail(proposal.id)}
-                      onActivate={() => {
-                        if (selecting) changeSelection(proposal, !selected);
-                        else openProposalDetail(proposal.id);
-                      }}
-                      openLabel={t.proposal.viewDetail(proposal.name)}
-                      openDataAttribute={{ name: "proposal-detail-trigger", value: proposal.id }}
-                      dataAttribute={{ name: "discovery-proposal", value: proposal.name }}
-                    />
-                  );
-                })}
+                {visibleRestProposals.map((proposal) => renderProposalRow(proposal))}
               </FlipList>
               )}
             </section>
-          ) : workspace?.proposals.length ? null : workspace?.latestRun?.status === "completed" ? <p className="order-2 rounded-panel border border-dashed p-5 text-center text-muted-foreground">{t.proposal.nonePassed}</p> : null}
+          ) : workspace?.proposals.length || batchJob ? null : workspace?.latestRun?.status === "completed" ? <p className="order-2 rounded-panel border border-dashed p-5 text-center text-muted-foreground">{t.proposal.nonePassed}</p> : null}
 
           {selectedProposal ? (
             <PlaceDetailSheet

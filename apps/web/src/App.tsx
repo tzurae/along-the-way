@@ -63,6 +63,7 @@ import { ApiRequestError, localizedApiErrorMessage } from "./api-error";
 import { useTripLiveUpdates } from "./useTripLiveUpdates";
 import { useDiscoveryJob, useDiscoveryJobTitle, type DiscoveryJobBadge } from "./useDiscoveryJob";
 import { useScheduleToast } from "./ScheduleToast";
+import { focusDiscoveryBatch } from "./DiscoveryInvestigate";
 interface OnboardingFacts {
   tripId: string;
   hasLodging: boolean;
@@ -1239,7 +1240,10 @@ export function App() {
         {
           label: failed ? t.discovery.run.viewReason : t.discovery.run.view,
           href: `?trip=${encodeURIComponent(selectedTrip.id)}&tab=places&segment=discovery`,
-          navigate: () => selectSegment("places", "discovery"),
+          navigate: () => {
+            selectSegment("places", "discovery");
+            focusDiscoveryBatch();
+          },
         },
       );
     },

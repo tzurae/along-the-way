@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Check, X } from "lucide-react";
+import { Check, Pencil, RotateCw, X } from "lucide-react";
 
 import {
   DISCOVERY_STAGES,
@@ -237,18 +237,56 @@ function elapsedSeconds(startedAt: string | null, now: number) {
   return Number.isFinite(started) ? Math.max(0, Math.floor((now - started) / 1000)) : null;
 }
 
+/** Element id of the batch heading, so the dialog and the toast can move focus to it. */
+export const DISCOVERY_BATCH_ID = "discovery-batch";
+
+export function prefersReducedMotion() {
+  return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
 /**
- * The stages of one 調查 job exactly as the worker reports them; nothing advances on a timer.
- * The only clock here is the elapsed time of the running stage, measured from its real start.
+ * Moves focus to the batch heading and brings it into view. The panel that holds it may only
+ * become visible, or the job only arrive, a few renders later, so it waits up to about a second
+ * for a visible heading and then gives up quietly.
  */
-export function ResearchProgress({ job, failureReason, actions, t }: {
+export function focusDiscoveryBatch() {
+  let frames = 0;
+  const attempt = () => {
+    const heading = document.getElementById(DISCOVERY_BATCH_ID);
+    // A dialog still closing keeps focus trapped inside it; wait until it is gone.
+    if (!heading || heading.offsetParent === null || document.querySelector('[role="dialog"]')) {
+      if (++frames < 60) window.requestAnimationFrame(attempt);
+      return;
+    }
+    heading.focus({ preventScroll: true });
+    heading.scrollIntoView({ block: "center", behavior: prefersReducedMotion() ? "auto" : "smooth" });
+  };
+  window.requestAnimationFrame(attempt);
+}
+
+/**
+ * The newest 調查 job at the top of the list: while it runs, its current stage as the worker
+ * reports it (nothing advances on a timer; the only clock is the running stage's elapsed time from
+ * its real start); once saved, the places it found, in the same spot; if it failed, why.
+ */
+export function ResearchBatch({ job, failureReason, children, onDismiss, onAgain, onRetry, onEdit, busy, canRetry, t }: {
   job: DiscoveryJobDto;
   failureReason: string;
-  actions?: ReactNode;
+  /** The rows this job added; shown once the save stage finished. */
+  children?: ReactNode;
+  onDismiss(): void;
+  onAgain(): void;
+  onRetry(): void;
+  /** Opens 你的需求; absent on the first run, where the request form is on the page. */
+  onEdit?: () => void;
+  busy: boolean;
+  /** False when there is no request text to research again. */
+  canRetry: boolean;
   t: DiscoveryCopy;
 }) {
   const running = job.status === "queued" || job.status === "running";
   const [now, setNow] = useState(() => Date.now());
+  const [detailsOpen, setDetailsOpen] = useState(false);
   useEffect(() => {
     if (!running) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -261,41 +299,60 @@ export function ResearchProgress({ job, failureReason, actions, t }: {
     return !running && state === "running" ? "failed" : state;
   };
   const saved = stateOf("save") === "done";
+  const failed = job.status === "failed";
+  const count = job.addedCount ?? 0;
   const failedStage = DISCOVERY_STAGES.find((stage) => stateOf(stage) === "failed") ?? job.stage;
-  const title = job.status === "failed" ? t.run.failedTitle
-    : saved ? t.run.doneTitle(job.addedCount ?? 0)
-      : job.status === "queued" ? t.run.queued : t.run.title;
   const runningStage = DISCOVERY_STAGES.find((stage) => stateOf(stage) === "running") ?? null;
-  const runningCopy: Record<DiscoveryStage, string> = {
-    plan: t.stages.planRunning,
-    research: t.stages.researchRunning,
-    verify: t.stages.verifyRunning,
-    save: t.stages.saveRunning,
-    photos: t.stages.photosRunning,
-  };
+  const runningSeconds = runningStage ? elapsedSeconds(job.stages[runningStage].startedAt, now) : null;
+  const title = failed ? t.run.failedTitle
+    : job.status === "queued" ? t.run.queued
+      : !saved ? t.run.title
+        : running ? t.run.foundTitle(count)
+          : t.run.doneTitle(count);
+  const totalSeconds = job.status === "succeeded" && job.stages.plan.startedAt && job.finishedAt
+    ? elapsedSeconds(job.stages.plan.startedAt, Date.parse(job.finishedAt)) : null;
+  const meta = failed ? null
+    : running && !saved && runningStage ? (runningSeconds === null ? t.stages[runningStage] : t.run.stageMeta(t.stages[runningStage], runningSeconds))
+      : running && saved ? t.run.photosLoading
+        : totalSeconds !== null ? t.run.took(totalSeconds) : null;
   const note = (stage: DiscoveryStage) => {
-    const entry = job.stages[stage];
     const state = stateOf(stage);
     if (state === "done") return t.stages.done;
     if (state === "partial") return t.stages.photosPartial;
     if (state === "failed") return t.stages.failed;
     if (state === "pending") return t.stages.pending;
-    const seconds = elapsedSeconds(entry.startedAt, now);
-    const base = stage === "photos" && saved ? t.stages.photosNonBlocking : runningCopy[stage];
-    return seconds === null ? base : `${base}・${t.stages.elapsed(seconds)}`;
+    return t.stages.running;
   };
-  // Collapsed to one line once everything finished; the list stays while photos still load.
-  const collapsed = job.status === "succeeded";
+  // Where it stopped matters when it failed; while it runs the list is one tap away.
+  const showStages = failed || (running && detailsOpen);
   return (
-    <section className="order-1 pd-progress" data-status={job.status} aria-labelledby={`discovery-job-${job.id}`}>
-      <h3 id={`discovery-job-${job.id}`} className="pd-progress-title">
-        {collapsed ? <Check aria-hidden="true" className="size-4" /> : null}{title}
-      </h3>
+    <section className="order-1 pd-batch" data-status={job.status} aria-labelledby={DISCOVERY_BATCH_ID}>
+      <div className="pd-batch-head">
+        <div className="pd-batch-heading">
+          <span className="pd-batch-icon" aria-hidden="true">
+            {failed ? <X className="size-4" /> : running && !saved ? <span className="pd-stage-spinner" /> : <Check className="size-4" />}
+          </span>
+          <h3 id={DISCOVERY_BATCH_ID} tabIndex={-1} className="pd-batch-title">{title}</h3>
+          {meta ? <span className="pd-batch-meta">{meta}</span> : null}
+        </div>
+        <div className="pd-batch-actions">
+          {running ? (
+            <button type="button" className="pd-batch-link" aria-expanded={detailsOpen} onClick={() => setDetailsOpen((open) => !open)}>
+              {detailsOpen ? t.run.hideDetails : t.run.showDetails}
+            </button>
+          ) : (
+            <>
+              {!failed ? <button type="button" className="pd-batch-link" disabled={busy} onClick={onAgain}>{t.run.again}</button> : null}
+              <button type="button" className="pd-batch-link" onClick={onDismiss}>{t.run.dismiss}</button>
+            </>
+          )}
+        </div>
+      </div>
       {/* Read once per stage change, e.g. 「查證地點，進行中」. */}
       <p className="sr-only" role="status" aria-live="polite">
-        {runningStage ? `${t.stages[runningStage]}，${t.stages.running}` : title}
+        {runningStage && !saved ? `${t.stages[runningStage]}，${t.stages.running}` : title}
       </p>
-      {collapsed ? null : (
+      {showStages ? (
         <ol className="pd-stages">
           {DISCOVERY_STAGES.map((stage) => {
             const state = stateOf(stage);
@@ -312,14 +369,22 @@ export function ResearchProgress({ job, failureReason, actions, t }: {
             );
           })}
         </ol>
-      )}
-      {job.status === "failed" ? (
+      ) : null}
+      {failed ? (
         <>
-          <p className="pd-progress-failure">
+          <p className="pd-batch-failure">
             {failedStage ? t.stages.failedAt(t.stages[failedStage]) : null}{failureReason} {t.stages.answersKept}
           </p>
-          {actions ? <div className="pd-progress-actions">{actions}</div> : null}
+          <div className="pd-batch-retry">
+            {onEdit ? <button className="pd-secondary" disabled={busy} onClick={onEdit}><Pencil aria-hidden="true" className="size-4" />{t.brief.editRequirements}</button> : null}
+            <button className="pd-primary" disabled={busy || !canRetry} onClick={onRetry}><RotateCw aria-hidden="true" className="size-4" />{t.investigateAgain}</button>
+          </div>
         </>
+      ) : running && !saved ? (
+        <p className="pd-batch-empty">{t.run.placeholder}</p>
+      ) : saved ? (
+        // Saved, but the list read that holds its rows may not have arrived yet.
+        children ?? (count > 0 ? <p className="pd-batch-empty">{t.run.arranging}</p> : null)
       ) : null}
     </section>
   );

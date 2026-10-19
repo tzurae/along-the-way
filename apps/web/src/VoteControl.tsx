@@ -29,7 +29,7 @@ export function VoteControl({ name, voters, voteCount, ownVote, votingAvailable,
       <section className="pd-vote-control" data-compact={compact ? "true" : "false"} aria-label={t.forPlace(name)}>
         <span className="pd-vote-tally" aria-label={`${t.unavailable}，${t.count(voteCount)}`} title={t.unavailable}>
           <ThumbsUp aria-hidden="true" className="size-4" />
-          <span>{voteCount}</span>
+          {voteCount > 0 ? <span>{voteCount}</span> : null}
         </span>
         {!compact ? <VoteVoters voters={voters} /> : null}
       </section>
@@ -47,7 +47,8 @@ export function VoteControl({ name, voters, voteCount, ownVote, votingAvailable,
         onClick={() => onChange(!ownVote)}
       >
         <ThumbsUp aria-hidden="true" className="size-4" />
-        <span>{voteCount}</span>
+        {/* No votes yet: the thumb alone; the count stays in the accessible name. */}
+        {voteCount > 0 ? <span>{voteCount}</span> : null}
       </button>
       {!compact ? <VoteVoters voters={voters} /> : null}
     </section>

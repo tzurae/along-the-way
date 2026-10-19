@@ -48,7 +48,8 @@
   font-size: 14px;
 }
 
-.schedule-primary-button:disabled {
+.schedule-primary-button:disabled,
+.schedule-secondary-button:disabled {
   opacity: .45;
 }
 
