@@ -128,6 +128,11 @@ describe("trip skeleton contract", () => {
           {
             id: "66666666-6666-4666-8666-666666666666",
             date: "2026-10-21",
+            title: null,
+            note: null,
+            detailsVersion: 1,
+            alternativeTripPlaceIds: [],
+            alternativesVersion: 1,
             entries: [
               {
                 itemId: typedItems[0]!.id,

@@ -1488,6 +1488,41 @@ export function createApp({
     });
   });
 
+  app.put("/api/trips/:tripId/days/:dayId/details", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const day = await tripSkeleton.updateDayDetails(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "dayId"),
+      idempotencyKey(context),
+      {
+        expectedVersion: numberField(body, "expectedVersion"),
+        title: nullableStringField(body, "title"),
+        note: nullableStringField(body, "note"),
+      },
+    );
+    return context.json({ day });
+  });
+
+  app.put("/api/trips/:tripId/days/:dayId/alternatives", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const day = await tripSkeleton.updateDayAlternatives(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "dayId"),
+      idempotencyKey(context),
+      {
+        expectedVersion: numberField(body, "expectedVersion"),
+        tripPlaceIds: stringArrayField(body, "tripPlaceIds"),
+      },
+    );
+    return context.json({ day });
+  });
+
 
   app.put(
     "/api/trips/:tripId/days/:dayId/place-order",

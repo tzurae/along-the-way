@@ -72,7 +72,7 @@ function lodgingFixture({
     tripVersion: trip.version,
     places: [{ id: "hotel", tripId: trip.id, name: "原飯店", type: "lodging", address: null, latitude: 35, longitude: 139, timeZone, sourceUrl: null, notes: null, locationStatus: "complete", version: 1 }],
     items: [item],
-    days: trip.days.map((day) => ({ id: day.id, date: day.date, entries: [] })),
+    days: trip.days.map((day) => ({ id: day.id, date: day.date, title: null, note: null, detailsVersion: 1, alternativeTripPlaceIds: [], alternativesVersion: 1, entries: [] })),
   };
   return { trip, item, skeleton };
 }

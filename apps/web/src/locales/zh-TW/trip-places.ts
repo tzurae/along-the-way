@@ -118,6 +118,12 @@ export const tripPlaces = {
     emptyAiSuffix: "」請 AI 推薦地點。",
     addFirstPlace: "加入第一個地點",
     tableLabel: "口袋名單地點",
+    viewLabel: "清單排列方式",
+    viewList: "清單",
+    viewByArea: "依區域",
+    unknownArea: "其他地區",
+    folderCount: (count: number) => `${count} 個`,
+    folderLabel: (area: string) => `${area}的地點`,
     columns: {
       place: "地點",
       type: "類型",

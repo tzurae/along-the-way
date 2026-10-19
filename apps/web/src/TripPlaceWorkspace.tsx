@@ -7,6 +7,8 @@ import {
   CircleAlert,
   CircleCheck,
   CloudOff,
+  Folder,
+  List,
   LoaderCircle,
   MapPin,
   MapPinOff,
@@ -23,6 +25,7 @@ import {
   type ProviderPlaceCandidateDto,
   type ProviderPlaceSearchResultDto,
   type TripPlaceDto,
+  type TripPlaceResponse,
   type UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
 import {
@@ -102,6 +105,34 @@ function addressArea(address: string | null) {
     .filter((part) => part && !/^[〒\d\s-]+$/u.test(part));
   if (parts.length === 0) return null;
   return (parts.length >= 3 ? parts.slice(-2) : parts).join(", ");
+}
+
+/** Below this many places one list is short enough; the 清單／依區域 switch only appears above it. */
+const PLACE_FOLDER_MINIMUM = 8;
+const PLACE_VIEW_STORAGE_KEY = "along-the-way:place-view";
+type PlaceView = "list" | "area";
+
+function readPlaceView(): PlaceView {
+  try {
+    return window.localStorage.getItem(PLACE_VIEW_STORAGE_KEY) === "area" ? "area" : "list";
+  } catch {
+    return "list";
+  }
+}
+
+/**
+ * Folders by 區域 for a long 口袋名單. The input is newest first, so each folder lists its newest
+ * place first and the folder holding the newest place comes first; places without a readable
+ * area share one folder.
+ */
+function groupPlacesByArea(places: TripPlaceDto[]) {
+  const folders = new Map<string, TripPlaceDto[]>();
+  for (const place of places) {
+    const area = placeArea(place.address) ?? "";
+    const folder = folders.get(area);
+    if (folder) folder.push(place); else folders.set(area, [place]);
+  }
+  return [...folders].map(([area, folderPlaces]) => ({ area: area || null, places: folderPlaces }));
 }
 
 function canSelectForSchedule(place: TripPlaceDto, available: boolean) {
@@ -201,16 +232,22 @@ const emptyManualPlaceDraft: ManualPlaceDraft = {
 };
 
 
-function AddPlacePanel({
+/** Search, Google Maps link or manual entry; `changed` receives the place that was just added. */
+export function AddPlacePanel({
   tripId,
   request,
   close,
   changed,
+  title,
+  description,
 }: {
   tripId: string;
   request: TripPlaceWorkspaceProps["request"];
   close(): void;
-  changed(): Promise<void>;
+  changed(tripPlace: TripPlaceDto): Promise<void>;
+  /** Overrides the sheet heading, e.g. when adding straight into a day of the itinerary. */
+  title?: string;
+  description?: string;
 }) {
   const { t: { tripPlaces: t } } = useI18n();
   const [mode, setMode] = useState<"url" | "search" | "manual">("search");
@@ -270,14 +307,14 @@ function AddPlacePanel({
       originalNote: note || null,
     };
     try {
-      await request(`/api/trips/${tripId}/trip-places`, {
+      const { tripPlace } = await request<TripPlaceResponse>(`/api/trips/${tripId}/trip-places`, {
         method: "POST",
         headers: { "Idempotency-Key": retryKey(retryKeys.current, operation, payload) },
         body: JSON.stringify(payload),
         parse: parseTripPlaceResponse,
       });
       clearRetryKey(retryKeys.current, operation);
-      await changed();
+      await changed(tripPlace);
       close();
     } catch (error) {
       notify("error", error instanceof ApiRequestError && error.code === "already_in_wishlist"
@@ -312,14 +349,14 @@ function AddPlacePanel({
       originalNote: note.trim() || null,
     };
     try {
-      await request(`/api/trips/${tripId}/trip-places`, {
+      const { tripPlace } = await request<TripPlaceResponse>(`/api/trips/${tripId}/trip-places`, {
         method: "POST",
         headers: { "Idempotency-Key": retryKey(retryKeys.current, operation, payload) },
         body: JSON.stringify(payload),
         parse: parseTripPlaceResponse,
       });
       clearRetryKey(retryKeys.current, operation);
-      await changed();
+      await changed(tripPlace);
       close();
     } catch (error) {
       const safeMessage = error instanceof ApiRequestError && error.code === "validation_error"
@@ -334,7 +371,7 @@ function AddPlacePanel({
   const pendingCandidateName = candidates.find((candidate) => candidate.providerPlaceId === pendingProviderPlaceId)?.name ?? null;
 
   return (
-    <PlaceDetailSheet open appearance="workspace" title={t.add.title} description={t.add.description} onClose={close}>
+    <PlaceDetailSheet open appearance="workspace" title={title ?? t.add.title} description={description ?? t.add.description} onClose={close}>
       <div className="pd-tabs" role="tablist" aria-label={t.add.methodLabel}>
         {([
           ["search", t.add.search],
@@ -671,6 +708,10 @@ export function TripPlaceWorkspace({
   // (aiProposalId set) live in 行程 only.
   const places = readModel.current.filter((place) => place.aiProposalId === null);
   const [adding, setAdding] = useState(false);
+  // 清單 or 依區域 folders for a long list; remembered on this device.
+  const [placeView, setPlaceView] = useState<PlaceView>(readPlaceView);
+  // null until someone opens or closes a folder.
+  const [openAreaKeys, setOpenAreaKeys] = useState<Set<string> | null>(null);
   const [readError, setReadError] = useState("");
   const [loading, setLoading] = useState(true);
   const [voteDrafts, setVoteDrafts] = useState<Record<string, boolean>>({});
@@ -1273,6 +1314,99 @@ export function TripPlaceWorkspace({
     );
   }
 
+  function placeRow(place: TripPlaceDto) {
+    const available = placesById.has(place.id);
+    const located = place.latitude !== null && place.longitude !== null;
+    const scheduled = place.scheduled || place.assignedDayId !== null;
+    const selected = selectedPlaceIds.has(place.id);
+    const eligible = canSelectForSchedule(place, available);
+    const repeatedName = (placeNameCounts.get(place.name) ?? 0) > 1;
+    const preview = previews.previews.get(place.id);
+    const status = !located ? (
+      <span className="pd-schedule-meta pd-schedule-meta--missing"><MapPinOff aria-hidden="true" />{t.workspace.missingLocationForSchedule}</span>
+    ) : scheduled ? (
+      <span className="pd-schedule-meta schedule-status-pill"><CalendarCheck aria-hidden="true" />{place.assignedDayId ? schedule.scheduledOn(dayLabel(place.assignedDayId)!) : t.workspace.selectedPendingDate}</span>
+    ) : null;
+    const state = selecting
+      ? selected ? "selected" : eligible ? "selectable" : "selecting"
+      : "default";
+    return (
+      <PlaceListRow
+        key={place.id}
+        variant="wishlist"
+        name={place.name}
+        typeLabel={t.placeType[place.type]}
+        placeType={place.type}
+        secondary={place.notes
+          ? <span>{t.workspace.reason(place.notes)}</span>
+          : addressArea(place.address)
+            ? <span className="list-place-row__area"><MapPin aria-hidden="true" />{addressArea(place.address)}</span>
+            : undefined}
+        status={status}
+        photo={preview?.photo}
+        photoCount={preview?.photoCount ?? 0}
+        loadingPhoto={previews.loading}
+        voteAction={voteActions(place)}
+        menu={selecting ? undefined : (
+          <RowMenu
+            label={t.workspace.rowMenu(place.name)}
+            items={[
+              ...(canSchedule && available && located && place.assignedDayId ? [{
+                label: schedule.changeDate,
+                onSelect: () => { setScheduleError(""); setScheduleContext({ placeIds: [place.id] }); },
+              }] : []),
+              ...(preview?.photo ? [{
+                label: feedbackText.photo.title,
+                onSelect: (trigger: HTMLButtonElement | null) => setPhotoFeedback({
+                  tripPlaceId: place.id,
+                  returnFocus: trigger,
+                }),
+              }] : []),
+              ...(available && (canSchedule || !isScheduledForRemovalPolicy(place)) ? [{
+                label: t.workspace.remove,
+                danger: true,
+                disabled: removing,
+                onSelect: () => { if (window.confirm(t.workspace.confirmRemove(place.name))) void remove(place); },
+              }] : []),
+            ]}
+          />
+        )}
+        selectionControl={canSchedule && selecting ? selectionCheckbox(place) : undefined}
+        ariaLabel={repeatedName ? t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress) : place.name}
+        current={!selecting && selectedPlaceId === place.id}
+        state={state}
+        scheduled={scheduled}
+        changed={!selecting && highlightedPlaceIds.has(place.id)}
+        onOpen={() => openDetail(place.id)}
+        onActivate={() => {
+          if (selecting) {
+            if (eligible) togglePlaceSelection(place);
+          } else {
+            openDetail(place.id);
+          }
+        }}
+        openLabel={t.workspace.viewDetail(place.name)}
+        openDataAttribute={{ name: "place-detail-trigger", value: place.id }}
+        dataAttribute={{ name: "wishlist-place", value: place.name }}
+      />
+    );
+  }
+
+  const foldersShown = placeView === "area" && listedPlaces.length >= PLACE_FOLDER_MINIMUM;
+  const areaFolders = foldersShown ? groupPlacesByArea(filteredPlaces) : [];
+  const filtering = filteredPlaces.length !== listedPlaces.length;
+  // Until someone opens or closes a folder, only the one holding the newest place is open.
+  const openAreas = openAreaKeys ?? new Set(areaFolders.slice(0, 1).map((group) => group.area ?? ""));
+
+  function changePlaceView(view: PlaceView) {
+    setPlaceView(view);
+    try {
+      window.localStorage.setItem(PLACE_VIEW_STORAGE_KEY, view);
+    } catch {
+      // Storage can be unavailable (private mode); the choice then lasts for this visit only.
+    }
+  }
+
   return (
     <section className="pd-workspace" data-selecting={selecting || undefined} aria-labelledby="shared-wishlist-heading">
       <div className={`pd-pagehead${selecting ? " pd-pagehead--selecting" : ""}`}>
@@ -1325,85 +1459,53 @@ export function TripPlaceWorkspace({
       ) : null}
       {listedPlaces.length > 1 ? <PlaceFilterBar filters={filters} total={listedPlaces.length} label="搜尋口袋名單" /> : null}
       {listedPlaces.length > 0 && filteredPlaces.length === 0 ? <PlaceFilterEmpty onClear={filters.clear} /> : null}
-      {filteredPlaces.length > 0 ? (
-        <FlipList className="pd-list" ariaLabel={t.workspace.tableLabel}>
-          {filteredPlaces.map((place) => {
-            const available = placesById.has(place.id);
-            const located = place.latitude !== null && place.longitude !== null;
-            const scheduled = place.scheduled || place.assignedDayId !== null;
-            const selected = selectedPlaceIds.has(place.id);
-            const eligible = canSelectForSchedule(place, available);
-            const repeatedName = (placeNameCounts.get(place.name) ?? 0) > 1;
-            const preview = previews.previews.get(place.id);
-            const status = !located ? (
-              <span className="pd-schedule-meta pd-schedule-meta--missing"><MapPinOff aria-hidden="true" />{t.workspace.missingLocationForSchedule}</span>
-            ) : scheduled ? (
-              <span className="pd-schedule-meta schedule-status-pill"><CalendarCheck aria-hidden="true" />{place.assignedDayId ? schedule.scheduledOn(dayLabel(place.assignedDayId)!) : t.workspace.selectedPendingDate}</span>
-            ) : null;
-            const state = selecting
-              ? selected ? "selected" : eligible ? "selectable" : "selecting"
-              : "default";
+      {listedPlaces.length >= PLACE_FOLDER_MINIMUM ? (
+        <div className="pd-view-toggle" role="group" aria-label={t.workspace.viewLabel}>
+          {(["list", "area"] as const).map((view) => (
+            <button key={view} type="button" aria-pressed={placeView === view} onClick={() => changePlaceView(view)}>
+              {view === "list" ? <List aria-hidden="true" /> : <Folder aria-hidden="true" />}
+              {view === "list" ? t.workspace.viewList : t.workspace.viewByArea}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {filteredPlaces.length > 0 && foldersShown ? (
+        <div className="pd-folders">
+          {areaFolders.map((group) => {
+            const key = group.area ?? "";
+            // A search or chip filter opens every folder, so no match hides inside a closed one.
+            const open = filtering || openAreas.has(key);
             return (
-              <PlaceListRow
-                key={place.id}
-                variant="wishlist"
-                name={place.name}
-                typeLabel={t.placeType[place.type]}
-                placeType={place.type}
-                secondary={place.notes
-                  ? <span>{t.workspace.reason(place.notes)}</span>
-                  : addressArea(place.address)
-                    ? <span className="list-place-row__area"><MapPin aria-hidden="true" />{addressArea(place.address)}</span>
-                    : undefined}
-                status={status}
-                photo={preview?.photo}
-                photoCount={preview?.photoCount ?? 0}
-                loadingPhoto={previews.loading}
-                voteAction={voteActions(place)}
-                menu={selecting ? undefined : (
-                  <RowMenu
-                    label={t.workspace.rowMenu(place.name)}
-                    items={[
-                      ...(canSchedule && available && located && place.assignedDayId ? [{
-                        label: schedule.changeDate,
-                        onSelect: () => { setScheduleError(""); setScheduleContext({ placeIds: [place.id] }); },
-                      }] : []),
-                      ...(preview?.photo ? [{
-                        label: feedbackText.photo.title,
-                        onSelect: (trigger: HTMLButtonElement | null) => setPhotoFeedback({
-                          tripPlaceId: place.id,
-                          returnFocus: trigger,
-                        }),
-                      }] : []),
-                      ...(available && (canSchedule || !isScheduledForRemovalPolicy(place)) ? [{
-                        label: t.workspace.remove,
-                        danger: true,
-                        disabled: removing,
-                        onSelect: () => { if (window.confirm(t.workspace.confirmRemove(place.name))) void remove(place); },
-                      }] : []),
-                    ]}
-                  />
-                )}
-                selectionControl={canSchedule && selecting ? selectionCheckbox(place) : undefined}
-                ariaLabel={repeatedName ? t.workspace.placeAtAddress(place.name, place.address ?? t.workspace.unknownAddress) : place.name}
-                current={!selecting && selectedPlaceId === place.id}
-                state={state}
-                scheduled={scheduled}
-                changed={!selecting && highlightedPlaceIds.has(place.id)}
-                onOpen={() => openDetail(place.id)}
-                onActivate={() => {
-                  if (selecting) {
-                    if (eligible) togglePlaceSelection(place);
-                  } else {
-                    openDetail(place.id);
-                  }
+              <details
+                key={key}
+                className="pd-folder"
+                open={open}
+                onToggle={(event) => {
+                  const nowOpen = event.currentTarget.open;
+                  if (filtering || nowOpen === open) return;
+                  setOpenAreaKeys((current) => {
+                    const next = new Set(current ?? openAreas);
+                    if (nowOpen) next.add(key); else next.delete(key);
+                    return next;
+                  });
                 }}
-                openLabel={t.workspace.viewDetail(place.name)}
-                openDataAttribute={{ name: "place-detail-trigger", value: place.id }}
-                dataAttribute={{ name: "wishlist-place", value: place.name }}
-              />
+              >
+                <summary>
+                  <Folder aria-hidden="true" />
+                  <span className="pd-folder-name">{group.area ?? t.workspace.unknownArea}</span>
+                  <span className="pd-folder-count">{t.workspace.folderCount(group.places.length)}</span>
+                  <ChevronRight aria-hidden="true" className="pd-folder-chevron" />
+                </summary>
+                <FlipList className="pd-list" ariaLabel={t.workspace.folderLabel(group.area ?? t.workspace.unknownArea)}>
+                  {group.places.map(placeRow)}
+                </FlipList>
+              </details>
             );
           })}
+        </div>
+      ) : filteredPlaces.length > 0 ? (
+        <FlipList className="pd-list" ariaLabel={t.workspace.tableLabel}>
+          {filteredPlaces.map(placeRow)}
         </FlipList>
       ) : null}
       {selectedPlace ? (

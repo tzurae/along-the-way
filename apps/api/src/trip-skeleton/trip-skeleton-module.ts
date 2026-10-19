@@ -3,9 +3,13 @@ import type {
   ConstraintInput,
   ItineraryItemDto,
   PlaceDto,
+  TripDayAlternativesDto,
+  TripDayDetailsDto,
   TripSkeletonDto,
   TripLodgingInput,
   UpdateItineraryItemInput,
+  UpdateTripDayAlternativesInput,
+  UpdateTripDayDetailsInput,
   UpdatePlaceInput,
 } from "@along-the-way/contracts/trip-skeleton";
 
@@ -14,6 +18,20 @@ export const MAX_ITINERARY_ITEM_PARTICIPANTS = 100;
 
 export interface TripSkeletonModule {
   getSkeleton(userId: string, tripId: string): Promise<TripSkeletonDto>;
+  updateDayDetails(
+    userId: string,
+    tripId: string,
+    dayId: string,
+    idempotencyKey: string,
+    input: UpdateTripDayDetailsInput,
+  ): Promise<TripDayDetailsDto>;
+  updateDayAlternatives(
+    userId: string,
+    tripId: string,
+    dayId: string,
+    idempotencyKey: string,
+    input: UpdateTripDayAlternativesInput,
+  ): Promise<TripDayAlternativesDto>;
   createFlight(userId: string, tripId: string, idempotencyKey: string, expectedTripVersion: number, input: TripFlightInput): Promise<ItineraryItemDto>;
   updateFlight(userId: string, tripId: string, itemId: string, idempotencyKey: string, expectedVersion: number, input: TripFlightInput): Promise<ItineraryItemDto>;
   createLodging(userId: string, tripId: string, idempotencyKey: string, expectedTripVersion: number, input: TripLodgingInput): Promise<ItineraryItemDto>;

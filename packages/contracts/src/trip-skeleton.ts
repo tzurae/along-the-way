@@ -217,7 +217,55 @@ export interface TimelineEntryDto {
 export interface TimelineDayDto {
   id: string;
   date: string;
+  /** The day's own name, e.g. 「京都賞楓日」; null shows only the date. */
+  title: string | null;
+  /** Free-text 玩法 note for the day. */
+  note: string | null;
+  /** Version of title + note only; arranging places never changes it. */
+  detailsVersion: number;
+  /** 「備案」 trip places in display order; never stops of the day. */
+  alternativeTripPlaceIds: string[];
+  /** Version of the 備案 list only. */
+  alternativesVersion: number;
   entries: TimelineEntryDto[];
+}
+
+export const MAX_TRIP_DAY_TITLE_LENGTH = 60;
+export const MAX_TRIP_DAY_NOTE_LENGTH = 2000;
+
+export interface UpdateTripDayDetailsInput {
+  expectedVersion: number;
+  title: string | null;
+  note: string | null;
+}
+
+export interface TripDayDetailsDto {
+  id: string;
+  date: string;
+  title: string | null;
+  note: string | null;
+  detailsVersion: number;
+}
+
+export interface TripDayDetailsResponse {
+  day: TripDayDetailsDto;
+}
+
+export const MAX_TRIP_DAY_ALTERNATIVES = 12;
+
+export interface UpdateTripDayAlternativesInput {
+  expectedVersion: number;
+  tripPlaceIds: string[];
+}
+
+export interface TripDayAlternativesDto {
+  id: string;
+  alternativeTripPlaceIds: string[];
+  alternativesVersion: number;
+}
+
+export interface TripDayAlternativesResponse {
+  day: TripDayAlternativesDto;
 }
 
 export interface TripSkeletonDto {
@@ -460,10 +508,40 @@ function timelineEntryValue(value: unknown): TimelineEntryDto {
 function timelineDayValue(value: unknown): TimelineDayDto {
   if (!isRecord(value) || !Array.isArray(value.entries)) return invalidResponse();
   return {
-    id: stringValue(value.id),
-    date: stringValue(value.date),
+    ...tripDayDetailsValue(value),
+    ...tripDayAlternativesValue(value),
     entries: value.entries.map(timelineEntryValue),
   };
+}
+
+function tripDayAlternativesValue(value: unknown): TripDayAlternativesDto {
+  if (!isRecord(value) || !Array.isArray(value.alternativeTripPlaceIds)) return invalidResponse();
+  return {
+    id: stringValue(value.id),
+    alternativeTripPlaceIds: value.alternativeTripPlaceIds.map(stringValue),
+    alternativesVersion: integerValue(value.alternativesVersion),
+  };
+}
+
+export function parseTripDayAlternativesResponse(value: unknown): TripDayAlternativesResponse {
+  if (!isRecord(value)) return invalidResponse();
+  return { day: tripDayAlternativesValue(value.day) };
+}
+
+function tripDayDetailsValue(value: unknown): TripDayDetailsDto {
+  if (!isRecord(value)) return invalidResponse();
+  return {
+    id: stringValue(value.id),
+    date: stringValue(value.date),
+    title: nullableString(value.title),
+    note: nullableString(value.note),
+    detailsVersion: integerValue(value.detailsVersion),
+  };
+}
+
+export function parseTripDayDetailsResponse(value: unknown): TripDayDetailsResponse {
+  if (!isRecord(value)) return invalidResponse();
+  return { day: tripDayDetailsValue(value.day) };
 }
 
 export function parseTripSkeletonResponse(value: unknown): TripSkeletonResponse {

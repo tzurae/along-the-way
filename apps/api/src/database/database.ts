@@ -86,6 +86,9 @@ export interface TripDayTable {
   trip_id: string;
   date: DateOnly;
   title: string | null;
+  note: string | null;
+  details_version: Generated<number>;
+  alternatives_version: Generated<number>;
   version: Generated<number>;
 }
 
@@ -208,6 +211,16 @@ export interface TripPlaceDayAssignmentTable {
   assigned_at: Timestamp;
   /** Applied order within the day; null until a route order is applied. */
   day_position: number | null;
+}
+
+/** A day's 「備案」: places kept as on-the-spot alternatives, never stops of the day. */
+export interface TripDayAlternativeTable {
+  trip_id: string;
+  trip_day_id: string;
+  trip_place_id: string;
+  position: number;
+  created_by: string;
+  created_at: Generated<Timestamp>;
 }
 
 export interface TripPlaceDuplicateSuggestionTable {
@@ -678,6 +691,7 @@ export interface AlongTheWayDatabase {
   trip_place_desired_days: TripPlaceDayTable;
   trip_place_excluded_days: TripPlaceDayTable;
   trip_place_day_assignments: TripPlaceDayAssignmentTable;
+  trip_day_alternatives: TripDayAlternativeTable;
   trip_place_duplicate_suggestions: TripPlaceDuplicateSuggestionTable;
   discovery_briefs: DiscoveryBriefTable;
   discovery_runs: DiscoveryRunTable;

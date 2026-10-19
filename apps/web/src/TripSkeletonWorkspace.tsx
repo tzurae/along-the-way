@@ -20,7 +20,7 @@ import {
   type UpdatePlaceInput,
   type ZonedEndpointDto,
 } from "@along-the-way/contracts/trip-skeleton";
-import { BedDouble, CalendarClock, CalendarDays, CalendarMinus, CalendarPlus, ChevronDown, Clock3, GripVertical, Lock, Luggage, MapPin, MapPinOff, Plus, Route, StickyNote, Trash2, Unlock } from "lucide-react";
+import { BedDouble, CalendarClock, CalendarDays, CalendarMinus, CalendarPlus, ChevronDown, Clock3, GripVertical, Lock, Luggage, MapPin, MapPinOff, NotebookPen, Plus, Route, Search, StickyNote, Trash2, Unlock } from "lucide-react";
 import { parseDayRouteResponse, type DayRouteResponse } from "@along-the-way/contracts/day-plans";
 import { lodgingForNight } from "@along-the-way/contracts/day-time-zone";
 
@@ -34,8 +34,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { DayPlanDialog, type PlannedDay } from "./DayPlanDialog";
+import { DayAlternatives, saveDayAlternatives } from "./DayAlternatives";
+import { DayDetailsEditor, DayNote } from "./TripDayDetails";
 import { ItineraryItemDialog } from "./ItineraryItemDialog";
 import { PlaceDialog } from "./PlaceDialog";
+import { AddPlacePanel } from "./TripPlaceWorkspace";
 import { useI18n, type Messages } from "./i18n";
 import { canArrangeItinerary } from "./trip-permissions";
 import { ApiRequestError } from "./api-error";
@@ -396,6 +399,10 @@ export function TripSkeletonWorkspace({
   const [planningDay, setPlanningDay] = useState<PlannedDay | null>(null);
   const [viewingItem, setViewingItem] = useState<{ itemId: string; continuation: boolean } | null>(null);
   const [assignmentDayId, setAssignmentDayId] = useState<string | null>(null);
+  // The one day whose title and 玩法 note are being edited inline.
+  const [editingDayId, setEditingDayId] = useState<string | null>(null);
+  // The day a brand-new place (searched on Google Maps or typed in) goes into, as a stop or a 備案.
+  const [addingTo, setAddingTo] = useState<{ dayId: string; as: "stop" | "alternative" } | null>(null);
   const [assignmentErrorPlaceId, setAssignmentErrorPlaceId] = useState<string | null>(null);
   const assignmentErrorPlaceIdRef = useRef<string | null>(null);
   const [viewingAssignedPlaceId, setViewingAssignedPlaceId] = useState<string | null>(null);
@@ -1016,6 +1023,7 @@ export function TripSkeletonWorkspace({
 
   const tripDays = skeleton.days;
   const assignmentDay = skeleton.days.find((day) => day.id === assignmentDayId);
+  const addingToDay = addingTo ? skeleton.days.find((day) => day.id === addingTo.dayId) : undefined;
   const pendingPlaces = tripPlaces.filter((place) =>
     place.selectedForItinerary && !place.scheduled && place.assignedDayId === null
   );
@@ -1215,12 +1223,26 @@ export function TripSkeletonWorkspace({
               <section key={day.id} className="day-column" data-date={day.date}>
                 <header className="day-heading">
                   <div>
-                    <h3>{formatPlanDate(day.date, locale)}</h3>
+                    <h3>
+                      {formatPlanDate(day.date, locale)}
+                      {day.title ? <span className="plan-day-title">{day.title}</span> : null}
+                    </h3>
                     <p>
                       {itemCount > 0
                         ? t.tripSkeleton.plannedEntries(itemCount)
                         : t.tripSkeleton.noPlannedPlaces}
                     </p>
+                    {canArrange && editingDayId !== day.id ? (
+                      <button
+                        type="button"
+                        className="plan-route-link plan-day-details-link"
+                        aria-label={t.tripSkeleton.editDayDetailsFor(t.tripSkeleton.dayLabel(index + 1))}
+                        onClick={() => setEditingDayId(day.id)}
+                      >
+                        <NotebookPen aria-hidden="true" />
+                        {t.tripSkeleton.editDayDetails}
+                      </button>
+                    ) : null}
                   </div>
                   <div className="plan-day-actions">
                     {assignedPlaces.length === 0 ? (
@@ -1259,6 +1281,20 @@ export function TripSkeletonWorkspace({
                     ) : null}
                   </div>
                 </header>
+                {editingDayId === day.id ? (
+                  <DayDetailsEditor
+                    tripId={trip.id}
+                    day={day}
+                    dayLabel={t.tripSkeleton.dayLabel(index + 1)}
+                    request={request}
+                    onSaved={async () => {
+                      await load();
+                      setEditingDayId(null);
+                    }}
+                    onConflict={() => void load()}
+                    onCancel={() => setEditingDayId(null)}
+                  />
+                ) : day.note ? <DayNote note={day.note} /> : null}
                 <PlanningDaySummary dayId={day.id} />
                 {missingLodging ? (
                   <aside className="plan-lodging-notice">
@@ -1368,6 +1404,20 @@ export function TripSkeletonWorkspace({
                     });
                   })()}
                 </ul>
+                <DayAlternatives
+                  tripId={trip.id}
+                  day={day}
+                  places={tripPlaces}
+                  canArrange={canArrange}
+                  disabled={busyId !== null}
+                  request={request}
+                  onChanged={load}
+                  placeOnDay={(place) => updateDayAssignment(day.id, place)}
+                  searchNew={() => {
+                    setError("");
+                    setAddingTo({ dayId: day.id, as: "alternative" });
+                  }}
+                />
               </section>
             );
           })}
@@ -1422,6 +1472,20 @@ export function TripSkeletonWorkspace({
                 );
               })}
             </div>
+            <button
+              type="button"
+              className="plan-outline-button plan-add-new-place"
+              disabled={busyId !== null}
+              onClick={() => {
+                setAddingTo({ dayId: assignmentDayId, as: "stop" });
+                setAssignmentDayId(null);
+                updateAssignmentErrorPlaceId(null);
+                setError("");
+              }}
+            >
+              <Search aria-hidden="true" />
+              {t.tripSkeleton.addNewPlace}
+            </button>
             <DayAssignmentPicker
               places={tripPlaces}
               busyPlaceId={busyId?.startsWith("day-assignment:") ? busyId.slice("day-assignment:".length) : null}
@@ -1431,6 +1495,38 @@ export function TripSkeletonWorkspace({
               editLocation={renderLocationEditor}
             />
           </PlaceDetailSheet>
+        ) : null}
+        {canArrange && addingToDay && addingTo ? (
+          <AddPlacePanel
+            tripId={trip.id}
+            request={request}
+            title={addingTo.as === "stop"
+              ? t.tripSkeleton.addNewPlaceTo(formatPlanDate(addingToDay.date, locale))
+              : t.tripSkeleton.addAlternativeTo(formatPlanDate(addingToDay.date, locale))}
+            description={addingTo.as === "stop" ? t.tripSkeleton.addNewPlaceHelper : t.tripSkeleton.addAlternativeSearchHelper}
+            close={() => setAddingTo(null)}
+            changed={async (tripPlace) => {
+              if (addingTo.as === "alternative") {
+                // The new place sits in 口袋名單; the latest read carries the list's current version.
+                const latestDay = latestSkeleton.current?.days.find((day) => day.id === addingToDay.id) ?? addingToDay;
+                try {
+                  await saveDayAlternatives(request, trip.id, latestDay, [...latestDay.alternativeTripPlaceIds, tripPlace.id]);
+                } catch {
+                  setError(t.tripSkeleton.alternativesSaveError);
+                }
+                await load();
+                onPlacesChanged();
+                return;
+              }
+              const located = tripPlace.latitude !== null && tripPlace.longitude !== null;
+              if (located && await updateDayAssignment(addingToDay.id, tripPlace)) return;
+              // Not placed yet (no map location, or the assignment failed): reopen this day's sheet,
+              // where the new place waits in 口袋名單 with its location editor or its error.
+              await load();
+              onPlacesChanged();
+              setAssignmentDayId(addingToDay.id);
+            }}
+          />
         ) : null}
         {viewingAssignedPlace ? (
           <PlaceDetailSheet
