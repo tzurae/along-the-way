@@ -59,7 +59,8 @@ export const discovery = {
   },
   stages: {
     plan: "規劃方向",
-    research: "搜尋網路資料",
+    discover: "在地圖上找店",
+    research: "挑選並查資料",
     verify: "查證地點",
     save: "存入清單",
     photos: "找照片",

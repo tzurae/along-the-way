@@ -178,8 +178,8 @@ export interface DiscoveryClarificationDto {
   version: number;
 }
 
-export type DiscoveryStage = "plan" | "research" | "verify" | "save" | "photos";
-export const DISCOVERY_STAGES: readonly DiscoveryStage[] = ["plan", "research", "verify", "save", "photos"];
+export type DiscoveryStage = "plan" | "discover" | "research" | "verify" | "save" | "photos";
+export const DISCOVERY_STAGES: readonly DiscoveryStage[] = ["plan", "discover", "research", "verify", "save", "photos"];
 export type DiscoveryStageState = "pending" | "running" | "done" | "partial" | "failed";
 
 export interface DiscoveryJobDto {

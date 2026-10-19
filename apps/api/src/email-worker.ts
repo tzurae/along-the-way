@@ -8,6 +8,7 @@ import { PostgresCommonsCandidateModule } from "./place-details/commons-photo-ca
 import { CommonsPlacePhotos } from "./place-details/commons-place-photos";
 import { PostgresRateLimiter } from "./private-trips/postgres-rate-limiter";
 import { GooglePlacesProvider } from "./trip-places/google-places-provider";
+import { MapsGroundingLite } from "./discovery/maps-grounding-lite";
 import { PostgresTripPlaceModule } from "./trip-places/postgres-trip-place-module";
 import { OpenAiPlacePlanningProfileModel } from "./planning/openai-place-planning-profile-model";
 import { PostgresPlacePlanningProfileWorker } from "./planning/postgres-place-planning-profile-module";
@@ -91,6 +92,11 @@ const discovery = new PostgresDiscoveryModule({
     model: optionalSetting("OPENAI_MODEL"),
   }),
   placeLookup: placeProvider,
+  // Real places for research to pick from; same paid-provider budget as Places.
+  placeDiscovery: new MapsGroundingLite({
+    apiKey: optionalSetting("GOOGLE_MAPS_API_KEY"),
+    consumeBudget: () => rateLimiter.tryConsumePaidProvider("google_places"),
+  }),
   // The research limit is charged when the job is queued (API); the worker never charges again.
   claimAiRun: async () => undefined,
   tripPlaces: new PostgresTripPlaceModule({

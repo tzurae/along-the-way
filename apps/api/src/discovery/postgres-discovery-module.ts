@@ -65,12 +65,15 @@ import {
   storedClarifyItems,
 } from "./discovery-clarification";
 import { discoveryJobDto, DiscoveryJobProgress, emptyStages, type ClaimedDiscoveryJob } from "./discovery-jobs";
+import { discoverPlaces, type PlaceDiscovery } from "./maps-grounding-lite";
 
 interface PostgresDiscoveryModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
   model: DiscoveryModel;
-  /** Google lookups with rating and review count, used to place and screen researched candidates. */
+  /** Google Place Details with rating and review count, used to place and screen picked places. */
   placeLookup: RatedPlaceLookup;
+  /** Google Maps Grounding Lite: the real places research may pick from. */
+  placeDiscovery: PlaceDiscovery;
   tripPlaces: PostgresTripPlaceModule;
   /** Permanently charges one hourly AI start immediately before the model is called. */
   claimAiRun: (userId: string, tripId: string) => Promise<void>;
@@ -249,6 +252,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
   private readonly database: Kysely<AlongTheWayDatabase>;
   private readonly model: DiscoveryModel;
   private readonly placeLookup: RatedPlaceLookup;
+  private readonly placeDiscovery: PlaceDiscovery;
   private readonly tripPlaces: PostgresTripPlaceModule;
   private readonly claimAiRun: (userId: string, tripId: string) => Promise<void>;
   private readonly sourceChecks: RecommendationSourceChecks;
@@ -260,6 +264,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     this.database = options.database;
     this.model = options.model;
     this.placeLookup = options.placeLookup;
+    this.placeDiscovery = options.placeDiscovery;
     this.tripPlaces = options.tripPlaces;
     this.claimAiRun = options.claimAiRun;
     this.sourceChecks = options.sourceChecks ?? defaultRecommendationSourceChecks;
@@ -474,7 +479,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       throw new AppError("clarification_incomplete", "Answer the required questions before research", 409);
     }
     if (!this.model.available) throw new AppError("model_unavailable", "AI discovery is not configured", 503);
-    if (this.placeLookup.available === false) {
+    if (this.placeLookup.available === false || !this.placeDiscovery.available) {
       throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
     }
     const jobId = await this.database.transaction().execute(async (transaction) => {
@@ -570,22 +575,29 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     const questionAnswers = clarificationQuestionAnswers(storedClarifyItems(clarification.items));
     const trip = await this.tripFacts(userId, tripId);
     const rejected = await this.database.selectFrom("candidate_proposals")
-      .select(["provider_place_id", "name"])
+      .select("provider_place_id")
       .where("trip_id", "=", tripId)
       .where("status", "=", "rejected")
       .execute();
-    // One suggestion per place (owner decision 2026-10-19): the model is told what the trip already
-    // has, so it neither re-proposes nor rewrites those places, and the gate drops any it still does.
+    // One suggestion per place (owner decision 2026-10-19): places the trip already has are removed
+    // from what discovery found, so research never sees them, and the gate drops any that remain.
     const suggested = await this.database.selectFrom("candidate_proposals")
-      .select(["provider_place_id", "name"])
+      .select("provider_place_id")
       .where("trip_id", "=", tripId)
       .where("status", "in", ["pending", "accepted"])
       .execute();
-    const wishlistNames = await this.database.selectFrom("trip_places")
-      .select("name")
-      .where("trip_id", "=", tripId)
-      .where("archived_at", "is", null)
-      .execute();
+    const wishlistPlaceIds = async () => new Set((await this.database.selectFrom("trip_places as tripPlace")
+      .innerJoin("place_identities as identity", "identity.id", "tripPlace.place_id")
+      .innerJoin("places as legacy", (join) => join.onRef("legacy.id", "=", "tripPlace.legacy_place_id")
+        .onRef("legacy.trip_id", "=", "tripPlace.trip_id"))
+      .select("identity.provider_place_id")
+      .where("tripPlace.trip_id", "=", tripId)
+      .where((expression) => expression.or([
+        expression("tripPlace.archived_at", "is", null),
+        expression("legacy.travel_only", "=", true),
+      ]))
+      .where("identity.provider_place_id", "is not", null)
+      .execute()).flatMap((row) => row.provider_place_id ?? []));
       await progress.start("plan");
       const stageStarted = Date.now();
       const plan = await this.model.plan({
@@ -593,35 +605,45 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         trip,
         questionAnswers,
       });
-      if (this.placeLookup.available === false) {
+      if (this.placeLookup.available === false || !this.placeDiscovery.available) {
         throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
       }
       const planMs = Date.now() - stageStarted;
       await progress.finish("plan");
+      // Real places first (Google Maps Grounding Lite): research may only pick among these, so it
+      // cannot propose a place that does not exist. Every search the plan lists runs.
+      await progress.start("discover");
+      const known = new Set([
+        ...rejected.map((row) => row.provider_place_id),
+        ...suggested.map((row) => row.provider_place_id),
+        ...await wishlistPlaceIds(),
+      ]);
+      const discovered = await discoverPlaces({
+        queries: plan.request.searchQueries,
+        discovery: this.placeDiscovery,
+        languageCode: plan.outputLanguage,
+        known,
+      }).catch((error: unknown) => {
+        if (error instanceof ProviderQuotaError) throw error;
+        if (error instanceof ProviderUnavailableError) {
+          throw new AppError("provider_unavailable", "Google Maps is unavailable; the existing shortlist is unchanged", 503);
+        }
+        throw error;
+      });
+      const discoverMs = Date.now() - stageStarted - planMs;
+      await progress.finish("discover");
       await progress.start("research");
       const research = await this.model.research({
         brief: plan.structuredBrief,
         request: plan.request,
         trip,
         questionAnswers,
-        rejectedPlaces: [...new Set(rejected.map((row) => row.name))],
-        knownPlaces: [...new Set([...suggested.map((row) => row.name), ...wishlistNames.map((row) => row.name)])],
+        discovered: discovered.groups,
         outputLanguage: plan.outputLanguage,
       });
-      // Read after research, which takes minutes, so a place accepted meanwhile is not proposed again.
-      const wishlist = await this.database.selectFrom("trip_places as tripPlace")
-        .innerJoin("place_identities as identity", "identity.id", "tripPlace.place_id")
-        .innerJoin("places as legacy", (join) => join.onRef("legacy.id", "=", "tripPlace.legacy_place_id")
-          .onRef("legacy.trip_id", "=", "tripPlace.trip_id"))
-        .select("identity.provider_place_id")
-        .where("tripPlace.trip_id", "=", tripId)
-        .where((expression) => expression.or([
-          expression("tripPlace.archived_at", "is", null),
-          expression("legacy.travel_only", "=", true),
-        ]))
-        .where("identity.provider_place_id", "is not", null)
-        .execute();
-      const researchMs = Date.now() - stageStarted - planMs;
+      // Read after research, so a place added to the wishlist meanwhile is not proposed again.
+      const wishlist = await wishlistPlaceIds();
+      const researchMs = Date.now() - stageStarted - planMs - discoverMs;
       await progress.finish("research");
       await progress.start("verify");
       const verification = await verifyResearchedCandidates({
@@ -631,7 +653,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         placeLookup: this.placeLookup,
         sourceChecks: this.sourceChecks,
         rejectedProviderPlaceIds: new Set(rejected.map((row) => row.provider_place_id)),
-        wishlistProviderPlaceIds: new Set(wishlist.flatMap((row) => row.provider_place_id ?? [])),
+        wishlistProviderPlaceIds: wishlist,
         suggestedProviderPlaceIds: new Set(suggested.map((row) => row.provider_place_id)),
         tripCountryCodes: new Set(trip.countries.map((country) => country.code)),
       }).catch((error: unknown) => {
@@ -641,11 +663,11 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         }
         throw error;
       });
-      const verifyMs = Date.now() - stageStarted - planMs - researchMs;
+      const verifyMs = Date.now() - stageStarted - planMs - discoverMs - researchMs;
       await progress.finish("verify");
       await progress.start("save");
       const searchPlan: DiscoverySearchPlan = {
-        queries: verification.queries,
+        queries: plan.request.searchQueries.map((entry) => entry.query),
         areas: plan.request.areas,
         categories: plan.request.categories,
         defaultCategories: plan.request.defaultCategories,
@@ -831,9 +853,12 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         event: "discovery_run_timing",
         tripId,
         planMs,
+        discoverMs,
         researchMs,
         verifyMs,
-        saveMs: Date.now() - stageStarted - planMs - researchMs - verifyMs,
+        saveMs: Date.now() - stageStarted - planMs - discoverMs - researchMs - verifyMs,
+        searches: plan.request.searchQueries.length,
+        discovered: discovered.found,
         researched: research.candidates.length,
         shown: verification.gate.shown.length,
       }));
@@ -1648,7 +1673,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       clarification: clarificationRow ? clarificationDto(clarificationRow) : null,
       latestJob: latestJobRow ? discoveryJobDto(latestJobRow) : null,
       modelAvailable: this.model.available,
-      placeProviderAvailable: this.placeLookup.available !== false,
+      placeProviderAvailable: this.placeLookup.available !== false && this.placeDiscovery.available,
     };
   }
 

@@ -270,7 +270,7 @@ export interface DiscoveryJobTable {
   created_by: string;
   client_ip: string | null;
   status: "queued" | "running" | "succeeded" | "failed";
-  stage: "plan" | "research" | "verify" | "save" | "photos" | null;
+  stage: "plan" | "discover" | "research" | "verify" | "save" | "photos" | null;
   /** Record<stage, { state, startedAt, endedAt, counts? }> */
   stages: Generated<unknown>;
   error_code: string | null;
