@@ -94,6 +94,7 @@ const discovery = new PostgresDiscoveryModule({
   placeLookup: placeProvider,
   claimAiRun: (userId, tripId) => rateLimiter.claimDiscoveryAiRun(userId, tripId),
   tripPlaces,
+  commonsCandidates,
 });
 const dayPlans = new PostgresDayPlanModule({
   database,

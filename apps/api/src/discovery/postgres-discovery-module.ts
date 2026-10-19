@@ -50,6 +50,8 @@ import {
   type RatedPlaceLookup,
 } from "../trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "../trip-places/postgres-trip-place-module";
+import { upsertGooglePlaceIdentity } from "../trip-places/google-place-identity";
+import type { CommonsCandidateGenerator } from "../place-details/commons-photo-candidates";
 
 interface PostgresDiscoveryModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
@@ -60,6 +62,8 @@ interface PostgresDiscoveryModuleOptions {
   /** Permanently charges one hourly AI start immediately before the model is called. */
   claimAiRun: (userId: string, tripId: string) => Promise<void>;
   sourceChecks?: RecommendationSourceChecks;
+  /** Finds a Commons photo for each suggestion's place identity, so list thumbnails need no Google call. */
+  commonsCandidates?: CommonsCandidateGenerator;
   now?: () => Date;
   policyVersion?: string;
 }
@@ -247,6 +251,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
   private readonly tripPlaces: PostgresTripPlaceModule;
   private readonly claimAiRun: (userId: string, tripId: string) => Promise<void>;
   private readonly sourceChecks: RecommendationSourceChecks;
+  private readonly commonsCandidates: CommonsCandidateGenerator | undefined;
   private readonly now: () => Date;
   private readonly policyVersion: string;
 
@@ -257,6 +262,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     this.tripPlaces = options.tripPlaces;
     this.claimAiRun = options.claimAiRun;
     this.sourceChecks = options.sourceChecks ?? defaultRecommendationSourceChecks;
+    this.commonsCandidates = options.commonsCandidates;
     this.now = options.now ?? (() => new Date());
     // v2: research first, Google only places candidates, two independent sources required.
     this.policyVersion = options.policyVersion ?? "discovery-v2";
@@ -266,6 +272,25 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     uuid(tripId, "tripId");
     await this.requireMember(this.database, userId, tripId);
     return this.readWorkspace(this.database, tripId, userId);
+  }
+
+  /** Background and serial (Wikimedia is polite-use only); a failure only leaves the type icon. */
+  private findSuggestionPhotos(placeIdentityIds: readonly string[]) {
+    const generator = this.commonsCandidates;
+    if (!generator || placeIdentityIds.length === 0) return;
+    void (async () => {
+      for (const placeIdentityId of placeIdentityIds) {
+        try {
+          await generator.generate(placeIdentityId);
+        } catch (error) {
+          console.error(JSON.stringify({
+            event: "commons_candidate_generation_failed",
+            placeIdentityId,
+            errorClass: error instanceof Error ? error.constructor.name : "NonErrorThrow",
+          }));
+        }
+      }
+    })();
   }
 
   async saveBrief(
@@ -527,7 +552,9 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         dateRange: { start: trip.startDate, end: trip.endDate },
       };
       const sourceTitles = new Map(research.sources.map((source) => [source.url, source.title]));
-      return await this.database.transaction().execute(async (transaction) => {
+      // Identities created for this run's suggestions; their Commons photos are found after commit.
+      const suggestionIdentityIds: string[] = [];
+      const workspace = await this.database.transaction().execute(async (transaction) => {
         await this.requireMember(transaction, userId, tripId);
         await lockMutation(transaction, userId, operation, key);
         const replay = await replayed(transaction, userId, operation, key);
@@ -673,6 +700,10 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
             recommendation_sentences: JSON.stringify(recommendationSentences),
             tradeoff_sentences: JSON.stringify(tradeoffSentences),
           }).returning("id").executeTakeFirstOrThrow();
+          // Owner decision 2026-10-19: a suggestion gets its place identity now, not on acceptance,
+          // so the Commons pipeline can give it a list photo. Acceptance reuses this identity.
+          const identity = await upsertGooglePlaceIdentity(transaction, place, this.now());
+          if (!suggestionIdentityIds.includes(identity.id)) suggestionIdentityIds.push(identity.id);
           await transaction.insertInto("candidate_proposal_evidence").values(
             [...new Set(evidenceIds)].map((evidenceId) => ({ proposal_id: proposal.id, evidence_id: evidenceId })),
           ).execute();
@@ -716,6 +747,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           .execute();
         return response;
       });
+      this.findSuggestionPhotos(suggestionIdentityIds);
+      return workspace;
     } catch (error) {
       if (error instanceof ProviderQuotaError) {
         // A daily budget refusal is transient and made no Google request. Remove the claim so the

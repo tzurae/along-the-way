@@ -52,6 +52,7 @@ import {
 import type { TripPlaceModule } from "./trip-place-module";
 import type { PreparedCommonsPhoto, RepresentativePhotoSource } from "../place-details/commons-place-photos";
 import type { CommonsCandidateGenerator } from "../place-details/commons-photo-candidates";
+import { upsertGooglePlaceIdentity } from "./google-place-identity";
 
 interface ModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
@@ -854,7 +855,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     refuseActiveProviderDuplicate: boolean,
   ) {
     const identity = candidate
-      ? await this.upsertProviderIdentity(transaction, candidate)
+      ? await upsertGooglePlaceIdentity(transaction, candidate, this.now())
       : await transaction.insertInto("place_identities").values({
           provider: "manual",
           provider_place_id: null,
@@ -1710,38 +1711,6 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       });
       await remember(transaction, userId, operation, key, { removed: true });
     });
-  }
-
-  private async upsertProviderIdentity(
-    transaction: Transaction<AlongTheWayDatabase>,
-    candidate: ProviderPlaceCandidateDto,
-  ) {
-    const result = await sql<{ id: string }>`
-      insert into place_identities (
-        provider, provider_place_id, canonical_name, canonical_type,
-        canonical_address, latitude, longitude, time_zone,
-        provider_observed_at, provider_expires_at, provider_attribution,
-        updated_at
-      ) values (
-        'google', ${candidate.providerPlaceId}, ${candidate.name}, ${candidate.type},
-        ${candidate.address}, ${candidate.latitude}, ${candidate.longitude}, ${candidate.timeZone},
-        ${candidate.observedAt}, ${candidate.expiresAt}, ${candidate.attribution}, ${this.now()}
-      )
-      on conflict (provider, provider_place_id) where provider_place_id is not null
-      do update set
-        canonical_name = excluded.canonical_name,
-        canonical_type = excluded.canonical_type,
-        canonical_address = excluded.canonical_address,
-        latitude = excluded.latitude,
-        longitude = excluded.longitude,
-        time_zone = excluded.time_zone,
-        provider_observed_at = excluded.provider_observed_at,
-        provider_expires_at = excluded.provider_expires_at,
-        provider_attribution = excluded.provider_attribution,
-        updated_at = excluded.updated_at
-      returning id
-    `.execute(transaction);
-    return result.rows[0]!;
   }
 
   private async reconcileLegacyPlaces(
