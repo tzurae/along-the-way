@@ -104,19 +104,45 @@
   box-shadow: 0 12px 30px -26px rgb(31 48 41 / 65%);
 }
 
-.plan-pending > summary {
+.plan-pending-toggle {
   display: grid;
+  width: 100%;
   min-height: 64px;
   cursor: pointer;
-  list-style: none;
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
   padding: 12px 16px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
 }
 
-.plan-pending > summary::-webkit-details-marker {
-  display: none;
+/* Same open/close motion as the rail's child bars: rows grow 0fr → 1fr while the body fades in. */
+.plan-pending-expander {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 260ms cubic-bezier(0.16, 1, 0.3, 1), opacity 180ms ease;
+}
+
+.plan-pending[data-open="true"] .plan-pending-expander {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.plan-pending-clip {
+  min-height: 0;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plan-pending-expander,
+  .plan-pending-chevron {
+    transition: none;
+  }
 }
 
 .plan-pending-title {
@@ -164,7 +190,7 @@
   transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.plan-pending[open] .plan-pending-chevron {
+.plan-pending[data-open="true"] .plan-pending-chevron {
   transform: rotate(180deg);
 }
 

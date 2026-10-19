@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Temporal } from "@js-temporal/polyfill";
 import type { TripDto } from "@along-the-way/contracts/private-trips";
 import {
@@ -400,6 +400,9 @@ export function TripSkeletonWorkspace({
   const assignmentErrorPlaceIdRef = useRef<string | null>(null);
   const [viewingAssignedPlaceId, setViewingAssignedPlaceId] = useState<string | null>(null);
   const [repairingPlaceId, setRepairingPlaceId] = useState<string | null>(null);
+  // 待安排 expands/collapses with a height animation, so it is a button + grid rows instead of <details>.
+  const [pendingOpen, setPendingOpen] = useState(false);
+  const pendingBodyId = useId();
   const viewingAssignedPlace = viewingAssignedPlaceId ? tripPlaces.find((place) => place.id === viewingAssignedPlaceId) : undefined;
   const repairingPlace = repairingPlaceId ? tripPlaces.find((place) => place.id === repairingPlaceId) : undefined;
   const actionKeys = useRef(new Map<string, string>());
@@ -1070,8 +1073,14 @@ export function TripSkeletonWorkspace({
           <p role="alert" className="plan-page-error">{error}</p>
         ) : null}
 
-        <details className="plan-pending">
-          <summary>
+        <section className="plan-pending" data-open={pendingOpen}>
+          <button
+            type="button"
+            className="plan-pending-toggle"
+            aria-expanded={pendingOpen}
+            aria-controls={pendingBodyId}
+            onClick={() => setPendingOpen((open) => !open)}
+          >
             <span className="plan-pending-title">
               <strong>{t.tripSkeleton.pendingTitle}</strong>
               <span>{t.tripSkeleton.pendingHelper}</span>
@@ -1083,8 +1092,10 @@ export function TripSkeletonWorkspace({
               {pendingPlaces.length}
             </span>
             <ChevronDown aria-hidden="true" className="plan-pending-chevron" />
-          </summary>
-          <div className="plan-pending-body">
+          </button>
+          <div className="plan-pending-expander" inert={!pendingOpen}>
+          <div className="plan-pending-clip">
+          <div id={pendingBodyId} className="plan-pending-body">
             {pendingPlaces.length === 0 ? (
               <div className="plan-pending-empty">
                 <CalendarDays aria-hidden="true" />
@@ -1137,7 +1148,9 @@ export function TripSkeletonWorkspace({
               </ul>
             )}
           </div>
-        </details>
+          </div>
+          </div>
+        </section>
 
         <div
           className="plan-day-filter"
