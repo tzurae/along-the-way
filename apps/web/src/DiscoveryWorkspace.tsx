@@ -546,6 +546,20 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
     void refresh();
     setPhotosExpectedUntil(Date.now() + 120_000);
   }, [jobId, jobSaved, refresh]);
+  // A successful run uses up its checklist on the server; re-read once it finishes so 你的需求
+  // starts from fresh questions instead of the answered ones still held here. Only for jobs seen
+  // unfinished here: a run that finished earlier is already reflected in the first read.
+  const jobFinished = job?.status === "succeeded";
+  const unfinishedJobIds = useRef(new Set<string>());
+  useEffect(() => {
+    if (!jobId) return;
+    if (!jobFinished) {
+      unfinishedJobIds.current.add(jobId);
+      return;
+    }
+    if (!unfinishedJobIds.current.delete(jobId)) return;
+    void refresh();
+  }, [jobId, jobFinished, refresh]);
 
   // 本次新增: the newest job stays at the top of the list, from its first stage to the places it
   // found, until the member collapses it. A job counts once it was seen running or its result

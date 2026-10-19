@@ -83,10 +83,21 @@ export class DiscoveryJobProgress {
     return this.update(stage, { state, endedAt: this.now().toISOString() }, stage);
   }
 
-  async succeed() {
-    await this.database.updateTable("discovery_jobs").set({
-      status: "succeeded", finished_at: this.now(), heartbeat_at: this.now(), client_ip: null,
-    }).where("id", "=", this.jobId).where("status", "=", "running").execute();
+  /**
+   * Ends the job as succeeded and, in the same transaction, removes the checklist it used, so the
+   * next 調查 asks fresh questions. Atomic: a client that sees "succeeded" never reads the used
+   * checklist, and a job that ends up failed instead keeps its answers for 重新調查.
+   */
+  async succeed(checklist: { tripId: string; briefVersion: number }) {
+    await this.database.transaction().execute(async (transaction) => {
+      const ended = await transaction.updateTable("discovery_jobs").set({
+        status: "succeeded", finished_at: this.now(), heartbeat_at: this.now(), client_ip: null,
+      }).where("id", "=", this.jobId).where("status", "=", "running").returning("id").executeTakeFirst();
+      if (!ended) return;
+      await transaction.deleteFrom("discovery_clarifications")
+        .where("trip_id", "=", checklist.tripId).where("brief_version", "=", checklist.briefVersion)
+        .execute();
+    });
   }
 
   /** Marks the running stage failed and ends the job. */

@@ -840,7 +840,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       await progress.start("photos");
       const photos = await this.findSuggestionPhotos(suggestionIdentityIds);
       await progress.finish("photos", photos === "complete" ? "done" : "partial");
-      await progress.succeed();
+      // Also removes the checklist this run used (its answers were read before planning).
+      await progress.succeed({ tripId, briefVersion: version });
       console.info(JSON.stringify({ event: "discovery_job_finished", jobId: job.id, tripId, added, photos }));
     } catch (error) {
       const code = error instanceof ProviderQuotaError ? "provider_quota"
