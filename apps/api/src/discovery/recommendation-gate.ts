@@ -1,16 +1,28 @@
-import type {
-  DiscoveryEndorsement,
-  DiscoveryShortfallDto,
+import {
+  GOOGLE_MIN_RATING,
+  GOOGLE_MIN_REVIEWS,
+  type DiscoveryEndorsement,
+  type DiscoveryShortfallDto,
 } from "@along-the-way/contracts/discovery";
 
 import type { BusinessStatus } from "../planning/opening-hours";
 
-/** Below this many reviews a Google rating is too fragile to count, whatever its value. */
-export const GOOGLE_MIN_REVIEWS = 200;
-export const GOOGLE_MIN_RATING = 4;
-/** A recommendation is shown only when this many independent kinds of source vouch for it. */
-export const MIN_ENDORSEMENTS = 2;
+export { GOOGLE_MIN_RATING, GOOGLE_MIN_REVIEWS };
+/**
+ * Owner decision 2026-10-20: one verified source is enough to show a place, because every place
+ * is now a real Google Maps result; the card says which sources were verified. Wikivoyage alone
+ * is not enough yet: its matcher still mistakes bold words for listings (喜兵衛 → Kihei, Maui).
+ */
+export const SINGLE_SOURCE_ENDORSEMENTS: readonly DiscoveryEndorsement[] = ["google_reviews", "official_tourism"];
 export const MIN_PER_CATEGORY = 2;
+
+/**
+ * Whether these verified sources are enough to show a place. Wikivoyage never decides it: with
+ * only three kinds, any two include Google reviews or an official page.
+ */
+export function enoughEndorsements(endorsements: readonly DiscoveryEndorsement[]) {
+  return endorsements.some((endorsement) => SINGLE_SOURCE_ENDORSEMENTS.includes(endorsement));
+}
 
 export type GateResolution =
   | { status: "not_found" }
@@ -152,7 +164,7 @@ export function gateRecommendations(input: GateInput): GateResult {
       // Already listed: not a quality failure, so no shortfall; a decision still explains itself.
       if (decided) shortfalls.push(shortfall(decided, candidate.displayName, named));
       // The decision is the reason given; it still covers its kind only if it could be visited.
-      if (endorsements.length >= MIN_ENDORSEMENTS && infeasible(resolution, input.tripCountryCodes) === null) {
+      if (enoughEndorsements(endorsements) && infeasible(resolution, input.tripCountryCodes) === null) {
         passedDecided.push(place.members);
       }
       continue;
@@ -162,7 +174,7 @@ export function gateRecommendations(input: GateInput): GateResult {
       shortfalls.push(shortfall(ruledOut, candidate.displayName, named));
       continue;
     }
-    if (endorsements.length < MIN_ENDORSEMENTS) {
+    if (!enoughEndorsements(endorsements)) {
       shortfalls.push(shortfall("single_source", candidate.displayName, named, endorsements));
       continue;
     }

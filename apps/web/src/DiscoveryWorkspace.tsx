@@ -107,6 +107,19 @@ function endorsementLabel(
   }
 }
 
+/**
+ * The card line naming the verified sources; null when none can be stated (older proposals).
+ * Wikivoyage is left out: its matcher still mistakes bold words for listings (喜兵衛 → Kihei,
+ * Maui), so the card would state a source that may be false.
+ */
+function endorsementLine(endorsements: readonly DiscoveryEndorsement[], t: Messages["discovery"]) {
+  const labels = endorsements
+    .filter((endorsement) => endorsement !== "wikivoyage")
+    .map((endorsement) => endorsementLabel(endorsement, t));
+  if (labels.length === 0) return null;
+  return labels.length === 1 ? t.endorsement.onlyOne(labels[0]!) : t.endorsement.verified(labels);
+}
+
 function discoveryRunFailureReason(errorCode: string | null, t: Messages["discovery"]) {
   switch (errorCode?.toLowerCase()) {
     case "model_unavailable":
@@ -1104,6 +1117,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
         placeType={proposal.type}
         stateLabel={fresh && proposal.status === "pending" ? t.run.fresh : proposalStatusLabel(proposal, displayStatus)}
         secondary={firstSentence?.text ?? proposal.recommendation}
+        evidence={endorsementLine(proposal.endorsements, t) ?? undefined}
         caution={caution ?? undefined}
         cautionAction={caution && cautionCount > 1 ? <span className="list-place-row__caution-action">・<button type="button" className="list-place-row__inline-action" onClick={() => openProposalDetail(proposal.id, "cautions")}>{t.proposal.moreItems(cautionCount - 1)}</button></span> : undefined}
         photo={preview?.photo}
