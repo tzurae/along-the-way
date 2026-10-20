@@ -42,6 +42,7 @@ function route(order: DayRouteOrder): DayRouteDto {
     metersToEnd: null,
     totalMeters: 0,
     travelSource: "straight_line",
+    transitProvider: null,
     routeShapesAvailable: false,
     minutesToEnd: null,
     linesToEnd: [],

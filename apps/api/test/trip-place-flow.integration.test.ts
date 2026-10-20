@@ -20,7 +20,7 @@ import {
   parseTripSkeletonResponse,
 } from "@along-the-way/contracts/trip-skeleton";
 
-import { createApp } from "../src/app";
+import { createApp, type AppDependencies } from "../src/app";
 import { PostgresPlaceDetailModule } from "../src/place-details/postgres-place-detail-module";
 import { packagedPhotoRoot } from "../src/place-details/photo-assets";
 import { PostgresCollaborationModule } from "../src/private-trips/postgres-collaboration-module";
@@ -40,6 +40,7 @@ import {
 } from "../src/database/migrations/020_trip_day_versions";
 import { seedDatabase } from "../src/database/seed";
 import { PostgresDayPlanModule } from "../src/planning/postgres-day-plan-module";
+import { GoogleRoutesProvider } from "../src/planning/google-routes-provider";
 import { NavitimeProvider } from "../src/planning/navitime-provider";
 import type { EmailSender } from "../src/private-trips/email-sender";
 import { PostgresEmailWorker } from "../src/private-trips/postgres-email-worker";
@@ -194,9 +195,13 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
   let provider: ControlledProvider;
   let rateLimiter: PostgresRateLimiter;
   let tripPlaces: PostgresTripPlaceModule;
+  let tripSkeleton: PostgresTripSkeletonModule;
   let collaboration: PostgresCollaborationModule;
   let navitime: NavitimeProvider;
+  let googleRoutes: GoogleRoutesProvider;
+  let appDependencies: AppDependencies;
   let transitRequests: Array<{ fromId: string; toId: string; date: string }>;
+  let googleMatrixRequests: Array<Array<{ fromId: string; toId: string }>>;
   let identityAuthenticateCalls = 0;
   let afterReadObserver: (() => void) | null = null;
   let currentNow = new Date("2026-09-28T12:00:00.000Z");
@@ -269,13 +274,32 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     transitRequests = [];
     navitime = new NavitimeProvider({
       apiKey: "stub-navitime-key",
-      consumeBudget: async () => true,
+      reserveBudget: async () => ({ refund: async () => {} }),
     });
     vi.spyOn(navitime, "transit").mockImplementation(async (from, to, date) => {
       transitRequests.push({ fromId: from.id, toId: to.id, date });
       return { minutes: 20, lines: ["測試線"] };
     });
     vi.spyOn(navitime, "shape").mockRejectedValue(new Error("Route shapes are not exercised here"));
+    googleMatrixRequests = [];
+    googleRoutes = new GoogleRoutesProvider({
+      apiKey: "stub-google-routes-key",
+      reserveBudget: async () => ({ refund: async () => {} }),
+    });
+    vi.spyOn(googleRoutes, "matrix").mockImplementation(async (pairs) => {
+      googleMatrixRequests.push(pairs.map(({ from, to }) => ({ fromId: from.id, toId: to.id })));
+      return pairs.map(({ from, to }) => ({
+        fromId: from.id,
+        toId: to.id,
+        fromLatitude: from.latitude,
+        fromLongitude: from.longitude,
+        toLatitude: to.latitude,
+        toLongitude: to.longitude,
+        minutes: from.latitude > to.latitude ? 1 : 50,
+        lines: ["Google 測試交通"],
+      }));
+    });
+    vi.spyOn(googleRoutes, "shape").mockRejectedValue(new Error("Route shapes are not exercised here"));
     tripPlaces = new PostgresTripPlaceModule({
       database,
       provider,
@@ -292,7 +316,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         resolveHost: async () => ["142.250.72.238"],
       },
     });
-    const tripSkeleton = new PostgresTripSkeletonModule({ database, now });
+    tripSkeleton = new PostgresTripSkeletonModule({ database, now });
     collaboration = new PostgresCollaborationModule(database);
     const collaborationAfter = collaboration.after.bind(collaboration);
     collaboration.after = async (userId, tripId, order) => {
@@ -306,7 +330,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       now,
     );
     provider.consumeBudget = () => rateLimiter.tryConsumePaidProvider("google_places");
-    app = createApp({
+    appDependencies = {
       placeDetails: new PostgresPlaceDetailModule({ database, assetRoot: packagedPhotoRoot }),
       collaboration,
       dayPlans: new PostgresDayPlanModule({
@@ -314,6 +338,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         tripSkeleton,
         tripPlaces,
         navitime,
+        googleRoutes,
       }),
       discovery: unrelatedDiscoveryModule,
       identityAccess,
@@ -324,7 +349,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       tripPlaces,
       tripSkeleton,
       tripWorkspace: new PostgresTripWorkspaceModule({ database, now }),
-    });
+    };
+    app = createApp(appDependencies);
   });
 
   afterAll(async () => {
@@ -368,7 +394,13 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     return { cookie: sessionCookie(consumed), user };
   }
 
-  async function createTrip(cookie: string, name: string) {
+  async function createTrip(
+    cookie: string,
+    name: string,
+    options: { countryCodes?: string[]; timeZone?: string } = {},
+  ) {
+    const countryCodes = options.countryCodes ?? ["JP"];
+    const timeZone = options.timeZone ?? "Asia/Tokyo";
     const response = await app.request("/api/trips", {
       method: "POST",
       headers: {
@@ -381,8 +413,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         name,
         startDate: "2026-10-21",
         endDate: "2026-10-27",
-        countryCodes: ["JP"],
-        flights: tripFlights(),
+        countryCodes,
+        flights: tripFlights("2026-10-21", "2026-10-27", timeZone),
       }),
     });
     expect(response.status, await response.clone().text()).toBe(201);
@@ -455,6 +487,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     name: string,
     latitude: number,
     longitude: number,
+    timeZone = "Asia/Tokyo",
   ) {
     const response = await app.request(`/api/trips/${tripId}/trip-places`, {
       method: "POST",
@@ -471,7 +504,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         address: `${name} address`,
         latitude,
         longitude,
-        timeZone: "Asia/Tokyo",
+        timeZone,
         sourceUrl: null,
         originalNote: null,
       }),
@@ -3595,6 +3628,295 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       languageCode: "zh-TW",
       regionCode: "JP",
     });
+  });
+
+  it("selects Google for known non-Japan days, keeps NAVITIME for Japan, and fails closed without a country or key", async () => {
+    const owner = await login("transit-provider-selection@example.test");
+    const japan = await createTrip(owner.cookie, "Japan transit provider");
+    const japanRoute = parseDayRouteResponse(await (await dayRoute(
+      owner.cookie,
+      japan.id,
+      japan.days[1]!.id,
+      "current",
+    )).json()).route;
+    expect(japanRoute).toMatchObject({
+      transitProvider: "navitime",
+      travelSource: "straight_line",
+      routeShapesAvailable: true,
+    });
+
+    const france = await createTrip(owner.cookie, "France transit provider", {
+      countryCodes: ["FR"],
+      timeZone: "Europe/Paris",
+    });
+    const franceRoute = parseDayRouteResponse(await (await dayRoute(
+      owner.cookie,
+      france.id,
+      france.days[1]!.id,
+      "current",
+    )).json()).route;
+    expect(franceRoute).toMatchObject({
+      transitProvider: "google_routes",
+      travelSource: "straight_line",
+      routeShapesAvailable: true,
+    });
+
+    const unknown = await createTrip(owner.cookie, "Unknown day country", {
+      countryCodes: ["FR", "DE"],
+      timeZone: "Europe/Paris",
+    });
+    await sql`
+      update itinerary_endpoints
+      set country_stop_id = null
+      where itinerary_item_id in (
+        select id from itinerary_items where trip_id = ${unknown.id}
+      )
+    `.execute(database);
+    const unknownRoute = parseDayRouteResponse(await (await dayRoute(
+      owner.cookie,
+      unknown.id,
+      unknown.days[0]!.id,
+      "current",
+    )).json()).route;
+    expect(unknownRoute).toMatchObject({
+      transitProvider: null,
+      travelSource: "straight_line",
+      routeShapesAvailable: false,
+    });
+
+    const unconfiguredGoogle = new GoogleRoutesProvider({
+      apiKey: " ",
+      reserveBudget: async () => ({ refund: async () => {} }),
+    });
+    app = createApp({
+      ...appDependencies,
+      dayPlans: new PostgresDayPlanModule({
+        database,
+        tripSkeleton,
+        tripPlaces,
+        navitime,
+        googleRoutes: unconfiguredGoogle,
+      }),
+    });
+    const noKeyRoute = parseDayRouteResponse(await (await dayRoute(
+      owner.cookie,
+      france.id,
+      france.days[1]!.id,
+      "current",
+    )).json()).route;
+    expect(noKeyRoute).toMatchObject({
+      transitProvider: null,
+      travelSource: "straight_line",
+      routeShapesAvailable: false,
+    });
+  });
+
+  it("prices every Google matrix element, rejects a changed budget before calling Google, orders by minutes, and never changes the NAVITIME cache", async () => {
+    const owner = await login("google-transit-matrix@example.test");
+    const trip = await createTrip(owner.cookie, "Google transit matrix", {
+      countryCodes: ["FR"],
+      timeZone: "Europe/Paris",
+    });
+    const day = trip.days[1]!;
+    const first = await addLocatedManualPlace(
+      owner.cookie, trip.id, "google-transit-first", "Google first", 48.85, 2.35, "Europe/Paris",
+    );
+    const second = await addLocatedManualPlace(
+      owner.cookie, trip.id, "google-transit-second", "Google second", 48.86, 2.36, "Europe/Paris",
+    );
+    const third = await addLocatedManualPlace(
+      owner.cookie, trip.id, "google-transit-third", "Google third", 48.87, 2.37, "Europe/Paris",
+    );
+    await assignToDay(owner.cookie, trip.id, day.id, [first, second, third], "google-transit-assign");
+    await database.insertInto("transit_leg_cache").values({
+      trip_id: trip.id,
+      travel_date: day.date,
+      from_lat: "48.850000",
+      from_lon: "2.350000",
+      to_lat: "48.860000",
+      to_lon: "2.360000",
+      minutes: 999,
+      lines: JSON.stringify(["cache must be ignored"]),
+      minutes_fetched_at: new Date(),
+      shape_geojson: null,
+      shape_fetched_at: null,
+    }).execute();
+
+    const cached = parseDayRouteResponse(await (await dayRoute(
+      owner.cookie,
+      trip.id,
+      day.id,
+      "suggested",
+      undefined,
+      "cached",
+    )).json()).route;
+    expect(cached).toMatchObject({
+      transitProvider: "google_routes",
+      travelSource: "straight_line",
+      transitCallsNeeded: 6,
+    });
+    expect(googleMatrixRequests).toHaveLength(0);
+
+    const changedBudget = await dayRoute(
+      owner.cookie,
+      trip.id,
+      day.id,
+      "suggested",
+      undefined,
+      "fetch",
+      5,
+    );
+    expect(changedBudget.status).toBe(409);
+    expect(await changedBudget.json()).toMatchObject({
+      error: { code: "transit_calls_changed", transitCallsNeeded: 6 },
+    });
+    expect(googleMatrixRequests).toHaveLength(0);
+
+    const fetched = parseDayRouteResponse(await (await dayRoute(
+      owner.cookie,
+      trip.id,
+      day.id,
+      "suggested",
+      undefined,
+      "fetch",
+      cached.transitCallsNeeded,
+    )).json()).route;
+    expect(googleMatrixRequests.flat()).toHaveLength(6);
+    expect(new Set(googleMatrixRequests.flat().map(({ fromId, toId }) => `${fromId}:${toId}`))).toEqual(new Set([
+      `${first.id}:${second.id}`,
+      `${first.id}:${third.id}`,
+      `${second.id}:${first.id}`,
+      `${second.id}:${third.id}`,
+      `${third.id}:${first.id}`,
+      `${third.id}:${second.id}`,
+    ]));
+    expect(fetched).toMatchObject({
+      transitProvider: "google_routes",
+      travelSource: "google_routes",
+      transitCallsNeeded: 6,
+      orderedTripPlaceIds: [third.id, second.id, first.id],
+    });
+    expect(await database.selectFrom("transit_leg_cache")
+      .select("minutes")
+      .where("trip_id", "=", trip.id)
+      .execute()).toEqual([{ minutes: 999 }]);
+  });
+
+  it("keeps straight-line leg estimates when Google reports that a transit route is missing", async () => {
+    const owner = await login("google-missing-route@example.test");
+    const trip = await createTrip(owner.cookie, "Google missing route", {
+      countryCodes: ["FR"],
+      timeZone: "Europe/Paris",
+    });
+    const day = trip.days[1]!;
+    const first = await addLocatedManualPlace(
+      owner.cookie, trip.id, "google-missing-first", "Missing first", 48.85, 2.35, "Europe/Paris",
+    );
+    const second = await addLocatedManualPlace(
+      owner.cookie, trip.id, "google-missing-second", "Missing second", 48.86, 2.36, "Europe/Paris",
+    );
+    await assignToDay(owner.cookie, trip.id, day.id, [first, second], "google-missing-assign");
+    const missingRouteGoogle = new GoogleRoutesProvider({
+      apiKey: "stub-google-routes-key",
+      reserveBudget: async () => ({ refund: async () => {} }),
+    });
+    app = createApp({
+      ...appDependencies,
+      dayPlans: new PostgresDayPlanModule({
+        database,
+        tripSkeleton,
+        tripPlaces,
+        navitime,
+        googleRoutes: missingRouteGoogle,
+      }),
+    });
+    const fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { destinations: unknown[] };
+      return Response.json(body.destinations.map((_destination, destinationIndex) => ({
+        originIndex: 0,
+        destinationIndex,
+        status: {},
+        condition: "ROUTE_NOT_FOUND",
+      })));
+    });
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const route = parseDayRouteResponse(await (await dayRoute(
+        owner.cookie,
+        trip.id,
+        day.id,
+        "suggested",
+        undefined,
+        "fetch",
+        2,
+      )).json()).route;
+
+      expect(fetch).toHaveBeenCalled();
+      expect(route).toMatchObject({
+        transitProvider: "google_routes",
+        travelSource: "straight_line",
+        travelNotice: "transit_unavailable",
+        transitCallsNeeded: 2,
+        totalMinutes: null,
+      });
+      expect(route.stops.map((stop) => stop.minutesFromPrevious)).toEqual([null, null]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("atomically refunds an aborted first Google reservation but keeps a sent request charged", async () => {
+    const from = { id: "refund-from", latitude: 48.85, longitude: 2.35 };
+    const to = { id: "refund-to", latitude: 48.86, longitude: 2.36 };
+    const beforeFetchController = new AbortController();
+    const beforeFetch = vi.fn();
+    vi.stubGlobal("fetch", beforeFetch);
+    try {
+      const abortingProvider = new GoogleRoutesProvider({
+        apiKey: "stub-google-routes-key",
+        reserveBudget: async (cost) => {
+          const reservation = await rateLimiter.reservePaidProvider("google_routes", cost);
+          beforeFetchController.abort();
+          return reservation;
+        },
+      });
+      await rateLimiter.withPaidProviderIdentity("198.51.100.70", "refund-account", async () => {
+        await expect(abortingProvider.shape(
+          from, to, "2026-10-21", "Europe/Paris", beforeFetchController.signal,
+        )).rejects.toMatchObject({ code: "transit_unavailable" });
+      });
+      expect(beforeFetch).not.toHaveBeenCalled();
+      expect(await database.selectFrom("rate_limit_windows")
+        .select(["scope", "request_count"])
+        .where("scope", "like", "paid_provider:google_routes:%")
+        .execute()).toEqual([]);
+
+      const sentFetch = vi.fn(async () => {
+        throw new DOMException("Aborted", "AbortError");
+      });
+      vi.stubGlobal("fetch", sentFetch);
+      const sentProvider = new GoogleRoutesProvider({
+        apiKey: "stub-google-routes-key",
+        reserveBudget: (cost) => rateLimiter.reservePaidProvider("google_routes", cost),
+      });
+      await rateLimiter.withPaidProviderIdentity("198.51.100.70", "refund-account", async () => {
+        await expect(sentProvider.shape(
+          from, to, "2026-10-21", "Europe/Paris", new AbortController().signal,
+        )).rejects.toMatchObject({ code: "transit_unavailable" });
+      });
+      expect(sentFetch).toHaveBeenCalledOnce();
+      expect(await database.selectFrom("rate_limit_windows")
+        .select(["scope", "request_count"])
+        .where("scope", "like", "paid_provider:google_routes:%")
+        .orderBy("scope")
+        .execute()).toEqual([
+        { scope: "paid_provider:google_routes:account", request_count: 1 },
+        { scope: "paid_provider:google_routes:global", request_count: 1 },
+        { scope: "paid_provider:google_routes:ip", request_count: 1 },
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("uses no transit provider calls for cached reads, fetches only missing legs, and reuses the seven-day cache", async () => {

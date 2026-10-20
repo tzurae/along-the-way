@@ -169,6 +169,7 @@ beforeEach(() => {
         metersToEnd: null,
         totalMeters: order === "suggested" ? 100 : 200,
         travelSource: "straight_line",
+        transitProvider: null,
         routeShapesAvailable: false,
         minutesToEnd: null,
         linesToEnd: [],

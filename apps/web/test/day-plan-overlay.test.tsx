@@ -66,6 +66,7 @@ function route(
     metersToEnd: null,
     totalMeters: 1_000,
     travelSource: "straight_line",
+    transitProvider: null,
     routeShapesAvailable,
     minutesToEnd: null,
     linesToEnd: [],

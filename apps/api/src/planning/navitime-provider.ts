@@ -1,10 +1,12 @@
 import { parseTransitGeoJson, type TransitGeoJson } from "@along-the-way/contracts/day-plans";
 import { isRecord } from "@along-the-way/contracts/private-trips";
+import type { PaidProviderReservation } from "../private-trips/postgres-rate-limiter";
 import type { GeoPoint } from "./day-route-order";
+import { TransitError } from "./transit-batch";
 
 const HOST = "navitime-route-totalnavi.p.rapidapi.com";
 
-export class NavitimeError extends Error {
+export class NavitimeError extends TransitError {
   constructor(readonly code: "navitime_quota" | "navitime_unavailable") {
     super(code);
   }
@@ -19,7 +21,7 @@ export class NavitimeProvider {
 
   constructor(private readonly options: {
     apiKey?: string;
-    consumeBudget: () => Promise<boolean>;
+    reserveBudget: () => Promise<PaidProviderReservation | null>;
   }) {
     this.apiKey = options.apiKey?.trim() ?? "";
     this.configured = this.apiKey.length > 0;
@@ -41,11 +43,13 @@ export class NavitimeProvider {
       this.waiting.push(acquire);
     });
     else this.active += 1;
+    let reservation: PaidProviderReservation | null = null;
+    let sent = false;
     try {
       signal.throwIfAborted();
-      const reserved = await this.options.consumeBudget();
+      reservation = await this.options.reserveBudget();
       signal.throwIfAborted();
-      if (!reserved) throw new NavitimeError("navitime_quota");
+      if (!reservation) throw new NavitimeError("navitime_quota");
       const url = new URL(`https://${HOST}/${path}`);
       url.search = new URLSearchParams({
         start: `${from.latitude},${from.longitude}`,
@@ -56,21 +60,28 @@ export class NavitimeProvider {
           format: "geojson", options: "transport_shape", shape_color: "railway_line",
         } : {}),
       }).toString();
-      const response = await fetch(url, {
+      const request: RequestInit = {
         headers: { "x-rapidapi-host": HOST, "x-rapidapi-key": this.apiKey },
         signal: AbortSignal.any([signal, AbortSignal.timeout(8_000)]),
         cache: "no-store",
         redirect: "error",
-      });
+      };
+      signal.throwIfAborted();
+      sent = true;
+      const response = await fetch(url, request);
       if (response.status === 429) throw new NavitimeError("navitime_quota");
       if (!response.ok) throw new NavitimeError("navitime_unavailable");
       return await response.json();
     } catch (error) {
       throw error instanceof NavitimeError ? error : new NavitimeError("navitime_unavailable");
     } finally {
-      const next = this.waiting.shift();
-      if (next) next();
-      else this.active -= 1;
+      try {
+        if (reservation && !sent) await reservation.refund();
+      } finally {
+        const next = this.waiting.shift();
+        if (next) next();
+        else this.active -= 1;
+      }
     }
   }
 
@@ -102,40 +113,3 @@ export class NavitimeProvider {
   }
 }
 
-/** A 20-second batch deadline bounds HTTP latency; unfinished shapes retain their null defaults. */
-export async function mapNavitimeLegs<T, R>(
-  legs: readonly T[],
-  work: (leg: T, signal: AbortSignal) => Promise<R>,
-  unfinished?: (leg: T) => R,
-): Promise<R[]> {
-  const results: R[] = unfinished ? legs.map(unfinished) : new Array(legs.length);
-  const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout>;
-  const deadline = new Promise<void>((resolve) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      resolve();
-    }, 20_000);
-  });
-  let index = 0;
-  let failure: unknown;
-  let failed = false;
-  const workers = Promise.all(Array.from({ length: Math.min(4, legs.length) }, async () => {
-    while (!failed && !controller.signal.aborted && index < legs.length) {
-      const current = index++;
-      try {
-        const result = await work(legs[current]!, controller.signal);
-        if (!controller.signal.aborted) results[current] = result;
-      } catch (error) {
-        failed = true;
-        // A timeout/provider failure must never replace an already-observed quota refusal.
-        if (!(failure instanceof NavitimeError && failure.code === "navitime_quota")) failure = error;
-      }
-    }
-  }));
-  await Promise.race([workers, deadline]);
-  clearTimeout(timer!);
-  if (failed) throw failure;
-  if (controller.signal.aborted && !unfinished) throw new NavitimeError("navitime_unavailable");
-  return results;
-}
