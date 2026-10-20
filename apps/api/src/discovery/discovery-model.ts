@@ -78,7 +78,7 @@ export interface DiscoveryPlanResult {
   structuredBrief: StructuredDiscoveryBrief;
   unresolvedQuestions: string[];
   request: DiscoveryRequest;
-  /** Canonical BCP-47 tag of the brief's language; every AI-written field and place name uses it. */
+  /** Always APP_LANGUAGE (zh-TW): every AI-written field and place name uses it, whatever the brief's language. */
   outputLanguage: string;
 }
 
