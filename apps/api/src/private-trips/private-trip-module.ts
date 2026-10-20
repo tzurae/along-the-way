@@ -102,6 +102,8 @@ export class AppError extends Error {
       | "adjacent_country_stops"
       | "rate_limited"
       | "maps_daily_limit"
+      | "route_shapes_unavailable"
+      | "transit_calls_changed"
       | "invalid_local_time"
       | "ambiguous_local_time"
       | "place_not_found"
@@ -128,6 +130,7 @@ export class AppError extends Error {
       | "model_unavailable"
       | "provider_unavailable"
       | "provider_quota"
+      | "alternatives_unsupported"
       | "research_in_progress"
       | "clarification_incomplete"
       | "research_limit_reached"
@@ -157,6 +160,7 @@ export class AppError extends Error {
     readonly currentVersion?: number,
     readonly conflictTargetId?: string,
     readonly changedEntityIds?: string[],
+    readonly transitCallsNeeded?: number,
   ) {
     super(message);
   }

@@ -13,10 +13,13 @@ import {
 } from "react";
 import {
   parseDayRouteResponse,
+  parseDayRouteShapesResponse,
+  withTransitMatrix,
   type CreateDayRouteInput,
   type DayRouteDto,
   type DayRouteOrder,
   type DayRouteResponse,
+  type DayRouteShapesResponse,
 } from "@along-the-way/contracts/day-plans";
 import {
   parseTripPlaceListResponse,
@@ -39,6 +42,7 @@ import { useI18n } from "./i18n";
 import { ApiRequestError } from "./api-error";
 import { notify } from "./AppToaster";
 import { googleMapsDirectionsUrl } from "./google-maps";
+import { PlaceListSkeleton } from "./PlaceListSkeleton";
 
 type JsonRequest = <T>(
   url: string,
@@ -98,11 +102,32 @@ function missesLeg(route: DayRouteDto) {
  * never presented as an improvement.
  */
 function candidateDelta(baseline: DayRouteDto, candidate: DayRouteDto, sameText: string) {
+  if (candidate.travelSource === "navitime") {
+    if (baseline.totalMinutes === null || candidate.totalMinutes === null) {
+      return { tone: "same", text: "部分路段為估計，無法比較總時間" } as const;
+    }
+    const minutes = candidate.totalMinutes - baseline.totalMinutes;
+    return minutes === 0 ? { tone: "same", text: "移動時間相同" } as const
+      : minutes < 0 ? { tone: "shorter", text: `↓ 少 ${-minutes} 分鐘` } as const
+        : { tone: "longer", text: `↑ 多 ${minutes} 分鐘` } as const;
+  }
   const difference = candidate.totalMeters - baseline.totalMeters;
   if (Math.abs(difference) < 100) return { tone: "same", text: sameText } as const;
   return difference < 0
     ? { tone: "shorter", text: `↓ 少 ${kilometres(-difference)}` } as const
     : { tone: "longer", text: `↑ 多 ${kilometres(difference)}` } as const;
+}
+
+type ShapeState = { status: "loading" | "ready" | "error"; legs: DayRouteShapesResponse["legs"] };
+
+/** Coordinates are part of the snapshot identity; responses live only in this open dialog. */
+function routeShapeKey(route: DayRouteDto) {
+  return JSON.stringify([
+    route.dayId, route.date,
+    route.startsAt && [route.startsAt.placeId, route.startsAt.latitude, route.startsAt.longitude],
+    route.stops.map((stop) => [stop.tripPlaceId, stop.latitude, stop.longitude]),
+    route.endsAt && [route.endsAt.placeId, route.endsAt.latitude, route.endsAt.longitude],
+  ]);
 }
 
 type RouteView = "route" | "map";
@@ -166,9 +191,11 @@ function routeMapPoints(route: DayRouteDto): RouteMapPoint[] {
 
 function RouteMapOverlay({
   points,
+  shapes,
   visibilityRevision,
 }: {
   points: RouteMapPoint[];
+  shapes: DayRouteShapesResponse["legs"];
   visibilityRevision: boolean;
 }) {
   const map = useMap();
@@ -177,21 +204,42 @@ function RouteMapOverlay({
     if (!map) return;
     const bounds = new google.maps.LatLngBounds();
     points.forEach((point) => bounds.extend(point.position));
+    for (const leg of shapes) {
+      for (const feature of leg.geojson?.features ?? []) {
+        const paths = feature.geometry.type === "LineString"
+          ? [feature.geometry.coordinates] : feature.geometry.coordinates;
+        for (const path of paths) for (const [lng, lat] of path) bounds.extend({ lat, lng });
+      }
+    }
     map.fitBounds(bounds, 48);
-  }, [map, points, visibilityRevision]);
+  }, [map, points, shapes, visibilityRevision]);
 
   useEffect(() => {
     if (!map) return;
-    const polyline = new google.maps.Polyline({
-      map,
-      path: points.map((point) => point.position),
-      geodesic: false,
-      strokeColor: "#d37551",
-      strokeOpacity: 0.9,
-      strokeWeight: 4,
-    });
-    return () => polyline.setMap(null);
-  }, [map, points]);
+    const lines: google.maps.Polyline[] = [];
+    for (const leg of shapes) {
+      for (const feature of leg.geojson?.features ?? []) {
+        const walk = feature.properties.ways === "walk";
+        const paths = feature.geometry.type === "LineString"
+          ? [feature.geometry.coordinates] : feature.geometry.coordinates;
+        for (const path of paths) {
+          lines.push(new google.maps.Polyline({
+            map,
+            path: path.map(([lng, lat]) => ({ lat, lng })),
+            geodesic: false,
+            strokeColor: walk ? "#52645c" : feature.properties.inline.color ?? "#1f3029",
+            strokeOpacity: walk ? 0 : 1,
+            strokeWeight: 5,
+            ...(walk ? { icons: [{
+              icon: { path: "M 0,-1 0,1", strokeColor: "#52645c", strokeOpacity: 1, strokeWeight: 3, scale: 2 },
+              offset: "0", repeat: "12px",
+            }] } : {}),
+          }));
+        }
+      }
+    }
+    return () => lines.forEach((line) => line.setMap(null));
+  }, [map, shapes]);
 
   return null;
 }
@@ -199,11 +247,13 @@ function RouteMapOverlay({
 function RouteMapView({
   date,
   points,
+  shapes,
   mapId,
   visibilityRevision,
 }: {
   date: string;
   points: RouteMapPoint[];
+  shapes: DayRouteShapesResponse["legs"];
   mapId: string | null;
   visibilityRevision: boolean;
 }) {
@@ -216,7 +266,7 @@ function RouteMapView({
         gestureHandling="cooperative"
         mapId={mapId ?? "DEMO_MAP_ID"}
       >
-        <RouteMapOverlay points={points} visibilityRevision={visibilityRevision} />
+        <RouteMapOverlay points={points} shapes={shapes} visibilityRevision={visibilityRevision} />
         {points.map((point) => (
           <AdvancedMarker key={point.key} position={point.position} title={`${point.label}・${point.name}`}>
             <Pin
@@ -258,6 +308,7 @@ function RouteMapError({
 
 function ReservedRouteMap({
   route,
+  shapes,
   browserKey,
   mapId,
   request,
@@ -266,6 +317,7 @@ function ReservedRouteMap({
   onShowRoute,
 }: {
   route: DayRouteDto;
+  shapes: DayRouteShapesResponse["legs"];
   browserKey: string;
   mapId: string | null;
   request: JsonRequest;
@@ -338,13 +390,14 @@ function ReservedRouteMap({
   }
   return (
     <APIProvider apiKey={browserKey} onError={() => setState("script-error")}>
-      <RouteMapView date={route.date} points={points} mapId={mapId} visibilityRevision={visibilityRevision} />
+      <RouteMapView date={route.date} points={points} shapes={shapes} mapId={mapId} visibilityRevision={visibilityRevision} />
     </APIProvider>
   );
 }
 
 function RouteMapPanel({
   route,
+  shapes,
   config,
   loading,
   error,
@@ -353,6 +406,7 @@ function RouteMapPanel({
   onShowRoute,
 }: {
   route: DayRouteDto;
+  shapes: DayRouteShapesResponse["legs"];
   config: MapsConfigResponse | null;
   loading: boolean;
   error: string;
@@ -378,6 +432,7 @@ function RouteMapPanel({
     <ReservedRouteMap
       key={attempt}
       route={route}
+      shapes={shapes}
       browserKey={config.browserKey}
       mapId={config.mapId}
       request={request}
@@ -390,21 +445,20 @@ function RouteMapPanel({
 
 type LegEnd = { name: string; latitude: number | null; longitude: number | null; providerPlaceId: string | null };
 
-/**
- * The straight-line distance between the row above and the row below, drawn on the connecting
- * line, with a link to Google Maps directions for the same two points so travellers compare real
- * modes and times there; this app does not estimate travel time. Only rendered when both ends
- * exist; null metres mean one end lacks coordinates, which also leaves no link to build.
- */
-function legRow(key: string, meters: number | null, from: LegEnd, to: LegEnd) {
+/** Saved rows retain distance-only copy; candidate rows can show transit or an estimate. */
+function legRow(key: string, meters: number | null, from: LegEnd, to: LegEnd, minutes: number | null, lines: string[], shapeFailed: boolean, version: "saved" | "candidate") {
   const distance = meters === null ? "缺少座標" : meters < 1_000 ? `${meters} 公尺` : `${(meters / 1_000).toFixed(1)} 公里`;
   const directions = googleMapsDirectionsUrl(from, to);
+  const travel = version === "saved" ? distance
+    : minutes === null ? `估計・${distance}`
+      : lines.length > 0 ? `${minutes} 分鐘・${lines.join(" → ")}` : `步行 ${minutes} 分鐘`;
   return (
     <li key={key} className="route-leg">
       <span aria-hidden="true" />
       <span className="route-leg-track" aria-hidden="true" />
       <span className="route-leg-text">
-        <span><span aria-hidden="true">↓ </span>{distance}</span>
+        <span><span aria-hidden="true">↓ </span>{travel}</span>
+        {shapeFailed ? <span>這段路線無法取得</span> : null}
         {directions ? (
           <a
             className="route-leg-directions"
@@ -448,14 +502,91 @@ export function DayPlanDialog({
   const [mapsConfig, setMapsConfig] = useState<MapsConfigResponse | null>(null);
   const [mapsConfigLoading, setMapsConfigLoading] = useState(false);
   const [mapsConfigError, setMapsConfigError] = useState("");
-  const [busy, setBusy] = useState<"planning" | "saving" | null>(null);
+  const [busy, setBusy] = useState<"planning" | "transit" | "saving" | null>(null);
+  const [transitCallsNotice, setTransitCallsNotice] = useState("");
   const latestRequest = useRef(0);
   const mapsConfigRequest = useRef(0);
   const dialogEpoch = useRef(0);
   const actionKeys = useRef(new Map<string, string>());
+  const initialRouteRequest = useRef<{ dayId: string; pending: Promise<[DayRouteDto, DayRouteDto]> } | null>(null);
+  const shapeRequests = useRef(new Set<string>());
+  const [shapeStates, setShapeStates] = useState<Record<string, ShapeState>>({});
 
   const saved = routes.current ?? null;
   const candidate = routes.custom ?? routes.suggested ?? null;
+  const transitSource = candidate?.travelSource === "navitime" ? candidate : null;
+  const transitCallsNeeded = routes.suggested?.transitCallsNeeded ?? candidate?.transitCallsNeeded ?? 0;
+  const suggestedLabel = candidate?.travelSource === "navitime" ? "依交通時間排" : "依直線距離排";
+
+  function selectRouteTab(version: "saved" | "candidate", next: RouteView) {
+    if (version === "saved") setSavedTab(next);
+    else setCandidateTab(next);
+    if (version === "saved") return;
+    const route = candidate;
+    if (next !== "map" || !route?.routeShapesAvailable) return;
+    const key = routeShapeKey(route);
+    if (shapeRequests.current.has(key)) return;
+    shapeRequests.current.add(key);
+    const epoch = dialogEpoch.current;
+    setShapeStates((current) => ({ ...current, [key]: { status: "loading", legs: [] } }));
+    void request<DayRouteShapesResponse>(`/api/trips/${tripId}/days/${route.dayId}/route-shapes`, {
+      method: "POST",
+      body: JSON.stringify({ orderedTripPlaceIds: route.orderedTripPlaceIds }),
+      parse: parseDayRouteShapesResponse,
+    }).then((response) => {
+      if (epoch !== dialogEpoch.current) return;
+      setShapeStates((current) => ({ ...current, [key]: { status: "ready", legs: response.legs } }));
+    }, () => {
+      if (epoch !== dialogEpoch.current) return;
+      setShapeStates((current) => ({ ...current, [key]: { status: "error", legs: [] } }));
+    });
+  }
+
+  function shapeFailed(route: DayRouteDto, fromId: string, toId: string) {
+    const state = shapeStates[routeShapeKey(route)];
+    return state?.status === "error"
+      || (state?.status === "ready" && !state.legs.some((leg) => leg.fromId === fromId && leg.toId === toId && leg.geojson));
+  }
+
+  function routeMap(route: DayRouteDto, version: "saved" | "candidate") {
+    const state = version === "candidate" ? shapeStates[routeShapeKey(route)] : undefined;
+    const names = new Map([
+      ...route.stops.map((stop) => [stop.tripPlaceId, stop.name] as const),
+      ...(route.startsAt ? [[route.startsAt.placeId, route.startsAt.name] as const] : []),
+      ...(route.endsAt ? [[route.endsAt.placeId, route.endsAt.name] as const] : []),
+    ]);
+    return (
+      <>
+        <p className="route-version-note">
+          {version === "candidate" && route.routeShapesAvailable
+            ? "實線是大眾運輸，灰色虛線是步行。路線由 NAVITIME 提供。"
+            : "地圖只標出順序；實際怎麼走請點每段的 Google Maps"}
+        </p>
+        {state?.status === "loading" ? (
+          <div className="route-shapes-loading">
+            <p>正在取得實際交通與步行路線…</p>
+            <PlaceListSkeleton label="正在取得實際交通與步行路線" rows={2} />
+          </div>
+        ) : null}
+        {state?.status === "error" ? <p className="route-version-note" role="status">這段路線無法取得；請到「路線」分頁點每段的 Google Maps。</p> : null}
+        {state?.legs.filter((leg) => !leg.geojson).map((leg) => (
+          <p key={`${leg.fromId}:${leg.toId}`} className="route-version-note">
+            {names.get(leg.fromId)} → {names.get(leg.toId)}：這段路線無法取得
+          </p>
+        ))}
+        <RouteMapPanel
+          route={route}
+          shapes={state?.legs ?? []}
+          config={mapsConfig}
+          loading={mapsConfigLoading}
+          error={mapsConfigError}
+          request={request}
+          visibilityRevision={view === version}
+          onShowRoute={() => selectRouteTab(version, "route")}
+        />
+      </>
+    );
+  }
 
   const keyFor = (identity: string) => {
     const existing = actionKeys.current.get(identity);
@@ -475,7 +606,7 @@ export function DayPlanDialog({
   }, [request, tripId]);
 
   // Taking places off the day changes what is compared: the fair baseline is the saved order
-  // without those places, read from the same straight-line route endpoint as every other order.
+  // without those places. The matrix adds travel minutes locally, without another provider call.
   const removedIds = saved && candidate
     ? saved.orderedTripPlaceIds.filter((id) => !candidate.orderedTripPlaceIds.includes(id))
     : [];
@@ -510,10 +641,18 @@ export function DayPlanDialog({
     const ticket = ++latestRequest.current;
     setBusy("planning");
     try {
-      const [current, suggested] = await Promise.all([
-        fetchRoute(dayId, { order: "current" }),
-        fetchRoute(dayId, { order: "suggested" }),
-      ]);
+      // Strict Mode can replay the opening effect; share the same cache-only read.
+      if (initialRouteRequest.current?.dayId !== dayId) {
+        initialRouteRequest.current = {
+          dayId,
+          pending: Promise.all([
+            fetchRoute(dayId, { order: "current" }),
+            fetchRoute(dayId, { order: "suggested", transit: "cached" }),
+          ]),
+        };
+      }
+      const [current, suggested] = await initialRouteRequest.current.pending;
+      if (current.version !== suggested.version) throw new Error("這天的安排已變更，請關閉後重新開啟。");
       if (ticket !== latestRequest.current || epoch !== dialogEpoch.current) return;
       setRoutes({ current, suggested });
       setView("candidate");
@@ -526,14 +665,68 @@ export function DayPlanDialog({
     }
   }, [fetchRoute, t.dayPlan.couldNotPlan]);
 
+  async function fetchTransitSuggestion() {
+    if (!day || busy !== null) return;
+    const ticket = ++latestRequest.current;
+    const epoch = dialogEpoch.current;
+    const custom = routes.custom;
+    setBusy("transit");
+    setView("candidate");
+    setCandidateTab("route");
+    setTransitCallsNotice("");
+    try {
+      const suggested = await fetchRoute(day.id, {
+        order: "suggested", transit: "fetch", maxTransitCalls: transitCallsNeeded,
+      });
+      if (ticket !== latestRequest.current || epoch !== dialogEpoch.current) return;
+      let updatedCustom: DayRouteDto | undefined;
+      if (custom) {
+        // Preserve removals while applying the new suggestion to the remaining candidate stops.
+        const kept = new Set(custom.orderedTripPlaceIds);
+        updatedCustom = await fetchRoute(day.id, {
+          order: "custom",
+          orderedTripPlaceIds: suggested.travelSource === "navitime"
+            ? suggested.orderedTripPlaceIds.filter((id) => kept.has(id))
+            : custom.orderedTripPlaceIds,
+        });
+      }
+      if (ticket !== latestRequest.current || epoch !== dialogEpoch.current) return;
+      setRoutes((current) => ({ ...current, suggested, custom: updatedCustom }));
+    } catch (reason) {
+      if (ticket !== latestRequest.current || epoch !== dialogEpoch.current) return;
+      if (reason instanceof ApiRequestError && reason.code === "transit_calls_changed") {
+        try {
+          const suggested = await fetchRoute(day.id, { order: "suggested", transit: "cached" });
+          if (ticket !== latestRequest.current || epoch !== dialogEpoch.current) return;
+          setRoutes((current) => ({ ...current, suggested }));
+          setTransitCallsNotice(suggested.transitCallsNeeded > 0
+            ? `行程剛變動，需要的額度變成約 ${suggested.transitCallsNeeded} 次，請再按一次。`
+            : "行程剛變動，現在可直接使用已查過的交通時間。");
+        } catch {
+          if (ticket === latestRequest.current && epoch === dialogEpoch.current) {
+            setTransitCallsNotice("行程剛變動，暫時無法更新需要的額度，請關閉後重新開啟。");
+          }
+        }
+      } else {
+        notify("error", reason instanceof Error ? reason.message : t.dayPlan.couldNotPlan);
+      }
+    } finally {
+      if (ticket === latestRequest.current && epoch === dialogEpoch.current) setBusy(null);
+    }
+  }
+
   useEffect(() => {
     latestRequest.current += 1;
     const epoch = ++dialogEpoch.current;
     setRoutes({});
     setView("candidate");
     setBusy(null);
+    setTransitCallsNotice("");
     setSavedTab("route");
     setCandidateTab("route");
+    shapeRequests.current.clear();
+    setShapeStates({});
+    if (!day) initialRouteRequest.current = null;
     updateDrag(null);
     if (day) void loadRoutes(day.id, epoch);
     return () => {
@@ -572,6 +765,10 @@ export function DayPlanDialog({
   function close() {
     dialogEpoch.current += 1;
     latestRequest.current += 1;
+    initialRouteRequest.current = null;
+    shapeRequests.current.clear();
+    setShapeStates({});
+    setRoutes({});
     onClose();
   }
 
@@ -586,6 +783,7 @@ export function DayPlanDialog({
       const route = await fetchRoute(day.id, { order: "custom", orderedTripPlaceIds });
       if (ticket !== latestRequest.current || epoch !== dialogEpoch.current) return;
       setRoutes((current) => ({ ...current, custom: route }));
+      setCandidateTab("route");
     } catch (reason) {
       if (ticket === latestRequest.current && epoch === dialogEpoch.current) {
         notify("error", reason instanceof Error ? reason.message : t.dayPlan.couldNotPlan);
@@ -631,14 +829,39 @@ export function DayPlanDialog({
       await onOrderSaved();
       if (epoch !== dialogEpoch.current) return;
       notify("success", `已儲存為${day.label}的順序。`);
-      await loadRoutes(day.id, epoch);
+      // Refresh saved data and the cache-only suggestion; saving never starts paid calls.
+      const [current, suggested] = await Promise.all([
+        fetchRoute(day.id, { order: "current" }),
+        fetchRoute(day.id, { order: "suggested", transit: "cached" }),
+      ]);
+      if (epoch !== dialogEpoch.current) return;
+      setRoutes({
+        current,
+        suggested,
+        custom: {
+          ...(suggested.transitMatrix.length > 0 ? withTransitMatrix(current, suggested.transitMatrix) : current),
+          transitCallsNeeded: suggested.transitCallsNeeded,
+          transitCacheDays: suggested.transitCacheDays,
+          order: "custom",
+        },
+      });
+      setSavedTab("route");
+      setCandidateTab("route");
     } catch (reason) {
       if (epoch !== dialogEpoch.current) return;
       if (reason instanceof ApiRequestError && (reason.code === "forbidden" || reason.status === 403)) {
         notify("error", t.schedule.ownerOnlyAction);
       } else if (reason instanceof ApiRequestError && reason.code === "conflict") {
         notify("error", t.collaboration.replanDay);
-        await loadRoutes(day.id, epoch);
+        try {
+          const current = await fetchRoute(day.id, { order: "current" });
+          if (epoch !== dialogEpoch.current) return;
+          setRoutes({ current, custom: { ...current, order: "custom" } });
+          setSavedTab("route");
+          setCandidateTab("route");
+        } catch {
+          notify("error", t.dayPlan.couldNotPlan);
+        }
       } else {
         notify("error", reason instanceof Error ? reason.message : t.dayPlan.couldNotSaveOrder);
       }
@@ -731,7 +954,7 @@ export function DayPlanDialog({
     );
   }
 
-  function routeList(route: DayRouteDto, editable: boolean) {
+  function routeList(route: DayRouteDto, editable: boolean, version: "saved" | "candidate") {
     const otherStops = drag?.moved
       ? route.stops.filter((stop) => stop.tripPlaceId !== drag.id)
       : route.stops;
@@ -758,7 +981,9 @@ export function DayPlanDialog({
           return (
             <Fragment key={stop.tripPlaceId}>
               {index > 0 || route.startsAt
-                ? legRow(`leg-${stop.tripPlaceId}`, stop.metersFromPrevious, index > 0 ? route.stops[index - 1]! : route.startsAt!, stop)
+                ? legRow(`leg-${stop.tripPlaceId}`, stop.metersFromPrevious, index > 0 ? route.stops[index - 1]! : route.startsAt!, stop,
+                  stop.minutesFromPrevious, stop.linesFromPrevious,
+                  version === "candidate" && shapeFailed(route, index > 0 ? route.stops[index - 1]!.tripPlaceId : route.startsAt!.placeId, stop.tripPlaceId), version)
                 : null}
               <li
                 data-trip-place-id={stop.tripPlaceId}
@@ -787,7 +1012,9 @@ export function DayPlanDialog({
             </Fragment>
           );
         })}
-        {route.stops.length > 0 && route.endsAt ? legRow("leg-end", route.metersToEnd, route.stops.at(-1)!, route.endsAt) : null}
+        {route.stops.length > 0 && route.endsAt ? legRow("leg-end", route.metersToEnd, route.stops.at(-1)!, route.endsAt,
+          route.minutesToEnd, route.linesToEnd,
+          version === "candidate" && shapeFailed(route, route.stops.at(-1)!.tripPlaceId, route.endsAt.placeId), version) : null}
         <li className="route-stop route-distance-anchor">
           <span className="route-stop-number">終</span>
           <span className="route-stop-track" aria-hidden="true" />
@@ -820,8 +1047,8 @@ export function DayPlanDialog({
             aria-controls={`${savedTabPrefix}-route-panel`}
             aria-selected={savedTab === "route"}
             tabIndex={savedTab === "route" ? 0 : -1}
-            onClick={() => setSavedTab("route")}
-            onKeyDown={(event) => moveRouteViewTab(event, "route", setSavedTab, savedTabPrefix)}
+            onClick={() => selectRouteTab("saved", "route")}
+            onKeyDown={(event) => moveRouteViewTab(event, "route", (next) => selectRouteTab("saved", next), savedTabPrefix)}
           >
             <Route aria-hidden="true" />
             <span>路線</span>
@@ -834,8 +1061,8 @@ export function DayPlanDialog({
             aria-controls={`${savedTabPrefix}-map-panel`}
             aria-selected={savedTab === "map"}
             tabIndex={savedTab === "map" ? 0 : -1}
-            onClick={() => setSavedTab("map")}
-            onKeyDown={(event) => moveRouteViewTab(event, "map", setSavedTab, savedTabPrefix)}
+            onClick={() => selectRouteTab("saved", "map")}
+            onKeyDown={(event) => moveRouteViewTab(event, "map", (next) => selectRouteTab("saved", next), savedTabPrefix)}
           >
             <MapPin aria-hidden="true" />
             <span>Google Map</span>
@@ -843,20 +1070,10 @@ export function DayPlanDialog({
           </button>
         </div>
         <div id={`${savedTabPrefix}-route-panel`} role="tabpanel" aria-labelledby={`${savedTabPrefix}-route-tab`} hidden={savedTab !== "route"}>
-          {routeList(saved, false)}
+          {routeList(saved, false, "saved")}
         </div>
         <div id={`${savedTabPrefix}-map-panel`} role="tabpanel" aria-labelledby={`${savedTabPrefix}-map-tab`} hidden={savedTab !== "map"}>
-          {savedTab === "map" ? (
-            <RouteMapPanel
-              route={saved}
-              config={mapsConfig}
-              loading={mapsConfigLoading}
-              error={mapsConfigError}
-              request={request}
-              visibilityRevision={view === "saved"}
-              onShowRoute={() => setSavedTab("route")}
-            />
-          ) : null}
+          {savedTab === "map" ? routeMap(saved, "saved") : null}
         </div>
       </section>
     );
@@ -865,9 +1082,10 @@ export function DayPlanDialog({
   function candidateVersion() {
     if (!candidate || !saved) return null;
     const arranged = Boolean(routes.custom);
-    const comparedWith = removedIds.length === 0
-      ? saved
-      : baseline?.key === baselineKey ? baseline.route : null;
+    const rawBaseline = removedIds.length === 0
+      ? saved : baseline?.key === baselineKey ? baseline.route : null;
+    const comparedWith = rawBaseline && transitSource
+      ? withTransitMatrix(rawBaseline, transitSource.transitMatrix) : rawBaseline;
     const comparisonPending = removedIds.length > 0 && baseline?.key !== baselineKey;
     const delta = comparedWith
       ? candidateDelta(
@@ -881,10 +1099,11 @@ export function DayPlanDialog({
       <section className="route-version" data-active={view === "candidate"} data-route-version="candidate" aria-label="可以儲存的順序">
         <header className="route-version-heading">
           <div>
-            <h3>{arranged ? "我調整的" : "依直線距離排"}</h3>
+            <h3>{arranged ? "我調整的" : suggestedLabel}</h3>
             <span>預覽中・尚未儲存</span>
           </div>
           <div className="route-total" aria-live="polite">
+            {candidate.totalMinutes !== null ? <span className="route-total-value">約 {candidate.totalMinutes} 分鐘</span> : null}
             <span key={`value-${candidate.totalMeters}`} className="route-total-value" data-tone={delta?.tone ?? "original"}>
               {kilometres(candidate.totalMeters)}
             </span>
@@ -902,7 +1121,26 @@ export function DayPlanDialog({
             ) : null}
           </div>
         </header>
-        <div className="route-view-tabs" role="tablist" aria-label={`${arranged ? "我調整的" : "依直線距離排"}檢視方式`}>
+        {transitCallsNeeded > 0 ? (
+          <button
+            type="button"
+            className="route-link-button route-reset"
+            disabled={busy !== null}
+            onClick={() => void fetchTransitSuggestion()}
+          >
+            {busy === "transit" ? "查詢中…" : `用電車時間排（約 ${transitCallsNeeded} 次額度）`}
+          </button>
+        ) : null}
+        {transitCallsNotice ? <p role="status" className="route-version-note">{transitCallsNotice}</p> : null}
+        {candidate.transitCacheDays !== null && candidate.travelSource === "navitime" ? (
+          <p className="route-version-note">行程沒變，使用 {candidate.transitCacheDays} 天內查過的交通時間。</p>
+        ) : null}
+        {busy === "transit" ? (
+          <div className="route-shapes-loading">
+            <PlaceListSkeleton label="正在查詢缺少的交通時間" rows={2} />
+          </div>
+        ) : null}
+        <div className="route-view-tabs" role="tablist" aria-label={`${arranged ? "我調整的" : suggestedLabel}檢視方式`}>
           <button
             id={`${candidateTabPrefix}-route-tab`}
             type="button"
@@ -910,8 +1148,8 @@ export function DayPlanDialog({
             aria-controls={`${candidateTabPrefix}-route-panel`}
             aria-selected={candidateTab === "route"}
             tabIndex={candidateTab === "route" ? 0 : -1}
-            onClick={() => setCandidateTab("route")}
-            onKeyDown={(event) => moveRouteViewTab(event, "route", setCandidateTab, candidateTabPrefix)}
+            onClick={() => selectRouteTab("candidate", "route")}
+            onKeyDown={(event) => moveRouteViewTab(event, "route", (next) => selectRouteTab("candidate", next), candidateTabPrefix)}
           >
             <Route aria-hidden="true" />
             <span>路線</span>
@@ -924,8 +1162,8 @@ export function DayPlanDialog({
             aria-controls={`${candidateTabPrefix}-map-panel`}
             aria-selected={candidateTab === "map"}
             tabIndex={candidateTab === "map" ? 0 : -1}
-            onClick={() => setCandidateTab("map")}
-            onKeyDown={(event) => moveRouteViewTab(event, "map", setCandidateTab, candidateTabPrefix)}
+            onClick={() => selectRouteTab("candidate", "map")}
+            onKeyDown={(event) => moveRouteViewTab(event, "map", (next) => selectRouteTab("candidate", next), candidateTabPrefix)}
           >
             <MapPin aria-hidden="true" />
             <span>Google Map</span>
@@ -934,32 +1172,25 @@ export function DayPlanDialog({
         </div>
         <div id={`${candidateTabPrefix}-route-panel`} role="tabpanel" aria-labelledby={`${candidateTabPrefix}-route-tab`} hidden={candidateTab !== "route"}>
           <p className="route-version-note">
-            {arranged ? "從建議順序調整；拖曳即可再改。" : "只依地點間的直線距離排序。"}
+            {arranged ? "從目前順序調整；拖曳即可再改。"
+              : candidate.travelSource === "navitime"
+                ? "依 NAVITIME 交通時間排序；每段都以當地當天 09:00 出發估算，不是到站時間表。"
+                : "只依地點間的直線距離排序。"}
           </p>
-          {arranged ? (
+          {arranged && routes.suggested ? (
             <button
               type="button"
               className="route-link-button route-reset"
               disabled={busy !== null}
               onClick={() => setRoutes((current) => ({ ...current, custom: undefined }))}
             >
-              <RotateCcw aria-hidden="true" /> 還原成依直線距離排
+              <RotateCcw aria-hidden="true" /> 還原成{suggestedLabel}
             </button>
           ) : null}
-          {routeList(candidate, canArrange)}
+          {routeList(candidate, canArrange, "candidate")}
         </div>
         <div id={`${candidateTabPrefix}-map-panel`} role="tabpanel" aria-labelledby={`${candidateTabPrefix}-map-tab`} hidden={candidateTab !== "map"}>
-          {candidateTab === "map" ? (
-            <RouteMapPanel
-              route={candidate}
-              config={mapsConfig}
-              loading={mapsConfigLoading}
-              error={mapsConfigError}
-              request={request}
-              visibilityRevision={view === "candidate"}
-              onShowRoute={() => setCandidateTab("route")}
-            />
-          ) : null}
+          {candidateTab === "map" ? routeMap(candidate, "candidate") : null}
         </div>
       </section>
     );
@@ -979,7 +1210,9 @@ export function DayPlanDialog({
   const summary = saved
     ? {
       headline: `${saved.stops.length} 個地點`,
-      note: `比的是直線距離，不是實際路程${missesLeg(saved) || (candidate && missesLeg(candidate)) ? "；不含缺少座標的路段" : ""}`,
+      note: candidate?.travelSource === "navitime"
+        ? `NAVITIME 交通時間以當地 09:00 估算；公里數仍是直線距離${missesLeg(saved) || missesLeg(candidate) ? "；缺少資料的路段另標估計" : ""}`
+        : `比的是直線距離，不是實際路程${missesLeg(saved) || (candidate && missesLeg(candidate)) ? "；不含缺少座標的路段" : ""}`,
     }
     : null;
 
@@ -993,6 +1226,11 @@ export function DayPlanDialog({
 
         {!canArrange ? <p className="route-status">{t.schedule.ownerOnly}</p> : null}
         {busy === "planning" ? <p role="status" className="route-status">{t.dayPlan.planning}</p> : null}
+        {routes.suggested?.travelNotice ? <p role="status" className="route-status">
+          {routes.suggested.travelNotice === "navitime_quota"
+            ? "NAVITIME 的交通查詢額度已用完，這次先依直線距離排。每段仍可點 Google Maps 查看走法。"
+            : "目前無法取得 NAVITIME 交通時間，這次先依直線距離排。每段仍可點 Google Maps 查看走法。"}
+        </p> : null}
 
         {saved ? (
           <div className="route-comparison">
@@ -1007,7 +1245,7 @@ export function DayPlanDialog({
             <div className="route-segments" role="tablist" aria-label="切換查看順序">
               <button type="button" role="tab" aria-selected={view === "candidate"} disabled={!candidate} onClick={() => setView("candidate")}>
                 <GripVertical aria-hidden="true" />
-                <span>{routes.custom ? "我調整的" : "依直線距離排"}</span>
+                <span>{routes.custom ? "我調整的" : suggestedLabel}</span>
                 <Check className="route-selection-mark" aria-hidden="true" />
               </button>
               <button type="button" role="tab" aria-selected={view === "saved"} onClick={() => setView("saved")}>

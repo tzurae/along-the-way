@@ -22,7 +22,7 @@ export type RateLimitedAction =
   | "discovery_ai"
   | "place_guide_generation"
   | "whole_trip_plan_preview";
-export type PaidProvider = "google_places" | "google_maps_js";
+export type PaidProvider = "google_places" | "google_maps_js" | "navitime";
 export interface AppRateLimitUsage {
   googlePlacesToday: number;
   googlePlacesLimit: number;
@@ -68,22 +68,22 @@ const RULES: Record<RateLimitedAction, Rule> = {
   whole_trip_plan_preview: { windowSeconds: 60, accountLimit: 10 },
 };
 
-// Paid-provider budgets deliberately leave headroom below their Google Cloud project quotas.
-// Places keeps its existing UTC-day accounting; browser map loads follow Google's Pacific reset.
+// Paid-provider budgets leave headroom below provider quotas.
+// Places and NAVITIME use UTC days; browser map loads follow Google's Pacific reset.
 const PAID_PROVIDER_DAILY_LIMITS: Record<PaidProvider, { global: number; account: number; ip: number }> = {
   google_places: { global: 2000, account: 2000, ip: 2000 },
   google_maps_js: { global: 310, account: 310, ip: 310 },
+  navitime: { global: 60, account: 60, ip: 60 },
 };
 const PAID_PROVIDER_WINDOW_SECONDS = 24 * 60 * 60;
 const GOOGLE_MAPS_JS_RETENTION_SECONDS = 25 * 60 * 60;
 const GOOGLE_MAPS_TIME_ZONE = "America/Los_Angeles";
 const RETIRED_RETENTION_RULES = [
   { scopePattern: "paid_provider:google_routes:%", windowSeconds: PAID_PROVIDER_WINDOW_SECONDS },
-  { scopePattern: "paid_provider:navitime:%", windowSeconds: PAID_PROVIDER_WINDOW_SECONDS },
   { scopePattern: "route_planning:%", windowSeconds: 60 * 60 },
 ] as const;
 function paidProviderWindowStart(provider: PaidProvider, now: Date) {
-  if (provider === "google_places") {
+  if (provider !== "google_maps_js") {
     return new Date(Math.floor(now.valueOf() / (PAID_PROVIDER_WINDOW_SECONDS * 1_000))
       * PAID_PROVIDER_WINDOW_SECONDS * 1_000);
   }
@@ -116,6 +116,10 @@ export function rateLimitRetentionRules() {
       // A Pacific calendar day can be 25 hours when daylight saving time ends.
       scopePattern: "paid_provider:google_maps_js:%",
       windowSeconds: GOOGLE_MAPS_JS_RETENTION_SECONDS,
+    },
+    {
+      scopePattern: "paid_provider:navitime:%",
+      windowSeconds: PAID_PROVIDER_WINDOW_SECONDS,
     },
     // Cleanup only: these producers are retired, but existing hashed counters must still expire.
     ...RETIRED_RETENTION_RULES,

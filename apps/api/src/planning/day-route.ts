@@ -92,6 +92,8 @@ export function buildDayRoute(input: DayRouteInput): DayRouteDto {
       longitude: place.longitude,
       providerPlaceId: place.providerPlaceId,
       metersFromPrevious,
+      minutesFromPrevious: null,
+      linesFromPrevious: [],
     };
   });
   const last = orderedPlaces.at(-1);
@@ -113,5 +115,13 @@ export function buildDayRoute(input: DayRouteInput): DayRouteDto {
     stops,
     metersToEnd,
     totalMeters,
+    travelSource: "straight_line",
+    routeShapesAvailable: false,
+    minutesToEnd: null,
+    linesToEnd: [],
+    totalMinutes: null,
+    transitMatrix: [],
+    transitCallsNeeded: 0,
+    transitCacheDays: null,
   };
 }

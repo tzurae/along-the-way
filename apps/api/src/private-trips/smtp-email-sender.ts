@@ -34,7 +34,7 @@ export class SmtpEmailSender implements EmailSender {
       from: this.from,
       to: { address: message.to, name: "" },
       subject: "登入 Along the Way",
-      text: `請在 15 分鐘內使用以下一次性登入連結：\n\n${message.url}\n\n一次性登入碼：${message.code}\n請在你索取連結的瀏覽器輸入這組 6 位數登入碼。登入碼與連結共用一次登入機會，15 分鐘後失效。\n\n如果你沒有索取這個連結，可以忽略這封信。`,
+      text: `請在 7 天內使用以下一次性登入連結：\n\n${message.url}\n\n一次性登入碼：${message.code}\n請在你索取連結的瀏覽器輸入這組 6 位數登入碼。登入碼與連結共用一次登入機會，7 天後失效。\n\n如果你沒有索取這個連結，可以忽略這封信。`,
     });
   }
 

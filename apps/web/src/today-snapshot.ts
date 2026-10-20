@@ -1,7 +1,7 @@
 import { isPlaceType } from "@along-the-way/contracts/trip-skeleton";
 import type { TodayModel } from "./today-model";
 
-export const TODAY_SCHEMA_VERSION = 6;
+export const TODAY_SCHEMA_VERSION = 7;
 const PREFIX = "along-the-way:today:";
 const ACCOUNT_KEY = "along-the-way:today-account";
 const PLACE_FILTER_PREFIX = "along-the-way:place-filters:";
@@ -33,12 +33,27 @@ function zone(value: unknown) {
 function coordinate(value: unknown, limit: number) { return value === null || (typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= limit); }
 
 /**
- * Upgrade compatible schema-2/3/4/5 snapshots, then validate the complete
+ * Upgrade compatible schema-2/3/4/5/6 snapshots, then validate the complete
  * account-scoped result. Missing references, participant status, place types,
- * and legacy wishlist coordinates remain unknown; never infer them from
- * another snapshot.
+ * legacy wishlist coordinates, and replacement relations remain unknown;
+ * never infer them from another snapshot.
  */
 function migrateLegacySnapshot(value: unknown): unknown {
+  if (record(value, "schemaVersion accountId fetchedAt model") && value.schemaVersion === 6) {
+    const model = value.model;
+    if (!record(model, "tripId tripName tripVersion memberId days items") || !Array.isArray(model.days)) return value;
+    const days = [];
+    for (const day of model.days) {
+      if (!record(day, "id date timeZone itemIds wishlist") || !Array.isArray(day.wishlist)) return value;
+      const wishlist = [];
+      for (const place of day.wishlist) {
+        if (!record(place, "id name type latitude longitude providerPlaceId")) return value;
+        wishlist.push({ ...place, replacedStop: null });
+      }
+      days.push({ ...day, wishlist });
+    }
+    return { ...value, schemaVersion: TODAY_SCHEMA_VERSION, model: { ...model, days } };
+  }
   if (!record(value, "schemaVersion accountId fetchedAt model")
     || (value.schemaVersion !== 2 && value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5)) return value;
   const legacyVersion = value.schemaVersion;
@@ -51,10 +66,10 @@ function migrateLegacySnapshot(value: unknown): unknown {
     for (const place of day.wishlist) {
       if (legacyVersion === 5) {
         if (!record(place, "id name latitude longitude providerPlaceId")) return value;
-        wishlist.push({ ...place, type: null });
+        wishlist.push({ ...place, type: null, replacedStop: null });
       } else {
         if (!record(place, "id name")) return value;
-        wishlist.push({ ...place, type: null, latitude: null, longitude: null, providerPlaceId: null });
+        wishlist.push({ ...place, type: null, latitude: null, longitude: null, providerPlaceId: null, replacedStop: null });
       }
     }
     days.push({ ...day, wishlist });
@@ -91,8 +106,31 @@ function validSnapshot(value: unknown): value is TodaySnapshot {
   if (!record(value, "schemaVersion accountId fetchedAt model") || value.schemaVersion !== TODAY_SCHEMA_VERSION || !text(value.accountId) || !instant(value.fetchedAt)) return false;
   const model = value.model;
   if (!record(model, "tripId tripName tripVersion memberId days items") || !text(model.tripId) || !text(model.tripName) || !text(model.memberId) || !Number.isSafeInteger(model.tripVersion)) return false;
-  if (!list(model.days, (day) => record(day, "id date timeZone itemIds wishlist") && text(day.id) && text(day.date) && /^\d{4}-\d{2}-\d{2}$/.test(day.date) && Number.isFinite(Date.parse(day.date)) && new Date(day.date).toISOString().slice(0, 10) === day.date && zone(day.timeZone) && list(day.itemIds, text)
-    && list(day.wishlist, (place) => record(place, "id name type latitude longitude providerPlaceId") && text(place.id) && text(place.name) && (place.type === null || isPlaceType(place.type)) && coordinate(place.latitude, 90) && coordinate(place.longitude, 180) && nullableText(place.providerPlaceId)))) return false;
+  if (!list(model.days, (day) =>
+    record(day, "id date timeZone itemIds wishlist")
+    && text(day.id)
+    && text(day.date)
+    && /^\d{4}-\d{2}-\d{2}$/.test(day.date)
+    && Number.isFinite(Date.parse(day.date))
+    && new Date(day.date).toISOString().slice(0, 10) === day.date
+    && zone(day.timeZone)
+    && list(day.itemIds, text)
+    && list(day.wishlist, (place) =>
+      record(place, "id name type latitude longitude providerPlaceId replacedStop")
+      && text(place.id)
+      && text(place.name)
+      && (place.type === null || isPlaceType(place.type))
+      && coordinate(place.latitude, 90)
+      && coordinate(place.longitude, 180)
+      && nullableText(place.providerPlaceId)
+      && (place.replacedStop === null || (
+        record(place.replacedStop, "replacementId originalTripPlaceId originalName")
+        && text(place.replacedStop.replacementId)
+        && text(place.replacedStop.originalTripPlaceId)
+        && text(place.replacedStop.originalName)
+      ))
+    )
+  )) return false;
   return list(model.items, (item) => record(item, "id title type start end endpoints participants locked constraints facts notes sourceUrl")
     && text(item.id) && text(item.title) && text(item.type) && ["flight", "lodging", "transport", "reservation", "meal", "activity", "free-time"].includes(item.type)
     && (item.start === null || instant(item.start)) && (item.end === null || instant(item.end)) && typeof item.locked === "boolean" && nullableText(item.notes) && nullableText(item.sourceUrl)

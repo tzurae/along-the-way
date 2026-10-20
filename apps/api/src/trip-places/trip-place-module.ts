@@ -1,6 +1,7 @@
 import type {
   CreateTripPlaceInput,
   MergeTripPlacesInput,
+  NearbyAlternativesResponse,
   ProviderCandidatesResponse,
   RemoveTripPlaceInput,
   MustItemKind,
@@ -13,6 +14,26 @@ import type {
 
 export interface TripPlaceModule {
   list(userId: string, tripId: string): Promise<TripPlaceDto[]>;
+  nearbyAlternatives(
+    userId: string,
+    tripId: string,
+    dayId: string,
+    tripPlaceId: string,
+  ): Promise<NearbyAlternativesResponse>;
+  replaceStop(
+    userId: string,
+    tripId: string,
+    dayId: string,
+    tripPlaceId: string,
+    idempotencyKey: string,
+    input: { expectedDayVersion: number; providerPlaceId: string },
+  ): Promise<TripPlaceDto[]>;
+  undoStopReplacement(
+    userId: string,
+    tripId: string,
+    replacementId: string,
+    idempotencyKey: string,
+  ): Promise<TripPlaceDto[]>;
   search(
     userId: string,
     tripId: string,

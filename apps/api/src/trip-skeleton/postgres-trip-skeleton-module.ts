@@ -512,11 +512,14 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
           .where("place.trip_id", "=", tripId)
           .where("place.id", "in", added)
           .where("place.archived_at", "is", null)
-          .where("place.selected_for_itinerary", "=", false)
           .where("assignment.trip_place_id", "is", null)
+          .where(sql<boolean>`not exists (
+            select 1 from itinerary_endpoints as endpoint
+            where endpoint.trip_id = place.trip_id and endpoint.place_id = place.legacy_place_id
+          )`)
           .execute();
         if (eligible.length !== added.length) {
-          throw new AppError("validation_error", "Only places in 口袋名單 that are not on a day can become alternatives");
+          throw new AppError("validation_error", "Only places that are not on a day can become alternatives");
         }
       }
       await transaction.deleteFrom("trip_day_alternatives").where("trip_day_id", "=", dayId).execute();
@@ -1904,6 +1907,9 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
         updated_at: updatedAt,
       }).where("trip_id", "=", tripId).where("id", "=", place.id).execute();
     }
+    await PostgresTripPlaceModule.supersedeInvalidStopReplacements(
+      transaction, tripId, places.filter((place) => scheduled.has(place.legacy_place_id)).map((place) => place.id), updatedAt,
+    );
   }
 
   private async readPlaces(executor: DatabaseExecutor, tripId: string) {

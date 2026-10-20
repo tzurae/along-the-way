@@ -31,7 +31,7 @@ import {
 import { hashToken, type TokenIssuer } from "./token-issuer";
 import { PostgresRateLimiter } from "./postgres-rate-limiter";
 
-const MAGIC_LINK_LIFETIME_MS = 15 * 60 * 1_000;
+const MAGIC_LINK_LIFETIME_MS = 7 * 24 * 60 * 60 * 1_000;
 const INVITE_LIFETIME_MS = 7 * 24 * 60 * 60 * 1_000;
 const SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1_000;
 const SESSION_ABSOLUTE_LIFETIME_MS = 90 * 24 * 60 * 60 * 1_000;

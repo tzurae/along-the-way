@@ -38,11 +38,11 @@ export async function saveDayAlternatives(
   alternativeKeys.delete(identity);
 }
 
-/** 口袋名單 places that may become a 備案: not chosen for the itinerary and on no day. */
+/** Places that may become a 備案: on no day and not scheduled (口袋名單 and 待安排 alike). */
 export function alternativeCandidates(places: TripPlaceDto[], day: TimelineDayDto) {
   const taken = new Set(day.alternativeTripPlaceIds);
   return places.filter((place) =>
-    !place.selectedForItinerary && !place.scheduled && place.assignedDayId === null && !taken.has(place.id)
+    !place.scheduled && place.assignedDayId === null && !taken.has(place.id)
   );
 }
 

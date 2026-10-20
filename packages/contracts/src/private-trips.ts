@@ -175,6 +175,7 @@ export interface ApiErrorResponse {
     correlationId?: string;
     currentVersion?: number;
     latestChange?: ConflictChange | null;
+    transitCallsNeeded?: number;
   };
 }
 
@@ -368,12 +369,19 @@ export function parseApiError(value: unknown): ApiErrorResponse {
   ) {
     return invalidResponse();
   }
+  const transitCallsNeeded = value.error.transitCallsNeeded;
+  if (
+    (transitCallsNeeded !== undefined && (typeof transitCallsNeeded !== "number"
+      || !Number.isSafeInteger(transitCallsNeeded) || transitCallsNeeded < 0))
+    || (value.error.code === "transit_calls_changed" && transitCallsNeeded === undefined)
+  ) return invalidResponse();
   return {
     error: {
       code: stringValue(value.error.code),
       message: stringValue(value.error.message),
       ...(correlationId ? { correlationId } : {}),
       ...(currentVersion === undefined ? {} : { currentVersion }),
+      ...(transitCallsNeeded === undefined ? {} : { transitCallsNeeded }),
       ...(value.error.latestChange === undefined ? {} : {
         latestChange: value.error.latestChange === null ? null : conflictChange(value.error.latestChange),
       }),

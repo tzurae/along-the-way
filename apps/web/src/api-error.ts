@@ -28,5 +28,6 @@ export class ApiRequestError extends Error {
     readonly currentVersion?: number,
     readonly latestChange?: ConflictChange | null,
     readonly status?: number,
+    readonly transitCallsNeeded?: number,
   ) { super(message); }
 }

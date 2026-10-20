@@ -38,6 +38,19 @@ export interface PlaceSearchOptions {
   pageSize?: number;
 }
 
+export interface NearbySearchOptions extends Pick<PlaceSearchOptions, "languageCode" | "regionCode"> {
+  latitude: number;
+  longitude: number;
+  includedTypes: readonly string[];
+}
+
+export interface NearbyPlaceCandidate {
+  candidate: ProviderPlaceCandidate;
+  /** Live response only; never persisted with the place identity or mutation replay. */
+  rating: number | null;
+  userRatingCount: number | null;
+}
+
 export interface GoogleProviderPhoto {
   name: string;
   width: number;
@@ -99,6 +112,7 @@ export interface PlaceProvider {
   readonly attribution: string;
   readonly available?: boolean;
   search(query: string, options?: PlaceSearchOptions): Promise<ProviderPlaceCandidate[]>;
+  searchNearby?(options: NearbySearchOptions): Promise<NearbyPlaceCandidate[]>;
   getPlace(providerPlaceId: string, options?: Pick<PlaceSearchOptions, "languageCode" | "regionCode">): Promise<ProviderPlaceCandidate>;
   getPhotos?(providerPlaceId: string): Promise<GoogleProviderPhoto[]>;
   fetchPhotoMedia?(photoName: string, maxWidthPx: 192 | 1024): Promise<PlacePhotoMedia>;
@@ -156,6 +170,13 @@ const SEARCH_FIELD_MASK = [
   ...PLACE_FIELD_MASK,
   "places.primaryTypeDisplayName",
   "places.photos",
+].join(",");
+const NEARBY_FIELD_MASK = [
+  ...PLACE_FIELD_MASK,
+  "places.primaryTypeDisplayName",
+  "places.photos",
+  "places.rating",
+  "places.userRatingCount",
 ].join(",");
 // rating, userRatingCount and websiteUri move the request to the Enterprise SKU; the
 // businessStatus and addressComponents (Pro) fields then cost nothing more.
@@ -344,6 +365,40 @@ export class GooglePlacesProvider implements PlaceProvider, RatedPlaceLookup {
     const places = record(value)?.places;
     if (!Array.isArray(places)) return [];
     return places.map((place) => this.candidate(place, true));
+  }
+
+  async searchNearby(options: NearbySearchOptions): Promise<NearbyPlaceCandidate[]> {
+    if (!Number.isFinite(options.latitude) || Math.abs(options.latitude) > 90
+      || !Number.isFinite(options.longitude) || Math.abs(options.longitude) > 180
+      || options.includedTypes.length === 0 || options.includedTypes.length > 50) {
+      throw new TypeError("Invalid nearby search location or types");
+    }
+    const value = await this.request("https://places.googleapis.com/v1/places:searchNearby", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Goog-FieldMask": NEARBY_FIELD_MASK },
+      body: JSON.stringify({
+        includedTypes: options.includedTypes,
+        locationRestriction: {
+          circle: { center: { latitude: options.latitude, longitude: options.longitude }, radius: 1000 },
+        },
+        rankPreference: "POPULARITY",
+        maxResultCount: 20,
+        ...(options.languageCode ? { languageCode: options.languageCode } : {}),
+        ...(options.regionCode ? { regionCode: options.regionCode } : {}),
+      }),
+    });
+    const places = record(value)?.places;
+    if (!Array.isArray(places)) return [];
+    return places.map((place) => {
+      const item = record(place);
+      const rating = item?.rating;
+      const count = item?.userRatingCount;
+      return {
+        candidate: this.candidate(place, true),
+        rating: typeof rating === "number" && Number.isFinite(rating) && rating >= 1 && rating <= 5 ? rating : null,
+        userRatingCount: typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : null,
+      };
+    });
   }
 
   async details(rawProviderPlaceId: string, options: Pick<PlaceSearchOptions, "languageCode"> = {}): Promise<RatedPlaceCandidate> {

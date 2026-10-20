@@ -2,6 +2,7 @@ import { sql, type Transaction } from "kysely";
 
 import type { AlongTheWayDatabase } from "../database/database";
 import { AppError } from "../private-trips/private-trip-module";
+import { PostgresTripPlaceModule } from "../trip-places/postgres-trip-place-module";
 import type { PlannerInput, PlannerResult } from "./planner-model";
 
 /** Caller owns the trip lock, freshness check and validation; no nested transaction or event. */
@@ -110,5 +111,6 @@ export async function writeWholeTripPlan(
       updated_at: appliedAt,
     }).where("trip_id", "=", tripId).where("id", "in", changedPlaceIds).execute();
   }
+  await PostgresTripPlaceModule.supersedeInvalidStopReplacements(transaction, tripId, movedIds, appliedAt);
   return { affectedDayIds: [...affectedDays].sort(), changedPlaceIds };
 }
