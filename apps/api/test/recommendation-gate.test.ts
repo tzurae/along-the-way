@@ -40,19 +40,27 @@ const base = {
 };
 
 describe("recommendation quality gate", () => {
-  it("shows a place only when two independent kinds of source vouch for it", () => {
+  it("shows a place one verified Google or official source vouches for, but never on Wikivoyage alone", () => {
+    const unreviewed = { rating: null, userRatingCount: null };
     const result = gateRecommendations({
       ...base,
       candidates: [
         candidate({ id: "two-sources" }),
         candidate({ id: "google-only", wikivoyage: false }),
-        candidate({ id: "official-only", wikivoyage: false, officialTourism: true, resolution: resolved("official-only", { rating: null, userRatingCount: null }) }),
+        candidate({ id: "official-only", wikivoyage: false, officialTourism: true, resolution: resolved("official-only", unreviewed) }),
+        // Wikivoyage's matcher still mistakes bold words for listings, so it cannot carry a place alone.
+        candidate({ id: "wikivoyage-only", resolution: resolved("wikivoyage-only", unreviewed) }),
+        candidate({ id: "no-source", wikivoyage: false, resolution: resolved("no-source", unreviewed) }),
       ],
     });
-    expect(result.shown).toEqual([{ index: 0, members: [0], endorsements: ["google_reviews", "wikivoyage"] }]);
+    expect(result.shown).toEqual([
+      { index: 0, members: [0], endorsements: ["google_reviews", "wikivoyage"] },
+      { index: 1, members: [1], endorsements: ["google_reviews"] },
+      { index: 2, members: [2], endorsements: ["official_tourism"] },
+    ]);
     expect(result.shortfalls).toEqual([
-      { code: "single_source", subject: "google-only", named: false, endorsements: ["google_reviews"], count: null },
-      { code: "single_source", subject: "official-only", named: false, endorsements: ["official_tourism"], count: null },
+      { code: "single_source", subject: "wikivoyage-only", named: false, endorsements: ["wikivoyage"], count: null },
+      { code: "single_source", subject: "no-source", named: false, endorsements: [], count: null },
     ]);
   });
 
@@ -79,14 +87,14 @@ describe("recommendation quality gate", () => {
       ...base,
       namedPlaces: ["Saihoji", "Eianddo", "Ine"],
       candidates: [
-        candidate({ id: "Ine Funaya", namedPlace: "Ine", wikivoyage: false }),
+        candidate({ id: "Ine Funaya", namedPlace: "Ine", resolution: resolved("Ine Funaya", { userRatingCount: 40 }) }),
         candidate({ id: "Saihoji", namedPlace: "Saihoji", resolution: { status: "not_found" } }),
       ],
     });
     expect(result.shown).toEqual([]);
     expect(result.shortfalls).toEqual([
       { code: "not_researched", subject: "Eianddo", named: true, endorsements: [], count: null },
-      { code: "single_source", subject: "Ine Funaya", named: true, endorsements: ["google_reviews"], count: null },
+      { code: "single_source", subject: "Ine Funaya", named: true, endorsements: ["wikivoyage"], count: null },
       { code: "not_found", subject: "Saihoji", named: true, endorsements: [], count: null },
     ]);
   });
@@ -145,8 +153,8 @@ describe("recommendation quality gate", () => {
       candidates: [
         candidate({ id: "Kinkakuji" }),
         candidate({ id: "Ginkakuji" }),
-        // Only one source vouches for it: on the wishlist, but it does not cover Gardens.
-        candidate({ id: "Weak garden", category: "Gardens", wikivoyage: false }),
+        // Only Wikivoyage vouches for it, which is not enough: on the wishlist, but it does not cover Gardens.
+        candidate({ id: "Weak garden", category: "Gardens", resolution: resolved("Weak garden", { userRatingCount: 40 }) }),
       ],
     });
     expect(result.shown.map(({ index }) => index)).toEqual([0]);
@@ -165,7 +173,7 @@ describe("recommendation quality gate", () => {
         candidate({ id: "a" }),
         candidate({ id: "b" }),
         candidate({ id: "c", category: "Local food" }),
-        candidate({ id: "d", category: "Local food", wikivoyage: false }),
+        candidate({ id: "d", category: "Local food", resolution: resolved("d", { userRatingCount: 40 }) }),
       ],
     });
     expect(result.shortfalls.filter((entry) => entry.code === "category_short")).toEqual([
