@@ -270,8 +270,9 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     this.sourceChecks = options.sourceChecks ?? defaultRecommendationSourceChecks;
     this.commonsCandidates = options.commonsCandidates;
     this.now = options.now ?? (() => new Date());
-    // v2: research first, Google only places candidates, two independent sources required.
-    this.policyVersion = options.policyVersion ?? "discovery-v2";
+    // v3: research first, Google only places candidates; one verified source (Google reviews or
+    // an official tourism page) is enough, and Wikivoyage alone is not.
+    this.policyVersion = options.policyVersion ?? "discovery-v3";
   }
 
   async getWorkspace(userId: string, tripId: string) {
@@ -841,7 +842,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           eventType: "discovery.generated",
           targetType: "discovery_run",
           targetId: run.id,
-          summary: `Added ${added} new place proposals vouched for by two independent sources`,
+          summary: `Added ${added} new place proposals, each vouched for by at least one verified source`,
         });
         // The results are visible as soon as this commits; photos follow as their own stage.
         await transaction.updateTable("discovery_jobs").set({ run_id: run.id, added_count: added })

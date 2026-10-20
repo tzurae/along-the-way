@@ -107,6 +107,13 @@ function endorsementLabel(
   }
 }
 
+/** The card line naming the verified sources; null for older proposals that recorded none. */
+function endorsementLine(endorsements: readonly DiscoveryEndorsement[], t: Messages["discovery"]) {
+  if (endorsements.length === 0) return null;
+  const labels = endorsements.map((endorsement) => endorsementLabel(endorsement, t));
+  return labels.length === 1 ? t.endorsement.onlyOne(labels[0]!) : t.endorsement.verified(labels);
+}
+
 function discoveryRunFailureReason(errorCode: string | null, t: Messages["discovery"]) {
   switch (errorCode?.toLowerCase()) {
     case "model_unavailable":
@@ -1104,6 +1111,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
         placeType={proposal.type}
         stateLabel={fresh && proposal.status === "pending" ? t.run.fresh : proposalStatusLabel(proposal, displayStatus)}
         secondary={firstSentence?.text ?? proposal.recommendation}
+        evidence={endorsementLine(proposal.endorsements, t) ?? undefined}
         caution={caution ?? undefined}
         cautionAction={caution && cautionCount > 1 ? <span className="list-place-row__caution-action">・<button type="button" className="list-place-row__inline-action" onClick={() => openProposalDetail(proposal.id, "cautions")}>{t.proposal.moreItems(cautionCount - 1)}</button></span> : undefined}
         photo={preview?.photo}

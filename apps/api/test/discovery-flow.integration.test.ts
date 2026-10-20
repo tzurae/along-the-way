@@ -810,13 +810,18 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
     expect(model.researchInputs[0]!.discovered.flatMap((group) => group.placeIds)).toContain(market.providerPlaceId);
     // Takao was written about but its ID is the hotel: a name mismatch, never shown.
     expect(generated.latestRun?.shortfalls).toContainEqual(expect.objectContaining({ code: "name_mismatch", subject: "Takao" }));
-    expect(generated.proposals.map((proposal) => proposal.name)).toEqual(["Nishiki Market"]);
+    // Tiny Cafe has 40 reviews, so only its official page vouches for it: one verified source is
+    // enough, and the proposal says which one.
+    expect(new Map(generated.proposals.map((proposal) => [proposal.name, proposal.endorsements]))).toEqual(new Map([
+      ["Nishiki Market", ["google_reviews", "wikivoyage", "official_tourism"]],
+      ["Tiny Cafe", ["official_tourism"]],
+    ]));
     const job = generated.latestJob!;
-    expect(job).toMatchObject({ status: "succeeded", addedCount: 1 });
+    expect(job).toMatchObject({ status: "succeeded", addedCount: 2 });
     // Every stage ran in order; photos is partial because this module has no Commons photo finder.
     expect(Object.values(job.stages).map((stage) => stage.state)).toEqual(["done", "done", "done", "done", "done", "partial"]);
 
-    const proposal = generated.proposals[0]!;
+    const proposal = generated.proposals.find((entry) => entry.name === "Nishiki Market")!;
     expect(proposal.recommendationSentences).toEqual([{
       text: "A compact food-market stop matching the trip's main interest.",
       evidenceIds: [expect.any(String)],
