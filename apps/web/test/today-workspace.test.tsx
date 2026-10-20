@@ -4,8 +4,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { TodayWorkspace } from "../src/TodayWorkspace";
 import type { TodayDay, TodayItem, TodayModel, TodayPlace } from "../src/today-model";
 
-function place(name: string, latitude: number | null, longitude: number | null, providerPlaceId: string | null = null) {
-  return { id: name, name, type: "activity" as const, latitude, longitude, providerPlaceId };
+function place(
+  name: string,
+  latitude: number | null,
+  longitude: number | null,
+  providerPlaceId: string | null = null,
+  replacedStop: TodayDay["wishlist"][number]["replacedStop"] = null,
+): TodayDay["wishlist"][number] {
+  return { id: name, name, type: "activity", latitude, longitude, providerPlaceId, replacedStop };
 }
 
 function endpoint(role: "start" | "end", instant: string, timeZone: string, name: string, latitude: number | null, longitude: number | null) {
@@ -105,6 +111,23 @@ describe("Today timeline ordering and state", () => {
     expect(host.querySelector(".today-lead")).not.toHaveTextContent(/10:00|13:00/);
   });
 });
+
+  it("keeps a replacement and its original relation in one numbered Today stop row", () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-21T12:00:00Z"));
+    const replacement = place("附近備案", 35, 135, "google-backup", {
+      replacementId: "relation-1",
+      originalTripPlaceId: "original-1",
+      originalName: "原本景點",
+    });
+    const day = tripDay("day21", "2026-10-21", [], [replacement]);
+    const host = renderToday(todayModel([day]), day.date);
+
+    const rows = host.querySelectorAll(".today-stop");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent("附近備案");
+    expect(rows[0]).toHaveTextContent("原本景點");
+    expect(rows[0]!.querySelectorAll(".today-stop-order")).toHaveLength(1);
+  });
 
 describe("Today Google Maps legs", () => {
   it("uses the displayed endpoint for arrival-only flights and departure-only transport, preserving wishlist provider IDs", () => {

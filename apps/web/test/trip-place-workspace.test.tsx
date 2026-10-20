@@ -73,6 +73,7 @@ function place(id: string, name: string, scheduled: boolean): TripPlaceDto {
     effortLevel: null,
     assignedDayId: null,
     dayPosition: null,
+    replacedStop: null,
     budgetAmountMinor: null,
     budgetCurrency: null,
     notes: `${name} 的家庭備註`,

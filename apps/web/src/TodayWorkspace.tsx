@@ -1,15 +1,24 @@
-import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, BedDouble, BellRing, CalendarDays, ChevronRight, CircleDot, Clock3, ExternalLink, ListOrdered, Lock, MapPin, Navigation, Plane, TriangleAlert, Users, WifiOff } from "lucide-react";
-import { useI18n } from "./i18n";
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { ArrowLeft, ArrowRight, BedDouble, BellRing, CalendarDays, ChevronRight, CircleDot, Clock3, ExternalLink, GitFork, ImageOff, ListOrdered, LoaderCircle, Lock, MapPin, Navigation, Plane, TriangleAlert, Users, WifiOff } from "lucide-react";
+import {
+  parseNearbyAlternativesResponse,
+  parseTripPlaceListResponse,
+  type NearbyAlternativeDto,
+  type NearbyAlternativesResponse,
+  type TripPlaceListResponse,
+} from "@along-the-way/contracts/trip-places";
+import { useI18n, type Messages } from "./i18n";
 import { googleMapsCoordinatesUrl, googleMapsDirectionsUrl, googleMapsNavigationUrl } from "./google-maps";
 import { safeExternalUrl } from "./external-url";
 import { dayItems, localDate, parallelItemIds, personalState, tripClock, type TodayDay, type TodayItem, type TodayModel } from "./today-model";
 import { readTripLocation } from "./trip-location";
+import { ApiRequestError } from "./api-error";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest, type PlaceDetailRequestOptions, type PlacePreviewValue } from "./PlaceThumbnail";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import { TodayPlaceGuide, type TodayPlaceGuideReference } from "./TodayPlaceGuide";
 import { NativeSelect } from "./components/ui/native-select";
+import { placeTypeLabels } from "./locales/zh-TW/place-types";
 
 interface TodayDetailSelection {
   reference: TodayPlaceGuideReference;
@@ -208,21 +217,23 @@ function routeEnd(entry: TimelineEntry, edge: "before" | "after", zone: string |
   return place ? { name: place.name, latitude: place.latitude, longitude: place.longitude, providerPlaceId: null } : null;
 }
 
-function TodayDirectionsLeg({ from, to, zone, selectedDate }: {
+function TodayDirectionsLeg({ from, to, zone, selectedDate, alternativeControl, alternativesPanel }: {
   from: TimelineEntry;
-  to: TimelineEntry;
+  to: TimelineEntry | null;
   zone: string | null;
   selectedDate: string;
+  alternativeControl?: ReactNode;
+  alternativesPanel?: ReactNode;
 }) {
   const origin = routeEnd(from, "after", zone, selectedDate);
-  const destination = routeEnd(to, "before", zone, selectedDate);
+  const destination = to ? routeEnd(to, "before", zone, selectedDate) : null;
   const directions = origin && destination ? googleMapsDirectionsUrl(origin, destination) : null;
-  if (!directions || !origin || !destination) return null;
-  return <li className="today-route-leg">
+  if (!directions && !alternativeControl && !alternativesPanel) return null;
+  return <li className={`today-route-leg${alternativesPanel ? " has-backups" : ""}`}>
     <span aria-hidden="true" />
     <span className="today-route-leg-track" aria-hidden="true" />
     <span className="today-route-leg-body">
-      <a
+      {directions && origin && destination ? <a
         className="route-leg-directions"
         href={directions}
         target="_blank"
@@ -230,22 +241,214 @@ function TodayDirectionsLeg({ from, to, zone, selectedDate }: {
         aria-label={`在 Google Maps 查看「${origin.name}」到「${destination.name}」的交通方式（另開新分頁）`}
       >
         <MapPin aria-hidden="true" /> Google Maps
-      </a>
+      </a> : null}
+      {directions && alternativeControl ? <span className="today-route-leg-separator" aria-hidden="true">·</span> : null}
+      {alternativeControl}
     </span>
+    {alternativesPanel ? <div className="today-route-leg-backups">{alternativesPanel}</div> : null}
   </li>;
 }
 
-function TodayPlaceCard({ place, order, date, preview, previewsLoading, openPlace }: {
+const SUPPORTED_ALTERNATIVE_TYPES: Partial<Record<NonNullable<WishlistPlace["type"]>, true>> = {
+  restaurant: true,
+  cafe: true,
+  worship: true,
+  museum: true,
+  nature: true,
+  shopping: true,
+  activity: true,
+};
+
+type AlternativePanelState = {
+  dayId: string;
+  date: string;
+  stopTripPlaceId: string;
+  stopName: string;
+  stopType: NonNullable<WishlistPlace["type"]>;
+  phase: "loading" | "ready" | "error";
+  response: NearbyAlternativesResponse | null;
+  error: "quota" | "unavailable" | null;
+};
+
+interface CandidateDetailSelection {
+  candidate: NearbyAlternativeDto;
+  stopTripPlaceId: string;
+  stopName: string;
+  triggerKey: string;
+}
+
+type RetryKeys = Map<string, { fingerprint: string; key: string }>;
+
+function retryKey(store: RetryKeys, operation: string, payload: unknown) {
+  const fingerprint = JSON.stringify(payload);
+  const existing = store.get(operation);
+  if (existing?.fingerprint === fingerprint) return existing.key;
+  const key = crypto.randomUUID();
+  store.set(operation, { fingerprint, key });
+  return key;
+}
+
+function stopTriggerKey(tripPlaceId: string) {
+  return encodeURIComponent(`wishlist:${tripPlaceId}`);
+}
+
+function candidateTriggerKey(stopTripPlaceId: string, providerPlaceId: string) {
+  return encodeURIComponent(`nearby:${stopTripPlaceId}:${providerPlaceId}`);
+}
+
+function alternativeRating(candidate: NearbyAlternativeDto, locale: string, copy: Messages["today"]["stopBackups"]) {
+  if (candidate.rating === null) return copy.noRating;
+  const rating = new Intl.NumberFormat(locale, { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(candidate.rating);
+  if (candidate.userRatingCount === null) return `★${rating}`;
+  return copy.rating(rating, new Intl.NumberFormat(locale).format(candidate.userRatingCount));
+}
+
+function AlternativePanel({
+  id,
+  state,
+  locale,
+  canManage,
+  busyProviderPlaceId,
+  error,
+  retry,
+  openCandidate,
+  swap,
+}: {
+  id: string;
+  state: AlternativePanelState;
+  locale: string;
+  canManage: boolean;
+  busyProviderPlaceId: string | null;
+  error: string | null;
+  retry(): void;
+  openCandidate(candidate: NearbyAlternativeDto): void;
+  swap(candidate: NearbyAlternativeDto): void;
+}) {
+  const { t } = useI18n();
+  const copy = t.today.stopBackups;
+  const typeLabel = placeTypeLabels[state.stopType];
+  const loadingCopy = copy.loading(typeLabel);
+  return <div className="today-backups-expander">
+    <section id={id} className="today-backups" aria-label={copy.findNearby(state.stopName, typeLabel)}>
+      <div className="today-backups__head">
+        <span>{copy.nearby}</span>
+      </div>
+      {state.phase === "loading" ? <>
+        <div className="today-backups__loading" aria-hidden="true">
+          <div className="today-backups__loading-label"><LoaderCircle className="animate-spin motion-reduce:animate-none" size={16} />{loadingCopy}</div>
+          {Array.from({ length: 3 }, (_, index) => <div className="today-backups__skeleton" key={index}>
+            <span className="place-list-skeleton__block today-backups__skeleton-thumb" />
+            <span className="today-backups__skeleton-copy">
+              <span className="place-list-skeleton__block today-backups__skeleton-title" />
+              <span className="place-list-skeleton__block today-backups__skeleton-meta" />
+            </span>
+          </div>)}
+        </div>
+        <span className="sr-only" role="status">{loadingCopy}</span>
+      </> : state.phase === "error" ? <div className="today-backups__state" role="alert">
+        <p>{state.error === "quota" ? copy.quota : copy.unavailable}</p>
+        {state.error === "unavailable" ? <button type="button" onClick={retry}>{copy.retry}</button> : null}
+      </div> : state.response && state.response.alternatives.length === 0 ? <p className="today-backups__state" role="status">{copy.empty}</p> : (
+        <ul className="today-backups__list">
+          {state.response?.alternatives.map((candidate) => {
+            const triggerKey = candidateTriggerKey(state.stopTripPlaceId, candidate.providerPlaceId);
+            const busy = busyProviderPlaceId === candidate.providerPlaceId;
+            const rating = alternativeRating(candidate, locale, copy);
+            const distance = copy.distance(new Intl.NumberFormat(locale).format(candidate.straightLineMeters));
+            const descriptionId = `today-candidate-meta-${triggerKey}`;
+            return <li className="today-backups__candidate" key={candidate.providerPlaceId}>
+              <button
+                type="button"
+                className="today-backups__candidate-detail"
+                aria-label={copy.viewAlternative(candidate.name)}
+                aria-describedby={descriptionId}
+                data-today-candidate-detail-trigger={triggerKey}
+                onClick={() => openCandidate(candidate)}
+              >
+                <PlaceThumbnail photo={candidate.photo} placeType={candidate.type} />
+                <span className="today-backups__candidate-copy" id={descriptionId}>
+                  <strong>{candidate.name}</strong>
+                  <span>{rating}</span>
+                  <span>{distance}</span>
+                </span>
+                <ChevronRight size={16} aria-hidden="true" />
+              </button>
+              {canManage ? <button
+                type="button"
+                className="today-backups__swap"
+                disabled={busyProviderPlaceId !== null}
+                aria-busy={busy}
+                onClick={() => swap(candidate)}
+              >{busy ? copy.processing : copy.swap}</button> : null}
+              <div className="today-backups__candidate-credit">
+                <small>{candidate.attribution}</small>
+                <PlacePhotoCredit photo={candidate.photo} />
+              </div>
+            </li>;
+          })}
+        </ul>
+      )}
+      {error ? <p className="today-backups__operation-error" role="alert">{error}</p> : null}
+    </section>
+  </div>;
+}
+
+function CandidatePhoto({ candidate }: { candidate: NearbyAlternativeDto }) {
+  const photoKey = candidate.photo ? `${candidate.photo.id}\u0000${candidate.photo.imageUrl}` : null;
+  const [failure, setFailure] = useState({ photoKey, failed: false });
+  if (failure.photoKey !== photoKey) setFailure({ photoKey, failed: false });
+  const failed = failure.photoKey === photoKey && failure.failed;
+  const { t } = useI18n();
+  return <div className="today-candidate-detail__media">
+    {candidate.photo && !failed ? <img
+      src={candidate.photo.imageUrl}
+      width={candidate.photo.width}
+      height={candidate.photo.height}
+      alt={t.today.stopBackups.candidatePhoto(candidate.name)}
+      decoding="async"
+      onError={() => setFailure({ photoKey, failed: true })}
+    /> : <div className="today-candidate-detail__photo-empty" role="img" aria-label={t.placeDetail.photoUnavailable}>
+      <ImageOff aria-hidden="true" />
+      <span>{t.placeDetail.photoUnavailable}</span>
+    </div>}
+    <PlacePhotoCredit photo={candidate.photo} />
+  </div>;
+}
+
+function TodayPlaceCard({
+  place,
+  order,
+  date,
+  preview,
+  previewsLoading,
+  openPlace,
+  canManage,
+  undoingReplacementId,
+  operationError,
+  alternativesOpen,
+  undo,
+}: {
   place: WishlistPlace;
   order: number;
   date: string;
   preview: PlacePreviewValue | undefined;
   previewsLoading: boolean;
   openPlace?: (selection: TodayDetailSelection) => void;
+  canManage: boolean;
+  undoingReplacementId: string | null;
+  operationError: string | null;
+  alternativesOpen: boolean;
+  undo(place: WishlistPlace): void;
 }) {
   const { t } = useI18n();
-  const triggerKey = encodeURIComponent(`wishlist:${place.id}`);
-  return <li className="today-stop is-place">
+  const copy = t.today.stopBackups;
+  const triggerKey = stopTriggerKey(place.id);
+  const relationTriggerKey = place.replacedStop
+    ? encodeURIComponent(`replaced:${place.id}:${place.replacedStop.originalTripPlaceId}`)
+    : "";
+  const hasFollowup = place.replacedStop !== null || (!alternativesOpen && operationError !== null);
+  const undoing = place.replacedStop?.replacementId === undoingReplacementId;
+  return <li className={`today-stop is-place${hasFollowup ? " has-followup" : ""}`}>
     <span className="today-stop-order" aria-hidden="true">{order}</span>
     <span className="today-stop-track" aria-hidden="true" />
     <div className="today-stop-body today-place-body">
@@ -253,6 +456,7 @@ function TodayPlaceCard({ place, order, date, preview, previewsLoading, openPlac
       <div className="today-place-copy">
         {openPlace ? <button
           type="button"
+          className="today-place-detail-trigger"
           aria-label={t.today.viewPlaceDetail(place.name)}
           data-today-place-detail-trigger={triggerKey}
           onClick={() => openPlace({ reference: { kind: "trip-place", id: place.id }, name: place.name, triggerKey, date })}
@@ -262,10 +466,33 @@ function TodayPlaceCard({ place, order, date, preview, previewsLoading, openPlac
         <PlacePhotoCredit photo={preview?.photo} />
       </div>
     </div>
+    {place.replacedStop ? <div className="today-stop-relation">
+      <span>{copy.originalLabel}
+        {openPlace ? <button
+          type="button"
+          aria-label={copy.viewOriginal(place.replacedStop.originalName)}
+          data-today-place-detail-trigger={relationTriggerKey}
+          onClick={() => openPlace({
+            reference: { kind: "trip-place", id: place.replacedStop!.originalTripPlaceId },
+            name: place.replacedStop!.originalName,
+            triggerKey: relationTriggerKey,
+            date,
+          })}
+        >{place.replacedStop.originalName}</button> : place.replacedStop.originalName}
+      </span>
+      {canManage ? <button
+        type="button"
+        className="today-stop-relation__undo"
+        disabled={undoingReplacementId !== null}
+        aria-busy={undoing}
+        onClick={() => undo(place)}
+      >{undoing ? copy.processing : copy.undo}</button> : null}
+      {!alternativesOpen && operationError ? <p role="alert">{operationError}</p> : null}
+    </div> : !alternativesOpen && operationError ? <p className="today-backups__operation-error today-backups__operation-error--standalone" role="alert">{operationError}</p> : null}
   </li>;
 }
 
-export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, onArrangeDay, offline = false, fetchedAt, retry, retrying = false, persisted = true, request, photoRevision = 0 }: {
+export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, onArrangeDay, offline = false, fetchedAt, retry, retrying = false, persisted = true, request, onChanged, onPersistentError, photoRevision = 0 }: {
   model: TodayModel;
   selectedDate: string | null;
   onDayChanged(date: string, replace?: boolean): void;
@@ -278,6 +505,8 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
   retrying?: boolean;
   persisted?: boolean;
   request?: PlaceDetailRequest;
+  onChanged?(): Promise<void>;
+  onPersistentError?(message: string): void;
   photoRevision?: number;
 }) {
   const { t, locale } = useI18n();
@@ -285,10 +514,19 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
   const [now, setNow] = useState(Date.now);
   const [selectedDetail, setSelectedDetail] = useState<TodayDetailSelection | null>(null);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [alternatives, setAlternatives] = useState<AlternativePanelState | null>(null);
+  const [selectedCandidate, setSelectedCandidate] = useState<CandidateDetailSelection | null>(null);
+  const [busyProviderPlaceId, setBusyProviderPlaceId] = useState<string | null>(null);
+  const [undoingReplacementId, setUndoingReplacementId] = useState<string | null>(null);
+  const [operationError, setOperationError] = useState<{ stopTripPlaceId: string; message: string } | null>(null);
   const detailReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const itemReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const timelineRef = useRef<HTMLElement | null>(null);
   const detailTitleRef = useRef<HTMLHeadingElement>(null);
+  const searchSequence = useRef(0);
+  const visibleDayKey = useRef("");
+  const retryKeys = useRef<RetryKeys>(new Map());
+  const mounted = useRef(true);
   const detailRequest = useCallback(async <T,>(url: string, options?: PlaceDetailRequestOptions): Promise<T> => {
     if (!request) throw new Error("Place detail request is unavailable");
     return request<T>(url, photoRevision === 0 ? options : { ...options, cache: "no-cache" });
@@ -300,9 +538,14 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     return () => { window.clearInterval(timer); window.removeEventListener("focus", tick); };
   }, []);
   const clock = tripClock(model, now);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const day = model.days.find((entry) => entry.date === selectedDate)
     ?? clock.today
     ?? (clock.phase === "after" ? model.days.at(-1) : model.days[0]);
+  visibleDayKey.current = `${model.tripId}:${day?.id ?? ""}`;
   useEffect(() => {
     if (readTripLocation().trip === model.tripId && day && day.date !== selectedDate) onDayChanged(day.date, true);
   }, [model.tripId, day, selectedDate, onDayChanged]);
@@ -310,6 +553,18 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     if (selectedDetail && day?.date !== selectedDetail.date) setSelectedDetail(null);
   }, [day?.date, selectedDetail]);
   useEffect(() => { setSelectedItemId(null); }, [day?.date]);
+  useEffect(() => {
+    searchSequence.current += 1;
+    setAlternatives(null);
+    setSelectedCandidate(null);
+    setOperationError(null);
+  }, [model.tripId, day?.id]);
+  useEffect(() => {
+    if (!alternatives || !day || day.wishlist.some((place) => place.id === alternatives.stopTripPlaceId)) return;
+    searchSequence.current += 1;
+    setAlternatives(null);
+    setSelectedCandidate(null);
+  }, [alternatives, day]);
   const reminderLines = useMemo(() => {
     if (!day) return [];
     const lines: Array<{ key: string; copy: string; emphasis: boolean }> = [];
@@ -424,6 +679,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
   const wishlistPreviews = usePlacePreviews({ tripId: model.tripId, kind: "trip-place", ids: wishlistIds, request: request ? detailRequest : undefined, enabled: Boolean(request) && !offline });
 
   if (!day) return <p>{text.empty}</p>;
+  const activeDay = day;
   const index = model.days.indexOf(day);
   const items = dayItems(model, day);
   const parallel = parallelItemIds(items);
@@ -453,22 +709,324 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
       });
     }
   }
+  const canManageAlternatives = Boolean(request && onChanged && canArrange && !offline);
+  function focusTripPlace(tripPlaceId: string) {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const trigger = document.querySelector<HTMLElement>(`[data-today-place-detail-trigger="${stopTriggerKey(tripPlaceId)}"]`);
+        (trigger ?? timelineRef.current)?.focus({ preventScroll: true });
+        trigger?.scrollIntoView({ block: "nearest" });
+      });
+    });
+  }
 
-  const detail = selectedDetail && request ? (
-    <PlaceDetailContent
+  function isCurrentTripRoute() {
+    return readTripLocation().trip === model.tripId;
+  }
+
+  async function findAlternatives(place: WishlistPlace) {
+    if (!request || !canManageAlternatives || !place.type || !SUPPORTED_ALTERNATIVE_TYPES[place.type]
+      || place.latitude === null || place.longitude === null) return;
+    const sequence = ++searchSequence.current;
+    const requestDayKey = visibleDayKey.current;
+    setSelectedCandidate(null);
+    setOperationError(null);
+    setAlternatives({
+      dayId: activeDay.id,
+      date: activeDay.date,
+      stopTripPlaceId: place.id,
+      stopName: place.name,
+      stopType: place.type,
+      phase: "loading",
+      response: null,
+      error: null,
+    });
+    try {
+      const response = await request<NearbyAlternativesResponse>(
+        `/api/trips/${model.tripId}/days/${activeDay.id}/trip-places/${place.id}/nearby-alternatives`,
+        { method: "POST", parse: parseNearbyAlternativesResponse },
+      );
+      if (searchSequence.current !== sequence
+        || visibleDayKey.current !== requestDayKey
+        || response.dayId !== activeDay.id
+        || response.stopTripPlaceId !== place.id) return;
+      setAlternatives({
+        dayId: activeDay.id,
+        date: activeDay.date,
+        stopTripPlaceId: place.id,
+        stopName: place.name,
+        stopType: place.type,
+        phase: "ready",
+        response,
+        error: null,
+      });
+    } catch (reason) {
+      if (searchSequence.current !== sequence || visibleDayKey.current !== requestDayKey) return;
+      setAlternatives({
+        dayId: activeDay.id,
+        date: activeDay.date,
+        stopTripPlaceId: place.id,
+        stopName: place.name,
+        stopType: place.type,
+        phase: "error",
+        response: null,
+        error: reason instanceof ApiRequestError && reason.code === "provider_quota" ? "quota" : "unavailable",
+      });
+    }
+  }
+
+  function collapseAlternatives() {
+    searchSequence.current += 1;
+    setAlternatives(null);
+    setSelectedCandidate(null);
+    setOperationError(null);
+  }
+
+  function openCandidate(candidate: NearbyAlternativeDto) {
+    if (!alternatives?.response) return;
+    const triggerKey = candidateTriggerKey(alternatives.stopTripPlaceId, candidate.providerPlaceId);
+    detailReturnPosition.current = { x: window.scrollX, y: window.scrollY };
+    setSelectedCandidate({
+      candidate,
+      stopTripPlaceId: alternatives.stopTripPlaceId,
+      stopName: alternatives.stopName,
+      triggerKey,
+    });
+  }
+
+  function closeCandidate() {
+    const triggerKey = selectedCandidate?.triggerKey;
+    const position = detailReturnPosition.current;
+    detailReturnPosition.current = null;
+    setSelectedCandidate(null);
+    window.requestAnimationFrame(() => {
+      if (triggerKey) document.querySelector<HTMLElement>(`[data-today-candidate-detail-trigger="${triggerKey}"]`)?.focus({ preventScroll: true });
+      if (position) window.scrollTo({ left: position.x, top: position.y, behavior: "instant" });
+    });
+  }
+
+  async function swapAlternative(candidate: NearbyAlternativeDto) {
+    if (!request || !onChanged || !alternatives?.response || busyProviderPlaceId !== null) return;
+    const alternativesResponse = alternatives.response;
+    const context = alternatives;
+    const mutationDayKey = visibleDayKey.current;
+    const mutationSequence = searchSequence.current;
+    const payload = {
+      expectedDayVersion: alternativesResponse.dayVersion,
+      providerPlaceId: candidate.providerPlaceId,
+    };
+    const operation = `replace:${context.dayId}:${context.stopTripPlaceId}`;
+    setBusyProviderPlaceId(candidate.providerPlaceId);
+    setOperationError(null);
+    onPersistentError?.("");
+    let response: TripPlaceListResponse;
+    try {
+      response = await request<TripPlaceListResponse>(
+        `/api/trips/${model.tripId}/days/${context.dayId}/trip-places/${context.stopTripPlaceId}/replacement`,
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": retryKey(retryKeys.current, operation, payload) },
+          body: JSON.stringify(payload),
+          parse: parseTripPlaceListResponse,
+        },
+      );
+    } catch (reason) {
+      if (!mounted.current || !isCurrentTripRoute()) {
+        if (mounted.current) setBusyProviderPlaceId(null);
+        return;
+      }
+      const viewStillCurrent = visibleDayKey.current === mutationDayKey
+        && searchSequence.current === mutationSequence;
+      if (reason instanceof ApiRequestError && reason.code === "conflict") {
+        const refreshSequence = viewStillCurrent ? ++searchSequence.current : mutationSequence;
+        if (viewStillCurrent) {
+          setAlternatives(null);
+          setSelectedCandidate(null);
+        }
+        try {
+          await onChanged();
+          if (viewStillCurrent
+            && mounted.current
+            && visibleDayKey.current === mutationDayKey
+            && searchSequence.current === refreshSequence) {
+            setOperationError({ stopTripPlaceId: context.stopTripPlaceId, message: text.stopBackups.conflict });
+          }
+        } catch {
+          if (isCurrentTripRoute()) onPersistentError?.(text.stopBackups.conflictRefreshFailed);
+        }
+      } else if (viewStillCurrent) {
+        setOperationError({ stopTripPlaceId: context.stopTripPlaceId, message: text.stopBackups.outcomeUnknown });
+      }
+      if (mounted.current) setBusyProviderPlaceId(null);
+      return;
+    }
+    retryKeys.current.delete(operation);
+    if (!mounted.current || !isCurrentTripRoute()) {
+      if (mounted.current) setBusyProviderPlaceId(null);
+      return;
+    }
+    const viewStillCurrent = visibleDayKey.current === mutationDayKey
+      && searchSequence.current === mutationSequence;
+    const refreshSequence = viewStillCurrent ? ++searchSequence.current : mutationSequence;
+    if (viewStillCurrent) {
+      setAlternatives(null);
+      setSelectedCandidate(null);
+    }
+    const replacement = response.tripPlaces.find((place) =>
+      place.providerPlaceId === candidate.providerPlaceId
+      && place.assignedDayId === context.dayId
+      && !place.scheduled
+    );
+    try {
+      await onChanged();
+      if (viewStillCurrent
+        && mounted.current
+        && visibleDayKey.current === mutationDayKey
+        && searchSequence.current === refreshSequence
+        && replacement) {
+        focusTripPlace(replacement.id);
+      }
+    } catch {
+      if (isCurrentTripRoute()) onPersistentError?.(text.stopBackups.refreshFailed);
+    } finally {
+      if (mounted.current) setBusyProviderPlaceId(null);
+    }
+  }
+
+  async function undoReplacement(place: WishlistPlace) {
+    if (!request || !onChanged || !place.replacedStop || undoingReplacementId !== null) return;
+    const relation = place.replacedStop;
+    const mutationDayKey = visibleDayKey.current;
+    const mutationSequence = searchSequence.current;
+    const operation = `undo:${relation.replacementId}`;
+    const payload = {};
+    setUndoingReplacementId(relation.replacementId);
+    setOperationError(null);
+    onPersistentError?.("");
+    try {
+      await request<TripPlaceListResponse>(
+        `/api/trips/${model.tripId}/stop-replacements/${relation.replacementId}/undo`,
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": retryKey(retryKeys.current, operation, payload) },
+          body: JSON.stringify(payload),
+          parse: parseTripPlaceListResponse,
+        },
+      );
+    } catch (reason) {
+      if (!mounted.current || !isCurrentTripRoute()) {
+        if (mounted.current) setUndoingReplacementId(null);
+        return;
+      }
+      const viewStillCurrent = visibleDayKey.current === mutationDayKey
+        && searchSequence.current === mutationSequence;
+      if (reason instanceof ApiRequestError && reason.code === "conflict") {
+        const refreshSequence = viewStillCurrent ? ++searchSequence.current : mutationSequence;
+        if (viewStillCurrent) {
+          setAlternatives(null);
+          setSelectedCandidate(null);
+        }
+        try {
+          await onChanged();
+          if (viewStillCurrent
+            && mounted.current
+            && visibleDayKey.current === mutationDayKey
+            && searchSequence.current === refreshSequence) {
+            setOperationError({ stopTripPlaceId: place.id, message: text.stopBackups.conflict });
+          }
+        } catch {
+          if (isCurrentTripRoute()) onPersistentError?.(text.stopBackups.conflictRefreshFailed);
+        }
+      } else if (viewStillCurrent) {
+        setOperationError({ stopTripPlaceId: place.id, message: text.stopBackups.outcomeUnknown });
+      }
+      if (mounted.current) setUndoingReplacementId(null);
+      return;
+    }
+    retryKeys.current.delete(operation);
+    if (!mounted.current || !isCurrentTripRoute()) {
+      if (mounted.current) setUndoingReplacementId(null);
+      return;
+    }
+    const viewStillCurrent = visibleDayKey.current === mutationDayKey
+      && searchSequence.current === mutationSequence;
+    const refreshSequence = viewStillCurrent ? ++searchSequence.current : mutationSequence;
+    if (viewStillCurrent) {
+      setAlternatives(null);
+      setSelectedCandidate(null);
+    }
+    try {
+      await onChanged();
+      if (viewStillCurrent
+        && mounted.current
+        && visibleDayKey.current === mutationDayKey
+        && searchSequence.current === refreshSequence) {
+        focusTripPlace(relation.originalTripPlaceId);
+      }
+    } catch {
+      if (isCurrentTripRoute()) onPersistentError?.(text.stopBackups.refreshFailed);
+    } finally {
+      if (mounted.current) setUndoingReplacementId(null);
+    }
+  }
+
+  const detail = selectedDetail && request ? <PlaceDetailContent
+    tripId={model.tripId}
+    reference={selectedDetail.reference}
+    date={selectedDetail.date}
+    photoRevision={photoRevision}
+    request={detailRequest}
+    interlude={<TodayPlaceGuide
       tripId={model.tripId}
       reference={selectedDetail.reference}
-      date={selectedDetail.date}
-      photoRevision={photoRevision}
+      placeName={selectedDetail.name}
       request={detailRequest}
-      interlude={<TodayPlaceGuide
-        tripId={model.tripId}
-        reference={selectedDetail.reference}
-        placeName={selectedDetail.name}
-        request={detailRequest}
-      />}
-    />
-  ) : null;
+    />}
+  /> : null;
+  const candidateSourceUrl = selectedCandidate ? safeExternalUrl(selectedCandidate.candidate.sourceUrl) : null;
+  const candidateBusy = Boolean(
+    selectedCandidate
+    && busyProviderPlaceId === selectedCandidate.candidate.providerPlaceId,
+  );
+  const candidateOperationError = selectedCandidate && operationError?.stopTripPlaceId === selectedCandidate.stopTripPlaceId
+    ? operationError.message
+    : null;
+  const candidateDetail = selectedCandidate ? <article className="today-candidate-detail">
+    <p className="today-candidate-detail__context">{text.stopBackups.replacing(selectedCandidate.stopName)}</p>
+    <CandidatePhoto candidate={selectedCandidate.candidate} />
+    <dl className="today-candidate-detail__facts">
+      <div>
+        <dt>{text.stopBackups.address}</dt>
+        <dd>{selectedCandidate.candidate.address ?? text.stopBackups.addressUnavailable}</dd>
+      </div>
+      <div>
+        <dt>{text.stopBackups.ratingLabel}</dt>
+        <dd>{alternativeRating(selectedCandidate.candidate, locale, text.stopBackups)}</dd>
+      </div>
+      <div>
+        <dt>{text.stopBackups.distanceLabel}</dt>
+        <dd>{text.stopBackups.distance(new Intl.NumberFormat(locale).format(selectedCandidate.candidate.straightLineMeters))}</dd>
+      </div>
+      <div>
+        <dt>{text.stopBackups.typeLabel}</dt>
+        <dd>{placeTypeLabels[selectedCandidate.candidate.type]}</dd>
+      </div>
+    </dl>
+    {candidateSourceUrl ? <a className="today-link" href={candidateSourceUrl} target="_blank" rel="noopener noreferrer">
+      {text.stopBackups.maps}<ExternalLink size={16} aria-hidden="true" /><span className="text-xs">{text.leavesApp}</span>
+    </a> : null}
+    <small className="today-candidate-detail__attribution">{selectedCandidate.candidate.attribution}</small>
+  </article> : null;
+  const candidateFooter = selectedCandidate && canManageAlternatives ? <div className="today-candidate-detail__footer">
+    {candidateOperationError ? <p role="alert">{candidateOperationError}</p> : null}
+    <button
+      type="button"
+      disabled={busyProviderPlaceId !== null}
+      aria-busy={candidateBusy}
+      onClick={() => void swapAlternative(selectedCandidate.candidate)}
+    >{candidateBusy ? text.stopBackups.processing : text.stopBackups.swap}</button>
+    <small>{text.stopBackups.allMembersUpdate}</small>
+  </div> : null;
   const formattedDay = new Intl.DateTimeFormat(locale, { timeZone: "UTC", month: "long", day: "numeric", weekday: "short" }).format(new Date(`${day.date}T12:00:00Z`));
   const leadItem = clock.phase === "before"
     ? firstFixed
@@ -581,6 +1139,9 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     ? parallelItemIds(dayItems(model, selectedItemDay)).has(selectedItem.id)
     : false;
   const emptyDay = timelineEntries.length === 0;
+  const operationErrorHasRow = operationError
+    ? day.wishlist.some((place) => place.id === operationError.stopTripPlaceId)
+    : false;
 
   return <section className="today-workspace" aria-label={t.app.tabs.today}>
     <header className="today-pagehead">
@@ -625,6 +1186,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
         <ul>{reminderLines.map((line) => <li key={line.key} className={line.emphasis ? "is-emphasis" : undefined}>{line.copy}</li>)}</ul>
       </aside> : null}
       <section ref={timelineRef} className="today-timeline" aria-label={text.group} tabIndex={-1}>
+        {!operationErrorHasRow && operationError ? <p className="today-backups__operation-error today-backups__operation-error--global" role="alert">{operationError.message}</p> : null}
         {timelineEntries.length ? <>
           <div className="today-sectionhead">
             <h3>{clock.phase === "before" && index === 0 ? text.firstDayPlan : text.timeline}</h3>
@@ -635,13 +1197,70 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
           </div>
           {pastItems.length ? <div className="today-past-label"><Clock3 size={15} aria-hidden="true" />{text.elapsedItems(pastItems.length)}</div> : null}
           <ol className="today-timeline-list">{timelineEntries.map((entry, entryIndex) => {
-            const previous = timelineEntries[entryIndex - 1];
+            const next = timelineEntries[entryIndex + 1] ?? null;
             const key = entry.kind === "fixed" ? `fixed:${entry.item.id}` : `place:${entry.place.id}`;
+            const place = entry.kind === "place" ? entry.place : null;
+            const alternativesOpen = Boolean(place && alternatives?.stopTripPlaceId === place.id);
+            const canChooseAlternative = Boolean(
+              place
+              && canManageAlternatives
+              && place.type
+              && SUPPORTED_ALTERNATIVE_TYPES[place.type]
+              && place.latitude !== null
+              && place.longitude !== null,
+            );
+            const alternativesId = place ? `today-backups-${stopTriggerKey(place.id)}` : "";
+            const operationMessage = place && operationError?.stopTripPlaceId === place.id
+              ? operationError.message
+              : null;
+            const alternativeControl = place && canChooseAlternative && place.type ? <button
+              type="button"
+              className="today-route-backup-trigger"
+              aria-label={alternativesOpen
+                ? text.stopBackups.collapseNearby(place.name)
+                : text.stopBackups.findNearby(place.name, placeTypeLabels[place.type])}
+              aria-expanded={alternativesOpen}
+              aria-controls={alternativesOpen ? alternativesId : undefined}
+              onClick={alternativesOpen ? collapseAlternatives : () => void findAlternatives(place)}
+            >
+              <GitFork size={11} aria-hidden="true" />
+              <span>{alternativesOpen ? text.stopBackups.collapse : text.stopBackups.trigger}</span>
+            </button> : null;
+            const alternativesPanel = place && alternativesOpen && alternatives ? <AlternativePanel
+              id={alternativesId}
+              state={alternatives}
+              locale={locale}
+              canManage={canManageAlternatives}
+              busyProviderPlaceId={busyProviderPlaceId}
+              error={operationMessage}
+              retry={() => void findAlternatives(place)}
+              openCandidate={openCandidate}
+              swap={(candidate) => void swapAlternative(candidate)}
+            /> : null;
             return <Fragment key={key}>
-              {previous ? <TodayDirectionsLeg from={previous} to={entry} zone={day.timeZone} selectedDate={day.date} /> : null}
               {entry.kind === "fixed"
                 ? <TodayCard item={entry.item} zone={day.timeZone} selectedDate={day.date} parallel={parallel.has(entry.item.id)} state={entry.state} onOpen={openItem} />
-                : <TodayPlaceCard place={entry.place} order={entry.order} date={day.date} preview={wishlistPreviews.previews.get(entry.place.id)} previewsLoading={wishlistPreviews.loading} openPlace={openPlace} />}
+                : <TodayPlaceCard
+                  place={entry.place}
+                  order={entry.order}
+                  date={day.date}
+                  preview={wishlistPreviews.previews.get(entry.place.id)}
+                  previewsLoading={wishlistPreviews.loading}
+                  openPlace={openPlace}
+                  canManage={canManageAlternatives}
+                  undoingReplacementId={undoingReplacementId}
+                  operationError={operationMessage}
+                  alternativesOpen={alternativesOpen}
+                  undo={(currentPlace) => void undoReplacement(currentPlace)}
+                />}
+              <TodayDirectionsLeg
+                from={entry}
+                to={next}
+                zone={day.timeZone}
+                selectedDate={day.date}
+                alternativeControl={alternativeControl}
+                alternativesPanel={alternativesPanel}
+              />
             </Fragment>;
           })}</ol>
         </> : <>
@@ -658,7 +1277,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     <p className="today-last-sync">{text.syncedAt(snapshotTime)}</p>
     <PlaceDetailSheet
       appearance="workspace"
-      open={Boolean(selectedItem) && !selectedDetail}
+      open={Boolean(selectedItem) && !selectedDetail && !selectedCandidate}
       title={selectedItem?.title ?? ""}
       onClose={closeItem}
     >
@@ -671,6 +1290,14 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
       onClose={closeDetail}
     >
       {detail}
+    </PlaceDetailSheet>
+    <PlaceDetailSheet
+      open={Boolean(selectedCandidate)}
+      title={selectedCandidate ? text.detailTitle(selectedCandidate.candidate.name) : ""}
+      onClose={closeCandidate}
+      footer={candidateFooter}
+    >
+      {candidateDetail}
     </PlaceDetailSheet>
   </section>;
 }

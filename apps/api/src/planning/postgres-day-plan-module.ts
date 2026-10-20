@@ -1,8 +1,12 @@
 import { Temporal } from "@js-temporal/polyfill";
 import {
   MAX_DAY_ROUTE_STOPS,
+  withTransitMatrix,
   type CreateDayRouteInput,
   type DayRouteDto,
+  type DayRouteShapesResponse,
+  type TransitMatrixEntry,
+  type TransitGeoJson,
 } from "@along-the-way/contracts/day-plans";
 import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
 import type { TripSkeletonDto } from "@along-the-way/contracts/trip-skeleton";
@@ -21,7 +25,10 @@ import {
 } from "../private-trips/postgres-private-trip-store";
 import type { TripPlaceModule } from "../trip-places/trip-place-module";
 import type { TripSkeletonModule } from "../trip-skeleton/trip-skeleton-module";
-import { buildDayRoute } from "./day-route";
+import { buildDayRoute, type DayRouteInput, type RoutePlace } from "./day-route";
+import { orderByCost, routeLength, type GeoPoint } from "./day-route-order";
+import { mapNavitimeLegs, NavitimeError, type NavitimeProvider } from "./navitime-provider";
+import { PostgresTransitLegCache, TRANSIT_CACHE_DAYS, transitLegKey } from "./postgres-transit-leg-cache";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -37,6 +44,7 @@ interface DayPlaceOrderResponse {
 
 export interface DayPlanModule {
   route(userId: string, tripId: string, dayId: string, input: CreateDayRouteInput): Promise<DayRouteDto>;
+  routeShapes(userId: string, tripId: string, dayId: string, orderedTripPlaceIds: string[]): Promise<DayRouteShapesResponse>;
   applyOrder(
     userId: string,
     tripId: string,
@@ -50,6 +58,7 @@ interface ModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
   tripSkeleton: TripSkeletonModule;
   tripPlaces: TripPlaceModule;
+  navitime?: NavitimeProvider;
 }
 
 /** Applied order first; places without one keep their list order after them. */
@@ -80,6 +89,53 @@ function bookedLodgingForNight(skeleton: TripSkeletonDto, date: string) {
   return null;
 }
 
+function located(place: RoutePlace): place is RoutePlace & GeoPoint {
+  return place.latitude !== null && place.longitude !== null;
+}
+
+/**
+ * Days have no country-stop column. Resolve from booked nights and dated itinerary endpoints;
+ * ambiguous/cross-border days fail closed. A single-country trip needs no booked travel.
+ */
+function dayIsInJapan(
+  skeleton: TripSkeletonDto,
+  date: string,
+  countries: { id: string; country_code: string; time_zone: string | null }[],
+  planned: TripPlaceDto[],
+): boolean {
+  const ids = new Set<string>();
+  const previousDate = Temporal.PlainDate.from(date).subtract({ days: 1 }).toString();
+  for (const item of skeleton.items) {
+    if (item.type === "lodging") {
+      const start = item.endpoints.find((entry) => entry.role === "start");
+      const end = item.endpoints.find((entry) => entry.role === "end");
+      if (start?.countryStopId && end && start.localDateTime.slice(0, 10) <= date
+        && end.localDateTime.slice(0, 10) > previousDate) ids.add(start.countryStopId);
+    }
+    for (const endpoint of item.endpoints) {
+      if (endpoint.localDateTime.slice(0, 10) !== date) continue;
+      if (endpoint.countryStopId === null) return false;
+      ids.add(endpoint.countryStopId);
+    }
+  }
+  if (ids.size === 0) {
+    const latest = skeleton.items.filter((item) => item.type === "flight" || item.type === "transport")
+      .flatMap((item) => item.endpoints)
+      .filter((endpoint) => endpoint.localDateTime.slice(0, 10) <= date)
+      .sort((a, b) => b.instant.localeCompare(a.instant))[0];
+    if (latest) {
+      if (latest.countryStopId === null) return false;
+      ids.add(latest.countryStopId);
+    }
+  }
+  const relevant = ids.size > 0 ? countries.filter((country) => ids.has(country.id)) : countries;
+  if (relevant.length === 0 || relevant.some((country) => country.country_code !== "JP")
+    || (ids.size > 0 && relevant.length !== ids.size)) return false;
+  // A known foreign stop's timezone on a day's point contradicts its Japan assignment.
+  return !planned.some((place) => place.timeZone && countries.some((country) =>
+    country.time_zone === place.timeZone && country.country_code !== "JP"));
+}
+
 /** Every writer takes the trip row before a day row, keeping the repository's lock order. */
 async function lockTrip(transaction: Transaction<AlongTheWayDatabase>, tripId: string): Promise<void> {
   const trip = await transaction.selectFrom("trips")
@@ -94,22 +150,36 @@ export class PostgresDayPlanModule implements DayPlanModule {
   private readonly database: Kysely<AlongTheWayDatabase>;
   private readonly tripSkeleton: TripSkeletonModule;
   private readonly tripPlaces: TripPlaceModule;
+  private readonly navitime: NavitimeProvider | undefined;
+  private readonly transitCache: PostgresTransitLegCache;
 
   constructor(options: ModuleOptions) {
     this.database = options.database;
     this.tripSkeleton = options.tripSkeleton;
     this.tripPlaces = options.tripPlaces;
+    this.navitime = options.navitime;
+    this.transitCache = new PostgresTransitLegCache(options.database);
   }
 
-  async route(
+  private async routeInput(
     userId: string,
     tripId: string,
     dayId: string,
     input: CreateDayRouteInput,
-  ): Promise<DayRouteDto> {
+  ): Promise<{ input: DayRouteInput; navitimeApplies: boolean }> {
     const order = input?.order;
     if (order !== "current" && order !== "suggested" && order !== "custom") {
       throw new AppError("validation_error", "order must be current, suggested or custom");
+    }
+    if (input.transit !== undefined && (order !== "suggested" || (input.transit !== "cached" && input.transit !== "fetch"))) {
+      throw new AppError("validation_error", "transit must be cached or fetch, and is only valid with suggested order");
+    }
+    if (
+      (input.transit === "fetch" && (typeof input.maxTransitCalls !== "number"
+        || !Number.isSafeInteger(input.maxTransitCalls) || input.maxTransitCalls < 0))
+      || (input.transit !== "fetch" && input.maxTransitCalls !== undefined)
+    ) {
+      throw new AppError("validation_error", "maxTransitCalls must be a non-negative integer and is required only with transit=fetch");
     }
     if (order !== "custom" && input.orderedTripPlaceIds !== undefined) {
       throw new AppError("validation_error", "orderedTripPlaceIds is only valid with custom order");
@@ -120,9 +190,13 @@ export class PostgresDayPlanModule implements DayPlanModule {
 
     const normalizedDayId = dayId.toLowerCase();
     const beforeVersion = await this.dayVersion(userId, tripId, normalizedDayId);
-    const [skeleton, places] = await Promise.all([
+    const [skeleton, places, countries] = await Promise.all([
       this.tripSkeleton.getSkeleton(userId, tripId),
       this.tripPlaces.list(userId, tripId),
+      this.navitime?.configured
+        ? this.database.selectFrom("trip_country_stops").select(["id", "country_code", "time_zone"])
+          .where("trip_id", "=", tripId).execute()
+        : Promise.resolve([]),
     ]);
     const version = await this.dayVersion(userId, tripId, normalizedDayId);
     if (version !== beforeVersion) {
@@ -159,7 +233,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
         ?.providerPlaceId ?? null;
       return { place: { ...lodging, providerPlaceId } };
     };
-    return buildDayRoute({
+    const routeInput: DayRouteInput = {
       dayId: normalizedDayId,
       date: day.date,
       version,
@@ -168,7 +242,145 @@ export class PostgresDayPlanModule implements DayPlanModule {
       ...(order === "custom" ? { orderedIds: requestedIds } : {}),
       morningLodging: lodgingOn(Temporal.PlainDate.from(day.date).subtract({ days: 1 }).toString()),
       nightLodging: lodgingOn(day.date),
+    };
+    return {
+      input: routeInput,
+      navitimeApplies: Boolean(this.navitime?.configured && dayIsInJapan(skeleton, day.date, countries,
+        order === "custom" ? planned.filter((place) => requested.has(place.id)) : planned)),
+    };
+  }
+
+  async route(userId: string, tripId: string, dayId: string, request: CreateDayRouteInput): Promise<DayRouteDto> {
+    const { input, navitimeApplies } = await this.routeInput(userId, tripId, dayId, request);
+    const fallback = { ...buildDayRoute(input), routeShapesAvailable: navitimeApplies };
+    if (!navitimeApplies || input.order === "current") return fallback;
+    const selected = input.order === "custom" ? new Set(input.orderedIds) : null;
+    const stops = input.planned.filter((place) => !selected || selected.has(place.id)).filter(located);
+    const start = input.morningLodging?.place;
+    const end = input.nightLodging?.place;
+    const morning = start && located(start) ? start : null;
+    const night = end && located(end) ? end : null;
+    const pairs: { from: GeoPoint; to: GeoPoint }[] = [];
+    const seen = new Set<string>();
+    const add = (from: GeoPoint, to: GeoPoint) => {
+      const key = `${from.id}:${to.id}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      pairs.push({ from, to });
+    };
+    for (const stop of stops) {
+      if (morning) add(morning, stop);
+      for (const other of stops) if (other.id !== stop.id) add(stop, other);
+      if (night) add(stop, night);
+    }
+    let cached = new Map<string, { minutes: number; lines: string[] }>();
+    const missing = new Map<string, { from: GeoPoint; to: GeoPoint }>();
+    for (const pair of pairs) {
+      if (pair.from.id !== pair.to.id) missing.set(transitLegKey(pair.from, pair.to), pair);
+    }
+    const matrixSnapshot = (): TransitMatrixEntry[] => pairs.flatMap(({ from, to }) => {
+      const value = from.id === to.id ? { minutes: 0, lines: [] } : cached.get(transitLegKey(from, to));
+      return value ? [{
+        fromId: from.id, toId: to.id,
+        fromLatitude: from.latitude, fromLongitude: from.longitude,
+        toLatitude: to.latitude, toLongitude: to.longitude,
+        ...value,
+      }] : [];
     });
+    try {
+      cached = await this.transitCache.minutes(tripId, input.date);
+      for (const key of cached.keys()) missing.delete(key);
+      if (request.transit === "fetch" && missing.size > request.maxTransitCalls!) {
+        throw new AppError(
+          "transit_calls_changed", "The required transit calls exceed the confirmed amount",
+          409, undefined, undefined, undefined, undefined, missing.size,
+        );
+      }
+      const allCached = missing.size === 0;
+      if (input.order === "custom") {
+        const matrix = matrixSnapshot();
+        return matrix.length > 0
+          ? withTransitMatrix({ ...fallback, transitCacheDays: allCached ? TRANSIT_CACHE_DAYS : null }, matrix)
+          : fallback;
+      }
+      if (!allCached && request.transit !== "fetch") {
+        return { ...fallback, transitCallsNeeded: missing.size, transitMatrix: matrixSnapshot() };
+      }
+      if (!allCached) {
+        await mapNavitimeLegs([...missing], async ([key, { from, to }], signal) => {
+          const value = await this.navitime!.transit(from, to, input.date, signal);
+          // Commit each success independently: a later leg's error must not discard paid results.
+          await this.transitCache.saveMinutes(tripId, input.date, from, to, value);
+          cached.set(key, value);
+          missing.delete(key);
+        });
+      }
+      const matrix = matrixSnapshot();
+      const costs = new Map(matrix.map((leg) => [`${leg.fromId}:${leg.toId}`, leg.minutes]));
+      const cost = (from: GeoPoint, to: GeoPoint) => costs.get(`${from.id}:${to.id}`)!;
+      const suggestedIds = orderByCost(stops, morning, night, cost, 7, true);
+      const byId = new Map(stops.map((stop) => [stop.id, stop]));
+      const suggested = suggestedIds.map((id) => byId.get(id)!);
+      const chosen = routeLength(suggested, morning, night, cost) <= routeLength(stops, morning, night, cost)
+        ? suggested : stops;
+      const route = buildDayRoute({
+        ...input, order: "custom",
+        orderedIds: [...chosen.map((stop) => stop.id), ...input.planned.filter((place) => !located(place)).map((place) => place.id)],
+      });
+      return withTransitMatrix({
+        ...route, order: "suggested", routeShapesAvailable: true,
+        transitCacheDays: allCached ? TRANSIT_CACHE_DAYS : null,
+      }, matrix);
+    } catch (error) {
+      if (error instanceof AppError && error.code === "transit_calls_changed") throw error;
+      return {
+        ...fallback, transitCallsNeeded: input.order === "suggested" ? missing.size : 0,
+        transitMatrix: matrixSnapshot(),
+        travelNotice: error instanceof NavitimeError ? error.code : "navitime_unavailable",
+      };
+    }
+  }
+
+  async routeShapes(userId: string, tripId: string, dayId: string, orderedTripPlaceIds: string[]): Promise<DayRouteShapesResponse> {
+    const { input, navitimeApplies } = await this.routeInput(userId, tripId, dayId, { order: "custom", orderedTripPlaceIds });
+    if (!navitimeApplies) throw new AppError("route_shapes_unavailable", "Transit route shapes are unavailable for this day", 422);
+    const byId = new Map(input.planned.map((place) => [place.id, place]));
+    // Keep the requested adjacency, including unlocated places; never bridge a missing point.
+    const stops = input.orderedIds!.map((id) => byId.get(id)!);
+    if (stops.length === 0) return { legs: [] };
+    const points = [
+      ...(input.morningLodging ? [input.morningLodging.place] : []),
+      ...stops,
+      ...(input.nightLodging ? [input.nightLodging.place] : []),
+    ];
+    const pairs = points.slice(1).map((to, index) => ({ from: points[index]!, to }));
+    let cached: Map<string, TransitGeoJson>;
+    try {
+      cached = await this.transitCache.shapes(tripId, input.date);
+    } catch {
+      // An unreadable cache is not permission to spend quota re-fetching every leg.
+      return { legs: pairs.map(({ from, to }) => ({ fromId: from.id, toId: to.id, geojson: null })) };
+    }
+    const missing = new Map<string, { from: GeoPoint; to: GeoPoint }>();
+    for (const { from, to } of pairs) {
+      if (!located(from) || !located(to)) continue;
+      const key = transitLegKey(from, to);
+      if (!cached.has(key)) missing.set(key, { from, to });
+    }
+    const fetched = await mapNavitimeLegs([...missing], async ([key, { from, to }], signal) => {
+      try {
+        const geojson = await this.navitime!.shape(from, to, input.date, signal);
+        await this.transitCache.saveShape(tripId, input.date, from, to, geojson);
+        return { key, geojson };
+      } catch {
+        return { key, geojson: null };
+      }
+    }, ([key]) => ({ key, geojson: null }));
+    for (const { key, geojson } of fetched) if (geojson) cached.set(key, geojson);
+    return { legs: pairs.map(({ from, to }) => ({
+      fromId: from.id, toId: to.id,
+      geojson: located(from) && located(to) ? cached.get(transitLegKey(from, to)) ?? null : null,
+    })) };
   }
 
   async applyOrder(

@@ -40,7 +40,11 @@ const coordinates: Record<string, google.maps.LatLngLiteral> = {
   b: { lat: 35.02, lng: 135.81 },
 };
 
-function route(order: DayRouteOrder, ids = order === "suggested" ? ["b", "a"] : ["a", "b"]): DayRouteDto {
+function route(
+  order: DayRouteOrder,
+  ids = order === "suggested" ? ["b", "a"] : ["a", "b"],
+  routeShapesAvailable = false,
+): DayRouteDto {
   return {
     dayId: "day-1",
     date: "2026-10-21",
@@ -56,9 +60,19 @@ function route(order: DayRouteOrder, ids = order === "suggested" ? ["b", "a"] : 
       longitude: coordinates[tripPlaceId]!.lng,
       providerPlaceId: null,
       metersFromPrevious: index === 0 ? null : 1_000,
+      minutesFromPrevious: null,
+      linesFromPrevious: [],
     })),
     metersToEnd: null,
     totalMeters: 1_000,
+    travelSource: "straight_line",
+    routeShapesAvailable,
+    minutesToEnd: null,
+    linesToEnd: [],
+    totalMinutes: null,
+    transitMatrix: [],
+    transitCallsNeeded: 0,
+    transitCacheDays: null,
   };
 }
 
@@ -106,8 +120,17 @@ afterEach(() => {
 });
 
 describe("day-plan map overlays", () => {
-  it("replaces the polyline path when a pending route update settles without reserving another map", async () => {
-    const custom = deferred<{ route: DayRouteDto }>();
+  it("draws only provider route shapes and never a straight endpoint polyline", async () => {
+    const shapes = deferred<{
+      legs: Array<{ fromId: string; toId: string; geojson: {
+        type: "FeatureCollection";
+        features: Array<{
+          type: "Feature";
+          geometry: { type: "LineString"; coordinates: [number, number][] };
+          properties: { ways: "transport"; inline: { color: string } };
+        }>;
+      } }>;
+    }>();
     let mapLoads = 0;
     const request = async <T,>(url: string, options?: RequestInit): Promise<T> => {
       if (url === "/api/maps/config") return { browserKey: "key", mapId: "map-id" } as T;
@@ -115,23 +138,41 @@ describe("day-plan map overlays", () => {
         mapLoads += 1;
         return undefined as T;
       }
-      const input = JSON.parse(String(options?.body)) as { order: DayRouteOrder; orderedTripPlaceIds?: string[] };
-      if (input.order === "custom") return await custom.promise as T;
-      return { route: route(input.order) } as T;
+      if (url.endsWith("/route-shapes")) return await shapes.promise as T;
+      const input = JSON.parse(String(options?.body)) as { order: DayRouteOrder };
+      return { route: route(input.order, undefined, input.order === "suggested") } as T;
     };
-    renderDialog(request);
+    const { unmount } = renderDialog(request);
     const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
-    fireEvent.keyDown(within(candidate).getByRole("button", { name: /拖曳「地點 b」/ }), { key: "ArrowDown" });
     fireEvent.click(within(candidate).getByRole("tab", { name: "Google Map" }));
 
-    await waitFor(() => expect(polylines).toHaveLength(1));
-    expect(polylines[0]!.path).toEqual([coordinates.b, coordinates.a]);
-    act(() => custom.resolve({ route: route("custom", ["a", "b"]) }));
+    expect(await within(candidate).findByText("正在取得實際交通與步行路線…")).toBeInTheDocument();
+    expect(polylines).toHaveLength(0);
 
-    await waitFor(() => expect(polylines).toHaveLength(2));
-    expect(polylines[0]!.setMap).toHaveBeenCalledWith(null);
-    expect(polylines[1]!.path).toEqual([coordinates.a, coordinates.b]);
+    const providerPath: [number, number][] = [
+      [coordinates.b!.lng, coordinates.b!.lat],
+      [135.9, 35.1],
+      [coordinates.a!.lng, coordinates.a!.lat],
+    ];
+    act(() => shapes.resolve({ legs: [{
+      fromId: "b",
+      toId: "a",
+      geojson: {
+        type: "FeatureCollection",
+        features: [{
+          type: "Feature",
+          geometry: { type: "LineString", coordinates: providerPath },
+          properties: { ways: "transport", inline: { color: "#123456" } },
+        }],
+      },
+    }] }));
+
+    await waitFor(() => expect(polylines).toHaveLength(1));
+    expect(polylines[0]!.path).toEqual(providerPath.map(([lng, lat]) => ({ lat, lng })));
+    expect(polylines[0]!.path).not.toEqual([coordinates.b, coordinates.a]);
     expect(mapLoads).toBe(1);
+    unmount();
+    expect(polylines[0]!.setMap).toHaveBeenCalledWith(null);
   });
 
   it("fits bounds again when a map loaded in a hidden mobile column is revealed", async () => {

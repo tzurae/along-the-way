@@ -2624,41 +2624,76 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       expect((await readSkeleton(ownerCookie, trip.id)).days[0]).toMatchObject({ title: null, detailsVersion: 1, alternativesVersion: 1 });
     });
 
-    it("keeps 口袋名單 places as a day's 備案 without making them stops, and drops removed places", async () => {
+    it("accepts a 待安排 place as 備案, rejects scheduled places, and drops removed places", async () => {
       const cookie = await login();
       const trip = await createTrip(cookie);
       const [first, second] = (await readSkeleton(cookie, trip.id)).days;
       const steak = await addPocketPlace(cookie, trip.id, "alt-steak", "牛排店");
       const ramen = await addPocketPlace(cookie, trip.id, "alt-ramen", "拉麵店");
       const planned = await addPocketPlace(cookie, trip.id, "alt-planned", "原本的午餐");
+      const pending = await addPocketPlace(cookie, trip.id, "alt-pending", "AI 待安排餐廳");
+      const scheduled = await addPocketPlace(cookie, trip.id, "alt-scheduled", "已排時間餐廳");
+      await database.updateTable("trip_places").set({ selected_for_itinerary: true })
+        .where("trip_id", "=", trip.id).where("id", "=", pending.id).execute();
+      await seedItem(trip.members[0]!.userId, trip.id, {
+        type: "activity",
+        title: "已排時間餐廳",
+        participantMemberIds: null,
+        endpoints: [{
+          role: "start",
+          countryStopId: trip.countryStops[0]!.id,
+          placeId: scheduled.legacyPlaceId!,
+          localDateTime: "2026-10-21T12:00",
+          timeZone: "Asia/Tokyo",
+        }],
+        details: { durationMinutes: 60, bookedBy: null, confirmationStatus: null },
+        constraints: [],
+      });
       const assigned = await mutate(cookie, `/api/trips/${trip.id}/trip-place-day-assignments`, "alt-assign", {
         assignments: [{ tripPlaceId: planned.id, tripDayId: first!.id, expectedVersion: planned.version }],
       }, "PUT");
       expect(assigned.status, await assigned.clone().text()).toBe(200);
 
       const path = `/api/trips/${trip.id}/days/${first!.id}/alternatives`;
-      // A place already on a day is a stop, not a backup.
-      const refused = await mutate(cookie, path, "alt-planned-refused", { expectedVersion: 1, tripPlaceIds: [planned.id] }, "PUT");
-      expect(refused.status).toBe(400);
-      const saved = await mutate(cookie, path, "alt-save", { expectedVersion: 1, tripPlaceIds: [ramen.id, steak.id] }, "PUT");
+      const assignedRefused = await mutate(cookie, path, "alt-planned-refused",
+        { expectedVersion: 1, tripPlaceIds: [planned.id] }, "PUT");
+      expect(assignedRefused.status).toBe(400);
+      const scheduledRefused = await mutate(cookie, path, "alt-scheduled-refused",
+        { expectedVersion: 1, tripPlaceIds: [scheduled.id] }, "PUT");
+      expect(scheduledRefused.status).toBe(400);
+      const saved = await mutate(cookie, path, "alt-save",
+        { expectedVersion: 1, tripPlaceIds: [pending.id, ramen.id, steak.id] }, "PUT");
       expect(saved.status, await saved.clone().text()).toBe(200);
-      expect((await saved.json()).day).toEqual({ id: first!.id, alternativeTripPlaceIds: [ramen.id, steak.id], alternativesVersion: 2 });
+      expect((await saved.json()).day).toEqual({
+        id: first!.id,
+        alternativeTripPlaceIds: [pending.id, ramen.id, steak.id],
+        alternativesVersion: 2,
+      });
       const stale = await mutate(cookie, path, "alt-stale", { expectedVersion: 1, tripPlaceIds: [] }, "PUT");
       expect(stale.status).toBe(409);
 
       const skeleton = await readSkeleton(cookie, trip.id);
-      expect(skeleton.days.find((day) => day.id === first!.id)).toMatchObject({ alternativeTripPlaceIds: [ramen.id, steak.id], alternativesVersion: 2 });
+      expect(skeleton.days.find((day) => day.id === first!.id)).toMatchObject({
+        alternativeTripPlaceIds: [pending.id, ramen.id, steak.id],
+        alternativesVersion: 2,
+      });
       expect(skeleton.days.find((day) => day.id === second!.id)).toMatchObject({ alternativeTripPlaceIds: [], alternativesVersion: 1 });
       const places = parseTripPlaceListResponse(await (await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } })).json()).tripPlaces;
-      // Backups stay in 口袋名單: not chosen for the itinerary, on no day.
+      // Backups stay off a day; an accepted AI place may remain selected while it is 待安排.
       for (const id of [ramen.id, steak.id]) {
         expect(places.find((place) => place.id === id)).toMatchObject({ selectedForItinerary: false, assignedDayId: null });
       }
+      expect(places.find((place) => place.id === pending.id)).toMatchObject({
+        selectedForItinerary: true,
+        assignedDayId: null,
+        scheduled: false,
+      });
 
       const ramenNow = places.find((place) => place.id === ramen.id)!;
       const removed = await mutate(cookie, `/api/trips/${trip.id}/trip-places/${ramen.id}/remove`, "alt-remove-ramen", { expectedVersion: ramenNow.version });
       expect(removed.status, await removed.clone().text()).toBe(204);
-      expect((await readSkeleton(cookie, trip.id)).days.find((day) => day.id === first!.id)!.alternativeTripPlaceIds).toEqual([steak.id]);
+      expect((await readSkeleton(cookie, trip.id)).days.find((day) => day.id === first!.id)!.alternativeTripPlaceIds)
+        .toEqual([pending.id, steak.id]);
     });
   });
 

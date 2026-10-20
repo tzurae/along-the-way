@@ -479,7 +479,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       expect(header).toContain("HttpOnly");
       expect(header).toContain("Secure");
       expect(header).toContain("SameSite=Lax");
-      expect(header).toContain("Max-Age=900");
+      expect(header).toContain("Max-Age=604800");
       expect(header).not.toContain("Domain=");
     }
     const token = linkToken(email.magicLinks.at(-1)!.url, "magicToken")!;
@@ -541,17 +541,34 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     expect(await response.json()).toMatchObject({ error: { code: "revoked_magic_link" } });
   });
 
-  it("SEC-01 expires codes and rate-limits code guesses", async () => {
-    const requested = await requestMagicLink("owner@example.test");
-    const message = email.magicLinks.at(-1)!;
-    now = new Date(now.valueOf() + 15 * 60 * 1_000);
-    expect((await authPost("/api/auth/magic-links/verify-code", { email: message.to, code: message.code }, cookieFrom(requested))).status).toBe(400);
-    for (let attempt = 0; attempt < 9; attempt += 1) {
-      expect((await authPost("/api/auth/magic-links/verify-code", { email: message.to, code: "000000" })).status).toBe(400);
+  it("SEC-01 keeps magic links valid through 6 days 23 hours and expires them after 7 days", async () => {
+    const validRequest = await requestMagicLink("owner@example.test");
+    const validMessage = email.magicLinks.at(-1)!;
+    const expiredRequest = await requestMagicLink("owner@example.test");
+    const expiredMessage = email.magicLinks.at(-1)!;
+
+    now = new Date(now.valueOf() + (6 * 24 + 23) * 60 * 60 * 1_000);
+    const validToken = linkToken(validMessage.url, "magicToken")!;
+    expect((await authPost("/api/auth/magic-links/consume", { token: validToken }, cookieFrom(validRequest))).status).toBe(200);
+
+    now = new Date(now.valueOf() + 60 * 60 * 1_000 + 1);
+    const expiredToken = linkToken(expiredMessage.url, "magicToken")!;
+    expect((await authPost("/api/auth/magic-links/consume", { token: expiredToken }, cookieFrom(expiredRequest))).status).toBe(400);
+    expect((await authPost("/api/auth/magic-links/verify-code", {
+      email: expiredMessage.to,
+      code: expiredMessage.code,
+    }, cookieFrom(expiredRequest))).status).toBe(400);
+  });
+
+  it("SEC-01 rate-limits code guesses", async () => {
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      const response = await authPost("/api/auth/magic-links/verify-code", {
+        email: "owner@example.test",
+        code: "000000",
+      });
+      expect(response.status).toBe(attempt === 10 ? 429 : 400);
+      if (attempt === 10) expect(response.headers.get("retry-after")).toBeTruthy();
     }
-    const limited = await authPost("/api/auth/magic-links/verify-code", { email: message.to, code: "000000" });
-    expect(limited.status).toBe(429);
-    expect(limited.headers.get("retry-after")).toBeTruthy();
   });
 
   it("SEC-02 keeps invited users inactive until an invite-linked sign-in accepts membership", async () => {
@@ -854,10 +871,10 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       expect(job.attempt_count).toBe(0);
     }
     now = new Date("2026-09-30T00:00:00Z");
-    while (await emailWorker.runOnce()) { /* Expired magic links are skipped; live invitations remain deliverable. */ }
+    while (await emailWorker.runOnce()) { /* Live magic links and invitations remain deliverable. */ }
     expect(email.invites).toHaveLength(301);
     expect(email.invites.at(-1)!.to).toBe("today-recipient@example.test");
-    expect(email.magicLinks).toHaveLength(1);
+    expect(email.magicLinks).toHaveLength(2);
   }, 60_000);
 
   it.each([
@@ -1134,7 +1151,7 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
       email.magicLinks.at(-1)!.url,
       "magicToken",
     )!;
-    now = new Date("2026-10-11T12:16:00.000Z");
+    now = new Date("2026-10-18T12:00:00.001Z");
     const expired = await app.request("/api/auth/magic-links/consume", {
       method: "POST",
       headers: {

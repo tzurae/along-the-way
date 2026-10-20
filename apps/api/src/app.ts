@@ -495,7 +495,7 @@ export function createApp({
   function loginNonce(context: Context) {
     const nonce = randomBytes(32).toString("base64url");
     setCookie(context, LOGIN_NONCE_COOKIE, nonce, {
-      httpOnly: true, secure: secureCookie, sameSite: "Lax", path: "/", maxAge: 15 * 60,
+      httpOnly: true, secure: secureCookie, sameSite: "Lax", path: "/", maxAge: 7 * 24 * 60 * 60,
     });
     return nonce;
   }
@@ -1240,6 +1240,50 @@ export function createApp({
     );
   });
 
+  app.post("/api/trips/:tripId/days/:dayId/trip-places/:tripPlaceId/nearby-alternatives", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    context.header("Cache-Control", "private, no-store");
+    return context.json(await withPaidProviderIdentity(context, user.id, () => tripPlaces.nearbyAlternatives(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "dayId"),
+      uuidParam(context, "tripPlaceId"),
+    )));
+  });
+
+  app.post("/api/trips/:tripId/days/:dayId/trip-places/:tripPlaceId/replacement", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const tripPlacesResult = await withPaidProviderIdentity(context, user.id, () => tripPlaces.replaceStop(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "dayId"),
+      uuidParam(context, "tripPlaceId"),
+      idempotencyKey(context),
+      {
+        expectedDayVersion: numberField(body, "expectedDayVersion"),
+        providerPlaceId: stringField(body, "providerPlaceId"),
+      },
+    ));
+    return context.json({ tripPlaces: tripPlacesResult });
+  });
+
+  app.post("/api/trips/:tripId/stop-replacements/:replacementId/undo", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    await jsonBody(context);
+    return context.json({
+      tripPlaces: await tripPlaces.undoStopReplacement(
+        user.id,
+        uuidParam(context, "tripId"),
+        uuidParam(context, "replacementId"),
+        idempotencyKey(context),
+      ),
+    });
+  });
+
   app.post("/api/trips/:tripId/trip-places/resolve-url", async (context) => {
     const { user } = await authenticated(context);
     await rateLimiter.consume("trip_content", clientIp(context), user.id);
@@ -1455,20 +1499,36 @@ export function createApp({
     async (context) => {
       const { user } = await authenticated(context);
       const body = await jsonBody(context);
-      const route = await dayPlans.route(
+      const route = await withPaidProviderIdentity(context, user.id, () => dayPlans.route(
         user.id,
         uuidParam(context, "tripId"),
         uuidParam(context, "dayId"),
         {
           order: stringField(body, "order") as CreateDayRouteInput["order"],
+          ...(body.transit === undefined ? {} : { transit: stringField(body, "transit") as CreateDayRouteInput["transit"] }),
+          ...(body.maxTransitCalls === undefined ? {} : { maxTransitCalls: numberField(body, "maxTransitCalls") }),
           ...(body.orderedTripPlaceIds === undefined
             ? {}
             : { orderedTripPlaceIds: stringArrayField(body, "orderedTripPlaceIds") }),
         },
-      );
+      ));
+      context.header("Cache-Control", "private, no-store");
       return context.json({ route });
     },
   );
+
+  app.post("/api/trips/:tripId/days/:dayId/route-shapes", async (context) => {
+    const { user } = await authenticated(context);
+    const body = await jsonBody(context);
+    const shapes = await withPaidProviderIdentity(context, user.id, () => dayPlans.routeShapes(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "dayId"),
+      stringArrayField(body, "orderedTripPlaceIds"),
+    ));
+    context.header("Cache-Control", "private, no-store");
+    return context.json(shapes);
+  });
 
   app.put("/api/trips/:tripId/days/:dayId/arrangement", async (context) => {
     const { user } = await authenticated(context);
@@ -1876,6 +1936,7 @@ export function createApp({
               : { currentVersion: error.currentVersion }),
             ...(latestChange === undefined ? {} : { latestChange }),
             ...(error.changedEntityIds === undefined ? {} : { changedEntityIds: error.changedEntityIds }),
+            ...(error.transitCallsNeeded === undefined ? {} : { transitCallsNeeded: error.transitCallsNeeded }),
           },
         },
         error.status,

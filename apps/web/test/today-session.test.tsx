@@ -140,7 +140,9 @@ beforeEach(() => {
       return reply({ error: { code: "forbidden", message: "server copy" } }, 403);
     }
     if (input.endsWith("/route") && init?.method === "POST") {
-      const order = JSON.parse(String(init.body)).order as "current" | "suggested";
+      const routeInput = JSON.parse(String(init.body)) as { order: "current" | "suggested"; transit?: string };
+      const order = routeInput.order;
+      expect(routeInput).toEqual(order === "suggested" ? { order: "suggested", transit: "cached" } : { order: "current" });
       const orderedTripPlaceIds = order === "suggested" ? ["SECOND", "FIRST"] : ["FIRST", "SECOND"];
       const wishlist = todayWishlist();
       return reply({ route: {
@@ -160,10 +162,20 @@ beforeEach(() => {
             longitude: place.longitude,
             providerPlaceId: place.providerPlaceId,
             metersFromPrevious: index === 0 ? null : 100,
+            minutesFromPrevious: null,
+            linesFromPrevious: [],
           };
         }),
         metersToEnd: null,
         totalMeters: order === "suggested" ? 100 : 200,
+        travelSource: "straight_line",
+        routeShapesAvailable: false,
+        minutesToEnd: null,
+        linesToEnd: [],
+        totalMinutes: null,
+        transitMatrix: [],
+        transitCallsNeeded: 0,
+        transitCacheDays: null,
       } });
     }
     if (input.endsWith("/place-order") && init?.method === "PUT") {
@@ -824,10 +836,10 @@ it("queues offline logout for the current account and replays that target after 
 
 it("still sends online logout when durable pending storage is full", async () => {
   await mount();
-  const setItem = Storage.prototype.setItem;
-  vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+  const setItem = localStorage.setItem.bind(localStorage);
+  const storageWrite = vi.spyOn(localStorage, "setItem").mockImplementation((key, value) => {
     if (key === "along-the-way:pending-server-logout") throw new DOMException("Storage full", "QuotaExceededError");
-    setItem.call(this, key, value);
+    setItem(key, value);
   });
 
   await click(document.querySelector<HTMLButtonElement>(".atw-account-trigger")!);
@@ -835,6 +847,8 @@ it("still sends online logout when durable pending storage is full", async () =>
 
   await waitFor(() => expect(button("寄送登入連結")).toBeInTheDocument());
   expect(logoutBodies).toEqual([{ userId: todayUser.id }]);
+  expect(storageWrite).toHaveBeenCalledWith("along-the-way:pending-server-logout", todayUser.id);
+  storageWrite.mockRestore();
 });
 
 it("drops a deferred target mismatch without signing out the newer account", async () => {

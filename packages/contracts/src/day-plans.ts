@@ -1,6 +1,6 @@
 import { isRecord } from "./type-guards";
 
-/** `current` the day's saved order, `suggested` the shortest straight-line order, `custom` one a member arranged. */
+/** `current` is saved order, `suggested` minimizes travel cost, `custom` is member-arranged. */
 export type DayRouteOrder = "current" | "suggested" | "custom";
 
 /** Same bound as the arrangement writer, so an existing large day remains reorderable. */
@@ -8,6 +8,10 @@ export const MAX_DAY_ROUTE_STOPS = 100;
 
 export interface CreateDayRouteInput {
   order: DayRouteOrder;
+  /** Only suggested may fetch missing transit data; omitted means cached, never a paid call. */
+  transit?: "cached" | "fetch";
+  /** Required with transit=fetch: the maximum number of paid calls shown on the pressed button. */
+  maxTransitCalls?: number;
   /** Only with `custom`: this day's places in the wanted order, each once. Omitting one previews taking it off the day. */
   orderedTripPlaceIds?: string[];
 }
@@ -31,6 +35,9 @@ export interface DayRouteStopDto {
   providerPlaceId: string | null;
   /** Straight-line metres (rounded integer) from the previous point (startsAt lodging, else previous stop); null when either point lacks coordinates or there is no previous point. */
   metersFromPrevious: number | null;
+  minutesFromPrevious: number | null;
+  /** Empty for a walk-only leg. */
+  linesFromPrevious: string[];
 }
 
 export interface DayRouteDto {
@@ -50,10 +57,49 @@ export interface DayRouteDto {
   metersToEnd: number | null;
   /** Sum of all non-null legs including metersToEnd. */
   totalMeters: number;
+  travelSource: "navitime" | "straight_line";
+  travelNotice?: "navitime_quota" | "navitime_unavailable";
+  /** Provider is configured and the day's country stop is JP, independently of matrix success. */
+  routeShapesAvailable: boolean;
+  minutesToEnd: number | null;
+  linesToEnd: string[];
+  totalMinutes: number | null;
+  transitMatrix: TransitMatrixEntry[];
+  /** Missing/stale unique coordinate pairs in the day's suggestion matrix. */
+  transitCallsNeeded: number;
+  /** Fresh cached minutes cover the matrix; the value is the cache validity window in days. */
+  transitCacheDays: number | null;
 }
 
 export interface DayRouteResponse {
   route: DayRouteDto;
+}
+
+export interface TransitMatrixEntry {
+  fromId: string;
+  toId: string;
+  /** Null only when parsing an older response; such an entry cannot supply travel minutes. */
+  fromLatitude: number | null;
+  fromLongitude: number | null;
+  toLatitude: number | null;
+  toLongitude: number | null;
+  minutes: number;
+  lines: string[];
+}
+
+export interface TransitGeoJson {
+  type: "FeatureCollection";
+  features: {
+    type: "Feature";
+    geometry:
+      | { type: "LineString"; coordinates: [number, number][] }
+      | { type: "MultiLineString"; coordinates: [number, number][][] };
+    properties: { ways: "walk" | "transport"; inline: { color: string | null } };
+  }[];
+}
+
+export interface DayRouteShapesResponse {
+  legs: { fromId: string; toId: string; geojson: TransitGeoJson | null }[];
 }
 
 function invalid(): never {
@@ -105,6 +151,8 @@ function stop(value: unknown): DayRouteStopDto {
     longitude: nullableNumber(entry.longitude),
     providerPlaceId: nullableText(entry.providerPlaceId),
     metersFromPrevious: nullableInteger(entry.metersFromPrevious),
+    minutesFromPrevious: nullableInteger(entry.minutesFromPrevious ?? null),
+    linesFromPrevious: texts(entry.linesFromPrevious ?? []),
   };
 }
 
@@ -127,9 +175,121 @@ function route(value: unknown): DayRouteDto {
     stops: Array.isArray(entry.stops) ? entry.stops.map(stop) : invalid(),
     metersToEnd: nullableInteger(entry.metersToEnd),
     totalMeters: integer(entry.totalMeters),
+    travelSource: entry.travelSource === undefined || entry.travelSource === "straight_line"
+      ? "straight_line" : entry.travelSource === "navitime" ? "navitime" : invalid(),
+    ...(entry.travelNotice === undefined ? {} : {
+      travelNotice: entry.travelNotice === "navitime_quota" || entry.travelNotice === "navitime_unavailable"
+        ? entry.travelNotice : invalid(),
+    }),
+    routeShapesAvailable: entry.routeShapesAvailable === undefined ? false
+      : typeof entry.routeShapesAvailable === "boolean" ? entry.routeShapesAvailable : invalid(),
+    minutesToEnd: nullableInteger(entry.minutesToEnd ?? null),
+    linesToEnd: texts(entry.linesToEnd ?? []),
+    totalMinutes: nullableInteger(entry.totalMinutes ?? null),
+    transitCallsNeeded: integer(entry.transitCallsNeeded ?? 0),
+    transitCacheDays: nullableInteger(entry.transitCacheDays ?? null),
+    transitMatrix: entry.transitMatrix === undefined ? [] : Array.isArray(entry.transitMatrix)
+      ? entry.transitMatrix.map((value) => {
+        const leg = record(value);
+        return {
+          fromId: text(leg.fromId), toId: text(leg.toId), minutes: integer(leg.minutes), lines: texts(leg.lines),
+          fromLatitude: nullableNumber(leg.fromLatitude ?? null),
+          fromLongitude: nullableNumber(leg.fromLongitude ?? null),
+          toLatitude: nullableNumber(leg.toLatitude ?? null),
+          toLongitude: nullableNumber(leg.toLongitude ?? null),
+        };
+      }) : invalid(),
   };
 }
 
 export function parseDayRouteResponse(value: unknown): DayRouteResponse {
   return { route: route(record(value).route) };
+}
+
+function texts(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(text) : invalid();
+}
+
+/** Reordering checks the coordinate snapshot; persistent provider caching belongs to the API. */
+export function withTransitMatrix(route: DayRouteDto, matrix: TransitMatrixEntry[]): DayRouteDto {
+  const points = new Map<string, { latitude: number | null; longitude: number | null }>(
+    route.stops.map((stop) => [stop.tripPlaceId, stop]),
+  );
+  if (route.startsAt) points.set(route.startsAt.placeId, route.startsAt);
+  if (route.endsAt) points.set(route.endsAt.placeId, route.endsAt);
+  const byFrom = new Map<string, Map<string, TransitMatrixEntry>>();
+  for (const leg of matrix) {
+    const from = points.get(leg.fromId);
+    const to = points.get(leg.toId);
+    if (!from || !to || from.latitude === null || from.longitude === null || to.latitude === null || to.longitude === null
+      || from.latitude !== leg.fromLatitude || from.longitude !== leg.fromLongitude
+      || to.latitude !== leg.toLatitude || to.longitude !== leg.toLongitude) continue;
+    if (!byFrom.has(leg.fromId)) byFrom.set(leg.fromId, new Map());
+    byFrom.get(leg.fromId)!.set(leg.toId, leg);
+  }
+  let total = 0;
+  let complete = true;
+  const stops = route.stops.map((stop, index) => {
+    const from = index === 0 ? route.startsAt?.placeId : route.stops[index - 1]!.tripPlaceId;
+    const leg = from ? byFrom.get(from)?.get(stop.tripPlaceId) : undefined;
+    if (from && !leg) complete = false;
+    total += leg?.minutes ?? 0;
+    return { ...stop, minutesFromPrevious: leg?.minutes ?? null, linesFromPrevious: leg?.lines ?? [] };
+  });
+  const last = stops.at(-1);
+  const end = last && route.endsAt ? byFrom.get(last.tripPlaceId)?.get(route.endsAt.placeId) : undefined;
+  if (last && route.endsAt && !end) complete = false;
+  total += end?.minutes ?? 0;
+  return {
+    ...route, stops, travelSource: "navitime", transitMatrix: matrix,
+    minutesToEnd: end?.minutes ?? null, linesToEnd: end?.lines ?? [],
+    totalMinutes: complete ? total : null,
+  };
+}
+
+export function parseTransitGeoJson(value: unknown): TransitGeoJson {
+  const collection = record(value);
+  if (collection.type !== "FeatureCollection" || !Array.isArray(collection.features)) return invalid();
+  const position = (value: unknown): [number, number] => {
+    if (!Array.isArray(value) || value.length < 2) return invalid();
+    const [longitude, latitude] = value;
+    if (typeof longitude !== "number" || !Number.isFinite(longitude) || Math.abs(longitude) > 180
+      || typeof latitude !== "number" || !Number.isFinite(latitude) || Math.abs(latitude) > 90) return invalid();
+    return [longitude, latitude];
+  };
+  const line = (value: unknown) => Array.isArray(value) && value.length >= 2 ? value.map(position) : invalid();
+  const features: TransitGeoJson["features"] = [];
+  for (const value of collection.features) {
+    const feature = record(value);
+    if (feature.type !== "Feature") return invalid();
+    const geometry = record(feature.geometry);
+    if (geometry.type !== "LineString" && geometry.type !== "MultiLineString") continue;
+    const properties = record(feature.properties);
+    if (properties.ways !== "walk" && properties.ways !== "transport") return invalid();
+    const inline = properties.inline == null ? {} : record(properties.inline);
+    features.push({
+      type: "Feature",
+      geometry: geometry.type === "LineString"
+        ? { type: "LineString", coordinates: line(geometry.coordinates) }
+        : { type: "MultiLineString", coordinates: Array.isArray(geometry.coordinates) ? geometry.coordinates.map(line) : invalid() },
+      properties: {
+        ways: properties.ways,
+        inline: { color: typeof inline.color === "string" && /^#[0-9a-f]{6}$/i.test(inline.color) ? inline.color : null },
+      },
+    });
+  }
+  if (features.length === 0) return invalid();
+  return { type: "FeatureCollection", features };
+}
+
+export function parseDayRouteShapesResponse(value: unknown): DayRouteShapesResponse {
+  const entry = record(value);
+  if (!Array.isArray(entry.legs)) return invalid();
+  return { legs: entry.legs.map((value) => {
+    const leg = record(value);
+    return {
+      fromId: text(leg.fromId), toId: text(leg.toId),
+      geojson: leg.geojson === null ? null : parseTransitGeoJson(leg.geojson),
+    };
+  }) };
 }

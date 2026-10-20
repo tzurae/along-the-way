@@ -86,6 +86,7 @@ jobs:
           GCP_MONITORING_CREDENTIALS: ${{ secrets.STAGING_GCP_MONITORING_CREDENTIALS }}
           OPENAI_API_KEY: ${{ secrets.STAGING_OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.STAGING_OPENAI_MODEL }}
+          RAPIDAPI_KEY: ${{ secrets.STAGING_RAPIDAPI_KEY }}
         run: |
           site_address="$CONFIGURED_SITE_ADDRESS"
           if [ -z "$site_address" ]; then
@@ -145,6 +146,7 @@ jobs:
             printf 'GCP_MONITORING_CREDENTIALS_HOST_FILE=%s\n' "$gcp_monitoring_host_file"
             printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY"
             printf 'OPENAI_MODEL=%s\n' "$OPENAI_MODEL"
+            printf 'RAPIDAPI_KEY=%s\n' "$RAPIDAPI_KEY"
             printf 'RELEASE_IMAGE_TAG=%s\n' "$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           } >"$RUNNER_TEMP/along-the-way.env"
 

@@ -42,7 +42,7 @@ SameSite=Lax and Path=/, without Domain. Local HTTP uses `along_the_way_session`
 the old unprefixed cookie is not accepted on HTTPS, so existing users sign in again.
 Startup rejects non-HTTPS `SITE_ADDRESS` values except HTTP on `localhost`,
 `127.0.0.1` or `::1`; the local Compose address `http://localhost` remains allowed.
-Both magic-link request routes always set a 15-minute HttpOnly login-nonce cookie
+Both magic-link request routes always set a 7-day HttpOnly login-nonce cookie
 (`__Host-along_the_way_login_nonce` on HTTPS), including unknown recipients.
 Only its SHA-256 hash is stored with the link. A matching browser signs in directly;
 a foreign browser or a switch from a different signed-in account receives
@@ -52,7 +52,7 @@ masked). The link remains unused until the user explicitly resubmits
 
 The email also contains a 6-digit one-time code. `POST /api/auth/magic-links/verify-code`
 accepts `{email, code}` only with the matching login-nonce cookie. Link and code
-share a 15-minute expiry and one successful use; five wrong codes revoke both.
+share a 7-day expiry and one successful use; five wrong codes revoke both.
 Code attempts are limited to 10 per normalized address and 30 per IP per 15 minutes.
 The sign-in screen supports code entry and an explicit account-switch confirmation.
 Email addresses are NFKC-normalized, trimmed and lowercased, and only one plain
@@ -221,6 +221,35 @@ field only) and updates `place_identities`, provider-backed `trip_places`/`place
 and `candidate_proposals`. Places Google returns without a type are skipped.
 A pre-0.9.0 build rejects the new categories when it reads them.
 
+### Per-stop nearby alternatives (migration 044)
+
+On 行程, 「選備案」 is available to schedulers for untimed day places with coordinates,
+except lodging/station/airport/other. Nearby Search requests a 1000 m circle, POPULARITY,
+up to 20 results and zh-TW (the trip's single-country region when available). The server
+keeps the same mapped place type, excludes the original and already assigned/scheduled
+trip places, sorts by Google rating then review count (null ratings last), and returns eight.
+The [Google Table A types](https://developers.google.com/maps/documentation/places/web-service/place-types#table-a)
+are an explicit whitelist, not an inverse of every category-mapping rule.
+Distance is rounded straight-line metres. Ratings and review counts are live only:
+never database fields, mutation replay payloads or Today snapshots.
+
+- `POST /api/trips/:tripId/days/:dayId/trip-places/:tripPlaceId/nearby-alternatives`
+  returns candidates plus `dayVersion`; uses the existing Google budget and photo proxy.
+- `POST /api/trips/:tripId/days/:dayId/trip-places/:tripPlaceId/replacement`
+  takes `{ expectedDayVersion, providerPlaceId }` and an `Idempotency-Key`.
+- `POST /api/trips/:tripId/stop-replacements/:replacementId/undo`
+  takes `{}` and an `Idempotency-Key`.
+
+Replace/undo atomically write desired days (migration 007 derives assignments), preserve
+the stop's slot, and return the displaced place to Pocket, not 待安排. A chain retains the
+root original; 「改回」 restores that root into the current replacement's slot. An active
+`replacedStop` is projected only while its replacement remains on the relation's day;
+moving, scheduling or archiving it prevents undo. Mutations return the current trip-place
+list, record collaboration events and replay by readback marker. Stale versions or occupied
+candidates return 409; Google quota/unavailability return 503 without replacing the stop.
+Offline members and members without scheduling permission see no replacement actions.
+
+
 ### Commons photo backfill (#149)
 
 Run `DATABASE_URL=... bun apps/api/src/database/backfill-commons-photos.ts`
@@ -356,33 +385,112 @@ is the [place-details/photo specification](docs/superpowers/specs/2026-10-09-pla
 
 ## Day route ordering
 
-「幫我排順路」 is a distance-only draft. It does not calculate clock times,
-travel times, opening-hours waits, capacity, fit, luggage feasibility, or a
-return time. There are no travel-mode or per-day-hours settings.
+「幫我排順路」會先產生草稿，只有按下儲存才改動行程。開啟 dialog **不呼叫 NAVITIME**；
+右側建議先讀七天內的逐段快取，足夠時直接依真實大眾運輸／步行時間排序，不足時先顯示直線建議。
+左側「已儲存」一直只有直線距離，不顯示交通分鐘，也不查詢或畫出 NAVITIME shapes。
+不計算停留、營業時間等待、行程容量、行李可行性或實際到站時間表。
 
 `POST /api/trips/:tripId/days/:dayId/route` accepts:
 
 ```json
 {
-  "order": "current | suggested | custom",
-  "orderedTripPlaceIds": ["custom-candidate-place-id"],
-  "insertTripPlaceId": "optional-unassigned-place-id"
+  "order": "suggested",
+  "transit": "cached"
 }
 ```
 
-`current` keeps the saved day order. `suggested` uses straight-line distance
-and the day's lodging anchor. `custom` previews the complete candidate list:
-omitting a current-day place previews its removal, and including an unassigned
-place previews its addition. `insertTripPlaceId` asks the server to put one
-additional unassigned place where it adds the least straight-line distance.
-Drafts contain at most 100 stops. Located places are ordered first; places
-without coordinates are appended in saved order.
+`current`（已儲存）保留原順序；`custom` 只接受當天的地點 ID，省略代表預覽移除。
+這兩種請求不呼叫 NAVITIME。地點上限為 100，缺座標的地點仍放在有座標地點之後，
+前一晚住宿作為起點、當晚住宿作為終點，沒有住宿或座標時不憑空補點。
+`suggested` 的 `transit` 可為 `cached` 或 `fetch`，省略時預設 `cached`，不會自動付費查詢。
+`cached` 只有在完整有向矩陣的分鐘資料都有效時回傳交通建議；否則回傳原直線建議與
+`transitCallsNeeded`（缺少／過期的唯一座標配對數）。右側顯示
+「用電車時間排（約 N 次額度）」，只有按下才送 `transit: "fetch"` 與 `maxTransitCalls: N`，
+並且只查缺少的路段。`maxTransitCalls` 在 fetch 請求中必填，必須是非負整數；其他模式不能帶入。
+伺服器重新計算 missing/stale 唯一配對，若比按鈕上的 N 更多，**不呼叫供應商**，
+回 `409`、`error.code: "transit_calls_changed"` 與 `error.transitCallsNeeded`（目前需要的次數）。
+這個拒絕不會被包成一般直線 fallback；前端只重讀 cached suggestion，更新按鈕並提示
+「行程剛變動，需要的額度變成約 N 次，請再按一次。」，不自動重送 fetch。
+查詢中按鈕停用、顯示「查詢中…」與既有 skeleton；快取完整時不顯示按鈕，改顯示
+「行程沒變，使用 7 天內查過的交通時間」。`custom` 只讀既有快取，不呼叫供應商；
+缺資料仍顯示「估計」。若先移除地點再按交通排序，仍保留移除，只調整剩下的候選順序。
 
-The response contains the day ID/date/version, the requested order, ordered
-place IDs, morning and night lodging references, per-stop rounded metres from
-the previous point, rounded metres from the last stop to the night's lodging,
-and the sum of all known legs. A missing endpoint or coordinate produces
-`null` for that leg rather than an estimate.
+設定 server-only `RAPIDAPI_KEY` 後，API 會用 `trip_country_stops.country_code = JP`
+判定 NAVITIME 是否適用。日程沒有直接的 country-stop 欄位，所以使用前一晚／當晚住宿、
+當天 itinerary endpoints 的 `countryStopId`；沒有當天依據時，使用最近的航班／交通端點，
+最後才使用旅程的國家 stops。國家不明、跨國或已知地點時區與外國 stop 相符時保守採直線。
+當天任一端點或最近端點的 `countryStopId` 為 null（在旅程國家以外）時也不適用；
+不能先丟掉返國抵達端點，再拿較早的日本出發端點判斷。
+沒有 key 或不是日本的日程，排序和距離計算維持原本行為。
+
+只有明確送出 `suggested`＋`transit: "fetch"`，才會向 RapidAPI
+`navitime-route-totalnavi.p.rapidapi.com/route_transit` 補查起點住宿→每站、每站→其他站、
+每站→終點住宿的有向交通時間。每段一律用**當地當天 09:00** 出發，這是排序近似，
+不是依前一站停留時間推進的時刻表。最多 7 站採完整排列求最短總分鐘數；
+超過 7 站採 nearest-neighbour + 有向 2-opt，結果不比已儲存順序更慢。
+非 NAVITIME 日程保留原直線演算法（最多 8 站完整搜尋）。
+
+設有座標站數為 `n`，有座標起／終住宿各以 `s`、`e`（0 或 1）表示，
+完整矩陣的 ID 配對上限是 **`n(n−1) + n·s + n·e`**；相同 ID 的自我路段為 0 分鐘、不發請求。
+將其依四個座標各取小數六位合併成唯一配對集合 `P`，有效分鐘快取集合為 `C`：
+開 dialog 是 **0 次**；確認後的 `|P − C|` 若不大於 `maxTransitCalls`，最多查 `|P − C|` 次。
+若超過已確認的上限，本次是 **0 次**並回上述 409，請使用者確認新的 N。
+地圖只補相鄰的唯一座標配對 `H`，最多 **`|H − 有效 shape 快取|` 次**。
+例：4 站、前後有住宿、完全沒有快取時，交通排序最多 20 次、首次地圖最多 5 次；
+七天內相同行程再開 dialog 和同順序地圖均為 0 次 NAVITIME 呼叫。
+`route_transit` 和 `shape_transit` 共用每 UTC 日 **60 次 global／60 次 account／60 次 IP**
+guard，每次 HTTP 前都先預留額度；每個 API process 最多 4 個 NAVITIME HTTP 同時進行，
+每次 timeout 8 秒、不重試。建議矩陣及 route-shapes 各有整批 20 秒 deadline：
+到期停止排新工作並取消 HTTP，不等待尚未收尾的請求；建議整天回退，
+shapes 保留已完成的路段、未完成的回 null。矩陣遇第一個失敗也停止排新工作，
+多個錯誤同時發生時，已觀察到的 quota 錯誤優先，不被後到的 unavailable 覆蓋。
+任一建議查詢失敗就整天回退原本的直線建議；guard 拒絕或 HTTP 429 回
+`travelNotice: navitime_quota`，其他失敗回 `navitime_unavailable`。60 次是每日保護，
+不是月額度保證；例如沒有快取的 8 站加前後住宿要 72 次，可能因 guard 回退。
+已成功查到的單段結果仍各自寫入，下次只補剩餘路段，不重查已成功的部分。
+
+回應保留原本所有 meters 欄位（都是直線公尺），新增
+`travelSource: navitime | straight_line`、每站的 `minutesFromPrevious`／`linesFromPrevious`、
+`minutesToEnd`／`linesToEnd`、`totalMinutes`、`transitMatrix`（每段包含 `fromId`、`toId`、
+`fromLatitude`、`fromLongitude`、`toLatitude`、`toLongitude`、`minutes`、`lines`）
+和 `routeShapesAvailable`、`transitCallsNeeded`、`transitCacheDays`。`transitCacheDays: 7`
+表示這次不用供應商查詢就有完整矩陣。缺少路段資料時分鐘為 null、線名為空陣列，
+總分鐘也為 null，不把部分時間冒充整天總計。舊回應 parser 預設直線、空 matrix、
+null 分鐘、0 次待查與 null 快取天數。
+候選順序使用回應 matrix；其兩端座標必須與當前 route 完全相同，不能把同 ID 的舊位置
+分鐘套到新位置。DB 快取 key 則依指定規則將座標取小數六位；日程日期不同時不共用。
+儲存後重讀 current 與 cached suggestion，不會自動付費產生建議；左側仍不套用 matrix。
+
+`POST /api/trips/:tripId/days/:dayId/route-shapes` 接受
+`{ "orderedTripPlaceIds": ["current-day-place-id"] }`，與 route 共用登入／成員權限、
+當天歸屬和重複 ID 檢查。座標與前後住宿一律由 DB 解出，不接受客戶端座標。
+NAVITIME 適用時，每個相鄰路段先讀七天內的 shape；只有缺少或過期才呼叫 `shape_transit`
+並寫回（同樣 09:00、逐次 guard、最多 4 個同時執行、8 秒 timeout、整批 20 秒 deadline）。
+不適用時回 `422 route_shapes_unavailable`。
+回應 `{ legs: [{ fromId, toId, geojson }] }`；單段失敗或缺座標時 geojson 為 null，
+不跨過缺座標地點畫假路線。
+
+只有右側 candidate 的 Google Map 分頁會讀 shapes；左側只顯示起／終、編號標記與 Google Maps 提示。
+同一 dialog＋順序只讀一次；拖曳不觸發，改順序後再開地圖才讀，重新開 dialog 仍先用 DB 快取。
+大眾運輸畫供應商線色
+（預設 `#1f3029`）的 5px 實線，步行畫 `#52645c` 虛線。失敗段不畫線，
+列表顯示「這段路線無法取得」。未適用 NAVITIME 時只有起／終與編號標記，
+並提示點每段 Google Maps；所有情況都不再畫連接座標的假直線。
+
+**Owner 決定將 NAVITIME 結果存入 DB，使用七天快取。** NAVITIME 使用規約第 5 條第 5 款
+有禁止快取的限制；owner 已明確接受這個條款風險及可能被停用的後果，這不代表取得供應商授權。
+Expand-only migration `045_transit_leg_cache.ts` 在既有 `044_trip_stop_replacements` 後新增
+`transit_leg_cache`，以 `(trip_id, travel_date, from_lat, from_lon, to_lat, to_lon)` 為主鍵，
+四個座標使用 `numeric(9,6)`。分鐘與線名（空線名表示步行）、shape GeoJSON 分別儲存，
+`minutes_fetched_at`／`shape_fetched_at` 各自判定七天有效期，不因另一種資料更新而延長。
+超過七天的資料不讀取，可在下次查詢成功時覆寫；trip 刪除時由 FK cascade 刪除整批快取。
+每個成功路段立即 upsert，不包在整批 matrix 的交易內，所以後續失敗不會撤銷先前已付費的結果。
+快取讀取失敗時不把它當成 cache miss 大量重查。兩個 endpoint 仍回
+`Cache-Control: private, no-store`，不啟用瀏覽器／service worker 的 HTTP 快取。
+`RAPIDAPI_KEY` 由 `.env` 經 compose 的 app-environment 傳入 API，不寫入快取、不記錄、不送瀏覽器；
+不恢復已刪除的個人 key 或時刻表。
+供應商規格：[route_transit](https://api-sdk.navitime.co.jp/api/specs/api_guide/route_transit.html)、
+[shape_transit](https://api-sdk.navitime.co.jp/api/specs/api_guide/shape_transit.html)。
 
 Saving remains explicit and version checked:
 
@@ -392,8 +500,7 @@ Saving remains explicit and version checked:
   located places, adds eligible unassigned places, and stores the candidate
   order.
 
-Route ordering itself makes no external provider call. Opening either comparison
-column's Google Map tab first reserves one authenticated `POST /api/maps/load`
+Opening either comparison column's Google Map tab first reserves one authenticated `POST /api/maps/load`
 unit, then loads the Maps JavaScript API only after the reservation succeeds.
 The shared database budget allows 310 loads per Los Angeles calendar day—10
 below the Google Cloud Maps JavaScript API quota of 320 loads per day—and
@@ -1117,7 +1224,7 @@ same request/version/key so retrying cannot duplicate an already saved item.
 
 Place assignment and order share a `TripDay` version.
 
-- `POST /api/trips/:tripId/days/:dayId/route` returns a distance-only draft and
+- `POST /api/trips/:tripId/days/:dayId/route` returns an unsaved route draft and
   checks the day version before and after reading its inputs. A concurrent
   assignment or order change returns `409`.
 - `PUT /api/trips/:tripId/days/:dayId/place-order` requires

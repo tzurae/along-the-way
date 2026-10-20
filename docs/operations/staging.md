@@ -94,6 +94,7 @@ Add these environment values:
 | Secret | `STAGING_SMTP_PASSWORD` | Gmail app password |
 | Optional variable | `STAGING_EMAIL_FROM` | Sender address; defaults to the Gmail SMTP username |
 | Optional secret | `STAGING_GOOGLE_MAPS_API_KEY` | Server-side Google key with Places API (New) enabled; without it provider-backed place search and details are unavailable |
+| Optional secret | `STAGING_RAPIDAPI_KEY` | RapidAPI key subscribed to NAVITIME Route (totalnavi); used only for 「用電車時間排」 and real transit map lines on Japan days. Without it 排順路 stays straight-line |
 | Optional secret | `STAGING_GOOGLE_MAPS_BROWSER_KEY` | Browser key for map rendering; it must be HTTP-referrer restricted to the deployed hostname and API-restricted to Maps JavaScript API |
 | Optional variable | `STAGING_GOOGLE_MAPS_MAP_ID` | Google Cloud Map ID used by the browser map |
 | Optional variable | `STAGING_GCP_MONITORING_PROJECTS` | Comma-separated `project-id:label` pairs; defaults to `test-along:正式站,along-the-way-dev:開發` |

@@ -135,6 +135,7 @@ async function requestJson<T>(
       parsed.error.currentVersion,
       parsed.error.latestChange,
       response.status,
+      parsed.error.transitCallsNeeded,
     );
   }
   if (!options.parse) return value as T;
@@ -748,6 +749,7 @@ export function App() {
   const [selectedTrip, setSelectedTrip] = useState<TripDto | null>(null);
   const [plannerLaunch, setPlannerLaunch] = useState<{ tripId: string; launch: WholeTripPlannerLaunch } | null>(null);
   const [error, setError] = useState("");
+  const [todayMutationError, setTodayMutationError] = useState<{ tripId: string; message: string } | null>(null);
   const [adminRouteError, setAdminRouteError] = useState("");
   const [accepting, setAccepting] = useState(false);
   const inviteKey = useRef<string | null>(null);
@@ -951,6 +953,7 @@ export function App() {
     const saved = store?.save(accountId.current, model);
     setPersisted(Boolean(saved));
     setTodaySnapshot(saved ?? { schemaVersion: TODAY_SCHEMA_VERSION, accountId: accountId.current, model, fetchedAt: new Date().toISOString() });
+    setTodayMutationError((current) => current?.tripId === tripId ? null : current);
     const location = readTripLocation();
     const clock = tripClock(model, Date.now());
     const tab = location.trip === tripId && location.tab ? location.tab : clock.today ? "today" : "itinerary";
@@ -1522,10 +1525,12 @@ export function App() {
   }
 
   if (offline) {
+    const offlineTripId = todaySnapshot?.model.tripId ?? readTripLocation().trip;
     return <main className="mx-auto min-h-screen w-[min(100%-1.25rem,58rem)] py-5">
       <header className="mb-5 flex flex-wrap items-center justify-between gap-3"><h1 className="text-xl font-bold">{todaySnapshot?.model.tripName ?? t.app.tabs.today}</h1><button className="min-h-11 rounded-lg border px-4 font-bold" onClick={() => void logout()}>{t.app.signOut}</button></header>
       <p className="mb-4 text-sm">{t.today.offlineAccount}</p>
       {error ? <p className="mb-4" role="alert">{error}</p> : null}
+      {todayMutationError && todayMutationError.tripId === offlineTripId ? <p className="mb-4" role="alert">{todayMutationError.message}</p> : null}
       {todaySnapshot ? <>
         <nav aria-label={t.today.savedTrips} className="mb-4 flex flex-wrap gap-2">{store?.forAccount(todaySnapshot.accountId).map((snapshot) => <button className="min-h-11 rounded-lg border px-3" key={snapshot.model.tripId} onClick={() => {
           writeTripLocation(snapshot.model.tripId, "today", null, null); restoreSnapshot();
@@ -1749,6 +1754,7 @@ export function App() {
               {!liveConnected ? <p aria-live="polite" role="status" className="rounded-xl border border-ink/10 bg-surface-subtle p-3 text-sm text-muted-foreground">{t.collaboration.reconnecting}</p> : null}
 
               <div id="trip-panel-today" role="tabpanel" aria-label={t.app.tabs.today} hidden={activeTripTab !== "today"}>
+                {todayMutationError && todayMutationError.tripId === selectedTrip.id ? <p className="mb-4" role="alert">{todayMutationError.message}</p> : null}
                 {todaySnapshot ? (
                   <TodayWorkspace
                     key={todaySnapshot.model.tripId}
@@ -1766,6 +1772,10 @@ export function App() {
                     persisted={persisted}
                     photoRevision={photoRevision}
                     request={request}
+                    onChanged={() => readTripLocation().trip === selectedTrip.id
+                      ? loadTrip(selectedTrip.id, true)
+                      : Promise.resolve()}
+                    onPersistentError={(message) => setTodayMutationError(message ? { tripId: selectedTrip.id, message } : null)}
                   />
                 ) : <p role="status">{t.today.unavailable}</p>}
               </div>
