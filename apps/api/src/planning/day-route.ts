@@ -116,6 +116,7 @@ export function buildDayRoute(input: DayRouteInput): DayRouteDto {
     metersToEnd,
     totalMeters,
     travelSource: "straight_line",
+    transitProvider: null,
     routeShapesAvailable: false,
     minutesToEnd: null,
     linesToEnd: [],

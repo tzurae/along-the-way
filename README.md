@@ -385,9 +385,10 @@ is the [place-details/photo specification](docs/superpowers/specs/2026-10-09-pla
 
 ## Day route ordering
 
-「幫我排順路」會先產生草稿，只有按下儲存才改動行程。開啟 dialog **不呼叫 NAVITIME**；
-右側建議先讀七天內的逐段快取，足夠時直接依真實大眾運輸／步行時間排序，不足時先顯示直線建議。
-左側「已儲存」一直只有直線距離，不顯示交通分鐘，也不查詢或畫出 NAVITIME shapes。
+「幫我排順路」會先產生草稿，只有按下儲存才改動行程。開啟 dialog **不呼叫任何交通供應商**。
+日本日程右側先讀七天內的 NAVITIME 逐段快取，足夠時依交通時間排序，不足時先顯示直線建議；
+已知非日本日程且有 server key 時使用 Google Routes，但沒有快取，所以開啟時一律先顯示直線建議。
+左側「已儲存」一直只有直線距離，不顯示交通分鐘，也不查詢或畫出任何供應商的路線。
 不計算停留、營業時間等待、行程容量、行李可行性或實際到站時間表。
 
 `POST /api/trips/:tripId/days/:dayId/route` accepts:
@@ -400,20 +401,22 @@ is the [place-details/photo specification](docs/superpowers/specs/2026-10-09-pla
 ```
 
 `current`（已儲存）保留原順序；`custom` 只接受當天的地點 ID，省略代表預覽移除。
-這兩種請求不呼叫 NAVITIME。地點上限為 100，缺座標的地點仍放在有座標地點之後，
+這兩種請求不呼叫交通供應商。地點上限為 100，缺座標的地點仍放在有座標地點之後，
 前一晚住宿作為起點、當晚住宿作為終點，沒有住宿或座標時不憑空補點。
 `suggested` 的 `transit` 可為 `cached` 或 `fetch`，省略時預設 `cached`，不會自動付費查詢。
-`cached` 只有在完整有向矩陣的分鐘資料都有效時回傳交通建議；否則回傳原直線建議與
-`transitCallsNeeded`（缺少／過期的唯一座標配對數）。右側顯示
-「用電車時間排（約 N 次額度）」，只有按下才送 `transit: "fetch"` 與 `maxTransitCalls: N`，
-並且只查缺少的路段。`maxTransitCalls` 在 fetch 請求中必填，必須是非負整數；其他模式不能帶入。
-伺服器重新計算 missing/stale 唯一配對，若比按鈕上的 N 更多，**不呼叫供應商**，
+NAVITIME 的 `cached` 只有在完整有向矩陣的分鐘資料都有效時回傳交通建議；否則回傳直線建議與
+`transitCallsNeeded`（缺少／過期的唯一座標配對數）。Google 的 `cached` 不讀快取，
+`transitCallsNeeded` 永遠是完整矩陣所需的元素數。日本右側顯示「用電車時間排（約 N 次額度）」，
+Google 日程顯示「用大眾運輸時間排（約 N 次）」；只有按下才送 `transit: "fetch"` 與 `maxTransitCalls: N`。
+NAVITIME 只查缺少的路段，Google 每次重新查完整矩陣。`maxTransitCalls` 必填且為非負整數，其他模式不能帶入。
+伺服器重新計算所需的 calls／elements，若比按鈕上的 N 更多，**不呼叫供應商**，
 回 `409`、`error.code: "transit_calls_changed"` 與 `error.transitCallsNeeded`（目前需要的次數）。
 這個拒絕不會被包成一般直線 fallback；前端只重讀 cached suggestion，更新按鈕並提示
 「行程剛變動，需要的額度變成約 N 次，請再按一次。」，不自動重送 fetch。
-查詢中按鈕停用、顯示「查詢中…」與既有 skeleton；快取完整時不顯示按鈕，改顯示
-「行程沒變，使用 7 天內查過的交通時間」。`custom` 只讀既有快取，不呼叫供應商；
-缺資料仍顯示「估計」。若先移除地點再按交通排序，仍保留移除，只調整剩下的候選順序。
+查詢中按鈕停用、顯示「查詢中…」與既有 skeleton。只有 NAVITIME 快取完整時會改顯示
+「行程沒變，使用 7 天內查過的交通時間」；Google 永遠不顯示這句。`custom` 不呼叫供應商，
+NAVITIME 只讀既有快取；Google 可在同一個開啟中的 dialog 套用已回傳的 matrix，缺資料仍顯示「估計」。
+若先移除地點再按交通排序，仍保留移除，只調整剩下的候選順序。
 
 設定 server-only `RAPIDAPI_KEY` 後，API 會用 `trip_country_stops.country_code = JP`
 判定 NAVITIME 是否適用。日程沒有直接的 country-stop 欄位，所以使用前一晚／當晚住宿、
@@ -421,18 +424,18 @@ is the [place-details/photo specification](docs/superpowers/specs/2026-10-09-pla
 最後才使用旅程的國家 stops。國家不明、跨國或已知地點時區與外國 stop 相符時保守採直線。
 當天任一端點或最近端點的 `countryStopId` 為 null（在旅程國家以外）時也不適用；
 不能先丟掉返國抵達端點，再拿較早的日本出發端點判斷。
-沒有 key 或不是日本的日程，排序和距離計算維持原本行為。
+日本沒有 `RAPIDAPI_KEY` 時仍採直線，不改呼叫 Google；國家不明或跨國時也採直線。
 
 只有明確送出 `suggested`＋`transit: "fetch"`，才會向 RapidAPI
 `navitime-route-totalnavi.p.rapidapi.com/route_transit` 補查起點住宿→每站、每站→其他站、
 每站→終點住宿的有向交通時間。每段一律用**當地當天 09:00** 出發，這是排序近似，
 不是依前一站停留時間推進的時刻表。最多 7 站採完整排列求最短總分鐘數；
 超過 7 站採 nearest-neighbour + 有向 2-opt，結果不比已儲存順序更慢。
-非 NAVITIME 日程保留原直線演算法（最多 8 站完整搜尋）。
+Google 也沿用這個有向分鐘排序；沒有可用交通供應商的日程保留直線演算法（最多 8 站完整搜尋）。
 
 設有座標站數為 `n`，有座標起／終住宿各以 `s`、`e`（0 或 1）表示，
 完整矩陣的 ID 配對上限是 **`n(n−1) + n·s + n·e`**；相同 ID 的自我路段為 0 分鐘、不發請求。
-將其依四個座標各取小數六位合併成唯一配對集合 `P`，有效分鐘快取集合為 `C`：
+NAVITIME 將其依四個座標各取小數六位合併成唯一配對集合 `P`，有效分鐘快取集合為 `C`：
 開 dialog 是 **0 次**；確認後的 `|P − C|` 若不大於 `maxTransitCalls`，最多查 `|P − C|` 次。
 若超過已確認的上限，本次是 **0 次**並回上述 409，請使用者確認新的 N。
 地圖只補相鄰的唯一座標配對 `H`，最多 **`|H − 有效 shape 快取|` 次**。
@@ -450,15 +453,16 @@ shapes 保留已完成的路段、未完成的回 null。矩陣遇第一個失�
 已成功查到的單段結果仍各自寫入，下次只補剩餘路段，不重查已成功的部分。
 
 回應保留原本所有 meters 欄位（都是直線公尺），新增
-`travelSource: navitime | straight_line`、每站的 `minutesFromPrevious`／`linesFromPrevious`、
+`travelSource: navitime | google_routes | straight_line`、`transitProvider: navitime | google_routes | null`、
+每站的 `minutesFromPrevious`／`linesFromPrevious`、
 `minutesToEnd`／`linesToEnd`、`totalMinutes`、`transitMatrix`（每段包含 `fromId`、`toId`、
 `fromLatitude`、`fromLongitude`、`toLatitude`、`toLongitude`、`minutes`、`lines`）
 和 `routeShapesAvailable`、`transitCallsNeeded`、`transitCacheDays`。`transitCacheDays: 7`
-表示這次不用供應商查詢就有完整矩陣。缺少路段資料時分鐘為 null、線名為空陣列，
+只表示 NAVITIME 這次不用供應商查詢就有完整矩陣；Google 永遠是 null。缺少路段資料時分鐘為 null、線名為空陣列，
 總分鐘也為 null，不把部分時間冒充整天總計。舊回應 parser 預設直線、空 matrix、
 null 分鐘、0 次待查與 null 快取天數。
 候選順序使用回應 matrix；其兩端座標必須與當前 route 完全相同，不能把同 ID 的舊位置
-分鐘套到新位置。DB 快取 key 則依指定規則將座標取小數六位；日程日期不同時不共用。
+分鐘套到新位置。NAVITIME 的 DB 快取 key 依指定規則將座標取小數六位；日程日期不同時不共用。
 儲存後重讀 current 與 cached suggestion，不會自動付費產生建議；左側仍不套用 matrix。
 
 `POST /api/trips/:tripId/days/:dayId/route-shapes` 接受
@@ -466,15 +470,16 @@ null 分鐘、0 次待查與 null 快取天數。
 當天歸屬和重複 ID 檢查。座標與前後住宿一律由 DB 解出，不接受客戶端座標。
 NAVITIME 適用時，每個相鄰路段先讀七天內的 shape；只有缺少或過期才呼叫 `shape_transit`
 並寫回（同樣 09:00、逐次 guard、最多 4 個同時執行、8 秒 timeout、整批 20 秒 deadline）。
-不適用時回 `422 route_shapes_unavailable`。
-回應 `{ legs: [{ fromId, toId, geojson }] }`；單段失敗或缺座標時 geojson 為 null，
+Google 適用時不讀寫快取，直接查每個有座標的相鄰路段（詳見下段）；兩種供應商都不適用時回 `422 route_shapes_unavailable`。
+回應 `{ legs: [{ fromId, toId, geojson }], travelNotice? }`；單段失敗或缺座標時 geojson 為 null，
 不跨過缺座標地點畫假路線。
 
 只有右側 candidate 的 Google Map 分頁會讀 shapes；左側只顯示起／終、編號標記與 Google Maps 提示。
-同一 dialog＋順序只讀一次；拖曳不觸發，改順序後再開地圖才讀，重新開 dialog 仍先用 DB 快取。
+同一 dialog＋順序只讀一次；拖曳不觸發，改順序後再開地圖才讀。重新開 dialog 時，
+NAVITIME 先用 DB 快取；Google 再次開右側地圖會重新付費查詢。
 大眾運輸畫供應商線色
 （預設 `#1f3029`）的 5px 實線，步行畫 `#52645c` 虛線。失敗段不畫線，
-列表顯示「這段路線無法取得」。未適用 NAVITIME 時只有起／終與編號標記，
+列表顯示「這段路線無法取得」。沒有適用的交通供應商時只有起／終與編號標記，
 並提示點每段 Google Maps；所有情況都不再畫連接座標的假直線。
 
 **Owner 決定將 NAVITIME 結果存入 DB，使用七天快取。** NAVITIME 使用規約第 5 條第 5 款
@@ -491,6 +496,63 @@ Expand-only migration `045_transit_leg_cache.ts` 在既有 `044_trip_stop_replac
 不恢復已刪除的個人 key 或時刻表。
 供應商規格：[route_transit](https://api-sdk.navitime.co.jp/api/specs/api_guide/route_transit.html)、
 [shape_transit](https://api-sdk.navitime.co.jp/api/specs/api_guide/shape_transit.html)。
+
+### Non-Japan Google Routes
+
+已知非日本日程且設定 `GOOGLE_MAPS_API_KEY` 時，使用 Google Routes API `TRANSIT`。
+沿用上述日程國家判定，只接受同一個已知國家；不硬編任何城市或額外國家清單。
+必須在 **server key 所屬的 Google Cloud project 啟用 Routes API**，並在該 key 的 API restrictions
+允許 Routes API；同一把 key 原有的 Places API (New) 權限保留。server key 不送瀏覽器；
+地圖仍用獨立的 `GOOGLE_MAPS_BROWSER_KEY` 與既有 Maps JavaScript API 額度。
+
+分鐘用 `POST https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix`，
+field mask 為 `originIndex,destinationIndex,status,condition,duration`。
+Google `TRANSIT` 每批最多 100 elements；這裡每個 origin 搭配最多 100 destinations，
+不為未使用的自我／住宿之間配對付費。N 是**矩陣元素數，不是 HTTP 請求數**：
+有座標的 `n` 站與起／終住宿 `s,e`，`N ≤ n(n−1)+n·s+n·e`，
+重複 ID 配對只算一次，相同 ID 的自我路段為 0 分鐘、不呼叫 Google。
+每個 origin 有 `dᵢ` 個需要的 destinations，矩陣 HTTP 數為 `Σ ceil(dᵢ/100)`；
+每批扣 `destinations.length` 個單位。Google matrix 不含線名或逐步運具，
+所以分鐘列標示「大眾運輸／步行」，不誤標為純步行。
+
+只有右側地圖分頁呼叫
+`POST https://routes.googleapis.com/directions/v2:computeRoutes`，每個有座標、不同 ID 的相鄰路段一次。
+field masks 為 `routes.legs.steps.polyline.encodedPolyline`、
+`routes.legs.steps.travelMode`、`routes.legs.steps.transitDetails.transitLine.color`。
+解碼逐 step polyline 成 GeoJSON，才能分開大眾運輸實線與灰色步行虛線；
+不用整條 `routes.polyline.encodedPolyline` 混畫步行，也不以兩端座標補假直線。
+Google 無路線時回 null；列表顯示估計／無法取得，地圖不畫該段，並註明「路線由 Google 提供」。
+例：4 站、前後住宿且 ID 都不重複，分鐘查詢為 20 elements（5 個 matrix HTTP），
+首次開右側地圖最多 5 個 computeRoutes HTTP；合計最多 25 個預算單位。
+
+`computeRouteMatrix` 與 `computeRoutes` 共用 `google_routes` guard：
+每 UTC 日 **2000 global／2000 account／2000 IP**。送出 HTTP 前，在同一筆交易原子預留整批元素，
+不能把 100 elements 當成一次；shape 每個 request 扣 1。這是 app 的每日保護，不是月費或 Google quota 保證。
+Google Routes 與 NAVITIME 的預留若在呼叫 `fetch` 前取消，會在原本的 window、
+global／account／IP 三個 scope 同一筆交易退回；不會退到隔天或另一個身分。已開始 HTTP 的請求仍計費。
+每個 API process 最多 4 個 Google Routes HTTP 同時進行，每次 timeout 8 秒、不重試；
+矩陣與 shapes 各沿用整批 20 秒 deadline，停止排新工作並取消逾時 HTTP。
+矩陣任何錯誤（包括無路線）整天回退直線，`travelNotice: transit_quota` 表示 guard 拒絕／HTTP 429
+（或 matrix element 的 RESOURCE_EXHAUSTED），其他錯誤為 `transit_unavailable`。
+shape 保留成功段，其餘 null；額度／服務失敗也透過 `travelNotice` 顯示 Google 文案，不寫 NAVITIME。
+
+所有分鐘與 shape 一律以**該日當地 09:00**出發，轉成含時區的 RFC 3339 instant 送給 Google，
+不是依停留時間推進的時刻表。日程本身沒有 timezone 欄，依序從當天地點、前後住宿、
+當天 itinerary endpoints、日程國家 stops 取得時區；同一層多個時區或沒有時區時不付費，回 unavailable。
+Google 的 transit 時刻表僅支援過去 7 天到未來 100 天；超出日期或服務範圍時照上述失敗路徑回退，
+不偷偷換日期或改成開車。
+
+**Owner 決定 Google Routes 結果完全不快取。** 不寫 `transit_leg_cache`、其他 DB、server cache、
+localStorage 或 HTTP cache；只保留在當次 HTTP response 與開啟中的 dialog 記憶體。
+拖曳／移除／儲存後仍可用同日期且座標相符的 dialog matrix，但左側永遠不套用分鐘。
+儲存後，日期、地點集合、座標與前後住宿都沒變時，保留已付費的 Google 建議作為「還原」目標；
+只更新版本與待查次數，不被重新讀取的直線建議覆蓋。資料變動則不保留，還原按鈕依真正目標標示交通或直線。
+關閉後資料即丟棄；再次開啟不查 Google、仍顯示完整 N，按分鐘按鈕或開右側地圖才重新查詢。
+
+供應商規格：[transit matrix](https://developers.google.com/maps/documentation/routes/transit-rm)、
+[transit route](https://developers.google.com/maps/documentation/routes/transit-route)、
+[computeRouteMatrix](https://developers.google.com/maps/documentation/routes/reference/rest/v2/TopLevel/computeRouteMatrix)、
+[computeRoutes](https://developers.google.com/maps/documentation/routes/reference/rest/v2/TopLevel/computeRoutes)。
 
 Saving remains explicit and version checked:
 

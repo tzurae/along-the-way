@@ -31,6 +31,7 @@ const validRouteResponse = {
     metersToEnd: 123,
     totalMeters: 123,
     travelSource: "straight_line",
+    transitProvider: null,
     routeShapesAvailable: false,
     minutesToEnd: null,
     linesToEnd: [],

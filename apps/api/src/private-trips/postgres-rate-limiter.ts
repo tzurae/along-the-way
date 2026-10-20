@@ -22,7 +22,11 @@ export type RateLimitedAction =
   | "discovery_ai"
   | "place_guide_generation"
   | "whole_trip_plan_preview";
-export type PaidProvider = "google_places" | "google_maps_js" | "navitime";
+export type PaidProvider = "google_places" | "google_maps_js" | "google_routes" | "navitime";
+export interface PaidProviderReservation {
+  /** Refund only before invoking fetch; retains the original window and identity. Idempotent. */
+  refund(): Promise<void>;
+}
 export interface AppRateLimitUsage {
   googlePlacesToday: number;
   googlePlacesLimit: number;
@@ -35,7 +39,7 @@ export interface RateLimiter {
   consume(action: RateLimitedAction, clientIp: string, account?: string, cost?: number): Promise<void>;
   claimDiscoveryAiRun(account: string, tripId: string): Promise<void>;
   withPaidProviderIdentity<T>(clientIp: string, account: string, work: () => Promise<T>): Promise<T>;
-  tryConsumePaidProvider(provider: PaidProvider): Promise<boolean>;
+  tryConsumePaidProvider(provider: PaidProvider, cost?: number): Promise<boolean>;
   appUsage(): Promise<AppRateLimitUsage>;
 }
 
@@ -69,17 +73,17 @@ const RULES: Record<RateLimitedAction, Rule> = {
 };
 
 // Paid-provider budgets leave headroom below provider quotas.
-// Places and NAVITIME use UTC days; browser map loads follow Google's Pacific reset.
+// Places, Routes and NAVITIME use UTC days; browser map loads follow Google's Pacific reset.
 const PAID_PROVIDER_DAILY_LIMITS: Record<PaidProvider, { global: number; account: number; ip: number }> = {
   google_places: { global: 2000, account: 2000, ip: 2000 },
   google_maps_js: { global: 310, account: 310, ip: 310 },
+  google_routes: { global: 2000, account: 2000, ip: 2000 },
   navitime: { global: 60, account: 60, ip: 60 },
 };
 const PAID_PROVIDER_WINDOW_SECONDS = 24 * 60 * 60;
 const GOOGLE_MAPS_JS_RETENTION_SECONDS = 25 * 60 * 60;
 const GOOGLE_MAPS_TIME_ZONE = "America/Los_Angeles";
 const RETIRED_RETENTION_RULES = [
-  { scopePattern: "paid_provider:google_routes:%", windowSeconds: PAID_PROVIDER_WINDOW_SECONDS },
   { scopePattern: "route_planning:%", windowSeconds: 60 * 60 },
 ] as const;
 function paidProviderWindowStart(provider: PaidProvider, now: Date) {
@@ -116,6 +120,10 @@ export function rateLimitRetentionRules() {
       // A Pacific calendar day can be 25 hours when daylight saving time ends.
       scopePattern: "paid_provider:google_maps_js:%",
       windowSeconds: GOOGLE_MAPS_JS_RETENTION_SECONDS,
+    },
+    {
+      scopePattern: "paid_provider:google_routes:%",
+      windowSeconds: PAID_PROVIDER_WINDOW_SECONDS,
     },
     {
       scopePattern: "paid_provider:navitime:%",
@@ -269,11 +277,18 @@ export class PostgresRateLimiter implements RateLimiter {
     }
   }
 
-  /** Reserves one paid-provider request in that provider's Cloud-quota calendar day. */
-  async tryConsumePaidProvider(provider: PaidProvider) {
+  async tryConsumePaidProvider(provider: PaidProvider, cost = 1) {
+    return await this.reservePaidProvider(provider, cost) !== null;
+  }
+
+  /** Atomically reserves paid units, with a same-window refund for cancellation before sending. */
+  async reservePaidProvider(provider: PaidProvider, cost = 1): Promise<PaidProviderReservation | null> {
+    if (!Number.isSafeInteger(cost) || cost < 1 || cost > 100) {
+      throw new Error("Paid provider cost must be an integer from 1 to 100");
+    }
     const identity = this.paidProviderIdentity.getStore();
     // Production entrypoints establish the identity in createApp. Fail closed if a new caller does not.
-    if (!identity) return false;
+    if (!identity) return null;
     const now = this.now();
     const windowStart = paidProviderWindowStart(provider, now);
     const limits = PAID_PROVIDER_DAILY_LIMITS[provider];
@@ -290,24 +305,54 @@ export class PostgresRateLimiter implements RateLimiter {
               scope: attempt.scope,
               key_hash: this.keyHash(attempt.scope, attempt.key),
               window_start: windowStart,
-              request_count: 1,
+              request_count: cost,
             })
             .onConflict((conflict) => conflict
               .columns(["scope", "key_hash", "window_start"])
               .doUpdateSet((expression) => ({
-                request_count: expression("rate_limit_windows.request_count", "+", 1),
+                request_count: expression("rate_limit_windows.request_count", "+", cost),
               }))
-              .where("rate_limit_windows.request_count", "<", attempt.limit))
+              .where("rate_limit_windows.request_count", "<=", attempt.limit - cost))
             .returning("request_count")
             .executeTakeFirst();
           if (!reserved) throw PAID_PROVIDER_REFUSED;
         }
       });
-      return true;
     } catch (error) {
-      if (error === PAID_PROVIDER_REFUSED) return false;
+      if (error === PAID_PROVIDER_REFUSED) return null;
       throw error;
     }
+    let refund: Promise<void> | undefined;
+    return {
+      refund: () => refund ??= this.database.transaction().execute(async (transaction) => {
+        for (const attempt of attempts) {
+          const keyHash = this.keyHash(attempt.scope, attempt.key);
+          const row = await transaction.selectFrom("rate_limit_windows")
+            .select("request_count")
+            .where("scope", "=", attempt.scope)
+            .where("key_hash", "=", keyHash)
+            .where("window_start", "=", windowStart)
+            .forUpdate()
+            .executeTakeFirst();
+          if (!row) throw new Error("Paid provider reservation could not be refunded");
+          if (row.request_count <= cost) {
+            // The table requires request_count > 0; an exhausted window must be removed.
+            await transaction.deleteFrom("rate_limit_windows")
+              .where("scope", "=", attempt.scope)
+              .where("key_hash", "=", keyHash)
+              .where("window_start", "=", windowStart)
+              .execute();
+          } else {
+            await transaction.updateTable("rate_limit_windows")
+              .set({ request_count: row.request_count - cost })
+              .where("scope", "=", attempt.scope)
+              .where("key_hash", "=", keyHash)
+              .where("window_start", "=", windowStart)
+              .execute();
+          }
+        }
+      }),
+    };
   }
   async appUsage(): Promise<AppRateLimitUsage> {
     const now = this.now();

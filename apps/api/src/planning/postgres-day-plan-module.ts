@@ -7,6 +7,7 @@ import {
   type DayRouteShapesResponse,
   type TransitMatrixEntry,
   type TransitGeoJson,
+  type TransitProvider,
 } from "@along-the-way/contracts/day-plans";
 import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
 import type { TripSkeletonDto } from "@along-the-way/contracts/trip-skeleton";
@@ -27,7 +28,9 @@ import type { TripPlaceModule } from "../trip-places/trip-place-module";
 import type { TripSkeletonModule } from "../trip-skeleton/trip-skeleton-module";
 import { buildDayRoute, type DayRouteInput, type RoutePlace } from "./day-route";
 import { orderByCost, routeLength, type GeoPoint } from "./day-route-order";
-import { mapNavitimeLegs, NavitimeError, type NavitimeProvider } from "./navitime-provider";
+import { NavitimeError, type NavitimeProvider } from "./navitime-provider";
+import type { GoogleRoutesProvider } from "./google-routes-provider";
+import { mapTransitLegs, TransitError } from "./transit-batch";
 import { PostgresTransitLegCache, TRANSIT_CACHE_DAYS, transitLegKey } from "./postgres-transit-leg-cache";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -59,6 +62,7 @@ interface ModuleOptions {
   tripSkeleton: TripSkeletonModule;
   tripPlaces: TripPlaceModule;
   navitime?: NavitimeProvider;
+  googleRoutes?: GoogleRoutesProvider;
 }
 
 /** Applied order first; places without one keep their list order after them. */
@@ -93,16 +97,17 @@ function located(place: RoutePlace): place is RoutePlace & GeoPoint {
   return place.latitude !== null && place.longitude !== null;
 }
 
+type CountryStop = { id: string; country_code: string; time_zone: string | null };
+
 /**
  * Days have no country-stop column. Resolve from booked nights and dated itinerary endpoints;
  * ambiguous/cross-border days fail closed. A single-country trip needs no booked travel.
  */
-function dayIsInJapan(
+function dayCountries(
   skeleton: TripSkeletonDto,
   date: string,
-  countries: { id: string; country_code: string; time_zone: string | null }[],
-  planned: TripPlaceDto[],
-): boolean {
+  countries: CountryStop[],
+): CountryStop[] {
   const ids = new Set<string>();
   const previousDate = Temporal.PlainDate.from(date).subtract({ days: 1 }).toString();
   for (const item of skeleton.items) {
@@ -114,7 +119,7 @@ function dayIsInJapan(
     }
     for (const endpoint of item.endpoints) {
       if (endpoint.localDateTime.slice(0, 10) !== date) continue;
-      if (endpoint.countryStopId === null) return false;
+      if (endpoint.countryStopId === null) return [];
       ids.add(endpoint.countryStopId);
     }
   }
@@ -124,16 +129,36 @@ function dayIsInJapan(
       .filter((endpoint) => endpoint.localDateTime.slice(0, 10) <= date)
       .sort((a, b) => b.instant.localeCompare(a.instant))[0];
     if (latest) {
-      if (latest.countryStopId === null) return false;
+      if (latest.countryStopId === null) return [];
       ids.add(latest.countryStopId);
     }
   }
   const relevant = ids.size > 0 ? countries.filter((country) => ids.has(country.id)) : countries;
-  if (relevant.length === 0 || relevant.some((country) => country.country_code !== "JP")
-    || (ids.size > 0 && relevant.length !== ids.size)) return false;
+  return ids.size > 0 && relevant.length !== ids.size ? [] : relevant;
+}
+
+function dayIsInJapan(countries: CountryStop[], planned: TripPlaceDto[], relevant: CountryStop[]): boolean {
+  if (relevant.length === 0 || relevant.some((country) => country.country_code !== "JP")) return false;
   // A known foreign stop's timezone on a day's point contradicts its Japan assignment.
   return !planned.some((place) => place.timeZone && countries.some((country) =>
     country.time_zone === place.timeZone && country.country_code !== "JP"));
+}
+
+/** A day has no timezone column. Prefer its places, then lodging/endpoints, then country stops. */
+function dayTimeZone(skeleton: TripSkeletonDto, date: string, relevant: CountryStop[], planned: TripPlaceDto[]): string | null {
+  const previousDate = Temporal.PlainDate.from(date).subtract({ days: 1 }).toString();
+  const sources = [
+    planned.map((place) => place.timeZone),
+    [bookedLodgingForNight(skeleton, previousDate)?.timeZone, bookedLodgingForNight(skeleton, date)?.timeZone],
+    skeleton.items.flatMap((item) => item.endpoints)
+      .filter((endpoint) => endpoint.localDateTime.slice(0, 10) === date).map((endpoint) => endpoint.timeZone),
+    relevant.map((country) => country.time_zone),
+  ];
+  for (const source of sources) {
+    const zones = new Set(source.filter((zone): zone is string => Boolean(zone)));
+    if (zones.size > 0) return zones.size === 1 ? [...zones][0]! : null;
+  }
+  return null;
 }
 
 /** Every writer takes the trip row before a day row, keeping the repository's lock order. */
@@ -151,6 +176,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
   private readonly tripSkeleton: TripSkeletonModule;
   private readonly tripPlaces: TripPlaceModule;
   private readonly navitime: NavitimeProvider | undefined;
+  private readonly googleRoutes: GoogleRoutesProvider | undefined;
   private readonly transitCache: PostgresTransitLegCache;
 
   constructor(options: ModuleOptions) {
@@ -158,6 +184,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
     this.tripSkeleton = options.tripSkeleton;
     this.tripPlaces = options.tripPlaces;
     this.navitime = options.navitime;
+    this.googleRoutes = options.googleRoutes;
     this.transitCache = new PostgresTransitLegCache(options.database);
   }
 
@@ -166,7 +193,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
     tripId: string,
     dayId: string,
     input: CreateDayRouteInput,
-  ): Promise<{ input: DayRouteInput; navitimeApplies: boolean }> {
+  ): Promise<{ input: DayRouteInput; transitProvider: TransitProvider | null; timeZone: string | null }> {
     const order = input?.order;
     if (order !== "current" && order !== "suggested" && order !== "custom") {
       throw new AppError("validation_error", "order must be current, suggested or custom");
@@ -193,7 +220,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
     const [skeleton, places, countries] = await Promise.all([
       this.tripSkeleton.getSkeleton(userId, tripId),
       this.tripPlaces.list(userId, tripId),
-      this.navitime?.configured
+      this.navitime?.configured || this.googleRoutes?.configured
         ? this.database.selectFrom("trip_country_stops").select(["id", "country_code", "time_zone"])
           .where("trip_id", "=", tripId).execute()
         : Promise.resolve([]),
@@ -243,17 +270,26 @@ export class PostgresDayPlanModule implements DayPlanModule {
       morningLodging: lodgingOn(Temporal.PlainDate.from(day.date).subtract({ days: 1 }).toString()),
       nightLodging: lodgingOn(day.date),
     };
+    const relevant = dayCountries(skeleton, day.date, countries);
+    const routePlaces = order === "custom" ? planned.filter((place) => requested.has(place.id)) : planned;
+    const japan = dayIsInJapan(countries, routePlaces, relevant);
+    const countryCode = relevant[0]?.country_code;
+    const knownNonJapan = countryCode && countryCode !== "JP"
+      && relevant.every((country) => country.country_code === countryCode)
+      && !routePlaces.some((place) => place.timeZone && countries.some((country) =>
+        country.time_zone === place.timeZone && country.country_code !== countryCode));
     return {
       input: routeInput,
-      navitimeApplies: Boolean(this.navitime?.configured && dayIsInJapan(skeleton, day.date, countries,
-        order === "custom" ? planned.filter((place) => requested.has(place.id)) : planned)),
+      transitProvider: japan ? (this.navitime?.configured ? "navitime" : null)
+        : knownNonJapan && this.googleRoutes?.configured ? "google_routes" : null,
+      timeZone: dayTimeZone(skeleton, day.date, relevant, routePlaces),
     };
   }
 
   async route(userId: string, tripId: string, dayId: string, request: CreateDayRouteInput): Promise<DayRouteDto> {
-    const { input, navitimeApplies } = await this.routeInput(userId, tripId, dayId, request);
-    const fallback = { ...buildDayRoute(input), routeShapesAvailable: navitimeApplies };
-    if (!navitimeApplies || input.order === "current") return fallback;
+    const { input, transitProvider, timeZone } = await this.routeInput(userId, tripId, dayId, request);
+    const fallback = { ...buildDayRoute(input), transitProvider, routeShapesAvailable: transitProvider !== null };
+    if (!transitProvider || input.order === "current") return fallback;
     const selected = input.order === "custom" ? new Set(input.orderedIds) : null;
     const stops = input.planned.filter((place) => !selected || selected.has(place.id)).filter(located);
     const start = input.morningLodging?.place;
@@ -273,6 +309,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
       for (const other of stops) if (other.id !== stop.id) add(stop, other);
       if (night) add(stop, night);
     }
+    const googlePairs = transitProvider === "google_routes" ? pairs.filter(({ from, to }) => from.id !== to.id) : [];
     let cached = new Map<string, { minutes: number; lines: string[] }>();
     const missing = new Map<string, { from: GeoPoint; to: GeoPoint }>();
     for (const pair of pairs) {
@@ -288,34 +325,48 @@ export class PostgresDayPlanModule implements DayPlanModule {
       }] : [];
     });
     try {
-      cached = await this.transitCache.minutes(tripId, input.date);
-      for (const key of cached.keys()) missing.delete(key);
-      if (request.transit === "fetch" && missing.size > request.maxTransitCalls!) {
-        throw new AppError(
-          "transit_calls_changed", "The required transit calls exceed the confirmed amount",
-          409, undefined, undefined, undefined, undefined, missing.size,
-        );
+      let matrix: TransitMatrixEntry[];
+      let allCached = false;
+      if (transitProvider === "google_routes") {
+        if (request.transit === "fetch" && googlePairs.length > request.maxTransitCalls!) {
+          throw new AppError(
+            "transit_calls_changed", "The required transit elements exceed the confirmed amount",
+            409, undefined, undefined, undefined, undefined, googlePairs.length,
+          );
+        }
+        if (request.transit !== "fetch") return { ...fallback, transitCallsNeeded: googlePairs.length };
+        matrix = googlePairs.length > 0 ? await this.googleRoutes!.matrix(googlePairs, input.date, timeZone) : [];
+        matrix.push(...matrixSnapshot()); // Only zero-minute self legs; Google never reads or writes the DB cache.
+      } else {
+        cached = await this.transitCache.minutes(tripId, input.date);
+        for (const key of cached.keys()) missing.delete(key);
+        if (request.transit === "fetch" && missing.size > request.maxTransitCalls!) {
+          throw new AppError(
+            "transit_calls_changed", "The required transit calls exceed the confirmed amount",
+            409, undefined, undefined, undefined, undefined, missing.size,
+          );
+        }
+        allCached = missing.size === 0;
+        if (input.order === "custom") {
+          const matrix = matrixSnapshot();
+          return matrix.length > 0
+            ? withTransitMatrix({ ...fallback, transitCacheDays: allCached ? TRANSIT_CACHE_DAYS : null }, matrix, transitProvider)
+            : fallback;
+        }
+        if (!allCached && request.transit !== "fetch") {
+          return { ...fallback, transitCallsNeeded: missing.size, transitMatrix: matrixSnapshot() };
+        }
+        if (!allCached) {
+          await mapTransitLegs([...missing], async ([key, { from, to }], signal) => {
+            const value = await this.navitime!.transit(from, to, input.date, signal);
+            // Commit each success independently: a later leg's error must not discard paid results.
+            await this.transitCache.saveMinutes(tripId, input.date, from, to, value);
+            cached.set(key, value);
+            missing.delete(key);
+          });
+        }
+        matrix = matrixSnapshot();
       }
-      const allCached = missing.size === 0;
-      if (input.order === "custom") {
-        const matrix = matrixSnapshot();
-        return matrix.length > 0
-          ? withTransitMatrix({ ...fallback, transitCacheDays: allCached ? TRANSIT_CACHE_DAYS : null }, matrix)
-          : fallback;
-      }
-      if (!allCached && request.transit !== "fetch") {
-        return { ...fallback, transitCallsNeeded: missing.size, transitMatrix: matrixSnapshot() };
-      }
-      if (!allCached) {
-        await mapNavitimeLegs([...missing], async ([key, { from, to }], signal) => {
-          const value = await this.navitime!.transit(from, to, input.date, signal);
-          // Commit each success independently: a later leg's error must not discard paid results.
-          await this.transitCache.saveMinutes(tripId, input.date, from, to, value);
-          cached.set(key, value);
-          missing.delete(key);
-        });
-      }
-      const matrix = matrixSnapshot();
       const costs = new Map(matrix.map((leg) => [`${leg.fromId}:${leg.toId}`, leg.minutes]));
       const cost = (from: GeoPoint, to: GeoPoint) => costs.get(`${from.id}:${to.id}`)!;
       const suggestedIds = orderByCost(stops, morning, night, cost, 7, true);
@@ -328,22 +379,26 @@ export class PostgresDayPlanModule implements DayPlanModule {
         orderedIds: [...chosen.map((stop) => stop.id), ...input.planned.filter((place) => !located(place)).map((place) => place.id)],
       });
       return withTransitMatrix({
-        ...route, order: "suggested", routeShapesAvailable: true,
+        ...route, order: "suggested", routeShapesAvailable: true, transitProvider,
+        transitCallsNeeded: googlePairs.length,
         transitCacheDays: allCached ? TRANSIT_CACHE_DAYS : null,
-      }, matrix);
+      }, matrix, transitProvider);
     } catch (error) {
       if (error instanceof AppError && error.code === "transit_calls_changed") throw error;
       return {
-        ...fallback, transitCallsNeeded: input.order === "suggested" ? missing.size : 0,
-        transitMatrix: matrixSnapshot(),
-        travelNotice: error instanceof NavitimeError ? error.code : "navitime_unavailable",
+        ...fallback, transitCallsNeeded: transitProvider === "google_routes" ? googlePairs.length
+          : input.order === "suggested" ? missing.size : 0,
+        transitMatrix: transitProvider === "google_routes" ? [] : matrixSnapshot(),
+        travelNotice: transitProvider === "google_routes"
+          ? error instanceof TransitError ? error.code : "transit_unavailable"
+          : error instanceof NavitimeError ? error.code : "navitime_unavailable",
       };
     }
   }
 
   async routeShapes(userId: string, tripId: string, dayId: string, orderedTripPlaceIds: string[]): Promise<DayRouteShapesResponse> {
-    const { input, navitimeApplies } = await this.routeInput(userId, tripId, dayId, { order: "custom", orderedTripPlaceIds });
-    if (!navitimeApplies) throw new AppError("route_shapes_unavailable", "Transit route shapes are unavailable for this day", 422);
+    const { input, transitProvider, timeZone } = await this.routeInput(userId, tripId, dayId, { order: "custom", orderedTripPlaceIds });
+    if (!transitProvider) throw new AppError("route_shapes_unavailable", "Transit route shapes are unavailable for this day", 422);
     const byId = new Map(input.planned.map((place) => [place.id, place]));
     // Keep the requested adjacency, including unlocated places; never bridge a missing point.
     const stops = input.orderedIds!.map((id) => byId.get(id)!);
@@ -354,6 +409,24 @@ export class PostgresDayPlanModule implements DayPlanModule {
       ...(input.nightLodging ? [input.nightLodging.place] : []),
     ];
     const pairs = points.slice(1).map((to, index) => ({ from: points[index]!, to }));
+    if (transitProvider === "google_routes") {
+      const results = await mapTransitLegs(pairs, async ({ from, to }, signal) => {
+        const leg = { fromId: from.id, toId: to.id, geojson: null };
+        if (!located(from) || !located(to) || from.id === to.id) return { leg };
+        try {
+          const geojson = await this.googleRoutes!.shape(from, to, input.date, timeZone, signal);
+          return { leg: { ...leg, geojson } };
+        } catch (error) {
+          return { leg, notice: error instanceof TransitError ? error.code : "transit_unavailable" as const };
+        }
+      }, ({ from, to }) => ({
+        leg: { fromId: from.id, toId: to.id, geojson: null },
+        notice: "transit_unavailable" as const,
+      }));
+      const travelNotice = results.find((result) => result.notice === "transit_quota")?.notice
+        ?? results.find((result) => result.notice)?.notice;
+      return { legs: results.map((result) => result.leg), ...(travelNotice ? { travelNotice } : {}) };
+    }
     let cached: Map<string, TransitGeoJson>;
     try {
       cached = await this.transitCache.shapes(tripId, input.date);
@@ -367,7 +440,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
       const key = transitLegKey(from, to);
       if (!cached.has(key)) missing.set(key, { from, to });
     }
-    const fetched = await mapNavitimeLegs([...missing], async ([key, { from, to }], signal) => {
+    const fetched = await mapTransitLegs([...missing], async ([key, { from, to }], signal) => {
       try {
         const geojson = await this.navitime!.shape(from, to, input.date, signal);
         await this.transitCache.saveShape(tripId, input.date, from, to, geojson);

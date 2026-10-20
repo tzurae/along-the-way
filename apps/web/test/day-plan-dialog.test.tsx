@@ -29,6 +29,9 @@ type RouteOptions = {
   totalMeters?: number;
   names?: Record<string, string>;
   transitCallsNeeded?: number;
+  transitProvider?: DayRouteDto["transitProvider"];
+  travelSource?: DayRouteDto["travelSource"];
+  routeShapesAvailable?: boolean;
 };
 
 function route(order: DayRouteOrder, options: RouteOptions = {}): DayRouteDto {
@@ -53,14 +56,44 @@ function route(order: DayRouteOrder, options: RouteOptions = {}): DayRouteDto {
     })),
     metersToEnd: null,
     totalMeters: options.totalMeters ?? Math.max(0, ids.length - 1) * 1_000,
-    travelSource: "straight_line",
-    routeShapesAvailable: false,
+    travelSource: options.travelSource ?? "straight_line",
+    transitProvider: options.transitProvider ?? null,
+    routeShapesAvailable: options.routeShapesAvailable ?? false,
     minutesToEnd: null,
     linesToEnd: [],
     totalMinutes: null,
     transitMatrix: [],
     transitCallsNeeded: options.transitCallsNeeded ?? 0,
     transitCacheDays: null,
+  };
+}
+
+function googleSuggestion(version = 7): DayRouteDto {
+  const suggestion = route("suggested", {
+    version,
+    transitCallsNeeded: 2,
+    transitProvider: "google_routes",
+    travelSource: "google_routes",
+    routeShapesAvailable: true,
+  });
+  const [from, to] = suggestion.stops;
+  return {
+    ...suggestion,
+    stops: [
+      from!,
+      { ...to!, minutesFromPrevious: 17, linesFromPrevious: ["大眾運輸／步行"] },
+    ],
+    totalMinutes: 17,
+    transitMatrix: [{
+      fromId: from!.tripPlaceId,
+      toId: to!.tripPlaceId,
+      fromLatitude: from!.latitude,
+      fromLongitude: from!.longitude,
+      toLatitude: to!.latitude,
+      toLongitude: to!.longitude,
+      minutes: 17,
+      lines: ["大眾運輸／步行"],
+    }],
   };
 }
 
@@ -196,6 +229,46 @@ describe("day-plan view tabs", () => {
       const input = inputOf(call.options);
       return input?.transit === "fetch" && input.maxTransitCalls === 3;
     })).toBe(true));
+  });
+
+  it("uses Google copy and attribution instead of NAVITIME for a Google day", async () => {
+    const { request } = immediateRequest({
+      suggested: route("suggested", {
+        transitCallsNeeded: 4,
+        transitProvider: "google_routes",
+        routeShapesAvailable: true,
+      }),
+    });
+    render(dialog(request));
+
+    expect(await screen.findByRole("button", { name: "用大眾運輸時間排（約 4 次）" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /用電車時間排/ })).not.toBeInTheDocument();
+    const candidate = screen.getByRole("region", { name: "可以儲存的順序" });
+    fireEvent.click(within(candidate).getByRole("tab", { name: "Google Map" }));
+    expect(within(candidate).getByText("實線是大眾運輸，灰色虛線是步行。路線由 Google 提供。")).toBeInTheDocument();
+    expect(within(candidate).queryByText(/NAVITIME/)).not.toBeInTheDocument();
+  });
+
+  it("never asks for paid route shapes from the saved side", async () => {
+    const { request, calls } = immediateRequest({
+      current: route("current", {
+        transitProvider: "google_routes",
+        routeShapesAvailable: true,
+      }),
+      suggested: route("suggested", {
+        transitProvider: "google_routes",
+        routeShapesAvailable: true,
+      }),
+    });
+    render(dialog(request));
+    const saved = await screen.findByRole("region", { name: "已儲存的順序" });
+
+    fireEvent.click(within(saved).getByRole("tab", { name: "Google Map" }));
+
+    expect(calls.filter((call) => call.url.endsWith("/route-shapes"))).toHaveLength(0);
+    const candidate = screen.getByRole("region", { name: "可以儲存的順序" });
+    fireEvent.click(within(candidate).getByRole("tab", { name: "Google Map" }));
+    expect(calls.filter((call) => call.url.endsWith("/route-shapes"))).toHaveLength(1);
   });
 });
 
@@ -374,6 +447,75 @@ describe("day-plan draft and save behavior", () => {
       orderedTripPlaceIds: ["a"],
       expectedVersion: 7,
     });
+  });
+
+  it("keeps the paid Google restore target and minutes after saving", async () => {
+    let saved = false;
+    const calls: RequestCall[] = [];
+    const request = async <T,>(url: string, options?: RequestInit): Promise<T> => {
+      calls.push({ url, options });
+      if (url === "/api/maps/config") return { browserKey: null, mapId: null } as T;
+      if (options?.method === "PUT") {
+        saved = true;
+        return { orderedTripPlaceIds: ["b", "a"], version: 8 } as T;
+      }
+      if (!url.endsWith("/route")) throw new Error(`Unexpected request: ${url}`);
+      const input = inputOf(options)!;
+      if (input.order === "current") {
+        return { route: route("current", saved ? { ids: ["b", "a"], version: 8 } : {}) } as T;
+      }
+      if (input.order === "suggested" && input.transit === "fetch") {
+        return { route: googleSuggestion() } as T;
+      }
+      if (input.order === "suggested") {
+        return {
+          route: route("suggested", {
+            version: saved ? 8 : 7,
+            transitCallsNeeded: 2,
+            transitProvider: "google_routes",
+            routeShapesAvailable: true,
+          }),
+        } as T;
+      }
+      if (input.order === "custom") {
+        return {
+          route: route("custom", {
+            ids: input.orderedTripPlaceIds,
+            version: saved ? 8 : 7,
+            transitProvider: "google_routes",
+            routeShapesAvailable: true,
+          }),
+        } as T;
+      }
+      throw new Error(`Unexpected route input: ${JSON.stringify(input)}`);
+    };
+    render(dialog(request));
+    fireEvent.click(await screen.findByRole("button", { name: "用大眾運輸時間排（約 2 次）" }));
+    const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+    expect(await within(candidate).findByText("17 分鐘・大眾運輸／步行")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "儲存為第 1 天的安排" }));
+
+    await within(candidate).findByRole("button", { name: "還原成依交通時間排" });
+    expect(within(candidate).getByText("17 分鐘・大眾運輸／步行")).toBeInTheDocument();
+    fireEvent.keyDown(within(candidate).getByRole("button", { name: /拖曳「地點 b」/ }), { key: "ArrowDown" });
+    await waitFor(() => expect(within(candidate).getAllByRole("button", { name: /^拖曳/ })
+      .map((button) => button.getAttribute("aria-label"))).toEqual([
+      "拖曳「地點 a」調整順序；也可用上下鍵",
+      "拖曳「地點 b」調整順序；也可用上下鍵",
+    ]));
+
+    fireEvent.click(within(candidate).getByRole("button", { name: "還原成依交通時間排" }));
+    await waitFor(() => expect(within(candidate).getAllByRole("button", { name: /^拖曳/ })
+      .map((button) => button.getAttribute("aria-label"))).toEqual([
+      "拖曳「地點 b」調整順序；也可用上下鍵",
+      "拖曳「地點 a」調整順序；也可用上下鍵",
+    ]));
+    expect(within(candidate).getByText("17 分鐘・大眾運輸／步行")).toBeInTheDocument();
+    const routeInputs = calls.filter((call) => call.url.endsWith("/route")).map((call) => inputOf(call.options));
+    expect(routeInputs.filter((input) => input?.transit === "fetch")).toEqual([
+      { order: "suggested", transit: "fetch", maxTransitCalls: 2 },
+    ]);
   });
 
   it("labels a custom route equal to the saved length without claiming it is shortest", async () => {

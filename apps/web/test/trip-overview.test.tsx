@@ -80,7 +80,7 @@ it("moves a place between two visible non-adjacent days with versioned assignmen
       value = { tripPlaces };
     } else if (path.endsWith("/days/day23/route")) {
       writes.push({ path, body: JSON.parse(String(init?.body)) });
-      value = { route: { dayId: "day23", date: "2026-10-23", version: 9, order: "current", orderedTripPlaceIds: ["SECOND", "FIRST"], startsAt: null, endsAt: null, stops: [], metersToEnd: null, totalMeters: 0, travelSource: "straight_line", routeShapesAvailable: false, minutesToEnd: null, linesToEnd: [], totalMinutes: null, transitMatrix: [], transitCallsNeeded: 0, transitCacheDays: null } };
+      value = { route: { dayId: "day23", date: "2026-10-23", version: 9, order: "current", orderedTripPlaceIds: ["SECOND", "FIRST"], startsAt: null, endsAt: null, stops: [], metersToEnd: null, totalMeters: 0, travelSource: "straight_line", transitProvider: null, routeShapesAvailable: false, minutesToEnd: null, linesToEnd: [], totalMinutes: null, transitMatrix: [], transitCallsNeeded: 0, transitCacheDays: null } };
     } else if (path.endsWith("/days/day23/place-order")) {
       writes.push({ path, body: JSON.parse(String(init?.body)) });
       value = { orderedTripPlaceIds: ["SECOND", "FIRST"], version: 10 };

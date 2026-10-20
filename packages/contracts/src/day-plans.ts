@@ -3,6 +3,9 @@ import { isRecord } from "./type-guards";
 /** `current` is saved order, `suggested` minimizes travel cost, `custom` is member-arranged. */
 export type DayRouteOrder = "current" | "suggested" | "custom";
 
+export type TransitProvider = "navitime" | "google_routes";
+export type TransitNotice = "navitime_quota" | "navitime_unavailable" | "transit_quota" | "transit_unavailable";
+
 /** Same bound as the arrangement writer, so an existing large day remains reorderable. */
 export const MAX_DAY_ROUTE_STOPS = 100;
 
@@ -10,7 +13,7 @@ export interface CreateDayRouteInput {
   order: DayRouteOrder;
   /** Only suggested may fetch missing transit data; omitted means cached, never a paid call. */
   transit?: "cached" | "fetch";
-  /** Required with transit=fetch: the maximum number of paid calls shown on the pressed button. */
+  /** Required with transit=fetch: confirmed paid units (Google matrix elements, NAVITIME calls). */
   maxTransitCalls?: number;
   /** Only with `custom`: this day's places in the wanted order, each once. Omitting one previews taking it off the day. */
   orderedTripPlaceIds?: string[];
@@ -57,15 +60,17 @@ export interface DayRouteDto {
   metersToEnd: number | null;
   /** Sum of all non-null legs including metersToEnd. */
   totalMeters: number;
-  travelSource: "navitime" | "straight_line";
-  travelNotice?: "navitime_quota" | "navitime_unavailable";
-  /** Provider is configured and the day's country stop is JP, independently of matrix success. */
+  travelSource: TransitProvider | "straight_line";
+  travelNotice?: TransitNotice;
+  /** Selected provider, including before minutes are fetched or after a failure. */
+  transitProvider: TransitProvider | null;
+  /** A transit provider is configured and applicable, independently of matrix success. */
   routeShapesAvailable: boolean;
   minutesToEnd: number | null;
   linesToEnd: string[];
   totalMinutes: number | null;
   transitMatrix: TransitMatrixEntry[];
-  /** Missing/stale unique coordinate pairs in the day's suggestion matrix. */
+  /** NAVITIME missing coordinate pairs, or the full Google matrix element count (never cached). */
   transitCallsNeeded: number;
   /** Fresh cached minutes cover the matrix; the value is the cache validity window in days. */
   transitCacheDays: number | null;
@@ -100,6 +105,7 @@ export interface TransitGeoJson {
 
 export interface DayRouteShapesResponse {
   legs: { fromId: string; toId: string; geojson: TransitGeoJson | null }[];
+  travelNotice?: TransitNotice;
 }
 
 function invalid(): never {
@@ -160,6 +166,15 @@ function order(value: unknown): DayRouteOrder {
   return value === "current" || value === "suggested" || value === "custom" ? value : invalid();
 }
 
+function transitProvider(value: unknown): TransitProvider | null {
+  return value == null ? null : value === "navitime" || value === "google_routes" ? value : invalid();
+}
+
+function transitNotice(value: unknown): TransitNotice {
+  return value === "navitime_quota" || value === "navitime_unavailable"
+    || value === "transit_quota" || value === "transit_unavailable" ? value : invalid();
+}
+
 function route(value: unknown): DayRouteDto {
   const entry = record(value);
   return {
@@ -176,11 +191,9 @@ function route(value: unknown): DayRouteDto {
     metersToEnd: nullableInteger(entry.metersToEnd),
     totalMeters: integer(entry.totalMeters),
     travelSource: entry.travelSource === undefined || entry.travelSource === "straight_line"
-      ? "straight_line" : entry.travelSource === "navitime" ? "navitime" : invalid(),
-    ...(entry.travelNotice === undefined ? {} : {
-      travelNotice: entry.travelNotice === "navitime_quota" || entry.travelNotice === "navitime_unavailable"
-        ? entry.travelNotice : invalid(),
-    }),
+      ? "straight_line" : transitProvider(entry.travelSource) ?? invalid(),
+    ...(entry.travelNotice === undefined ? {} : { travelNotice: transitNotice(entry.travelNotice) }),
+    transitProvider: transitProvider(entry.transitProvider),
     routeShapesAvailable: entry.routeShapesAvailable === undefined ? false
       : typeof entry.routeShapesAvailable === "boolean" ? entry.routeShapesAvailable : invalid(),
     minutesToEnd: nullableInteger(entry.minutesToEnd ?? null),
@@ -210,8 +223,8 @@ function texts(value: unknown): string[] {
   return Array.isArray(value) ? value.map(text) : invalid();
 }
 
-/** Reordering checks the coordinate snapshot; persistent provider caching belongs to the API. */
-export function withTransitMatrix(route: DayRouteDto, matrix: TransitMatrixEntry[]): DayRouteDto {
+/** Reordering checks the coordinate snapshot; Google results live only in this open dialog. */
+export function withTransitMatrix(route: DayRouteDto, matrix: TransitMatrixEntry[], provider: TransitProvider): DayRouteDto {
   const points = new Map<string, { latitude: number | null; longitude: number | null }>(
     route.stops.map((stop) => [stop.tripPlaceId, stop]),
   );
@@ -241,7 +254,7 @@ export function withTransitMatrix(route: DayRouteDto, matrix: TransitMatrixEntry
   if (last && route.endsAt && !end) complete = false;
   total += end?.minutes ?? 0;
   return {
-    ...route, stops, travelSource: "navitime", transitMatrix: matrix,
+    ...route, stops, travelSource: provider, transitProvider: provider, transitMatrix: matrix,
     minutesToEnd: end?.minutes ?? null, linesToEnd: end?.lines ?? [],
     totalMinutes: complete ? total : null,
   };
@@ -285,7 +298,7 @@ export function parseTransitGeoJson(value: unknown): TransitGeoJson {
 export function parseDayRouteShapesResponse(value: unknown): DayRouteShapesResponse {
   const entry = record(value);
   if (!Array.isArray(entry.legs)) return invalid();
-  return { legs: entry.legs.map((value) => {
+  return { ...(entry.travelNotice === undefined ? {} : { travelNotice: transitNotice(entry.travelNotice) }), legs: entry.legs.map((value) => {
     const leg = record(value);
     return {
       fromId: text(leg.fromId), toId: text(leg.toId),
