@@ -1,13 +1,13 @@
-import type {
-  DiscoveryEndorsement,
-  DiscoveryShortfallDto,
+import {
+  GOOGLE_MIN_RATING,
+  GOOGLE_MIN_REVIEWS,
+  type DiscoveryEndorsement,
+  type DiscoveryShortfallDto,
 } from "@along-the-way/contracts/discovery";
 
 import type { BusinessStatus } from "../planning/opening-hours";
 
-/** Below this many reviews a Google rating is too fragile to count, whatever its value. */
-export const GOOGLE_MIN_REVIEWS = 200;
-export const GOOGLE_MIN_RATING = 4;
+export { GOOGLE_MIN_RATING, GOOGLE_MIN_REVIEWS };
 /**
  * Owner decision 2026-10-20: one verified source is enough to show a place, because every place
  * is now a real Google Maps result; the card says which sources were verified. Wikivoyage alone
@@ -16,9 +16,12 @@ export const GOOGLE_MIN_RATING = 4;
 export const SINGLE_SOURCE_ENDORSEMENTS: readonly DiscoveryEndorsement[] = ["google_reviews", "official_tourism"];
 export const MIN_PER_CATEGORY = 2;
 
-/** Whether these verified sources are enough to show a place. */
+/**
+ * Whether these verified sources are enough to show a place. Wikivoyage never decides it: with
+ * only three kinds, any two include Google reviews or an official page.
+ */
 export function enoughEndorsements(endorsements: readonly DiscoveryEndorsement[]) {
-  return endorsements.length >= 2 || endorsements.some((endorsement) => SINGLE_SOURCE_ENDORSEMENTS.includes(endorsement));
+  return endorsements.some((endorsement) => SINGLE_SOURCE_ENDORSEMENTS.includes(endorsement));
 }
 
 export type GateResolution =

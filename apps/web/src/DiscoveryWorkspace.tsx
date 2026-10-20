@@ -107,10 +107,16 @@ function endorsementLabel(
   }
 }
 
-/** The card line naming the verified sources; null for older proposals that recorded none. */
+/**
+ * The card line naming the verified sources; null when none can be stated (older proposals).
+ * Wikivoyage is left out: its matcher still mistakes bold words for listings (喜兵衛 → Kihei,
+ * Maui), so the card would state a source that may be false.
+ */
 function endorsementLine(endorsements: readonly DiscoveryEndorsement[], t: Messages["discovery"]) {
-  if (endorsements.length === 0) return null;
-  const labels = endorsements.map((endorsement) => endorsementLabel(endorsement, t));
+  const labels = endorsements
+    .filter((endorsement) => endorsement !== "wikivoyage")
+    .map((endorsement) => endorsementLabel(endorsement, t));
+  if (labels.length === 0) return null;
   return labels.length === 1 ? t.endorsement.onlyOne(labels[0]!) : t.endorsement.verified(labels);
 }
 

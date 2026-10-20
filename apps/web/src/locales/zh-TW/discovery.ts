@@ -1,3 +1,5 @@
+import { GOOGLE_MIN_RATING, GOOGLE_MIN_REVIEWS } from "@along-the-way/contracts/discovery";
+
 import { placeTypeLabels } from "./place-types";
 
 export const discovery = {
@@ -13,9 +15,11 @@ export const discovery = {
     separator: "和",
   },
   endorsement: {
-    googleReviews: "Google Maps 評論 200 則以上、4 星以上",
+    googleReviews: `Google Maps 評論 ${GOOGLE_MIN_REVIEWS} 則以上、${GOOGLE_MIN_RATING} 星以上`,
     wikivoyage: "列於維基導遊",
-    officialTourism: "官方觀光網站有介紹",
+    // Matches what the server checks: the page names the place, and a non-government site counts
+    // only because the AI labelled it a tourism board.
+    officialTourism: "政府或觀光單位的網頁提到它（網站類型可能由 AI 判斷）",
     /** Card line: which independent sources were verified for this place. */
     verified: (labels: string[]) => `查證到：${labels.join("・")}`,
     onlyOne: (label: string) => `只查證到一種來源：${label}`,

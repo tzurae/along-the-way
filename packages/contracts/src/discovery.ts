@@ -4,10 +4,14 @@ import { isPlaceType, type PlaceType } from "./trip-skeleton";
 export type DiscoveryProposalStatus = "pending" | "accepting" | "accepted" | "rejected";
 /** Independent kinds of source that can vouch for a recommendation. */
 export type DiscoveryEndorsement = "google_reviews" | "wikivoyage" | "official_tourism";
+/** Google reviews vouch for a place only from this many reviews and this rating; the card states both. */
+export const GOOGLE_MIN_REVIEWS = 200;
+export const GOOGLE_MIN_RATING = 4;
 export type DiscoveryShortfallCode =
   | "not_researched"
   | "not_found"
   | "name_mismatch"
+  /** Its verified sources were not enough: none, or Wikivoyage alone (the name is historical). */
   | "single_source"
   | "category_short"
   /** Already on the trip's shared wishlist, so not proposed again. */
