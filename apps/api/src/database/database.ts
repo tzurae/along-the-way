@@ -6,6 +6,7 @@ import {
 } from "kysely";
 import { Pool } from "pg";
 import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
+import type { TransitGeoJson } from "@along-the-way/contracts/day-plans";
 import type {
   FeedbackStatus,
   FeedbackType,
@@ -222,6 +223,18 @@ export interface TripDayAlternativeTable {
   /** Null once that account is deleted; the 備案 stays for the rest of the trip. */
   created_by: string | null;
   created_at: Generated<Timestamp>;
+}
+
+export interface TripStopReplacementTable {
+  id: Generated<string>;
+  trip_id: string;
+  trip_day_id: string;
+  original_trip_place_id: string;
+  replacement_trip_place_id: string;
+  status: "active" | "superseded" | "undone";
+  created_by: string | null;
+  created_at: Timestamp;
+  updated_at: Timestamp;
 }
 
 export interface TripPlaceDuplicateSuggestionTable {
@@ -664,6 +677,20 @@ export interface WholeTripPlanProposalTable {
   expires_at: Timestamp;
 }
 
+export interface TransitLegCacheTable {
+  trip_id: string;
+  travel_date: DateOnly;
+  from_lat: string;
+  from_lon: string;
+  to_lat: string;
+  to_lon: string;
+  minutes: number | null;
+  lines: ColumnType<string[], string, string>;
+  shape_geojson: ColumnType<TransitGeoJson | null, string | null, string | null>;
+  minutes_fetched_at: Timestamp | null;
+  shape_fetched_at: Timestamp | null;
+}
+
 export interface AlongTheWayDatabase {
   users: UserTable;
   magic_link_tokens: MagicLinkTokenTable;
@@ -675,6 +702,7 @@ export interface AlongTheWayDatabase {
   trip_planning_settings: TripPlanningSettingsTable;
   trip_day_planning_overrides: TripDayPlanningOverrideTable;
   whole_trip_plan_proposals: WholeTripPlanProposalTable;
+  transit_leg_cache: TransitLegCacheTable;
   places: PlaceTable;
   legacy_place_origins: LegacyPlaceOriginTable;
   place_identities: PlaceIdentityTable;
@@ -693,6 +721,7 @@ export interface AlongTheWayDatabase {
   trip_place_excluded_days: TripPlaceDayTable;
   trip_place_day_assignments: TripPlaceDayAssignmentTable;
   trip_day_alternatives: TripDayAlternativeTable;
+  trip_stop_replacements: TripStopReplacementTable;
   trip_place_duplicate_suggestions: TripPlaceDuplicateSuggestionTable;
   discovery_briefs: DiscoveryBriefTable;
   discovery_runs: DiscoveryRunTable;

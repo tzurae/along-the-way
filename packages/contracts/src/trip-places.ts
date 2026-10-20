@@ -31,6 +31,34 @@ export interface ProviderPlaceSearchResultDto extends ProviderPlaceCandidateDto 
   alreadyInWishlist: boolean;
 }
 
+
+export type NearbyAlternativeDto = {
+  providerPlaceId: string;
+  name: string;
+  type: PlaceType;
+  address: string | null;
+  latitude: number;
+  longitude: number;
+  sourceUrl: string | null;
+  attribution: ProviderPlaceCandidateDto["attribution"];
+  photo: GooglePlacePhotoDto | null;
+  rating: number | null;
+  userRatingCount: number | null;
+  straightLineMeters: number;
+};
+
+export type NearbyAlternativesResponse = {
+  dayId: string;
+  stopTripPlaceId: string;
+  dayVersion: number;
+  alternatives: NearbyAlternativeDto[];
+};
+
+export type StopReplacementDto = {
+  replacementId: string;
+  originalTripPlaceId: string;
+  originalName: string;
+};
 export interface MemberVoteDto {
   memberUserId: string;
   memberEmail: string | null;
@@ -76,6 +104,7 @@ export interface TripPlaceDto {
   assignedDayId: string | null;
   /** Applied order within the assigned day; null until a route order is applied. */
   dayPosition: number | null;
+  replacedStop: StopReplacementDto | null;
   budgetAmountMinor: number | null;
   budgetCurrency: string | null;
   notes: string | null;
@@ -274,6 +303,54 @@ function duplicate(value: unknown): DuplicateSuggestionDto {
   };
 }
 
+function stopReplacement(value: unknown): StopReplacementDto {
+  const row = record(value);
+  return {
+    replacementId: text(row.replacementId),
+    originalTripPlaceId: text(row.originalTripPlaceId),
+    originalName: text(row.originalName),
+  };
+}
+
+function nearbyAlternative(value: unknown): NearbyAlternativeDto {
+  const row = record(value);
+  const latitude = row.latitude;
+  const longitude = row.longitude;
+  const rating = row.rating;
+  const userRatingCount = nullableInteger(row.userRatingCount);
+  const distance = integer(row.straightLineMeters);
+  if (typeof latitude !== "number" || !Number.isFinite(latitude) || Math.abs(latitude) > 90
+    || typeof longitude !== "number" || !Number.isFinite(longitude) || Math.abs(longitude) > 180
+    || (rating !== null && (typeof rating !== "number" || !Number.isFinite(rating) || rating < 1 || rating > 5))
+    || (userRatingCount !== null && userRatingCount < 0) || distance < 0) return invalid();
+  return {
+    providerPlaceId: text(row.providerPlaceId),
+    name: text(row.name),
+    type: placeType(row.type),
+    address: nullableText(row.address),
+    latitude,
+    longitude,
+    sourceUrl: nullableText(row.sourceUrl),
+    attribution: text(row.attribution),
+    photo: row.photo === null ? null : parseGooglePlacePhoto(row.photo),
+    rating,
+    userRatingCount,
+    straightLineMeters: distance,
+  };
+}
+
+export function parseNearbyAlternativesResponse(value: unknown): NearbyAlternativesResponse {
+  const row = record(value);
+  const dayVersion = integer(row.dayVersion);
+  if (dayVersion < 1) return invalid();
+  return {
+    dayId: text(row.dayId),
+    stopTripPlaceId: text(row.stopTripPlaceId),
+    dayVersion,
+    alternatives: Array.isArray(row.alternatives) ? row.alternatives.map(nearbyAlternative) : invalid(),
+  };
+}
+
 function tripPlace(value: unknown): TripPlaceDto {
   const row = record(value);
   const status = row.status;
@@ -323,6 +400,7 @@ function tripPlace(value: unknown): TripPlaceDto {
         ? row.effortLevel : invalid(),
     assignedDayId,
     dayPosition: nullableInteger(row.dayPosition),
+    replacedStop: row.replacedStop == null ? null : stopReplacement(row.replacedStop),
     budgetAmountMinor: nullableInteger(row.budgetAmountMinor),
     budgetCurrency: nullableText(row.budgetCurrency),
     notes: nullableText(row.notes),

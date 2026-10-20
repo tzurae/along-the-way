@@ -36,9 +36,19 @@ function route(order: DayRouteOrder): DayRouteDto {
       longitude: 135.785,
       providerPlaceId: null,
       metersFromPrevious: null,
+      minutesFromPrevious: null,
+      linesFromPrevious: [],
     }],
     metersToEnd: null,
     totalMeters: 0,
+    travelSource: "straight_line",
+    routeShapesAvailable: false,
+    minutesToEnd: null,
+    linesToEnd: [],
+    totalMinutes: null,
+    transitMatrix: [],
+    transitCallsNeeded: 0,
+    transitCacheDays: null,
   };
 }
 

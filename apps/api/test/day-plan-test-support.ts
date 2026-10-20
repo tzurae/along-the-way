@@ -7,4 +7,5 @@ async function unexpectedDayPlanCall(): Promise<never> {
 export const unrelatedDayPlanModule = {
   route: unexpectedDayPlanCall,
   applyOrder: unexpectedDayPlanCall,
+  routeShapes: unexpectedDayPlanCall,
 } satisfies DayPlanModule;

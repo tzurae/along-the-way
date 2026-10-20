@@ -5,6 +5,8 @@ import {
   type CreateTripPlaceInput,
   type MergeTripPlacesInput,
   type MustItemKind,
+  type NearbyAlternativeDto,
+  type NearbyAlternativesResponse,
   type ProviderCandidatesResponse,
   type ProviderPlaceCandidateDto,
   type ProviderPlaceSearchResultDto,
@@ -20,6 +22,7 @@ import { sql, type Kysely, type Transaction } from "kysely";
 
 import type { AlongTheWayDatabase } from "../database/database";
 import { reopenRemovedProposals } from "../discovery/reopen-removed-proposals";
+import { straightLineMeters } from "../planning/day-route-order";
 import { AppError } from "../private-trips/private-trip-module";
 import {
   dateOnly,
@@ -80,6 +83,24 @@ interface ManualPlaceFacts {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ISO_CURRENCIES = new Set(Intl.supportedValuesOf("currency"));
 
+
+// Google Places Table A, checked against the official place-types documentation.
+const NEARBY_TYPES: Partial<Record<PlaceType, readonly string[]>> = {
+  restaurant: ["restaurant"],
+  cafe: ["cafe", "coffee_shop", "bakery", "dessert_shop", "tea_house", "confectionery", "ice_cream_shop"],
+  worship: ["buddhist_temple", "shinto_shrine", "church", "hindu_temple", "mosque", "synagogue"],
+  museum: ["museum", "art_gallery"],
+  nature: ["park", "garden", "botanical_garden", "national_park", "hiking_area"],
+  shopping: ["market", "shopping_mall", "department_store", "gift_shop"],
+  activity: ["tourist_attraction", "historical_landmark", "cultural_landmark", "amusement_park", "observation_deck"],
+};
+
+function located<T extends { latitude: number | null; longitude: number | null }>(
+  place: T,
+): place is T & { latitude: number; longitude: number } {
+  return place.latitude !== null && Number.isFinite(place.latitude) && Math.abs(place.latitude) <= 90
+    && place.longitude !== null && Number.isFinite(place.longitude) && Math.abs(place.longitude) <= 180;
+}
 function requiredText(value: unknown, name: string, maximum: number) {
   if (typeof value !== "string") {
     throw new AppError("validation_error", `${name} must be a string`);
@@ -570,6 +591,252 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         503,
       );
     }
+  }
+
+  async nearbyAlternatives(
+    userId: string, tripId: string, rawDayId: string, rawTripPlaceId: string,
+  ): Promise<NearbyAlternativesResponse> {
+    const dayId = uuid(rawDayId, "dayId").toLowerCase();
+    const tripPlaceId = uuid(rawTripPlaceId, "tripPlaceId").toLowerCase();
+    await requireScheduler(this.database, userId, tripId);
+    const day = await this.database.selectFrom("trip_days").select("version")
+      .where("trip_id", "=", tripId).where("id", "=", dayId).executeTakeFirst();
+    if (!day) throw new AppError("trip_day_not_found", "Trip day not found", 404);
+    const places = await this.readList(this.database, userId, tripId);
+    const stop = this.requireAlternativeStop(places, tripPlaceId, dayId, day.version);
+    const includedTypes = NEARBY_TYPES[stop.type]!;
+    const options = await this.googleRequestOptions(tripId);
+    let candidates;
+    try {
+      if (!this.provider.searchNearby) throw new ProviderUnavailableError();
+      candidates = await this.provider.searchNearby({
+        ...options, latitude: stop.latitude, longitude: stop.longitude, includedTypes,
+      });
+    } catch (error) {
+      this.throwAlternativeProviderError(error);
+    }
+    const occupied = new Set(places.filter((place) => place.assignedDayId !== null || place.scheduled)
+      .map((place) => place.providerPlaceId));
+    const archived = await this.database.selectFrom("trip_places as place")
+      .innerJoin("place_identities as identity", "identity.id", "place.place_id")
+      .select("identity.provider_place_id")
+      .where("place.trip_id", "=", tripId).where("place.archived_at", "is not", null)
+      .where("identity.provider", "=", "google").execute();
+    for (const place of archived) occupied.add(place.provider_place_id);
+    const seen = new Set<string>();
+    const filtered = candidates.filter(({ candidate }) => {
+      if (candidate.type !== stop.type || !located(candidate)
+        || candidate.providerPlaceId === stop.providerPlaceId
+        || occupied.has(candidate.providerPlaceId) || seen.has(candidate.providerPlaceId)) return false;
+      seen.add(candidate.providerPlaceId);
+      return true;
+    }).sort((left, right) => {
+      if (left.rating === null && right.rating !== null) return 1;
+      if (left.rating !== null && right.rating === null) return -1;
+      return (right.rating ?? 0) - (left.rating ?? 0)
+        || (right.userRatingCount ?? 0) - (left.userRatingCount ?? 0);
+    }).slice(0, 8);
+    const photos = await this.searchResults(userId, tripId, filtered.map((entry) => entry.candidate));
+    const alternatives = filtered.map(({ candidate, rating, userRatingCount }, index): NearbyAlternativeDto => ({
+      providerPlaceId: candidate.providerPlaceId,
+      name: candidate.name,
+      type: candidate.type,
+      address: candidate.address,
+      latitude: candidate.latitude!,
+      longitude: candidate.longitude!,
+      sourceUrl: candidate.sourceUrl,
+      attribution: candidate.attribution,
+      photo: photos[index]!.photo,
+      rating,
+      userRatingCount,
+      straightLineMeters: Math.round(straightLineMeters(stop, {
+        id: candidate.providerPlaceId, latitude: candidate.latitude!, longitude: candidate.longitude!,
+      })),
+    }));
+    return { dayId, stopTripPlaceId: tripPlaceId, dayVersion: day.version, alternatives };
+  }
+
+  private throwAlternativeProviderError(error: unknown): never {
+    if (error instanceof ProviderQuotaError) throw new AppError("provider_quota", error.message, 503);
+    throw new AppError("provider_unavailable",
+      error instanceof ProviderUnavailableError ? error.message : "Google Places is temporarily unavailable", 503);
+  }
+
+  private requireAlternativeStop(places: TripPlaceDto[], tripPlaceId: string, dayId: string, dayVersion: number) {
+    const stop = places.find((place) => place.id === tripPlaceId);
+    if (!stop) throw new AppError("trip_place_not_found", "Trip place not found", 404);
+    if (stop.assignedDayId !== dayId || stop.scheduled) {
+      throw new AppError("conflict", "The stop is no longer an untimed place on this day", 409, undefined, dayVersion, dayId);
+    }
+    if (!NEARBY_TYPES[stop.type] || !located(stop)) {
+      throw new AppError("alternatives_unsupported", "Nearby alternatives require a supported place type and coordinates", 422);
+    }
+    return stop;
+  }
+
+  async replaceStop(
+    userId: string, tripId: string, rawDayId: string, rawTripPlaceId: string, rawKey: string,
+    input: { expectedDayVersion: number; providerPlaceId: string },
+  ): Promise<TripPlaceDto[]> {
+    const dayId = uuid(rawDayId, "dayId").toLowerCase();
+    const tripPlaceId = uuid(rawTripPlaceId, "tripPlaceId").toLowerCase();
+    const providerPlaceId = requiredText(input.providerPlaceId, "providerPlaceId", 300);
+    if (!/^[A-Za-z0-9_-]{8,300}$/.test(providerPlaceId)) throw new AppError("validation_error", "Invalid Google place identity");
+    const key = requireIdempotencyKey(rawKey);
+    // mutation_requests.operation is varchar(80): the day already scopes the trip (4 + 36 + 1 + 36 = 77).
+    const operation = `tsr:${dayId.toLowerCase()}:${tripPlaceId.toLowerCase()}`;
+    // Authorize and replay before spending quota; never keep a transaction open for Google.
+    const earlyReplay = await this.database.transaction().execute(async (transaction) => {
+      await requireScheduler(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      await this.lockTripContent(transaction, tripId);
+      await requireScheduler(transaction, userId, tripId);
+      if (await replayed(transaction, userId, operation, key)) return this.readList(transaction, userId, tripId);
+      await requireDayVersion(transaction, tripId, dayId, input.expectedDayVersion);
+      const places = await this.readList(transaction, userId, tripId);
+      const stop = this.requireAlternativeStop(places, tripPlaceId, dayId, input.expectedDayVersion);
+      const existing = places.find((place) => place.provider === "google" && place.providerPlaceId === providerPlaceId);
+      if (providerPlaceId === stop.providerPlaceId || (existing && (existing.assignedDayId !== null || existing.scheduled))) {
+        throw new AppError("conflict", "The candidate is already arranged", 409, undefined, input.expectedDayVersion, dayId);
+      }
+      return null;
+    });
+    if (earlyReplay) return earlyReplay;
+    let candidate: ProviderPlaceCandidate;
+    try {
+      candidate = await this.provider.getPlace(providerPlaceId, await this.googleRequestOptions(tripId));
+    } catch (error) {
+      this.throwAlternativeProviderError(error);
+    }
+    return this.database.transaction().execute(async (transaction) => {
+      await requireScheduler(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      await this.lockTripContent(transaction, tripId);
+      await requireScheduler(transaction, userId, tripId);
+      if (await replayed(transaction, userId, operation, key)) return this.readList(transaction, userId, tripId);
+      await this.reconcileLegacyPlaces(transaction, tripId);
+      await requireDayVersion(transaction, tripId, dayId, input.expectedDayVersion);
+      const places = await this.readList(transaction, userId, tripId);
+      const stop = this.requireAlternativeStop(places, tripPlaceId, dayId, input.expectedDayVersion);
+      const conflict = (message: string): never => {
+        throw new AppError("conflict", message, 409, undefined, input.expectedDayVersion, dayId);
+      };
+      if (candidate.providerPlaceId !== providerPlaceId || candidate.type !== stop.type || !located(candidate)
+        || straightLineMeters(stop, { ...candidate, id: providerPlaceId }) > 1000) {
+        return conflict("The candidate is no longer a nearby place of the same type");
+      }
+      const existing = await transaction.selectFrom("trip_places as place")
+        .innerJoin("place_identities as identity", "identity.id", "place.place_id")
+        .select(["place.id", "place.archived_at"])
+        .where("place.trip_id", "=", tripId).where("identity.provider", "=", "google")
+        .where("identity.provider_place_id", "=", providerPlaceId).forUpdate("place").executeTakeFirst();
+      const reusable = existing ? places.find((place) => place.id === existing.id) : undefined;
+      if (existing && (!reusable || existing.archived_at !== null
+        || reusable.assignedDayId !== null || reusable.scheduled || reusable.id === stop.id)) {
+        return conflict("The candidate is archived or already arranged");
+      }
+      if (reusable && reusable.type !== stop.type) return conflict("The candidate's trip category no longer matches the stop");
+      await this.lockTripPlace(transaction, tripId, stop.id);
+      const previous = await transaction.selectFrom("trip_stop_replacements").selectAll()
+        .where("trip_id", "=", tripId).where("replacement_trip_place_id", "=", stop.id)
+        .where("trip_day_id", "=", dayId).where("status", "=", "active").forUpdate().executeTakeFirst();
+      const originalId = previous?.original_trip_place_id ?? stop.id;
+      const replacementId = reusable?.id
+        ?? await this.addObservedCandidateInTransaction(transaction, userId, tripId, candidate);
+      const updatedAt = this.now();
+      // A formerly moved replacement may still have historical state; it must not attach to this new slot.
+      await transaction.updateTable("trip_stop_replacements").set({ status: "superseded", updated_at: updatedAt })
+        .where("trip_id", "=", tripId).where("replacement_trip_place_id", "=", replacementId)
+        .where("status", "=", "active").execute();
+      if (previous) {
+        await transaction.updateTable("trip_stop_replacements")
+          .set({ status: replacementId === originalId ? "undone" : "superseded", updated_at: updatedAt })
+          .where("id", "=", previous.id).execute();
+      }
+      const position = await this.replacementSlot(transaction, tripId, dayId, stop, places);
+      await this.swapStopAssignment(transaction, userId, tripId, dayId, stop.id, replacementId, position, updatedAt);
+      // Selecting the root from nearby results is also a restoration; never create a self-relation.
+      if (replacementId !== originalId) {
+        await transaction.insertInto("trip_stop_replacements").values({
+          trip_id: tripId, trip_day_id: dayId, original_trip_place_id: originalId,
+          replacement_trip_place_id: replacementId, status: "active", created_by: userId,
+          created_at: updatedAt, updated_at: updatedAt,
+        }).execute();
+      }
+      await recordEvent(transaction, {
+        tripId, actorId: userId, eventType: "trip_place.stop_replaced", targetType: "trip_place",
+        targetId: replacementId, relatedTargetIds: [dayId, stop.id, originalId], summary: "Replaced a planned stop",
+      });
+      await remember(transaction, userId, operation, key, { type: TRIP_PLACES_READBACK });
+      return this.readList(transaction, userId, tripId);
+    });
+  }
+
+  async undoStopReplacement(
+    userId: string, tripId: string, rawReplacementId: string, rawKey: string,
+  ): Promise<TripPlaceDto[]> {
+    const replacementId = uuid(rawReplacementId, "replacementId").toLowerCase();
+    const key = requireIdempotencyKey(rawKey);
+    const operation = `tsu:${tripId}:${replacementId}`;
+    return this.database.transaction().execute(async (transaction) => {
+      await requireScheduler(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      await this.lockTripContent(transaction, tripId);
+      await requireScheduler(transaction, userId, tripId);
+      if (await replayed(transaction, userId, operation, key)) return this.readList(transaction, userId, tripId);
+      await this.reconcileLegacyPlaces(transaction, tripId);
+      const relation = await transaction.selectFrom("trip_stop_replacements").selectAll()
+        .where("trip_id", "=", tripId).where("id", "=", replacementId).forUpdate().executeTakeFirst();
+      if (!relation) throw new AppError("trip_place_not_found", "Stop replacement not found", 404);
+      const day = await transaction.selectFrom("trip_days").select("version")
+        .where("trip_id", "=", tripId).where("id", "=", relation.trip_day_id).forUpdate().executeTakeFirstOrThrow();
+      const places = await this.readList(transaction, userId, tripId);
+      const current = places.find((place) => place.id === relation.replacement_trip_place_id);
+      const original = places.find((place) => place.id === relation.original_trip_place_id);
+      if (relation.status !== "active" || !current || current.assignedDayId !== relation.trip_day_id
+        || current.scheduled || !original || original.assignedDayId !== null || original.scheduled) {
+        throw new AppError("conflict", "This replacement can no longer be undone", 409, undefined, day.version, relation.trip_day_id);
+      }
+      for (const id of [current.id, original.id].sort()) await this.lockTripPlace(transaction, tripId, id);
+      const updatedAt = this.now();
+      const position = await this.replacementSlot(transaction, tripId, relation.trip_day_id, current, places);
+      await this.swapStopAssignment(transaction, userId, tripId, relation.trip_day_id, current.id, original.id, position, updatedAt);
+      await transaction.updateTable("trip_stop_replacements").set({ status: "undone", updated_at: updatedAt })
+        .where("id", "=", replacementId).execute();
+      await recordEvent(transaction, {
+        tripId, actorId: userId, eventType: "trip_place.stop_replacement_undone", targetType: "trip_place",
+        targetId: original.id, relatedTargetIds: [relation.trip_day_id, current.id], summary: "Restored the original planned stop",
+      });
+      await remember(transaction, userId, operation, key, { type: TRIP_PLACES_READBACK });
+      return this.readList(transaction, userId, tripId);
+    });
+  }
+
+  private async replacementSlot(
+    transaction: Transaction<AlongTheWayDatabase>, tripId: string, dayId: string,
+    stop: TripPlaceDto, places: TripPlaceDto[],
+  ) {
+    if (stop.dayPosition !== null) return stop.dayPosition;
+    // readList is newest-first; stable sorting matches the visible day's null-position order.
+    const ordered = places.filter((place) => place.assignedDayId === dayId && !place.scheduled)
+      .sort((left, right) => (left.dayPosition ?? Infinity) - (right.dayPosition ?? Infinity));
+    for (const [position, place] of ordered.entries()) {
+      await transaction.updateTable("trip_place_day_assignments").set({ day_position: position })
+        .where("trip_id", "=", tripId).where("trip_place_id", "=", place.id).execute();
+    }
+    return ordered.findIndex((place) => place.id === stop.id);
+  }
+
+  private async swapStopAssignment(
+    transaction: Transaction<AlongTheWayDatabase>, userId: string, tripId: string, dayId: string,
+    outgoingId: string, incomingId: string, position: number, updatedAt: Date,
+  ) {
+    await this.writeDayAssignment(transaction, userId, tripId, outgoingId, null, updatedAt);
+    await transaction.updateTable("trip_places").set({ selected_for_itinerary: false, unplaced_from_date: null })
+      .where("trip_id", "=", tripId).where("id", "=", outgoingId).execute();
+    await this.writeDayAssignment(transaction, userId, tripId, incomingId, dayId, updatedAt);
+    await transaction.updateTable("trip_place_day_assignments").set({ day_position: position })
+      .where("trip_id", "=", tripId).where("trip_place_id", "=", incomingId).execute();
   }
 
   async resolveUrl(
@@ -1286,6 +1553,9 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       version: sql`version + 1`,
       updated_at: updatedAt,
     }).where("id", "=", tripPlaceId).execute();
+    await PostgresTripPlaceModule.supersedeInvalidStopReplacements(
+      transaction, tripId, [tripPlaceId], updatedAt,
+    );
     await recordEvent(transaction, {
       tripId,
       actorId: userId,
@@ -1557,6 +1827,9 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         version: sql`version + 1`,
         updated_at: updatedAt,
       }).where("id", "=", target.id).execute();
+      await PostgresTripPlaceModule.supersedeInvalidStopReplacements(
+        transaction, tripId, [target.id], updatedAt,
+      );
       await sql`
         delete from trip_place_must_items as source_item
         where source_item.trip_place_id = ${source.id}
@@ -1700,6 +1973,9 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         version: sql`version + 1`,
         updated_at: removedAt,
       }).where("id", "=", tripPlaceId).execute();
+      await PostgresTripPlaceModule.supersedeInvalidStopReplacements(
+        transaction, tripId, [tripPlaceId], removedAt,
+      );
       await reopenRemovedProposals(transaction, tripId, removedAt, userId);
       await recordEvent(transaction, {
         tripId,
@@ -1719,6 +1995,33 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
   ) {
     await this.lockTripContent(transaction, tripId);
     await PostgresTripPlaceModule.reconcileLegacyPlacesInTransaction(transaction, tripId, this.now);
+  }
+
+  /** Run after placement writes in the caller's transaction; an ended relation never revives. */
+  static async supersedeInvalidStopReplacements(
+    transaction: Transaction<AlongTheWayDatabase>,
+    tripId: string,
+    tripPlaceIds: string[],
+    updatedAt: Date,
+  ) {
+    if (tripPlaceIds.length === 0) return;
+    await transaction.updateTable("trip_stop_replacements as replacement")
+      .set({ status: "superseded", updated_at: updatedAt })
+      .where("replacement.trip_id", "=", tripId)
+      .where("replacement.replacement_trip_place_id", "in", tripPlaceIds)
+      .where("replacement.status", "=", "active")
+      .where(sql<boolean>`not exists (
+        select 1 from trip_place_day_assignments as assignment
+        join trip_places as place on place.trip_id = assignment.trip_id and place.id = assignment.trip_place_id
+        where assignment.trip_id = replacement.trip_id
+          and assignment.trip_place_id = replacement.replacement_trip_place_id
+          and assignment.trip_day_id = replacement.trip_day_id
+          and place.archived_at is null
+          and not exists (
+            select 1 from itinerary_endpoints as endpoint
+            where endpoint.trip_id = place.trip_id and endpoint.place_id = place.legacy_place_id
+          )
+      )`).execute();
   }
 
   /** Caller holds the trip content lock; timed writers need the same canonical identity before removal. */
@@ -1750,6 +2053,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
       await transaction.updateTable("trip_places").set({
         archived_at: archivedAt, version: sql`version + 1`, updated_at: archivedAt,
       }).where("trip_id", "=", tripId).where("id", "in", ids).execute();
+      await PostgresTripPlaceModule.supersedeInvalidStopReplacements(transaction, tripId, ids, archivedAt);
     }
 
     await sql`
@@ -1998,7 +2302,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
     if (placeRows.length === 0) return [];
     const ids = placeRows.map((row) => row.id);
     const legacyPlaceIds = placeRows.map((row) => row.legacy_place_id);
-    const [contributions, members, voteRows, assignmentRows, duplicateRows, scheduledRows, aiProposalRows] = await Promise.all([
+    const [contributions, members, voteRows, assignmentRows, duplicateRows, scheduledRows, aiProposalRows, replacementRows] = await Promise.all([
       executor.selectFrom("trip_place_contributions")
         .distinctOn("trip_place_id")
         .select(["trip_place_id", "source_url"])
@@ -2023,6 +2327,16 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         .where("trip_id", "=", tripId)
         .where("accepted_trip_place_id", "in", ids)
         .execute(),
+      executor.selectFrom("trip_stop_replacements as replacement")
+        .innerJoin("trip_place_day_assignments as assignment", (join) => join
+          .onRef("assignment.trip_id", "=", "replacement.trip_id")
+          .onRef("assignment.trip_place_id", "=", "replacement.replacement_trip_place_id")
+          .onRef("assignment.trip_day_id", "=", "replacement.trip_day_id"))
+        .innerJoin("trip_places as original", "original.id", "replacement.original_trip_place_id")
+        .innerJoin("place_identities as identity", "identity.id", "original.place_id")
+        .select(["replacement.id", "replacement.replacement_trip_place_id", "replacement.original_trip_place_id",
+          "original.name", "original.facts_source", "identity.canonical_name"])
+        .where("replacement.trip_id", "=", tripId).where("replacement.status", "=", "active").execute(),
     ]);
     const scheduled = new Set(scheduledRows.map((row) => row.place_id));
     const aiProposalByTripPlaceId = new Map(
@@ -2030,6 +2344,11 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         ? [[proposal.accepted_trip_place_id, proposal.id] as const]
         : []),
     );
+    const replacementByPlaceId = new Map(replacementRows.map((row) => [row.replacement_trip_place_id, {
+      replacementId: row.id,
+      originalTripPlaceId: row.original_trip_place_id,
+      originalName: row.facts_source === "provider" ? row.canonical_name : row.name,
+    }]));
     const votesByKey = new Set(voteRows.map((row) => `${row.trip_place_id}:${row.member_user_id}`));
     const assignmentByPlaceId = new Map(
       assignmentRows.map((assignment) => [assignment.trip_place_id, assignment]),
@@ -2101,6 +2420,7 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         effortLevel: row.effort_level,
         assignedDayId: assignmentByPlaceId.get(row.id)?.trip_day_id ?? null,
         dayPosition: assignmentByPlaceId.get(row.id)?.day_position ?? null,
+        replacedStop: isScheduled ? null : replacementByPlaceId.get(row.id) ?? null,
         budgetAmountMinor: row.budget_amount_minor === null ? null : Number(row.budget_amount_minor),
         budgetCurrency: row.budget_currency,
         notes: row.notes,

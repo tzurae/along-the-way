@@ -1239,9 +1239,9 @@
 .route-leg-track { position: relative; }
 .route-leg-track::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--border); }
 .route-leg-text { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 2px 0; color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; }
-/* Opens Google Maps directions for this leg; travel modes and times are Google's, not ours. */
-.route-leg-directions { display: inline-flex; align-items: center; gap: 3px; height: 18px; border-radius: 999px; padding: 0 6px; background: #e8f0fe; color: #1a56b8; font-size: 11px; font-weight: 650; line-height: 1; text-decoration: none; }
-.route-leg-directions:hover { background: #d2e3fc; }
+/* Every leg retains an accessible link to Google's live directions. */
+.route-leg-directions { display: inline-flex; align-items: center; gap: 3px; min-height: 44px; border-radius: 999px; padding: 0 10px; background: var(--secondary); color: var(--secondary-foreground); font-size: 12px; font-weight: 650; line-height: 1; text-decoration: none; }
+.route-leg-directions:hover { background: var(--muted); }
 .route-leg-directions:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .route-leg-directions svg { width: 10px; height: 10px; }
 /* Reordering a suggested or arranged order: handle, dragged row, landing line. */
@@ -1251,15 +1251,15 @@
 .route-stop-draggable.drop-after::after { content: ""; position: absolute; left: 52px; right: 0; height: 3px; border-radius: 999px; background: var(--accent-strong, var(--color-ink)); pointer-events: none; }
 .route-stop-draggable.drop-before::before { top: -2px; }
 .route-stop-draggable.drop-after::after { bottom: -2px; }
-.route-drag-handle { display: inline-grid; width: 28px; min-height: 36px; margin-left: -6px; place-items: center; border-radius: 8px; color: var(--muted-foreground); cursor: grab; touch-action: none; user-select: none; }
+.route-drag-handle { display: inline-grid; width: 44px; min-height: 44px; margin-left: -6px; place-items: center; border-radius: 8px; color: var(--muted-foreground); cursor: grab; touch-action: none; user-select: none; }
 .route-drag-handle svg { width: 16px; height: 16px; }
 .route-drag-handle:hover:not([aria-disabled="true"]) { background: #1f30290d; color: var(--color-ink); }
 .route-drag-handle:focus-visible { outline: 2px solid var(--color-focus, var(--ring)); outline-offset: -2px; }
 .route-drag-handle[aria-disabled="true"] { cursor: default; opacity: 0.5; }
 .route-version-note { margin: 0; padding: 12px 16px 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
-.route-link-button { display: inline-flex; align-items: center; gap: 4px; justify-self: start; min-height: 32px; color: var(--color-ink); font-size: 12px; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
+.route-link-button { display: inline-flex; align-items: center; gap: 4px; justify-self: start; min-height: 44px; color: var(--color-ink); font-size: 12px; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
 .route-link-button svg, .route-remove-button svg { width: 13px; height: 13px; }
-.route-remove-button { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; min-height: 30px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-foreground); font-size: 11px; font-weight: 650; }
+.route-remove-button { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; min-height: 44px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-foreground); font-size: 11px; font-weight: 650; }
 .route-remove-button:hover:not(:disabled) { color: var(--load-packed); border-color: currentColor; }
 .route-reset { margin: 8px 16px 0; }
 .route-map-shell {
@@ -1272,6 +1272,8 @@
   width: 100%;
   height: 100%;
 }
+.route-shapes-loading { padding: 12px 16px; color: var(--muted-foreground); font-size: 14px; }
+.route-shapes-loading p { margin: 0 0 8px; }
 .route-map-status {
   display: grid;
   min-height: 360px;

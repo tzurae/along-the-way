@@ -28,6 +28,7 @@ type RouteOptions = {
   ids?: string[];
   totalMeters?: number;
   names?: Record<string, string>;
+  transitCallsNeeded?: number;
 };
 
 function route(order: DayRouteOrder, options: RouteOptions = {}): DayRouteDto {
@@ -47,15 +48,25 @@ function route(order: DayRouteOrder, options: RouteOptions = {}): DayRouteDto {
       longitude: 135.7 + index * 0.01,
       providerPlaceId: `google-${tripPlaceId}`,
       metersFromPrevious: index === 0 ? null : 1_000,
+      minutesFromPrevious: null,
+      linesFromPrevious: [],
     })),
     metersToEnd: null,
     totalMeters: options.totalMeters ?? Math.max(0, ids.length - 1) * 1_000,
+    travelSource: "straight_line",
+    routeShapesAvailable: false,
+    minutesToEnd: null,
+    linesToEnd: [],
+    totalMinutes: null,
+    transitMatrix: [],
+    transitCallsNeeded: options.transitCallsNeeded ?? 0,
+    transitCacheDays: null,
   };
 }
 
 function inputOf(options?: RequestInit) {
   return options?.body
-    ? JSON.parse(String(options.body)) as { order: DayRouteOrder; orderedTripPlaceIds?: string[] }
+    ? JSON.parse(String(options.body)) as { order: DayRouteOrder; transit?: "cached" | "fetch"; maxTransitCalls?: number; orderedTripPlaceIds?: string[] }
     : null;
 }
 
@@ -163,6 +174,28 @@ describe("day-plan view tabs", () => {
       }
     }
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("opens with cached transit data instead of spending provider quota", async () => {
+    const { request, calls } = immediateRequest();
+    render(dialog(request));
+    await screen.findByRole("region", { name: "可以儲存的順序" });
+
+    expect(calls.filter((call) => call.url.endsWith("/route")).map((call) => inputOf(call.options)))
+      .toEqual([{ order: "current" }, { order: "suggested", transit: "cached" }]);
+  });
+
+  it("binds a paid transit fetch to the missing-leg count the member approved", async () => {
+    const { request, calls } = immediateRequest({
+      suggested: route("suggested", { transitCallsNeeded: 3 }),
+    });
+    render(dialog(request));
+    fireEvent.click(await screen.findByRole("button", { name: "用電車時間排（約 3 次額度）" }));
+
+    await waitFor(() => expect(calls.some((call) => {
+      const input = inputOf(call.options);
+      return input?.transit === "fetch" && input.maxTransitCalls === 3;
+    })).toBe(true));
   });
 });
 

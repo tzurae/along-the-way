@@ -27,12 +27,25 @@ export interface TodayItem {
   notes: string | null;
   sourceUrl: string | null;
 }
+export interface TodayStopReplacement {
+  replacementId: string;
+  originalTripPlaceId: string;
+  originalName: string;
+}
 export interface TodayDay {
   id: string;
   date: string;
   timeZone: string | null;
   itemIds: string[];
-  wishlist: Array<{ id: string; name: string; type: PlaceType | null; latitude: number | null; longitude: number | null; providerPlaceId: string | null }>;
+  wishlist: Array<{
+    id: string;
+    name: string;
+    type: PlaceType | null;
+    latitude: number | null;
+    longitude: number | null;
+    providerPlaceId: string | null;
+    replacedStop: TodayStopReplacement | null;
+  }>;
 }
 export interface TodayModel {
   tripId: string;
@@ -116,6 +129,11 @@ export function createTodayModel(trip: TripDto, skeleton: TripSkeletonDto, place
           latitude: place.latitude,
           longitude: place.longitude,
           providerPlaceId: place.providerPlaceId,
+          replacedStop: place.replacedStop ? {
+            replacementId: place.replacedStop.replacementId,
+            originalTripPlaceId: place.replacedStop.originalTripPlaceId,
+            originalName: place.replacedStop.originalName,
+          } : null,
         })),
       };
     }).sort((a, b) => a.date.localeCompare(b.date)),

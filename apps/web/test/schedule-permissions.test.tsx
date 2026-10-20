@@ -210,8 +210,18 @@ function route(order: "current" | "suggested"): DayRouteDto {
       longitude: 135.78 + index * 0.01,
       providerPlaceId: null,
       metersFromPrevious: index === 0 ? null : 1_000,
+      minutesFromPrevious: null,
+      linesFromPrevious: [],
     })),
     metersToEnd: null,
     totalMeters: 1_000,
+    travelSource: "straight_line",
+    routeShapesAvailable: false,
+    minutesToEnd: null,
+    linesToEnd: [],
+    totalMinutes: null,
+    transitMatrix: [],
+    transitCallsNeeded: 0,
+    transitCacheDays: null,
   };
 }

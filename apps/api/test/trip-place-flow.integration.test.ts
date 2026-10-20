@@ -6,6 +6,7 @@ import type { Hono } from "hono";
 import { parseDayRouteResponse } from "@along-the-way/contracts/day-plans";
 import {
   parseProviderCandidatesResponse,
+  parseNearbyAlternativesResponse,
   parseTripPlaceListResponse,
   parseTripPlaceResponse,
   type ProviderPlaceCandidateDto,
@@ -39,6 +40,7 @@ import {
 } from "../src/database/migrations/020_trip_day_versions";
 import { seedDatabase } from "../src/database/seed";
 import { PostgresDayPlanModule } from "../src/planning/postgres-day-plan-module";
+import { NavitimeProvider } from "../src/planning/navitime-provider";
 import type { EmailSender } from "../src/private-trips/email-sender";
 import { PostgresEmailWorker } from "../src/private-trips/postgres-email-worker";
 import { PostgresIdentityAccessModule } from "../src/private-trips/postgres-identity-access-module";
@@ -51,6 +53,8 @@ import { PostgresTripSkeletonModule } from "../src/trip-skeleton/postgres-trip-s
 import {
   ProviderQuotaError,
   ProviderUnavailableError,
+  type NearbyPlaceCandidate,
+  type NearbySearchOptions,
   type PlaceProvider,
   type PlaceSearchOptions,
   type ProviderPlaceCandidate,
@@ -77,6 +81,9 @@ class ControlledProvider implements PlaceProvider {
   readonly detailRequests: Array<{ providerPlaceId: string; options: Pick<PlaceSearchOptions, "languageCode" | "regionCode"> }> = [];
   consumeBudget: (() => Promise<boolean>) | null = null;
   detailGate: ((requestNumber: number) => Promise<void>) | null = null;
+  readonly nearbyRequests: NearbySearchOptions[] = [];
+  nearbyResults: NearbyPlaceCandidate[] = [];
+  readonly extraPlaces = new Map<string, ProviderPlaceCandidate>();
   readonly kyoto: ProviderPlaceCandidate = {
     provider: "google",
     providerPlaceId: "ChIJ-Kyoto-Temple-1234",
@@ -121,6 +128,13 @@ class ControlledProvider implements PlaceProvider {
     return [this.kyoto, this.branch];
   }
 
+  async searchNearby(options: NearbySearchOptions) {
+    if (this.consumeBudget && !(await this.consumeBudget())) throw new ProviderQuotaError();
+    if (this.unavailable) throw new ProviderUnavailableError();
+    this.nearbyRequests.push(options);
+    return this.nearbyResults;
+  }
+
   async getPlace(
     providerPlaceId: string,
     options: Pick<PlaceSearchOptions, "languageCode" | "regionCode"> = {},
@@ -131,7 +145,7 @@ class ControlledProvider implements PlaceProvider {
     await this.detailGate?.(this.detailRequests.length);
     const place = [this.kyoto, this.branch].find(
       (candidate) => candidate.providerPlaceId === providerPlaceId,
-    );
+    ) ?? this.extraPlaces.get(providerPlaceId);
     if (!place) throw new ProviderUnavailableError("Place is unavailable");
     return place;
   }
@@ -181,6 +195,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
   let rateLimiter: PostgresRateLimiter;
   let tripPlaces: PostgresTripPlaceModule;
   let collaboration: PostgresCollaborationModule;
+  let navitime: NavitimeProvider;
+  let transitRequests: Array<{ fromId: string; toId: string; date: string }>;
   let identityAuthenticateCalls = 0;
   let afterReadObserver: (() => void) | null = null;
   let currentNow = new Date("2026-09-28T12:00:00.000Z");
@@ -250,6 +266,16 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       tokenIssuer,
       now,
     });
+    transitRequests = [];
+    navitime = new NavitimeProvider({
+      apiKey: "stub-navitime-key",
+      consumeBudget: async () => true,
+    });
+    vi.spyOn(navitime, "transit").mockImplementation(async (from, to, date) => {
+      transitRequests.push({ fromId: from.id, toId: to.id, date });
+      return { minutes: 20, lines: ["測試線"] };
+    });
+    vi.spyOn(navitime, "shape").mockRejectedValue(new Error("Route shapes are not exercised here"));
     tripPlaces = new PostgresTripPlaceModule({
       database,
       provider,
@@ -287,6 +313,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         database,
         tripSkeleton,
         tripPlaces,
+        navitime,
       }),
       discovery: unrelatedDiscoveryModule,
       identityAccess,
@@ -358,7 +385,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         flights: tripFlights(),
       }),
     });
-    expect(response.status).toBe(201);
+    expect(response.status, await response.clone().text()).toBe(201);
     return parseTripResponse(await response.json()).trip;
   }
 
@@ -393,6 +420,64 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
         originalNote: note,
       }),
     });
+  }
+
+  async function addProviderCandidate(
+    cookie: string,
+    tripId: string,
+    key: string,
+    candidate: ProviderPlaceCandidate,
+  ) {
+    provider.extraPlaces.set(candidate.providerPlaceId, candidate);
+    const response = await app.request(`/api/trips/${tripId}/trip-places`, {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        "idempotency-key": key,
+        origin: "https://app.example.test",
+      },
+      body: json({
+        method: "search",
+        providerPlaceId: candidate.providerPlaceId,
+        sourceUrl: candidate.sourceUrl,
+        originalNote: null,
+      }),
+    });
+    expect(response.status, await response.clone().text()).toBe(201);
+    return parseTripPlaceResponse(await response.json()).tripPlace;
+  }
+
+  async function addLocatedManualPlace(
+    cookie: string,
+    tripId: string,
+    key: string,
+    name: string,
+    latitude: number,
+    longitude: number,
+  ) {
+    const response = await app.request(`/api/trips/${tripId}/trip-places`, {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        "idempotency-key": key,
+        origin: "https://app.example.test",
+      },
+      body: json({
+        method: "manual",
+        name,
+        type: "restaurant",
+        address: `${name} address`,
+        latitude,
+        longitude,
+        timeZone: "Asia/Tokyo",
+        sourceUrl: null,
+        originalNote: null,
+      }),
+    });
+    expect(response.status, await response.clone().text()).toBe(201);
+    return parseTripPlaceResponse(await response.json()).tripPlace;
   }
 
   async function addManual(
@@ -438,7 +523,7 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
   async function assignToDay(
     cookie: string,
     tripId: string,
-    dayId: string,
+    dayId: string | null,
     places: TripPlaceDto[],
     key: string,
   ) {
@@ -468,6 +553,8 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     dayId: string,
     order: "current" | "suggested" | "custom",
     orderedTripPlaceIds?: string[],
+    transit?: "cached" | "fetch",
+    maxTransitCalls?: number,
   ) {
     return app.request(`/api/trips/${tripId}/days/${dayId}/route`, {
       method: "POST",
@@ -479,8 +566,53 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       body: json({
         order,
         ...(orderedTripPlaceIds === undefined ? {} : { orderedTripPlaceIds }),
+        ...(transit === undefined ? {} : { transit }),
+        ...(maxTransitCalls === undefined ? {} : { maxTransitCalls }),
       }),
     });
+  }
+
+  function nearbyCandidate(
+    providerPlaceId: string,
+    name: string,
+    options: { type?: ProviderPlaceCandidate["type"]; latitude?: number; longitude?: number } = {},
+  ): ProviderPlaceCandidate {
+    return {
+      ...provider.branch,
+      providerPlaceId,
+      name,
+      type: options.type ?? "restaurant",
+      latitude: options.latitude ?? 35.0002,
+      longitude: options.longitude ?? 135.7702,
+      sourceUrl: `https://www.google.com/maps/place/?query_place_id=${providerPlaceId}`,
+      providerPhoto: null,
+    };
+  }
+
+  async function replaceStop(
+    cookie: string,
+    tripId: string,
+    dayId: string,
+    stopId: string,
+    providerPlaceId: string,
+    expectedDayVersion: number,
+    key: string,
+  ) {
+    const response = await app.request(
+      `/api/trips/${tripId}/days/${dayId}/trip-places/${stopId}/replacement`,
+      {
+        method: "POST",
+        headers: {
+          cookie,
+          "content-type": "application/json",
+          "idempotency-key": key,
+          origin: "https://app.example.test",
+        },
+        body: json({ expectedDayVersion, providerPlaceId }),
+      },
+    );
+    expect(response.status, await response.clone().text()).toBe(200);
+    return parseTripPlaceListResponse(await response.json()).tripPlaces;
   }
 
   function saveDay(
@@ -3235,6 +3367,380 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect(await list(owner.cookie, trip.id)).toEqual([]);
   });
 
+
+  it("replaces an exact stop slot, keeps the root across a chain, and restores that root on undo", async () => {
+    const owner = await login("stop-replacement-chain@example.test");
+    const trip = await createTrip(owner.cookie, "Stop replacement chain");
+    const dayId = trip.days[0]!.id;
+    const before = await addLocatedManualPlace(owner.cookie, trip.id, "replace-before", "Before", 35, 135.769);
+    const original = await addLocatedManualPlace(owner.cookie, trip.id, "replace-original", "Original stop", 35, 135.77);
+    const after = await addLocatedManualPlace(owner.cookie, trip.id, "replace-after", "After", 35, 135.771);
+    await assignToDay(owner.cookie, trip.id, dayId, [before, original, after], "replace-assign");
+    const initial = parseDayRouteResponse(await (await dayRoute(owner.cookie, trip.id, dayId, "current")).json()).route;
+    expect((await saveDay(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "place-order",
+      "replace-order",
+      initial.version,
+      [before.id, original.id, after.id],
+    )).status).toBe(200);
+
+    const firstCandidate = nearbyCandidate("NearbyCandidateOne", "First nearby");
+    const secondCandidate = nearbyCandidate("NearbyCandidateTwo", "Second nearby", {
+      latitude: 35.0003,
+      longitude: 135.7703,
+    });
+    provider.extraPlaces.set(firstCandidate.providerPlaceId, firstCandidate);
+    provider.extraPlaces.set(secondCandidate.providerPlaceId, secondCandidate);
+
+    const firstVersion = parseDayRouteResponse(
+      await (await dayRoute(owner.cookie, trip.id, dayId, "current")).json(),
+    ).route.version;
+    const firstList = await replaceStop(
+      owner.cookie,
+      trip.id,
+      dayId,
+      original.id,
+      firstCandidate.providerPlaceId,
+      firstVersion,
+      "replace-first",
+    );
+    const firstReplacement = firstList.find((place) => place.providerPlaceId === firstCandidate.providerPlaceId)!;
+    expect(firstReplacement).toMatchObject({
+      assignedDayId: dayId,
+      dayPosition: 1,
+      replacedStop: {
+        originalTripPlaceId: original.id,
+        originalName: original.name,
+      },
+    });
+    expect(firstList.find((place) => place.id === original.id)).toMatchObject({
+      assignedDayId: null,
+      dayPosition: null,
+      selectedForItinerary: false,
+      unplacedFromDate: null,
+    });
+    expect(parseDayRouteResponse(
+      await (await dayRoute(owner.cookie, trip.id, dayId, "current")).json(),
+    ).route.orderedTripPlaceIds).toEqual([before.id, firstReplacement.id, after.id]);
+
+    const secondVersion = parseDayRouteResponse(
+      await (await dayRoute(owner.cookie, trip.id, dayId, "current")).json(),
+    ).route.version;
+    const secondList = await replaceStop(
+      owner.cookie,
+      trip.id,
+      dayId,
+      firstReplacement.id,
+      secondCandidate.providerPlaceId,
+      secondVersion,
+      "replace-second",
+    );
+    const secondReplacement = secondList.find((place) => place.providerPlaceId === secondCandidate.providerPlaceId)!;
+    expect(secondReplacement).toMatchObject({
+      assignedDayId: dayId,
+      dayPosition: 1,
+      replacedStop: {
+        originalTripPlaceId: original.id,
+        originalName: original.name,
+      },
+    });
+    expect(secondList.find((place) => place.id === firstReplacement.id)).toMatchObject({
+      assignedDayId: null,
+      selectedForItinerary: false,
+      unplacedFromDate: null,
+    });
+
+    const relationId = secondReplacement.replacedStop!.replacementId;
+    const undoneResponse = await app.request(`/api/trips/${trip.id}/stop-replacements/${relationId}/undo`, {
+      method: "POST",
+      headers: {
+        cookie: owner.cookie,
+        "content-type": "application/json",
+        "idempotency-key": "replace-undo",
+        origin: "https://app.example.test",
+      },
+      body: json({}),
+    });
+    expect(undoneResponse.status, await undoneResponse.clone().text()).toBe(200);
+    const undone = parseTripPlaceListResponse(await undoneResponse.json()).tripPlaces;
+    expect(undone.find((place) => place.id === original.id)).toMatchObject({
+      assignedDayId: dayId,
+      dayPosition: 1,
+      replacedStop: null,
+    });
+    expect(undone.find((place) => place.id === secondReplacement.id)).toMatchObject({
+      assignedDayId: null,
+      selectedForItinerary: false,
+      unplacedFromDate: null,
+    });
+  });
+
+  it("supersedes a stale replacement relation after its replacement leaves and returns to the day", async () => {
+    const owner = await login("stop-replacement-stale@example.test");
+    const trip = await createTrip(owner.cookie, "Stale stop replacement");
+    const dayId = trip.days[0]!.id;
+    const original = await addLocatedManualPlace(owner.cookie, trip.id, "stale-original", "Stale original", 35, 135.77);
+    const assigned = await assignToDay(owner.cookie, trip.id, dayId, [original], "stale-assign");
+    const currentOriginal = assigned.find((place) => place.id === original.id)!;
+    const candidate = nearbyCandidate("NearbyStaleCandidate", "Stale candidate");
+    provider.extraPlaces.set(candidate.providerPlaceId, candidate);
+    const version = parseDayRouteResponse(
+      await (await dayRoute(owner.cookie, trip.id, dayId, "current")).json(),
+    ).route.version;
+    const replaced = await replaceStop(
+      owner.cookie,
+      trip.id,
+      dayId,
+      currentOriginal.id,
+      candidate.providerPlaceId,
+      version,
+      "stale-replace",
+    );
+    const replacement = replaced.find((place) => place.providerPlaceId === candidate.providerPlaceId)!;
+    const relationId = replacement.replacedStop!.replacementId;
+
+    const unassigned = await assignToDay(owner.cookie, trip.id, null, [replacement], "stale-leave-day");
+    const offDay = unassigned.find((place) => place.id === replacement.id)!;
+    const returned = await assignToDay(owner.cookie, trip.id, dayId, [offDay], "stale-return-day");
+    expect(returned.find((place) => place.id === replacement.id)).toMatchObject({
+      assignedDayId: dayId,
+      replacedStop: null,
+    });
+
+    const staleUndo = await app.request(`/api/trips/${trip.id}/stop-replacements/${relationId}/undo`, {
+      method: "POST",
+      headers: {
+        cookie: owner.cookie,
+        "content-type": "application/json",
+        "idempotency-key": "stale-undo",
+        origin: "https://app.example.test",
+      },
+      body: json({}),
+    });
+    expect(staleUndo.status).toBe(409);
+  });
+
+  it("filters and sorts nearby alternatives before returning them and authorizes before the provider call", async () => {
+    const owner = await login("nearby-owner@example.test");
+    const editor = await login("nearby-editor@example.test");
+    const trip = await createTrip(owner.cookie, "Nearby alternatives");
+    await addMember(trip.id, editor.user.id);
+    const dayId = trip.days[0]!.id;
+    const stop = await addLocatedManualPlace(owner.cookie, trip.id, "nearby-stop", "Nearby stop", 35, 135.77);
+    await assignToDay(owner.cookie, trip.id, dayId, [stop], "nearby-stop-assign");
+
+    const assignedCandidate = nearbyCandidate("NearbyAssignedPlace", "Already assigned");
+    const archivedCandidate = nearbyCandidate("NearbyArchivedPlace", "Archived");
+    const assignedPlace = await addProviderCandidate(
+      owner.cookie,
+      trip.id,
+      "nearby-add-assigned",
+      assignedCandidate,
+    );
+    const archivedPlace = await addProviderCandidate(
+      owner.cookie,
+      trip.id,
+      "nearby-add-archived",
+      archivedCandidate,
+    );
+    await assignToDay(owner.cookie, trip.id, trip.days[1]!.id, [assignedPlace], "nearby-assign-other-day");
+    expect((await removePlace(owner.cookie, trip.id, archivedPlace, "nearby-archive")).status).toBe(204);
+
+    const bestByReviews = nearbyCandidate("NearbyBestReviews", "Best by reviews");
+    const sameRating = nearbyCandidate("NearbySameRating", "Same rating");
+    const lowerRating = nearbyCandidate("NearbyLowerRating", "Lower rating");
+    const nullRating = nearbyCandidate("NearbyNullRating", "Null rating");
+    const wrongType = nearbyCandidate("NearbyWrongType", "Wrong type", { type: "activity" });
+    provider.nearbyResults = [
+      { candidate: nullRating, rating: null, userRatingCount: 99_999 },
+      { candidate: lowerRating, rating: 4.5, userRatingCount: 2_000 },
+      { candidate: sameRating, rating: 4.8, userRatingCount: 100 },
+      { candidate: wrongType, rating: 5, userRatingCount: 10_000 },
+      { candidate: assignedCandidate, rating: 5, userRatingCount: 9_000 },
+      { candidate: archivedCandidate, rating: 5, userRatingCount: 8_000 },
+      { candidate: bestByReviews, rating: 4.8, userRatingCount: 500 },
+    ];
+
+    const path = `/api/trips/${trip.id}/days/${dayId}/trip-places/${stop.id}/nearby-alternatives`;
+    const forbidden = await app.request(path, {
+      method: "POST",
+      headers: { cookie: editor.cookie, origin: "https://app.example.test" },
+    });
+    expect(forbidden.status).toBe(403);
+    expect(provider.nearbyRequests).toHaveLength(0);
+
+    const response = await app.request(path, {
+      method: "POST",
+      headers: { cookie: owner.cookie, origin: "https://app.example.test" },
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    const result = parseNearbyAlternativesResponse(await response.json());
+    expect(result.alternatives.map((alternative) => [
+      alternative.name,
+      alternative.rating,
+      alternative.userRatingCount,
+    ])).toEqual([
+      ["Best by reviews", 4.8, 500],
+      ["Same rating", 4.8, 100],
+      ["Lower rating", 4.5, 2_000],
+      ["Null rating", null, 99_999],
+    ]);
+    expect(provider.nearbyRequests).toHaveLength(1);
+    expect(provider.nearbyRequests[0]).toMatchObject({
+      latitude: 35,
+      longitude: 135.77,
+      languageCode: "zh-TW",
+      regionCode: "JP",
+    });
+  });
+
+  it("uses no transit provider calls for cached reads, fetches only missing legs, and reuses the seven-day cache", async () => {
+    const owner = await login("transit-cache@example.test");
+    const trip = await createTrip(owner.cookie, "Transit cache");
+    const dayId = trip.days[1]!.id;
+    const first = await addLocatedManualPlace(owner.cookie, trip.id, "transit-first", "Transit first", 35, 135.77);
+    const second = await addLocatedManualPlace(owner.cookie, trip.id, "transit-second", "Transit second", 35.01, 135.78);
+    await assignToDay(owner.cookie, trip.id, dayId, [first, second], "transit-assign-two");
+
+    const cached = parseDayRouteResponse(await (await dayRoute(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "suggested",
+      undefined,
+      "cached",
+    )).json()).route;
+    expect(cached.transitCallsNeeded).toBe(2);
+    expect(transitRequests).toHaveLength(0);
+
+    const changedBudget = await dayRoute(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "suggested",
+      undefined,
+      "fetch",
+      1,
+    );
+    expect(changedBudget.status).toBe(409);
+    expect(await changedBudget.json()).toMatchObject({
+      error: { code: "transit_calls_changed", transitCallsNeeded: 2 },
+    });
+    expect(transitRequests).toHaveLength(0);
+
+    const fetched = parseDayRouteResponse(await (await dayRoute(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "suggested",
+      undefined,
+      "fetch",
+      cached.transitCallsNeeded,
+    )).json()).route;
+    expect(transitRequests).toHaveLength(2);
+    expect(fetched).toMatchObject({
+      travelSource: "navitime",
+      transitCallsNeeded: 0,
+    });
+
+    const afterFirstFetch = transitRequests.length;
+    const repeated = parseDayRouteResponse(await (await dayRoute(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "suggested",
+      undefined,
+      "fetch",
+      0,
+    )).json()).route;
+    expect(transitRequests).toHaveLength(afterFirstFetch);
+    expect(repeated.transitCacheDays).toBe(7);
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1_000;
+    const cacheRows = await database.selectFrom("transit_leg_cache")
+      .select(["from_lat", "from_lon", "to_lat", "to_lon"])
+      .where("trip_id", "=", trip.id)
+      .execute();
+    expect(cacheRows).toHaveLength(2);
+    await database.updateTable("transit_leg_cache")
+      .set({ minutes_fetched_at: new Date(Date.now() - sevenDaysMs + 60_000) })
+      .where("trip_id", "=", trip.id)
+      .execute();
+    const withinSevenDays = parseDayRouteResponse(await (await dayRoute(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "suggested",
+      undefined,
+      "cached",
+    )).json()).route;
+    expect(withinSevenDays.transitCallsNeeded).toBe(0);
+    expect(transitRequests).toHaveLength(afterFirstFetch);
+
+    const expiredLeg = cacheRows[0]!;
+    await database.updateTable("transit_leg_cache")
+      .set({ minutes_fetched_at: new Date(Date.now() - sevenDaysMs - 60_000) })
+      .where("trip_id", "=", trip.id)
+      .where("from_lat", "=", expiredLeg.from_lat)
+      .where("from_lon", "=", expiredLeg.from_lon)
+      .where("to_lat", "=", expiredLeg.to_lat)
+      .where("to_lon", "=", expiredLeg.to_lon)
+      .execute();
+    const afterExpiry = parseDayRouteResponse(await (await dayRoute(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "suggested",
+      undefined,
+      "cached",
+    )).json()).route;
+    expect(afterExpiry.transitCallsNeeded).toBe(1);
+    expect(transitRequests).toHaveLength(afterFirstFetch);
+    await dayRoute(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "suggested",
+      undefined,
+      "fetch",
+      1,
+    );
+    expect(transitRequests).toHaveLength(afterFirstFetch + 1);
+    const afterExpiryFetch = transitRequests.length;
+
+    const third = await addLocatedManualPlace(owner.cookie, trip.id, "transit-third", "Transit third", 35.02, 135.79);
+    await assignToDay(owner.cookie, trip.id, dayId, [third], "transit-assign-third");
+    const partiallyCached = parseDayRouteResponse(await (await dayRoute(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "suggested",
+      undefined,
+      "cached",
+    )).json()).route;
+    expect(partiallyCached.transitCallsNeeded).toBe(4);
+    expect(transitRequests).toHaveLength(afterExpiryFetch);
+
+    await dayRoute(
+      owner.cookie,
+      trip.id,
+      dayId,
+      "suggested",
+      undefined,
+      "fetch",
+      partiallyCached.transitCallsNeeded,
+    );
+    expect(transitRequests).toHaveLength(afterExpiryFetch + 4);
+    const requestedPairs = new Set(transitRequests.slice(afterExpiryFetch).map(({ fromId, toId }) => `${fromId}:${toId}`));
+    expect(requestedPairs).toEqual(new Set([
+      `${first.id}:${third.id}`,
+      `${second.id}:${third.id}`,
+      `${third.id}:${first.id}`,
+      `${third.id}:${second.id}`,
+    ]));
+  });
   it("names booked lodging without coordinates in the day route while leaving its legs unknown", async () => {
     const owner = await login("unlocated-lodging-route@example.test");
     const trip = await createTrip(owner.cookie, "Unlocated lodging route");
