@@ -160,26 +160,36 @@ describe("OpenAI Responses discovery model", () => {
     }
   });
 
-  it("drops sentences that rest on Google Maps content or came out in Japanese for a zh-TW reader", async () => {
+  it("drops sentences that rest on Google Maps content, give no page fact, or came out in Japanese for a zh-TW reader", async () => {
     const tofukuji = [{
       ...discovered[0]!,
       summary: "東福寺 [0] は京都市東山区にある臨済宗の寺院で、通天橋から見る紅葉が有名です。",
     }];
     const result = await model(vi.fn(async () => researchedResponse([researched({
       name: "東福寺",
+      localName: "東福寺",
       recommendation: [
+        // A care tip that came first: the moment still leads, because the card shows only one sentence.
+        { role: "care", text: "紅葉季要排隊，可以先吃一碗「おばんざい」再去。", pageFact: "紅葉シーズンは行列", sourceUrls: [searchedPage.url] },
         // Its page fact is copied from the Google Maps summary: never our claim.
-        { role: "moment", text: "通天橋一帶的紅葉很有名。", pageFact: "通天橋から見る紅葉が有名です", sourceUrls: [searchedPage.url] },
+        { role: "fit", text: "通天橋一帶的紅葉很有名。", pageFact: "通天橋から見る紅葉が有名です", sourceUrls: [searchedPage.url] },
         // Written in Japanese for a zh-TW reader.
         { role: "fit", text: "郷土色のある和食を食べたいときに合います。", pageFact: "郷土料理", sourceUrls: [searchedPage.url] },
-        // Chinese, naming the place in Japanese: kept.
-        { role: "care", text: "東福寺的通天橋在紅葉季要排隊入場。", pageFact: "Tsutenkyo queue in autumn", sourceUrls: [searchedPage.url] },
+        // No page fact: it cannot be checked against Google Maps content.
+        { role: "fit", text: "適合想慢慢看楓葉的人。", pageFact: " ", sourceUrls: [searchedPage.url] },
+        // Chinese that mentions a Japanese dish and shares only the place name with the summary: kept.
+        { role: "moment", text: "東福寺附近可以吃到赤こんにゃく，再走到通天橋看楓葉。", pageFact: "東福寺 通天橋", sourceUrls: [searchedPage.url] },
       ],
+      matchedNeeds: ["紅葉を見たい", "賞楓"],
       unknowns: ["ランチ1,500円以内に収まるかは不明です。", "通天橋是否需要預約還不確定。"],
     })]))).research({ trip: facts, brief, request, questionAnswers: [], discovered: tofukuji, outputLanguage: "zh-TW" });
 
     expect(result.candidates).toEqual([expect.objectContaining({
-      recommendationSentences: [{ text: "東福寺的通天橋在紅葉季要排隊入場。", sourceUrls: [searchedPage.url] }],
+      recommendationSentences: [
+        { text: "東福寺附近可以吃到赤こんにゃく，再走到通天橋看楓葉。", sourceUrls: [searchedPage.url] },
+        { text: "紅葉季要排隊，可以先吃一碗「おばんざい」再去。", sourceUrls: [searchedPage.url] },
+      ],
+      matchedNeeds: ["賞楓"],
       unknowns: ["通天橋是否需要預約還不確定。"],
     })]);
   });
@@ -193,19 +203,21 @@ describe("OpenAI Responses discovery model", () => {
         recommendation: [
           {
             text: `Autumn leaves are visible from Tsutenkyo bridge ([kyoto.travel](${official.url}?utm_source=openai)). [1] citeturn0search0`,
+            pageFact: "Tsutenkyo bridge autumn leaves",
             sourceUrls: [official.url, invented],
           },
           { text: "The pacing should feel calm.", pageFact: "", sourceUrls: [] },
           { text: "Bring a hat.", pageFact: "", sourceUrls: [invented] },
-          { text: "citeturn0search0", sourceUrls: [official.url] },
+          { text: "citeturn0search0", pageFact: "x", sourceUrls: [official.url] },
         ],
         tradeoffs: [
           {
             text: `[Crowds](${invented}) can build around noon. 【2†source】`,
+            pageFact: "crowded around noon",
             sourceUrls: [invented, official.url],
           },
-          { text: "", sourceUrls: [] },
-          { text: "【3†source】", sourceUrls: [official.url] },
+          { text: "", pageFact: "", sourceUrls: [] },
+          { text: "【3†source】", pageFact: "x", sourceUrls: [official.url] },
         ],
         sources: [
           { url: official.url, type: "tourism_board" },

@@ -13,8 +13,8 @@ import {
   type WebSourceType,
 } from "./discovery-model";
 
-/** Used when the model returns no kinds at all; normally it localizes these itself. */
-const DEFAULT_CATEGORIES = ["Must-see sights", "Local food", "Seasonal highlights"];
+/** Used when the model returns no kinds at all. */
+const DEFAULT_CATEGORIES = ["必訪景點", "在地美食", "當季亮點"];
 const MAX_RESEARCHED = 20;
 /**
  * Google Maps searches per run (Grounding Lite, about five places each): enough for two or three
@@ -165,17 +165,24 @@ function copiesGoogleContent(pageFact: string, googleText: string) {
 }
 
 /**
- * Whether text written for a Chinese reader came out in Japanese. A place's own Japanese name may
- * appear in a Chinese sentence, so its names are removed before counting kana.
+ * Japanese grammar a Chinese sentence never has, even when it quotes a Japanese dish or shop name:
+ * verb endings, and を, which no name uses as a particle between words.
+ */
+const JAPANESE_GRAMMAR = /(?:を|です|ます|ません|でした|ました|たい|ている|ていて|ください|ので|から|られ|される|できる|ある|いる|ない|という|には|では|への|との)/u;
+
+/**
+ * Whether text written for a Chinese reader came out in Japanese. A Chinese sentence may quote a
+ * Japanese name (赤こんにゃく, おばんざい, a shop's name), so quoted text and the place's own
+ * names are set aside, and only Japanese grammar or mostly-kana text counts.
  */
 function writtenInJapanese(text: string, outputLanguage: string, ownNames: readonly string[]) {
   if (!outputLanguage.toLowerCase().startsWith("zh")) return false;
-  let rest = text;
+  let rest = text.replace(/[「『][^」』]*[」』]/gu, "");
   for (const name of ownNames) if (name) rest = rest.split(name).join("");
-  const kana = rest.match(/[\p{Script=Hiragana}\p{Script=Katakana}]/gu)?.length ?? 0;
+  if (JAPANESE_GRAMMAR.test(rest)) return true;
   const hiragana = rest.match(/\p{Script=Hiragana}/gu)?.length ?? 0;
   const letters = rest.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu)?.length ?? 0;
-  return hiragana >= 4 || (letters > 0 && kana / letters >= 0.25);
+  return hiragana >= 8 && hiragana / letters >= 0.4;
 }
 
 interface ClaimChecks {
@@ -188,7 +195,7 @@ interface ClaimChecks {
 }
 
 /** Sentences each check dropped in one research run: logged so a drop in results can be explained. */
-interface DroppedClaims { uncited: number; googleContent: number; japanese: number }
+interface DroppedClaims { uncited: number; noPageFact: number; googleContent: number; japanese: number }
 
 /**
  * Keeps only sentences we can stand behind: each cites at least one page this request's web
@@ -196,13 +203,14 @@ interface DroppedClaims { uncited: number; googleContent: number; japanese: numb
  * The pageFact is used for the check only and is never returned or stored.
  */
 function claimSentences(value: unknown, checks: ClaimChecks, message: string, dropped: DroppedClaims): DiscoveryClaimSentence[] {
+  const sentences: Array<DiscoveryClaimSentence & { moment: boolean }> = [];
   if (!Array.isArray(value) || value.length > 12) {
     throw new DiscoveryModelResponseError(message);
   }
-  return value.flatMap((raw) => {
+  for (const raw of value) {
     const item = asObject(raw, message);
     const text = plainClaimText(item.text, message);
-    if (!text) return [];
+    if (!text) continue;
     const sourceUrls: string[] = [];
     for (const rawUrl of asStrings(item.sourceUrls, 8, message)) {
       const url = httpUrl(rawUrl);
@@ -210,19 +218,28 @@ function claimSentences(value: unknown, checks: ClaimChecks, message: string, dr
     }
     if (!sourceUrls.length) {
       dropped.uncited += 1;
-      return [];
+      continue;
     }
     const pageFact = typeof item.pageFact === "string" ? item.pageFact : "";
+    // Without the fact it rests on, a sentence cannot be checked against Google Maps content.
+    if (!compactText(pageFact)) {
+      dropped.noPageFact += 1;
+      continue;
+    }
     if (copiesGoogleContent(pageFact, checks.googleText)) {
       dropped.googleContent += 1;
-      return [];
+      continue;
     }
     if (writtenInJapanese(text, checks.outputLanguage, checks.ownNames)) {
       dropped.japanese += 1;
-      return [];
+      continue;
     }
-    return [{ text, sourceUrls }];
-  });
+    sentences.push({ text, sourceUrls, moment: item.role === "moment" });
+  }
+  // The card shows only the first sentence: the moment goes first, whatever order it came in.
+  return [...sentences]
+    .sort((left, right) => Number(right.moment) - Number(left.moment))
+    .map(({ text, sourceUrls }) => ({ text, sourceUrls }));
 }
 
 function httpUrl(value: unknown) {
@@ -438,7 +455,8 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
             "sources: cite only URLs web search returned that describe or recommend the place, labeled government (a government site), tourism_board (an official tourism organization), wikivoyage (a Wikivoyage page), place_official (the place's own website), or other.",
             "Voice: write to this traveling party as a thoughtful friend helping them decide, not as a reporter summarizing websites. recommendation is 1 to 3 items; each text is exactly one complete, natural sentence with a role: moment (exactly one, first, shown alone on the card: what there is to see, do, or eat during the trip dates, restating its pageFact concretely), fit (who in this party it suits and why, naming the brief interest or questionAnswers answer it serves), care (optional: one practical tip that restates a page fact about crowds, timing, a rule or manner, a path, or a place to sit; omit care when no page states such a fact). Do not start sentences with 這裡很適合 or 很適合安排; say what is there and for whom.",
             "pageFact is the single fact the sentence rests on, quoted short from the cited page in the page's own language; a sentence says nothing its pageFact, the brief, and questionAnswers do not support. Never take a pageFact from a discovered summary. sourceUrls cites at least one URL returned by web searches you ran in this request that supports the sentence; never type a URL from memory; never write a sentence no cited page supports. Never put Markdown links or citation markers in text.",
-            "State plain facts (what is there, when, rules, distances) directly as facts about the place, without saying where they came from (no 官方, 官網, 網站, 根據, 指出, 列為, 介紹, 被稱為); the citation already shows the source. An evaluative claim (most, best, top, famous, popular, representative, must-see; 最, 代表性, 熱門, 首選, 人氣, 知名) must name who makes it, as the cited page does (for example 京都官方把東福寺列為最熱門的紅葉景點之一); never make an evaluative claim on your own.",
+            "State plain facts (what is there, when, rules, distances) directly as facts about the place, without saying where they came from (no 根據, 指出, 網站, 官網, 介紹, 被稱為); the citation already shows the source.",
+            "The one exception is an evaluative claim (most, best, top, famous, popular, representative, must-see; 最, 代表性, 熱門, 首選, 人氣, 知名): it must always name who makes it, as the cited page does, and may say 官方 or 列為 to do so (for example 京都官方把東福寺列為最熱門的紅葉景點之一). Never make an evaluative claim on your own or without naming who makes it.",
             "Never write first-person experience, invented scenes, people, senses, times of day, or feelings, and never promise how the traveler will feel. Never soften a page's warning about crowds or safety. Follow every rule or manner a page states (for example, if a page asks visitors not to eat while walking, never suggest it).",
             "Describe the party only as the brief and questionAnswers state it; never count generations or add members. Do not claim stairs, slopes, seating, rest spots, toilets, strollers, accessibility, or suitability for children or elders unless a cited page states it; when an answer raises such a need and no page settles it, put it in unknowns as a concrete thing to check.",
             "tradeoffs are short sentences of practical care for this party, each restating its pageFact, with the same citation rules.",
@@ -460,7 +478,7 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
     const allowedPlaceIds = new Set(placeIds);
     const seen = new Set<string>();
     const candidates: ResearchedCandidate[] = [];
-    const dropped: DroppedClaims = { uncited: 0, googleContent: 0, japanese: 0 };
+    const dropped: DroppedClaims = { uncited: 0, noPageFact: 0, googleContent: 0, japanese: 0 };
     let droppedPlaces = 0;
     for (const raw of rawCandidates) {
       const item = asObject(raw, "AI discovery returned an invalid candidate");
