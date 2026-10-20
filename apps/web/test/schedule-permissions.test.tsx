@@ -216,6 +216,7 @@ function route(order: "current" | "suggested"): DayRouteDto {
     metersToEnd: null,
     totalMeters: 1_000,
     travelSource: "straight_line",
+    transitProvider: null,
     routeShapesAvailable: false,
     minutesToEnd: null,
     linesToEnd: [],

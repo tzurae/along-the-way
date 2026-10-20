@@ -102,7 +102,7 @@ function missesLeg(route: DayRouteDto) {
  * never presented as an improvement.
  */
 function candidateDelta(baseline: DayRouteDto, candidate: DayRouteDto, sameText: string) {
-  if (candidate.travelSource === "navitime") {
+  if (candidate.travelSource !== "straight_line") {
     if (baseline.totalMinutes === null || candidate.totalMinutes === null) {
       return { tone: "same", text: "部分路段為估計，無法比較總時間" } as const;
     }
@@ -118,7 +118,32 @@ function candidateDelta(baseline: DayRouteDto, candidate: DayRouteDto, sameText:
     : { tone: "longer", text: `↑ 多 ${kilometres(difference)}` } as const;
 }
 
-type ShapeState = { status: "loading" | "ready" | "error"; legs: DayRouteShapesResponse["legs"] };
+type ShapeState = { status: "loading" | "ready" | "error"; legs: DayRouteShapesResponse["legs"]; travelNotice?: DayRouteShapesResponse["travelNotice"] };
+
+/** Google has no server cache: keep the paid matrix only in this dialog, checking every coordinate. */
+function withDialogTransit(route: DayRouteDto, source: DayRouteDto | null): DayRouteDto {
+  if (source?.travelSource !== "google_routes" || route.transitProvider !== "google_routes" || source.date !== route.date) return route;
+  return withTransitMatrix(route, source.transitMatrix, "google_routes");
+}
+
+/** A cache-only refresh cannot replace a still-valid paid Google restore target. */
+function retainGoogleSuggestion(previous: DayRouteDto | undefined, fresh: DayRouteDto): DayRouteDto {
+  if (previous?.travelSource !== "google_routes" || fresh.transitProvider !== "google_routes"
+    || previous.dayId !== fresh.dayId || previous.date !== fresh.date
+    || previous.stops.length !== fresh.stops.length) return fresh;
+  const points = new Map(fresh.stops.map((stop) => [stop.tripPlaceId, stop]));
+  for (const stop of previous.stops) {
+    const point = points.get(stop.tripPlaceId);
+    if (!point || point.latitude !== stop.latitude || point.longitude !== stop.longitude) return fresh;
+  }
+  for (const side of ["startsAt", "endsAt"] as const) {
+    const before = previous[side];
+    const after = fresh[side];
+    if (before?.placeId !== after?.placeId || before?.latitude !== after?.latitude
+      || before?.longitude !== after?.longitude) return fresh;
+  }
+  return { ...previous, version: fresh.version, transitCallsNeeded: fresh.transitCallsNeeded };
+}
 
 /** Coordinates are part of the snapshot identity; responses live only in this open dialog. */
 function routeShapeKey(route: DayRouteDto) {
@@ -514,9 +539,10 @@ export function DayPlanDialog({
 
   const saved = routes.current ?? null;
   const candidate = routes.custom ?? routes.suggested ?? null;
-  const transitSource = candidate?.travelSource === "navitime" ? candidate : null;
+  const transitSource = candidate && candidate.travelSource !== "straight_line" ? candidate : null;
   const transitCallsNeeded = routes.suggested?.transitCallsNeeded ?? candidate?.transitCallsNeeded ?? 0;
-  const suggestedLabel = candidate?.travelSource === "navitime" ? "依交通時間排" : "依直線距離排";
+  const suggestedLabel = routes.suggested && routes.suggested.travelSource !== "straight_line" ? "依交通時間排" : "依直線距離排";
+  const providerName = candidate?.transitProvider === "google_routes" ? "Google" : "NAVITIME";
 
   function selectRouteTab(version: "saved" | "candidate", next: RouteView) {
     if (version === "saved") setSavedTab(next);
@@ -535,7 +561,7 @@ export function DayPlanDialog({
       parse: parseDayRouteShapesResponse,
     }).then((response) => {
       if (epoch !== dialogEpoch.current) return;
-      setShapeStates((current) => ({ ...current, [key]: { status: "ready", legs: response.legs } }));
+      setShapeStates((current) => ({ ...current, [key]: { status: "ready", legs: response.legs, travelNotice: response.travelNotice } }));
     }, () => {
       if (epoch !== dialogEpoch.current) return;
       setShapeStates((current) => ({ ...current, [key]: { status: "error", legs: [] } }));
@@ -559,7 +585,7 @@ export function DayPlanDialog({
       <>
         <p className="route-version-note">
           {version === "candidate" && route.routeShapesAvailable
-            ? "實線是大眾運輸，灰色虛線是步行。路線由 NAVITIME 提供。"
+            ? `實線是大眾運輸，灰色虛線是步行。路線由 ${route.transitProvider === "google_routes" ? "Google" : "NAVITIME"} 提供。`
             : "地圖只標出順序；實際怎麼走請點每段的 Google Maps"}
         </p>
         {state?.status === "loading" ? (
@@ -569,6 +595,11 @@ export function DayPlanDialog({
           </div>
         ) : null}
         {state?.status === "error" ? <p className="route-version-note" role="status">這段路線無法取得；請到「路線」分頁點每段的 Google Maps。</p> : null}
+        {state?.travelNotice ? <p className="route-version-note" role="status">
+          {state.travelNotice === "transit_quota"
+            ? "Google 的交通查詢額度已用完，未取得的路段不畫線；請點每段 Google Maps 查看走法。"
+            : "目前無法取得部分 Google 交通路線；請點每段 Google Maps 查看走法。"}
+        </p> : null}
         {state?.legs.filter((leg) => !leg.geojson).map((leg) => (
           <p key={`${leg.fromId}:${leg.toId}`} className="route-version-note">
             {names.get(leg.fromId)} → {names.get(leg.toId)}：這段路線無法取得
@@ -685,10 +716,11 @@ export function DayPlanDialog({
         const kept = new Set(custom.orderedTripPlaceIds);
         updatedCustom = await fetchRoute(day.id, {
           order: "custom",
-          orderedTripPlaceIds: suggested.travelSource === "navitime"
+          orderedTripPlaceIds: suggested.travelSource !== "straight_line"
             ? suggested.orderedTripPlaceIds.filter((id) => kept.has(id))
             : custom.orderedTripPlaceIds,
         });
+        updatedCustom = withDialogTransit(updatedCustom, suggested);
       }
       if (ticket !== latestRequest.current || epoch !== dialogEpoch.current) return;
       setRoutes((current) => ({ ...current, suggested, custom: updatedCustom }));
@@ -701,7 +733,9 @@ export function DayPlanDialog({
           setRoutes((current) => ({ ...current, suggested }));
           setTransitCallsNotice(suggested.transitCallsNeeded > 0
             ? `行程剛變動，需要的額度變成約 ${suggested.transitCallsNeeded} 次，請再按一次。`
-            : "行程剛變動，現在可直接使用已查過的交通時間。");
+            : suggested.transitProvider === "google_routes"
+              ? "行程剛變動，目前沒有需要查詢的交通路段。"
+              : "行程剛變動，現在可直接使用已查過的交通時間。");
         } catch {
           if (ticket === latestRequest.current && epoch === dialogEpoch.current) {
             setTransitCallsNotice("行程剛變動，暫時無法更新需要的額度，請關閉後重新開啟。");
@@ -782,7 +816,7 @@ export function DayPlanDialog({
     try {
       const route = await fetchRoute(day.id, { order: "custom", orderedTripPlaceIds });
       if (ticket !== latestRequest.current || epoch !== dialogEpoch.current) return;
-      setRoutes((current) => ({ ...current, custom: route }));
+      setRoutes((current) => ({ ...current, custom: withDialogTransit(route, candidate) }));
       setCandidateTab("route");
     } catch (reason) {
       if (ticket === latestRequest.current && epoch === dialogEpoch.current) {
@@ -835,11 +869,15 @@ export function DayPlanDialog({
         fetchRoute(day.id, { order: "suggested", transit: "cached" }),
       ]);
       if (epoch !== dialogEpoch.current) return;
+      const restoreTarget = current.version === suggested.version
+        ? retainGoogleSuggestion(routes.suggested, suggested) : suggested;
       setRoutes({
         current,
-        suggested,
+        suggested: restoreTarget,
         custom: {
-          ...(suggested.transitMatrix.length > 0 ? withTransitMatrix(current, suggested.transitMatrix) : current),
+          ...(restoreTarget.transitMatrix.length > 0 && restoreTarget.transitProvider
+            ? withTransitMatrix(current, restoreTarget.transitMatrix, restoreTarget.transitProvider)
+            : withDialogTransit(current, candidate)),
           transitCallsNeeded: suggested.transitCallsNeeded,
           transitCacheDays: suggested.transitCacheDays,
           order: "custom",
@@ -1085,7 +1123,7 @@ export function DayPlanDialog({
     const rawBaseline = removedIds.length === 0
       ? saved : baseline?.key === baselineKey ? baseline.route : null;
     const comparedWith = rawBaseline && transitSource
-      ? withTransitMatrix(rawBaseline, transitSource.transitMatrix) : rawBaseline;
+      ? withTransitMatrix(rawBaseline, transitSource.transitMatrix, transitSource.transitProvider!) : rawBaseline;
     const comparisonPending = removedIds.length > 0 && baseline?.key !== baselineKey;
     const delta = comparedWith
       ? candidateDelta(
@@ -1128,7 +1166,9 @@ export function DayPlanDialog({
             disabled={busy !== null}
             onClick={() => void fetchTransitSuggestion()}
           >
-            {busy === "transit" ? "查詢中…" : `用電車時間排（約 ${transitCallsNeeded} 次額度）`}
+            {busy === "transit" ? "查詢中…" : candidate.transitProvider === "google_routes"
+              ? `用大眾運輸時間排（約 ${transitCallsNeeded} 次）`
+              : `用電車時間排（約 ${transitCallsNeeded} 次額度）`}
           </button>
         ) : null}
         {transitCallsNotice ? <p role="status" className="route-version-note">{transitCallsNotice}</p> : null}
@@ -1173,8 +1213,8 @@ export function DayPlanDialog({
         <div id={`${candidateTabPrefix}-route-panel`} role="tabpanel" aria-labelledby={`${candidateTabPrefix}-route-tab`} hidden={candidateTab !== "route"}>
           <p className="route-version-note">
             {arranged ? "從目前順序調整；拖曳即可再改。"
-              : candidate.travelSource === "navitime"
-                ? "依 NAVITIME 交通時間排序；每段都以當地當天 09:00 出發估算，不是到站時間表。"
+              : candidate.travelSource !== "straight_line"
+                ? `依 ${providerName} 交通時間排序；每段都以當地當天 09:00 出發估算，不是到站時間表。`
                 : "只依地點間的直線距離排序。"}
           </p>
           {arranged && routes.suggested ? (
@@ -1210,8 +1250,8 @@ export function DayPlanDialog({
   const summary = saved
     ? {
       headline: `${saved.stops.length} 個地點`,
-      note: candidate?.travelSource === "navitime"
-        ? `NAVITIME 交通時間以當地 09:00 估算；公里數仍是直線距離${missesLeg(saved) || missesLeg(candidate) ? "；缺少資料的路段另標估計" : ""}`
+      note: candidate && candidate.travelSource !== "straight_line"
+        ? `${providerName} 交通時間以當地 09:00 估算；公里數仍是直線距離${missesLeg(saved) || missesLeg(candidate) ? "；缺少資料的路段另標估計" : ""}`
         : `比的是直線距離，不是實際路程${missesLeg(saved) || (candidate && missesLeg(candidate)) ? "；不含缺少座標的路段" : ""}`,
     }
     : null;
@@ -1227,9 +1267,9 @@ export function DayPlanDialog({
         {!canArrange ? <p className="route-status">{t.schedule.ownerOnly}</p> : null}
         {busy === "planning" ? <p role="status" className="route-status">{t.dayPlan.planning}</p> : null}
         {routes.suggested?.travelNotice ? <p role="status" className="route-status">
-          {routes.suggested.travelNotice === "navitime_quota"
-            ? "NAVITIME 的交通查詢額度已用完，這次先依直線距離排。每段仍可點 Google Maps 查看走法。"
-            : "目前無法取得 NAVITIME 交通時間，這次先依直線距離排。每段仍可點 Google Maps 查看走法。"}
+          {routes.suggested.travelNotice === "navitime_quota" || routes.suggested.travelNotice === "transit_quota"
+            ? `${providerName} 的交通查詢額度已用完，這次先依直線距離排。每段仍可點 Google Maps 查看走法。`
+            : `目前無法取得 ${providerName} 交通時間，這次先依直線距離排。每段仍可點 Google Maps 查看走法。`}
         </p> : null}
 
         {saved ? (

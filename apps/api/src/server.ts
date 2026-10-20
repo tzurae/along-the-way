@@ -5,6 +5,7 @@ import { OpenAiResponsesDiscoveryModel } from "./discovery/openai-responses-disc
 import { PostgresDiscoveryModule } from "./discovery/postgres-discovery-module";
 import { PostgresDayPlanModule } from "./planning/postgres-day-plan-module";
 import { NavitimeProvider } from "./planning/navitime-provider";
+import { GoogleRoutesProvider } from "./planning/google-routes-provider";
 import { PostgresPlanningSettingsModule } from "./planning/postgres-planning-settings-module";
 import { PostgresWholeTripPlanModule } from "./planning/postgres-whole-trip-plan-module";
 import { PostgresIdentityAccessModule } from "./private-trips/postgres-identity-access-module";
@@ -110,7 +111,11 @@ const dayPlans = new PostgresDayPlanModule({
   tripPlaces,
   navitime: new NavitimeProvider({
     apiKey: process.env.RAPIDAPI_KEY,
-    consumeBudget: () => rateLimiter.tryConsumePaidProvider("navitime"),
+    reserveBudget: () => rateLimiter.reservePaidProvider("navitime"),
+  }),
+  googleRoutes: new GoogleRoutesProvider({
+    apiKey: process.env.GOOGLE_MAPS_API_KEY,
+    reserveBudget: (elements) => rateLimiter.reservePaidProvider("google_routes", elements),
   }),
 });
 const readiness = new PostgresReadinessProbe(database);
