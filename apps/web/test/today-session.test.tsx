@@ -448,6 +448,23 @@ it("gives a signed-out user the sign-in screen, not a dead-end reconnect page, f
   expect(document.body).not.toHaveTextContent("暫時連不上伺服器，你的登入還在。");
 });
 
+it("keeps a 401-denied tab on the sign-in screen when an old link then meets a session outage", async () => {
+  sessionFailure = 401;
+  await mount();
+  await waitFor(() => expect(document.querySelector('input[type="email"]')).toBeInTheDocument());
+  magicConsumeFailure = "terminal";
+  sessionFailure = 500;
+  history.replaceState({}, "", "/?trip=A&tab=today#magicToken=already-used-token");
+
+  await act(async () => {
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  });
+
+  await waitFor(() => expect(document.querySelector('[role="alert"]')).toHaveTextContent("請寄一封新的登入信。"));
+  expect(document.querySelector('input[type="email"]')).toBeInTheDocument();
+  expect(document.body).not.toHaveTextContent("暫時連不上伺服器，你的登入還在。");
+});
+
 it("signs in but explains when a linked invitation expired or was revoked", async () => {
   await mount();
   magicInviteOutcome = true;

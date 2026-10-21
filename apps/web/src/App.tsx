@@ -745,6 +745,9 @@ export function App() {
   }, [replayPendingLogout, store, t.errors, t.today.mutationDisabled]);
   const [user, setUser] = useState<UserDto | null | undefined>(undefined);
   const [sessionDenied, setSessionDenied] = useState(() => store?.isLocallySignedOut() ?? false);
+  /** Current value for async auth code that outlives the render which started it. */
+  const sessionDeniedRef = useRef(sessionDenied);
+  sessionDeniedRef.current = sessionDenied;
   const [sessionRestoreUnavailable, setSessionRestoreUnavailable] = useState(false);
   const [globalView, setGlobalView] = useState<GlobalView>(readGlobalView);
   const [signingOutEverywhere, setSigningOutEverywhere] = useState(false);
@@ -1359,10 +1362,10 @@ export function App() {
               if (!active) return;
               if (!existing) {
                 const denied = sessionError instanceof ApiRequestError && sessionError.status === 401;
-                // After an explicit sign-out, reconnect() refuses to run, so the reconnect page would
-                // be a dead end: those users get the sign-in screen with the link explanation instead.
-                const locallySignedOut = signedOut.current || store?.isLocallySignedOut();
-                if (!denied && !locallySignedOut) {
+                // reconnect() refuses to run for a denied or explicitly signed-out session, so the
+                // reconnect page would be a dead end: those users get the sign-in screen instead.
+                const reconnectBlocked = sessionDeniedRef.current || signedOut.current || store?.isLocallySignedOut();
+                if (!denied && !reconnectBlocked) {
                   // The link is spent but the session may still be valid: treat it like any other
                   // transient restore failure instead of claiming the user must sign in again.
                   if (epoch === sessionEpoch.current) deferSessionRestore();
