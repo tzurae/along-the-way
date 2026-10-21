@@ -391,9 +391,10 @@ it("keeps a rate-limited magic token and explains when to retry", async () => {
   expect(new URLSearchParams(location.hash.slice(1)).get("magicToken")).toBe("limited-token");
 });
 
-it("localizes terminal magic-link failures without rendering server English", async () => {
+it("localizes terminal magic-link failures without rendering server English when the browser has no session", async () => {
   await mount();
   magicConsumeFailure = "terminal";
+  sessionFailure = 401;
   history.replaceState({}, "", "/?trip=A&tab=today#magicToken=invalid-token");
 
   await act(async () => {
@@ -404,6 +405,34 @@ it("localizes terminal magic-link failures without rendering server English", as
     "這個登入連結無效。 請寄一封新的登入信。",
   ));
   expect(document.querySelector('[role="alert"]')).not.toHaveTextContent("This sign-in link is invalid.");
+  expect(new URLSearchParams(location.hash.slice(1)).has("magicToken")).toBe(false);
+});
+
+it("keeps a still-signed-in browser in the app when an old, already-used email link is clicked again", async () => {
+  await mount();
+  await waitFor(() => expect(document.querySelector(".atw-account-trigger")).toHaveTextContent(todayUser.email));
+  magicConsumeFailure = "terminal";
+  history.replaceState({}, "", "/?trip=A&tab=today#magicToken=already-used-token");
+
+  await act(async () => {
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  });
+
+  await waitFor(() => expect(requests.filter((request) => request === "/api/auth/magic-links/consume")).toHaveLength(1));
+  await waitFor(() => expect(document.querySelector(".atw-account-trigger")).toHaveTextContent(todayUser.email));
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+  expect(document.querySelector('input[type="email"]')).toBeNull();
+  expect(new URLSearchParams(location.hash.slice(1)).has("magicToken")).toBe(false);
+});
+
+it("does not claim the user must sign in when an old link meets a transient session failure", async () => {
+  history.replaceState({}, "", "/?trip=A&tab=today#magicToken=already-used-token");
+  magicConsumeFailure = "terminal";
+  sessionFailure = 500;
+  await mount();
+
+  await waitFor(() => expect(document.body).toHaveTextContent("暫時連不上伺服器，你的登入還在。"));
+  expect(document.querySelector('input[type="email"]')).toBeNull();
   expect(new URLSearchParams(location.hash.slice(1)).has("magicToken")).toBe(false);
 });
 
