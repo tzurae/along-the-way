@@ -665,6 +665,7 @@ export function App() {
   const accountId = useRef<string | null>(null);
   const readOnly = useRef(false);
   const reconnecting = useRef(false);
+  const authenticating = useRef(false);
   const signedOut = useRef(false);
   const loadSequence = useRef(0);
   const sessionEpoch = useRef(0);
@@ -743,6 +744,8 @@ export function App() {
     }
   }, [replayPendingLogout, store, t.errors, t.today.mutationDisabled]);
   const [user, setUser] = useState<UserDto | null | undefined>(undefined);
+  const [sessionDenied, setSessionDenied] = useState(() => store?.isLocallySignedOut() ?? false);
+  const [sessionRestoreUnavailable, setSessionRestoreUnavailable] = useState(false);
   const [globalView, setGlobalView] = useState<GlobalView>(readGlobalView);
   const [signingOutEverywhere, setSigningOutEverywhere] = useState(false);
   const [trips, setTrips] = useState<TripSummaryDto[]>([]);
@@ -779,6 +782,7 @@ export function App() {
     if (!needsRestore) return;
     ++sessionEpoch.current;
     signedOut.current = false;
+    setSessionDenied(false);
     completedAuthKeys.current.delete("session");
     confirmedMagicToken.current = null;
     pendingCodeSession.current = null;
@@ -818,6 +822,7 @@ export function App() {
   const clearLocalSession = useCallback(() => {
     ++sessionEpoch.current;
     signedOut.current = true;
+    setSessionDenied(true);
     const owner = accountId.current ?? store?.lastAccount();
     if (owner) store?.clearAccount(owner);
     accountId.current = null;
@@ -825,6 +830,7 @@ export function App() {
     readOnly.current = false;
     setTodaySnapshot(null);
     setOnboardingFacts(null);
+    setSessionRestoreUnavailable(false);
     setUser(null);
     setTrips([]);
     setSelectedTrip(null);
@@ -1011,15 +1017,30 @@ export function App() {
     return true;
   }, [store, t.admin.unavailable]);
 
+  const deferSessionRestore = useCallback(() => {
+    setUser(undefined);
+    const restored = restoreSnapshot();
+    setSessionRestoreUnavailable(!restored);
+    if (!restored) {
+      // restoreSnapshot can enter its no-snapshot shell; session identity is still unknown.
+      readOnly.current = false;
+      setOffline(false);
+    }
+  }, [restoreSnapshot]);
+
   const reconnect = useCallback(async () => {
-    if (signedOut.current || store?.isLocallySignedOut() || reconnecting.current) return;
+    if (sessionDenied || signedOut.current || store?.isLocallySignedOut() || reconnecting.current || authenticating.current) return;
     reconnecting.current = true;
     setRetrying(true);
     const epoch = sessionEpoch.current;
     const navigationSequence = loadSequence.current;
+    let sessionRestored = false;
     try {
       const session = await request<{ user: UserDto }>("/api/session", { parse: parseSessionResponse });
       if (epoch !== sessionEpoch.current || navigationSequence !== loadSequence.current) return;
+      sessionRestored = true;
+      setSessionDenied(false);
+      setSessionRestoreUnavailable(false);
       const previousAccount = accountId.current ?? store?.lastAccount();
       if (previousAccount && previousAccount !== session.user.id) {
         store?.clearAccount(previousAccount);
@@ -1052,10 +1073,14 @@ export function App() {
       }
     } catch (reason) {
       if (epoch !== sessionEpoch.current || navigationSequence !== loadSequence.current) return;
+      if (!sessionRestored && !(reason instanceof ApiRequestError && reason.status === 401)) {
+        deferSessionRestore();
+        return;
+      }
       if (!(reason instanceof ApiRequestError) || ![401, 403, 404].includes(reason.status ?? 0)) restoreSnapshot();
       setError(reason instanceof Error ? reason.message : t.today.unavailable);
     } finally { reconnecting.current = false; setRetrying(false); }
-  }, [loadTrip, refreshTrips, request, restoreSnapshot, store, t.today.unavailable]);
+  }, [deferSessionRestore, loadTrip, refreshTrips, request, restoreSnapshot, sessionDenied, store, t.today.unavailable]);
 
   const selectTab = useCallback((tab: TripTab) => {
     const segment = defaultSegment(tab);
@@ -1103,8 +1128,7 @@ export function App() {
   }, [replayPendingLogout]);
 
   useEffect(() => {
-    const unavailable = () => { restoreSnapshot(); };
-    const online = () => { void reconnect(); };
+    const unavailable = () => { if (!sessionRestoreUnavailable) restoreSnapshot(); };
     const denied = (event: Event) => {
       const detail = (event as CustomEvent<{ tripId?: string; status: number }>).detail;
       if (detail.status === 401 || detail.tripId === readTripLocation().trip) {
@@ -1112,7 +1136,11 @@ export function App() {
         if (detail.status === 401) ++sessionEpoch.current;
         setTodaySnapshot(null); setSelectedTrip(null);
         setOffline(false); readOnly.current = false;
-        if (detail.status === 401) { setUser(null); setTrips([]); accountId.current = null; }
+        if (detail.status === 401) {
+          setSessionDenied(true);
+          setSessionRestoreUnavailable(false);
+          setUser(null); setTrips([]); accountId.current = null;
+        }
       }
     };
     const navigate = () => {
@@ -1169,29 +1197,35 @@ export function App() {
       }
     };
     window.addEventListener("offline", unavailable);
-    window.addEventListener("online", online);
     window.addEventListener("today-api-unavailable", unavailable);
     window.addEventListener("today-access-denied", denied);
     window.addEventListener("popstate", navigate);
     window.addEventListener("hashchange", fragmentChanged);
     return () => {
-      window.removeEventListener("offline", unavailable); window.removeEventListener("online", online);
+      window.removeEventListener("offline", unavailable);
       window.removeEventListener("today-api-unavailable", unavailable); window.removeEventListener("today-access-denied", denied);
       window.removeEventListener("popstate", navigate);
       window.removeEventListener("hashchange", fragmentChanged);
     };
-  }, [loadTrip, reconnect, restoreSnapshot, t.admin.unavailable, t.today.unavailable, user?.isAdmin]);
+  }, [loadTrip, restoreSnapshot, sessionRestoreUnavailable, t.admin.unavailable, t.today.unavailable, user?.isAdmin]);
 
   useEffect(() => {
-    if (!offline) return;
+    if (sessionDenied) return;
+    const online = () => { void reconnect(); };
+    window.addEventListener("online", online);
+    return () => window.removeEventListener("online", online);
+  }, [reconnect, sessionDenied]);
+
+  useEffect(() => {
+    if (sessionDenied || (!offline && !sessionRestoreUnavailable)) return;
     const revalidate = () => {
-      if (navigator.onLine && document.visibilityState !== "hidden") void reconnect();
+      if ((sessionRestoreUnavailable || navigator.onLine) && document.visibilityState !== "hidden") void reconnect();
     };
     // An offline shell can reopen while navigator.onLine already reports true; the
     // browser then has no online transition to emit when the API becomes reachable.
-    // Probe only while the visible read-only shell needs recovery. Events bypass
-    // the interval, and reconnect's single-flight guard coalesces simultaneous signals.
-    const interval = window.setInterval(revalidate, 2_000);
+    // Keep the existing snapshot recovery cadence; unknown sessions retry less often.
+    // Events bypass the interval, and reconnect coalesces simultaneous signals.
+    const interval = window.setInterval(revalidate, sessionRestoreUnavailable ? 15_000 : 2_000);
     window.addEventListener("focus", revalidate);
     document.addEventListener("visibilitychange", revalidate);
     return () => {
@@ -1199,7 +1233,7 @@ export function App() {
       window.removeEventListener("focus", revalidate);
       document.removeEventListener("visibilitychange", revalidate);
     };
-  }, [offline, reconnect]);
+  }, [offline, reconnect, sessionDenied, sessionRestoreUnavailable]);
 
   useEffect(() => {
     if (placesRevision > 0 && selectedTrip && !readOnly.current) void loadTrip(selectedTrip.id, true).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : t.today.unavailable));
@@ -1269,11 +1303,14 @@ export function App() {
         active = false;
       };
     }
+    authenticating.current = true;
+    setSessionRestoreUnavailable(false);
 
     void (async () => {
       try {
         if (!magicToken && !codeSession && store?.isLocallySignedOut()) {
           completedAuthKeys.current.add(authKey);
+          setSessionDenied(true);
           setUser(null);
           return;
         }
@@ -1365,6 +1402,7 @@ export function App() {
 
         authenticatedUser = session.user;
         if (!active || epoch !== sessionEpoch.current) return;
+        setSessionDenied(false);
         setAuthProgressPhase("loading-trips");
         const previousAccount = accountId.current ?? store?.lastAccount();
         if (previousAccount && previousAccount !== session.user.id) {
@@ -1394,8 +1432,13 @@ export function App() {
         }
         if (active && epoch === sessionEpoch.current) enterSignedIn(session.user);
       } catch (reason) {
-        if (!active) return;
+        if (!active || epoch !== sessionEpoch.current) return;
         if (!magicToken) completedAuthKeys.current.add(authKey);
+        if (!magicToken && !codeSession && !authenticatedUser
+          && !(reason instanceof ApiRequestError && reason.status === 401)) {
+          deferSessionRestore();
+          return;
+        }
         if (!(reason instanceof ApiRequestError) || reason.status === undefined || reason.status >= 500) {
           if (restoreSnapshot()) return;
         }
@@ -1410,15 +1453,20 @@ export function App() {
           enterSignedIn(authenticatedUser);
           return;
         }
+        if (reason instanceof ApiRequestError && reason.status === 401) setSessionDenied(true);
         setUser(null);
+      } finally {
+        if (active) authenticating.current = false;
       }
     })();
     return () => {
       active = false;
+      authenticating.current = false;
     };
   }, [
     authAttempt,
     authFragment.magicToken,
+    deferSessionRestore,
     enterSignedIn,
     loadTrip,
     refreshTrips,
@@ -1574,6 +1622,22 @@ export function App() {
   }
 
   if (user === undefined) {
+    if (sessionRestoreUnavailable) {
+      return (
+        <main className="atw-auth-transition-surface auth-page">
+          <section className="auth-card" aria-labelledby="session-restore-title">
+            <div role="status">
+              <h1 id="session-restore-title" className="auth-title auth-progress-title">
+                {auth.sessionRestoreUnavailable}
+              </h1>
+            </div>
+            <Button type="button" className="mt-6 min-h-11 px-5" onClick={() => void reconnect()} disabled={retrying}>
+              {retrying ? auth.reconnecting : auth.reconnect}
+            </Button>
+          </section>
+        </main>
+      );
+    }
     return <div className="atw-auth-transition-surface"><AuthProgress phase={authProgressPhase} /></div>;
   }
   if (user === null) {

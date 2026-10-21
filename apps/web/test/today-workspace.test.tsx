@@ -110,6 +110,27 @@ describe("Today timeline ordering and state", () => {
     expect(host.querySelector(".today-timeline")).not.toHaveTextContent(/08:00|09:00|10:00|13:00|14:00|15:00|16:00|17:00/);
     expect(host.querySelector(".today-lead")).not.toHaveTextContent(/10:00|13:00/);
   });
+  it("keeps next-stop navigation without the removed group timeline action", () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-21T09:00:00Z"));
+    const next = fixedItem(
+      "next stop",
+      "activity",
+      "2026-10-21T10:00:00Z",
+      "2026-10-21T11:00:00Z",
+      [endpoint("start", "2026-10-21T10:00:00Z", "UTC", "Next stop", 35, 135)],
+    );
+    const day = tripDay("day21", "2026-10-21", [next.id]);
+
+    const host = renderToday(todayModel([day], [next]), day.date);
+
+    const navigation = host.querySelector<HTMLAnchorElement>(".today-lead-actions a");
+    expect(navigation).toHaveTextContent("導航到 Next stop");
+    const destination = new URL(navigation!.href);
+    expect(destination.origin + destination.pathname).toBe("https://www.google.com/maps/dir/");
+    expect(destination.searchParams.get("destination")).toBe("35,135");
+    expect(host.querySelector(".today-lead")).not.toHaveTextContent("查看全團時間線");
+  });
+
 });
 
   it("keeps a replacement and its original relation in one numbered Today stop row", () => {

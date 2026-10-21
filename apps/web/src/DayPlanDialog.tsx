@@ -214,6 +214,45 @@ function routeMapPoints(route: DayRouteDto): RouteMapPoint[] {
   return points;
 }
 
+const TRANSIT_ROUTE_COLOR = "#1f3029";
+const WALK_ROUTE_COLOR = "#52645c";
+
+interface RouteLegendLine {
+  color: string;
+  label: string;
+}
+
+function routeLegendLines(
+  route: DayRouteDto,
+  shapes: DayRouteShapesResponse["legs"],
+  fallbackLabel: string,
+): RouteLegendLine[] {
+  const linesByLeg = new Map<string, string[]>();
+  route.stops.forEach((stop, index) => {
+    const fromId = index > 0 ? route.stops[index - 1]!.tripPlaceId : route.startsAt?.placeId;
+    if (fromId) linesByLeg.set(`${fromId}:${stop.tripPlaceId}`, stop.linesFromPrevious);
+  });
+  const lastStop = route.stops.at(-1);
+  if (lastStop && route.endsAt) {
+    linesByLeg.set(`${lastStop.tripPlaceId}:${route.endsAt.placeId}`, route.linesToEnd);
+  }
+
+  const distinct = new Map<string, RouteLegendLine>();
+  for (const leg of shapes) {
+    const features = leg.geojson?.features.filter((feature) => feature.properties.ways === "transport") ?? [];
+    const names = linesByLeg.get(`${leg.fromId}:${leg.toId}`) ?? [];
+    const namesMatch = names.length === features.length;
+    features.forEach((feature, index) => {
+      const color = feature.properties.inline.color ?? TRANSIT_ROUTE_COLOR;
+      const matchedName = namesMatch ? names[index]?.trim() : "";
+      const label = matchedName || fallbackLabel;
+      distinct.set(`${color}:${label}`, { color, label });
+    });
+  }
+  return [...distinct.values()];
+}
+
+
 function RouteMapOverlay({
   points,
   shapes,
@@ -252,11 +291,11 @@ function RouteMapOverlay({
             map,
             path: path.map(([lng, lat]) => ({ lat, lng })),
             geodesic: false,
-            strokeColor: walk ? "#52645c" : feature.properties.inline.color ?? "#1f3029",
+            strokeColor: walk ? WALK_ROUTE_COLOR : feature.properties.inline.color ?? TRANSIT_ROUTE_COLOR,
             strokeOpacity: walk ? 0 : 1,
             strokeWeight: 5,
             ...(walk ? { icons: [{
-              icon: { path: "M 0,-1 0,1", strokeColor: "#52645c", strokeOpacity: 1, strokeWeight: 3, scale: 2 },
+              icon: { path: "M 0,-1 0,1", strokeColor: WALK_ROUTE_COLOR, strokeOpacity: 1, strokeWeight: 3, scale: 2 },
               offset: "0", repeat: "12px",
             }] } : {}),
           }));
@@ -576,6 +615,11 @@ export function DayPlanDialog({
 
   function routeMap(route: DayRouteDto, version: "saved" | "candidate") {
     const state = version === "candidate" ? shapeStates[routeShapeKey(route)] : undefined;
+    const legendLines = state?.status === "ready"
+      ? routeLegendLines(route, state.legs, t.dayPlan.genericTransit)
+      : [];
+    const hasWalk = state?.status === "ready"
+      && state.legs.some((leg) => leg.geojson?.features.some((feature) => feature.properties.ways === "walk"));
     const names = new Map([
       ...route.stops.map((stop) => [stop.tripPlaceId, stop.name] as const),
       ...(route.startsAt ? [[route.startsAt.placeId, route.startsAt.name] as const] : []),
@@ -583,11 +627,9 @@ export function DayPlanDialog({
     ]);
     return (
       <>
-        <p className="route-version-note">
-          {version === "candidate" && route.routeShapesAvailable
-            ? `實線是大眾運輸，灰色虛線是步行。路線由 ${route.transitProvider === "google_routes" ? "Google" : "NAVITIME"} 提供。`
-            : "地圖只標出順序；實際怎麼走請點每段的 Google Maps"}
-        </p>
+        {version === "saved" || !route.routeShapesAvailable ? (
+          <p className="route-version-note">地圖只標出順序；實際怎麼走請點每段的 Google Maps</p>
+        ) : null}
         {state?.status === "loading" ? (
           <div className="route-shapes-loading">
             <p>正在取得實際交通與步行路線…</p>
@@ -615,6 +657,27 @@ export function DayPlanDialog({
           visibilityRevision={view === version}
           onShowRoute={() => selectRouteTab(version, "route")}
         />
+        {version === "candidate" && route.routeShapesAvailable ? (
+          <div className="route-map-caption">
+            {legendLines.length > 0 || hasWalk ? (
+              <ul className="route-map-legend" aria-label={t.dayPlan.mapLegendLabel}>
+                {legendLines.map((line) => (
+                  <li key={`${line.color}:${line.label}`}>
+                    <span className="route-map-legend-swatch" style={{ backgroundColor: line.color }} aria-hidden="true" />
+                    <span>{line.label}</span>
+                  </li>
+                ))}
+                {hasWalk ? (
+                  <li>
+                    <span className="route-map-legend-swatch route-map-legend-swatch--walk" aria-hidden="true" />
+                    <span>{t.dayPlan.walking}</span>
+                  </li>
+                ) : null}
+              </ul>
+            ) : null}
+            <p className="route-map-attribution">{t.dayPlan.routeProvider(route.transitProvider === "google_routes" ? "Google" : "NAVITIME")}</p>
+          </div>
+        ) : null}
       </>
     );
   }
@@ -1162,10 +1225,11 @@ export function DayPlanDialog({
         {transitCallsNeeded > 0 ? (
           <button
             type="button"
-            className="route-link-button route-reset"
+            className="route-transit-action"
             disabled={busy !== null}
             onClick={() => void fetchTransitSuggestion()}
           >
+            <Route aria-hidden="true" />
             {busy === "transit" ? "查詢中…" : candidate.transitProvider === "google_routes"
               ? `用大眾運輸時間排（約 ${transitCallsNeeded} 次）`
               : `用電車時間排（約 ${transitCallsNeeded} 次額度）`}

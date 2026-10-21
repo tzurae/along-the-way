@@ -26,7 +26,7 @@ let magicInviteOutcome = false;
 let magicConfirmationRequired = false;
 let inviteNetworkFailure = false;
 let memberActionFailure = false;
-let sessionNetworkFailure = false;
+let sessionFailure: "network" | 401 | 500 | null = null;
 let logoutNetworkFailure = false;
 let logoutTargetMismatch = false;
 let logoutBodies: unknown[] = [];
@@ -48,7 +48,7 @@ beforeEach(() => {
   magicConfirmationRequired = false;
   inviteNetworkFailure = false;
   memberActionFailure = false;
-  sessionNetworkFailure = false;
+  sessionFailure = null;
   logoutNetworkFailure = false;
   logoutTargetMismatch = false;
   sessionUser = todayUser;
@@ -69,7 +69,10 @@ beforeEach(() => {
     requests.push(input);
     if (gate && input.startsWith("/api/trips/A")) await gate;
     if (input === "/api/session") {
-      if (sessionNetworkFailure) throw new TypeError("Failed to fetch");
+      if (sessionFailure === "network") throw new TypeError("Failed to fetch");
+      if (sessionFailure) return reply({
+        error: { code: sessionFailure === 401 ? "unauthorized" : "internal", message: "Session unavailable" },
+      }, sessionFailure);
       return reply({ user: sessionUser });
     }
     if (input === "/api/logout" && init?.method === "POST") {
@@ -339,6 +342,36 @@ it.each(["network", 403, 500] as const)(
     await waitFor(() =>
       expect(document.querySelector('[data-trip-tab="today"]')).toBeInTheDocument(),
     );
+  },
+);
+
+it.each(["online", "button"] as const)(
+  "recovers a signed-in snapshot through %s after a 500 magic-link consume failure and an offline cycle",
+  async (recovery) => {
+    await mount();
+    await waitFor(() => expect(snapshot()).toBeTruthy());
+    magicConsumeFailure = 500;
+
+    history.replaceState({}, "", "/?trip=A&tab=today#magicToken=session-preserving-token");
+    await act(async () => window.dispatchEvent(new HashChangeEvent("hashchange")));
+
+    await waitFor(() => expect(button("重試登入")).toBeEnabled());
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    await act(async () => window.dispatchEvent(new Event("offline")));
+    await waitFor(() => expect(document.body).toHaveTextContent("離線資料"));
+    expect(button("重新連線並同步")).toBeEnabled();
+    const sessionReads = requests.filter((request) => request === "/api/session").length;
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+
+    if (recovery === "online") {
+      await act(async () => window.dispatchEvent(new Event("online")));
+    } else {
+      await click(button("重新連線並同步"));
+    }
+
+    await waitFor(() => expect(document.querySelector(".atw-account-trigger")).toHaveTextContent(todayUser.email));
+    expect(requests.filter((request) => request === "/api/session").length).toBeGreaterThan(sessionReads);
+    expect(document.body).not.toHaveTextContent("離線資料");
   },
 );
 
@@ -704,17 +737,63 @@ it("renders an unsafe itinerary item source as text instead of an external link"
   expect([...card.querySelectorAll("a")].some((link) => link.textContent === "官方來源")).toBe(false);
 });
 
-it("reopens the private read-only snapshot when the session read loses the network", async () => {
-  new TodaySnapshotStore(localStorage).save(
+it.each([
+  ["network error", "network", "button"],
+  ["500 response", 500, "online"],
+  ["network error", "network", "focus"],
+  ["500 response", 500, "visibilitychange"],
+] as const)("shows reconnect instead of sign-in after a cold-start %s and recovers through %s without a magic link", async (_label, failure, recovery) => {
+  sessionFailure = failure;
+  await mount();
+
+  await waitFor(() => expect(button("重新連線")).toBeInTheDocument());
+  expect(document.body).toHaveTextContent("暫時連不上伺服器，你的登入還在。");
+  expect(document.querySelector('input[type="email"]')).toBeNull();
+  expect(requests).not.toContain("/api/auth/magic-links");
+
+  sessionFailure = null;
+  if (recovery === "button") {
+    await click(button("重新連線"));
+  } else if (recovery === "visibilitychange") {
+    await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+  } else {
+    await act(async () => window.dispatchEvent(new Event(recovery)));
+  }
+
+  await waitFor(() => expect(document.querySelector(".atw-account-trigger")).toHaveTextContent(todayUser.email));
+  expect(requests).not.toContain("/api/auth/magic-links");
+});
+
+it("shows sign-in after a 401 and does not retry session restore on reconnect events", async () => {
+  sessionFailure = 401;
+  await mount();
+
+  await waitFor(() => expect(button("寄送登入連結")).toBeInTheDocument());
+  const sessionReads = requests.filter((request) => request === "/api/session").length;
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+    window.dispatchEvent(new Event("focus"));
+    document.dispatchEvent(new Event("visibilitychange"));
+    await Promise.resolve();
+  });
+  expect(requests.filter((request) => request === "/api/session")).toHaveLength(sessionReads);
+});
+
+it.each(["network", 500] as const)("keeps the stored account and snapshot after a transient %s session failure", async (failure) => {
+  const store = new TodaySnapshotStore(localStorage);
+  const stored = store.save(
     todayUser.id,
     createTodayModel(trips[0]!, skeleton, todayWishlist(), todayUser.id),
+    Date.parse("2026-10-21T00:00:00Z"),
   );
-  sessionNetworkFailure = true;
+  expect(stored).not.toBeNull();
+  sessionFailure = failure;
 
   await mount();
 
-  expect(document.body).toHaveTextContent("離線資料");
-  expect(document.body).toHaveTextContent("Trip A");
+  await waitFor(() => expect(document.body).toHaveTextContent("離線資料"));
+  expect(store.lastAccount()).toBe(todayUser.id);
+  expect(store.read(todayUser.id, "A")).toEqual(stored);
   expect(document.querySelector('input[type="email"]')).toBeNull();
 });
 

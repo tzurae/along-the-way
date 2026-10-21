@@ -1262,6 +1262,26 @@
 .route-remove-button { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; min-height: 44px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-foreground); font-size: 11px; font-weight: 650; }
 .route-remove-button:hover:not(:disabled) { color: var(--load-packed); border-color: currentColor; }
 .route-reset { margin: 8px 16px 0; }
+.route-transit-action {
+  display: flex;
+  width: calc(100% - 32px);
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 14px 16px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  box-shadow: 0 9px 24px -14px #000a;
+  font-size: 14px;
+  font-weight: 750;
+  line-height: 1.25;
+}
+.route-transit-action:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 88%, white); }
+.route-transit-action:focus-visible { outline: 3px solid color-mix(in srgb, var(--ring) 45%, transparent); outline-offset: 2px; }
+.route-transit-action:disabled { opacity: .55; }
+.route-transit-action svg { width: 17px; height: 17px; flex: none; }
 .route-map-shell {
   width: 100%;
   height: 360px;
@@ -1271,6 +1291,45 @@
 .route-map {
   width: 100%;
   height: 100%;
+}
+.route-map-caption {
+  display: grid;
+  gap: 9px;
+  border-top: 1px solid var(--border);
+  padding: 12px 16px 14px;
+}
+.route-map-legend {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.route-map-legend li {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.route-map-legend-swatch {
+  width: 28px;
+  height: 4px;
+  flex: none;
+  border-radius: 999px;
+}
+.route-map-legend-swatch--walk {
+  height: 3px;
+  border-radius: 0;
+  background: repeating-linear-gradient(90deg, #52645c 0 6px, transparent 6px 10px);
+}
+.route-map-attribution {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.4;
 }
 .route-shapes-loading { padding: 12px 16px; color: var(--muted-foreground); font-size: 14px; }
 .route-shapes-loading p { margin: 0 0 8px; }

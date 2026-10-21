@@ -38,6 +38,7 @@ function deferred<T>(): Deferred<T> {
 const coordinates: Record<string, google.maps.LatLngLiteral> = {
   a: { lat: 34.99, lng: 135.77 },
   b: { lat: 35.02, lng: 135.81 },
+  c: { lat: 35.04, lng: 135.83 },
 };
 
 function route(
@@ -174,6 +175,85 @@ describe("day-plan map overlays", () => {
     expect(mapLoads).toBe(1);
     unmount();
     expect(polylines[0]!.setMap).toHaveBeenCalledWith(null);
+  });
+
+  it("labels each transit feature from its leg, falls back on mismatched counts, and lists walking only on the candidate", async () => {
+    const candidate = route("suggested", ["b", "a", "c"], true);
+    candidate.stops = candidate.stops.map((stop, index) => ({
+      ...stop,
+      linesFromPrevious: index === 1
+        ? ["阪急京都線", "地下鐵烏丸線"]
+        : index === 2 ? ["JR奈良線", "京阪本線"] : [],
+    }));
+    const saved = route("current", ["b", "a", "c"], true);
+    const request = async <T,>(url: string, options?: RequestInit): Promise<T> => {
+      if (url === "/api/maps/config") return { browserKey: "key", mapId: "map-id" } as T;
+      if (url === "/api/maps/load") return undefined as T;
+      if (url.endsWith("/route-shapes")) {
+        return {
+          legs: [
+            {
+              fromId: "b",
+              toId: "a",
+              geojson: {
+                type: "FeatureCollection",
+                features: [
+                  {
+                    type: "Feature",
+                    geometry: { type: "LineString", coordinates: [[135.81, 35.02], [135.8, 35.01]] },
+                    properties: { ways: "transport", inline: { color: "#123456" } },
+                  },
+                  {
+                    type: "Feature",
+                    geometry: { type: "LineString", coordinates: [[135.8, 35.01], [135.77, 34.99]] },
+                    properties: { ways: "transport", inline: { color: "#654321" } },
+                  },
+                  {
+                    type: "Feature",
+                    geometry: { type: "LineString", coordinates: [[135.8, 35.01], [135.79, 35]] },
+                    properties: { ways: "walk", inline: { color: "#999999" } },
+                  },
+                ],
+              },
+            },
+            {
+              fromId: "a",
+              toId: "c",
+              geojson: {
+                type: "FeatureCollection",
+                features: [{
+                  type: "Feature",
+                  geometry: { type: "LineString", coordinates: [[135.77, 34.99], [135.83, 35.04]] },
+                  properties: { ways: "transport", inline: { color: "#abcdef" } },
+                }],
+              },
+            },
+          ],
+        } as T;
+      }
+      const input = JSON.parse(String(options?.body)) as { order: DayRouteOrder };
+      return { route: input.order === "suggested" ? candidate : saved } as T;
+    };
+    renderDialog(request);
+    const candidateRegion = await screen.findByRole("region", { name: "可以儲存的順序" });
+    fireEvent.click(within(candidateRegion).getByRole("tab", { name: "Google Map" }));
+
+    const legend = await within(candidateRegion).findByRole("list", { name: "地圖路線圖例" });
+    const rows = within(legend).getAllByRole("listitem");
+    expect(rows.map((row) => row.textContent)).toEqual([
+      "阪急京都線",
+      "地下鐵烏丸線",
+      "大眾運輸",
+      "步行",
+    ]);
+    expect(rows[0]!.querySelector(".route-map-legend-swatch")).toHaveStyle({ backgroundColor: "#123456" });
+    expect(rows[1]!.querySelector(".route-map-legend-swatch")).toHaveStyle({ backgroundColor: "#654321" });
+    expect(rows[2]!.querySelector(".route-map-legend-swatch")).toHaveStyle({ backgroundColor: "#abcdef" });
+    expect(rows[3]!.querySelector(".route-map-legend-swatch")).toHaveClass("route-map-legend-swatch--walk");
+
+    const savedRegion = screen.getByRole("region", { name: "已儲存的順序" });
+    fireEvent.click(within(savedRegion).getByRole("tab", { name: "Google Map" }));
+    expect(within(savedRegion).queryByRole("list", { name: "地圖路線圖例" })).not.toBeInTheDocument();
   });
 
   it("fits bounds again when a map loaded in a hidden mobile column is revealed", async () => {

@@ -712,6 +712,28 @@ it("restores a failed wishlist vote, announces the exact error, and reuses its i
   expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
 });
 
+it("renders the pocket list directly without a list or area view switch", async () => {
+  const wishlist = Array.from({ length: 8 }, (_, index) => ({
+    ...place(unscheduledId, `口袋地點 ${index + 1}`, false),
+    id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    placeId: `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+  }));
+  const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
+    if (path.endsWith("/trip-places") && !init?.method) return applyParser({ tripPlaces: wishlist }, init);
+    if (path.includes("/place-previews?")) return applyParser({ previews: [] }, init);
+    throw new Error(`Unexpected request: ${path}`);
+  };
+
+  const rendered = render(
+    <TripPlaceWorkspace accountId="account" trip={trip("owner")} request={request} placesRevision={0} onPlacesChanged={vi.fn()} />,
+  );
+
+  await screen.findByText("口袋地點 1", { exact: true });
+  expect(rendered.container.querySelectorAll("[data-wishlist-place]")).toHaveLength(8);
+  expect(screen.queryByRole("button", { name: "清單" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "依區域" })).not.toBeInTheDocument();
+});
+
 it("links an unlocated wishlist place to the working overview repair editor", async () => {
   const current = {
     ...place(unscheduledId, "待補位置地點", false),

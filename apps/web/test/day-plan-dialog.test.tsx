@@ -245,7 +245,7 @@ describe("day-plan view tabs", () => {
     expect(screen.queryByRole("button", { name: /用電車時間排/ })).not.toBeInTheDocument();
     const candidate = screen.getByRole("region", { name: "可以儲存的順序" });
     fireEvent.click(within(candidate).getByRole("tab", { name: "Google Map" }));
-    expect(within(candidate).getByText("實線是大眾運輸，灰色虛線是步行。路線由 Google 提供。")).toBeInTheDocument();
+    expect(within(candidate).getByText("路線由 Google 提供。")).toBeInTheDocument();
     expect(within(candidate).queryByText(/NAVITIME/)).not.toBeInTheDocument();
   });
 
