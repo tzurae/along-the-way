@@ -745,6 +745,9 @@ export function App() {
   }, [replayPendingLogout, store, t.errors, t.today.mutationDisabled]);
   const [user, setUser] = useState<UserDto | null | undefined>(undefined);
   const [sessionDenied, setSessionDenied] = useState(() => store?.isLocallySignedOut() ?? false);
+  /** Current value for async auth code that outlives the render which started it. */
+  const sessionDeniedRef = useRef(sessionDenied);
+  sessionDeniedRef.current = sessionDenied;
   const [sessionRestoreUnavailable, setSessionRestoreUnavailable] = useState(false);
   const [globalView, setGlobalView] = useState<GlobalView>(readGlobalView);
   const [signingOutEverywhere, setSigningOutEverywhere] = useState(false);
@@ -1330,7 +1333,8 @@ export function App() {
             });
             consumeRequests.current.set(magicToken, consumeRequest);
           }
-          let consumed: MagicLinkConsumeResponse;
+          let consumed: MagicLinkConsumeResponse | SessionResponse;
+          let linkConsumed = true;
           try {
             consumed = await consumeRequest;
           } catch (reason) {
@@ -1338,8 +1342,8 @@ export function App() {
               consumeRequests.current.delete(magicToken);
             }
             if (!active || epoch !== sessionEpoch.current) return;
-            setUser(null);
             if (reason instanceof LoginConfirmationRequired) {
+              setUser(null);
               setLoginConfirmation({ details: reason.details });
               return;
             }
@@ -1349,9 +1353,35 @@ export function App() {
             ) {
               completedAuthKeys.current.add(authKey);
               removeTokenFragment("magicToken");
-              setSignInError(`${reason.message} ${t.app.requestNewMagicLink}`);
-              setRetryMagicToken(null);
+              // People come back by clicking an old email link. If this browser is still signed
+              // in, a used or expired link must not sign them out: keep the existing session.
+              let sessionError: unknown = null;
+              const existing = await request<SessionResponse>("/api/session", {
+                parse: (value) => parseSessionResponse(value),
+              }).catch((error: unknown) => { sessionError = error; return null; });
+              if (!active) return;
+              if (!existing) {
+                const denied = sessionError instanceof ApiRequestError && sessionError.status === 401;
+                // reconnect() refuses to run for a denied or explicitly signed-out session, so the
+                // reconnect page would be a dead end: those users get the sign-in screen instead.
+                const reconnectBlocked = sessionDeniedRef.current || signedOut.current || store?.isLocallySignedOut();
+                if (!denied && !reconnectBlocked) {
+                  // The link is spent but the session may still be valid: treat it like any other
+                  // transient restore failure instead of claiming the user must sign in again.
+                  if (epoch === sessionEpoch.current) deferSessionRestore();
+                  return;
+                }
+                // A 401 already moved the app to signed-out (and bumped the epoch); still explain the link.
+                setUser(null);
+                setSignInError(`${reason.message} ${t.app.requestNewMagicLink}`);
+                setRetryMagicToken(null);
+                return;
+              }
+              if (epoch !== sessionEpoch.current) return;
+              consumed = existing;
+              linkConsumed = false;
             } else {
+              setUser(null);
               setSignInError(
                 reason instanceof ApiRequestError
                   && (reason.code === "rate_limited" || reason.status === 429)
@@ -1359,8 +1389,8 @@ export function App() {
                   : t.app.unableConsumeMagicLink,
               );
               setRetryMagicToken(magicToken);
+              return;
             }
-            return;
           }
           if (!active || epoch !== sessionEpoch.current) return;
           completedAuthKeys.current.add(authKey);
@@ -1368,8 +1398,8 @@ export function App() {
           store?.setLocallySignedOut(false);
           signedOut.current = false;
           session = consumed;
-          acceptedTripId = consumed.acceptedTripId;
-          linkedInviteOutcome = consumed.inviteOutcome;
+          acceptedTripId = linkConsumed ? (consumed as MagicLinkConsumeResponse).acceptedTripId : undefined;
+          linkedInviteOutcome = linkConsumed ? (consumed as MagicLinkConsumeResponse).inviteOutcome : undefined;
           if (acceptedTripId || linkedInviteOutcome) {
             removeTokenFragment("inviteToken");
             const next = {
