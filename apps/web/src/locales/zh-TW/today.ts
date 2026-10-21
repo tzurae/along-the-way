@@ -37,7 +37,7 @@ export const today = {
   locationMissing: "位置待補充", destinationCopy: (name: string) => `目的地：${name}`, route: (origin: string, destination: string) => `${origin} → ${destination}`,
   maps: "Google Maps 地點", directions: "Google Maps 起終點導航", leavesApp: "將離開 App", officialLink: "官方／來源連結",
   navigateNext: "導航到下一站", navigateTo: (name: string) => `導航到 ${name}`, goTo: (name: string) => `前往 ${name}`,
-  viewItemDetail: (name: string) => `查看「${name}」詳情`, viewTimeline: "查看全團時間線",
+  viewItemDetail: (name: string) => `查看「${name}」詳情`,
   navigationOffline: "導航需網路或已安裝的地圖 App",
   routeUnavailable: "無法取得即時交通資料；可使用上方 Google Maps 查看路線，實際路況仍以當下為準。",
   notes: "重要備註", noNotes: "沒有其他重要備註。", endpointsSection: "起點與終點", confirmationSection: "訂位與確認資料",

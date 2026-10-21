@@ -1,14 +1,11 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarCheck,
-  ChevronRight,
   CalendarPlus,
   Check,
   CircleAlert,
   CircleCheck,
   CloudOff,
-  Folder,
-  List,
   LoaderCircle,
   MapPin,
   MapPinOff,
@@ -107,33 +104,6 @@ function addressArea(address: string | null) {
   return (parts.length >= 3 ? parts.slice(-2) : parts).join(", ");
 }
 
-/** Below this many places one list is short enough; the 清單／依區域 switch only appears above it. */
-const PLACE_FOLDER_MINIMUM = 8;
-const PLACE_VIEW_STORAGE_KEY = "along-the-way:place-view";
-type PlaceView = "list" | "area";
-
-function readPlaceView(): PlaceView {
-  try {
-    return window.localStorage.getItem(PLACE_VIEW_STORAGE_KEY) === "area" ? "area" : "list";
-  } catch {
-    return "list";
-  }
-}
-
-/**
- * Folders by 區域 for a long 口袋名單. The input is newest first, so each folder lists its newest
- * place first and the folder holding the newest place comes first; places without a readable
- * area share one folder.
- */
-function groupPlacesByArea(places: TripPlaceDto[]) {
-  const folders = new Map<string, TripPlaceDto[]>();
-  for (const place of places) {
-    const area = placeArea(place.address) ?? "";
-    const folder = folders.get(area);
-    if (folder) folder.push(place); else folders.set(area, [place]);
-  }
-  return [...folders].map(([area, folderPlaces]) => ({ area: area || null, places: folderPlaces }));
-}
 
 function canSelectForSchedule(place: TripPlaceDto, available: boolean) {
   return available
@@ -708,10 +678,6 @@ export function TripPlaceWorkspace({
   // (aiProposalId set) live in 行程 only.
   const places = readModel.current.filter((place) => place.aiProposalId === null);
   const [adding, setAdding] = useState(false);
-  // 清單 or 依區域 folders for a long list; remembered on this device.
-  const [placeView, setPlaceView] = useState<PlaceView>(readPlaceView);
-  // null until someone opens or closes a folder.
-  const [openAreaKeys, setOpenAreaKeys] = useState<Set<string> | null>(null);
   const [readError, setReadError] = useState("");
   const [loading, setLoading] = useState(true);
   const [voteDrafts, setVoteDrafts] = useState<Record<string, boolean>>({});
@@ -1392,20 +1358,6 @@ export function TripPlaceWorkspace({
     );
   }
 
-  const foldersShown = placeView === "area" && listedPlaces.length >= PLACE_FOLDER_MINIMUM;
-  const areaFolders = foldersShown ? groupPlacesByArea(filteredPlaces) : [];
-  const allFoldersOpen = filteredPlaces.length !== listedPlaces.length || selecting;
-  // Until someone opens or closes a folder, only the one holding the newest place is open.
-  const openAreas = openAreaKeys ?? new Set(areaFolders.slice(0, 1).map((group) => group.area ?? ""));
-
-  function changePlaceView(view: PlaceView) {
-    setPlaceView(view);
-    try {
-      window.localStorage.setItem(PLACE_VIEW_STORAGE_KEY, view);
-    } catch {
-      // Storage can be unavailable (private mode); the choice then lasts for this visit only.
-    }
-  }
 
   return (
     <section className="pd-workspace" data-selecting={selecting || undefined} aria-labelledby="shared-wishlist-heading">
@@ -1459,56 +1411,7 @@ export function TripPlaceWorkspace({
       ) : null}
       {listedPlaces.length > 1 ? <PlaceFilterBar filters={filters} total={listedPlaces.length} label="搜尋口袋名單" /> : null}
       {listedPlaces.length > 0 && filteredPlaces.length === 0 ? <PlaceFilterEmpty onClear={filters.clear} /> : null}
-      {listedPlaces.length >= PLACE_FOLDER_MINIMUM ? (
-        <div className="pd-view-toggle" role="group" aria-label={t.workspace.viewLabel}>
-          {(["list", "area"] as const).map((view) => (
-            <button key={view} type="button" aria-pressed={placeView === view} onClick={() => changePlaceView(view)}>
-              {view === "list" ? <List aria-hidden="true" /> : <Folder aria-hidden="true" />}
-              {view === "list" ? t.workspace.viewList : t.workspace.viewByArea}
-            </button>
-          ))}
-        </div>
-      ) : null}
-      {filteredPlaces.length > 0 && foldersShown ? (
-        <div className="pd-folders">
-          {areaFolders.map((group) => {
-            const key = group.area ?? "";
-            // A search, chip filter or 排行程 selection opens every folder, so no row hides inside a closed one.
-            const open = allFoldersOpen || openAreas.has(key);
-            return (
-              <details
-                key={key}
-                className="pd-folder"
-                open={open}
-                onToggle={(event) => {
-                  const nowOpen = event.currentTarget.open;
-                  if (allFoldersOpen) {
-                    // React only re-applies `open` when the prop changes, so put the DOM back itself.
-                    if (!nowOpen) event.currentTarget.open = true;
-                    return;
-                  }
-                  if (nowOpen === open) return;
-                  setOpenAreaKeys((current) => {
-                    const next = new Set(current ?? openAreas);
-                    if (nowOpen) next.add(key); else next.delete(key);
-                    return next;
-                  });
-                }}
-              >
-                <summary>
-                  <Folder aria-hidden="true" />
-                  <span className="pd-folder-name">{group.area ?? t.workspace.unknownArea}</span>
-                  <span className="pd-folder-count">{t.workspace.folderCount(group.places.length)}</span>
-                  <ChevronRight aria-hidden="true" className="pd-folder-chevron" />
-                </summary>
-                <FlipList className="pd-list" ariaLabel={t.workspace.folderLabel(group.area ?? t.workspace.unknownArea)}>
-                  {group.places.map(placeRow)}
-                </FlipList>
-              </details>
-            );
-          })}
-        </div>
-      ) : filteredPlaces.length > 0 ? (
+      {filteredPlaces.length > 0 ? (
         <FlipList className="pd-list" ariaLabel={t.workspace.tableLabel}>
           {filteredPlaces.map(placeRow)}
         </FlipList>

@@ -1173,11 +1173,12 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
         {clock.phase === "after" ? <p className="today-lead-time">{text.finishedHelp}</p> : null}
         {clock.phase !== "before" && clock.phase !== "after" && !selectedIsToday ? <p className="today-lead-time">{text.selectedDayHelp(items.length)}</p> : null}
         {selectedIsToday && (routeCopy || leadHasUnknownParticipants) ? <div className="today-route">{routeCopy ? <><MapPin size={18} aria-hidden="true" /><span>{routeCopy}</span></> : null}{leadHasUnknownParticipants ? <><TriangleAlert size={18} aria-hidden="true" /><span>{text.participantsUnknownTimeline}</span></> : null}</div> : null}
-        <div className="today-lead-actions">
-          {navigationUrl && navigationPlace ? <a className="today-primary-action" href={navigationUrl} target="_blank" rel="noopener noreferrer"><Navigation size={17} aria-hidden="true" />{text.navigateTo(navigationPlace.name)}</a> : null}
-          {leadItem ? <button type="button" className="today-secondary-action" onClick={() => openItem(leadItem)}>{text.viewItemDetail(leadItem.title)}<ChevronRight size={17} aria-hidden="true" /></button> : null}
-          <button type="button" className="today-secondary-action" onClick={() => timelineRef.current?.scrollIntoView({ block: "start" })}>{text.viewTimeline}<ChevronRight size={17} aria-hidden="true" /></button>
-        </div>
+        {((navigationUrl && navigationPlace) || leadItem) ? (
+          <div className="today-lead-actions">
+            {navigationUrl && navigationPlace ? <a className="today-primary-action" href={navigationUrl} target="_blank" rel="noopener noreferrer"><Navigation size={17} aria-hidden="true" />{text.navigateTo(navigationPlace.name)}</a> : null}
+            {leadItem ? <button type="button" className="today-secondary-action" onClick={() => openItem(leadItem)}>{text.viewItemDetail(leadItem.title)}<ChevronRight size={17} aria-hidden="true" /></button> : null}
+          </div>
+        ) : null}
         {navigationUrl && offline ? <span className="today-navnote">{text.navigationOffline}</span> : null}
       </section>
       ) : null}
