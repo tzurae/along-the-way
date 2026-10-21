@@ -345,6 +345,36 @@ it.each(["network", 403, 500] as const)(
   },
 );
 
+it.each(["online", "button"] as const)(
+  "recovers a signed-in snapshot through %s after a 500 magic-link consume failure and an offline cycle",
+  async (recovery) => {
+    await mount();
+    await waitFor(() => expect(snapshot()).toBeTruthy());
+    magicConsumeFailure = 500;
+
+    history.replaceState({}, "", "/?trip=A&tab=today#magicToken=session-preserving-token");
+    await act(async () => window.dispatchEvent(new HashChangeEvent("hashchange")));
+
+    await waitFor(() => expect(button("重試登入")).toBeEnabled());
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+    await act(async () => window.dispatchEvent(new Event("offline")));
+    await waitFor(() => expect(document.body).toHaveTextContent("離線資料"));
+    expect(button("重新連線並同步")).toBeEnabled();
+    const sessionReads = requests.filter((request) => request === "/api/session").length;
+    Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
+
+    if (recovery === "online") {
+      await act(async () => window.dispatchEvent(new Event("online")));
+    } else {
+      await click(button("重新連線並同步"));
+    }
+
+    await waitFor(() => expect(document.querySelector(".atw-account-trigger")).toHaveTextContent(todayUser.email));
+    expect(requests.filter((request) => request === "/api/session").length).toBeGreaterThan(sessionReads);
+    expect(document.body).not.toHaveTextContent("離線資料");
+  },
+);
+
 it("keeps a rate-limited magic token and explains when to retry", async () => {
   await mount();
   magicConsumeFailure = 429;

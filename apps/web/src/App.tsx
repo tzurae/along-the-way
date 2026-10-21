@@ -744,6 +744,7 @@ export function App() {
     }
   }, [replayPendingLogout, store, t.errors, t.today.mutationDisabled]);
   const [user, setUser] = useState<UserDto | null | undefined>(undefined);
+  const [sessionDenied, setSessionDenied] = useState(() => store?.isLocallySignedOut() ?? false);
   const [sessionRestoreUnavailable, setSessionRestoreUnavailable] = useState(false);
   const [globalView, setGlobalView] = useState<GlobalView>(readGlobalView);
   const [signingOutEverywhere, setSigningOutEverywhere] = useState(false);
@@ -781,6 +782,7 @@ export function App() {
     if (!needsRestore) return;
     ++sessionEpoch.current;
     signedOut.current = false;
+    setSessionDenied(false);
     completedAuthKeys.current.delete("session");
     confirmedMagicToken.current = null;
     pendingCodeSession.current = null;
@@ -820,6 +822,7 @@ export function App() {
   const clearLocalSession = useCallback(() => {
     ++sessionEpoch.current;
     signedOut.current = true;
+    setSessionDenied(true);
     const owner = accountId.current ?? store?.lastAccount();
     if (owner) store?.clearAccount(owner);
     accountId.current = null;
@@ -1026,7 +1029,7 @@ export function App() {
   }, [restoreSnapshot]);
 
   const reconnect = useCallback(async () => {
-    if (user === null || signedOut.current || store?.isLocallySignedOut() || reconnecting.current || authenticating.current) return;
+    if (sessionDenied || signedOut.current || store?.isLocallySignedOut() || reconnecting.current || authenticating.current) return;
     reconnecting.current = true;
     setRetrying(true);
     const epoch = sessionEpoch.current;
@@ -1036,6 +1039,7 @@ export function App() {
       const session = await request<{ user: UserDto }>("/api/session", { parse: parseSessionResponse });
       if (epoch !== sessionEpoch.current || navigationSequence !== loadSequence.current) return;
       sessionRestored = true;
+      setSessionDenied(false);
       setSessionRestoreUnavailable(false);
       const previousAccount = accountId.current ?? store?.lastAccount();
       if (previousAccount && previousAccount !== session.user.id) {
@@ -1076,7 +1080,7 @@ export function App() {
       if (!(reason instanceof ApiRequestError) || ![401, 403, 404].includes(reason.status ?? 0)) restoreSnapshot();
       setError(reason instanceof Error ? reason.message : t.today.unavailable);
     } finally { reconnecting.current = false; setRetrying(false); }
-  }, [deferSessionRestore, loadTrip, refreshTrips, request, restoreSnapshot, store, t.today.unavailable, user]);
+  }, [deferSessionRestore, loadTrip, refreshTrips, request, restoreSnapshot, sessionDenied, store, t.today.unavailable]);
 
   const selectTab = useCallback((tab: TripTab) => {
     const segment = defaultSegment(tab);
@@ -1133,6 +1137,7 @@ export function App() {
         setTodaySnapshot(null); setSelectedTrip(null);
         setOffline(false); readOnly.current = false;
         if (detail.status === 401) {
+          setSessionDenied(true);
           setSessionRestoreUnavailable(false);
           setUser(null); setTrips([]); accountId.current = null;
         }
@@ -1205,14 +1210,14 @@ export function App() {
   }, [loadTrip, restoreSnapshot, sessionRestoreUnavailable, t.admin.unavailable, t.today.unavailable, user?.isAdmin]);
 
   useEffect(() => {
-    if (user === null) return;
+    if (sessionDenied) return;
     const online = () => { void reconnect(); };
     window.addEventListener("online", online);
     return () => window.removeEventListener("online", online);
-  }, [reconnect, user]);
+  }, [reconnect, sessionDenied]);
 
   useEffect(() => {
-    if (user === null || (!offline && !sessionRestoreUnavailable)) return;
+    if (sessionDenied || (!offline && !sessionRestoreUnavailable)) return;
     const revalidate = () => {
       if ((sessionRestoreUnavailable || navigator.onLine) && document.visibilityState !== "hidden") void reconnect();
     };
@@ -1228,7 +1233,7 @@ export function App() {
       window.removeEventListener("focus", revalidate);
       document.removeEventListener("visibilitychange", revalidate);
     };
-  }, [offline, reconnect, sessionRestoreUnavailable, user]);
+  }, [offline, reconnect, sessionDenied, sessionRestoreUnavailable]);
 
   useEffect(() => {
     if (placesRevision > 0 && selectedTrip && !readOnly.current) void loadTrip(selectedTrip.id, true).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : t.today.unavailable));
@@ -1305,6 +1310,7 @@ export function App() {
       try {
         if (!magicToken && !codeSession && store?.isLocallySignedOut()) {
           completedAuthKeys.current.add(authKey);
+          setSessionDenied(true);
           setUser(null);
           return;
         }
@@ -1396,6 +1402,7 @@ export function App() {
 
         authenticatedUser = session.user;
         if (!active || epoch !== sessionEpoch.current) return;
+        setSessionDenied(false);
         setAuthProgressPhase("loading-trips");
         const previousAccount = accountId.current ?? store?.lastAccount();
         if (previousAccount && previousAccount !== session.user.id) {
@@ -1446,6 +1453,7 @@ export function App() {
           enterSignedIn(authenticatedUser);
           return;
         }
+        if (reason instanceof ApiRequestError && reason.status === 401) setSessionDenied(true);
         setUser(null);
       } finally {
         if (active) authenticating.current = false;
