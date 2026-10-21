@@ -37,6 +37,16 @@ describe("route-leg directions", () => {
     expect(url.searchParams.has("travelmode")).toBe(false);
   });
 
+  it("can open transit directions for a likely bus leg", () => {
+    const result = googleMapsDirectionsUrl(
+      { latitude: 35.0593, longitude: 135.7525, providerPlaceId: null },
+      { latitude: 35.0302, longitude: 135.7727, providerPlaceId: null },
+      "transit",
+    );
+
+    expect(new URL(result!).searchParams.get("travelmode")).toBe("transit");
+  });
+
   it.each([
     [{ latitude: null, longitude: 0, providerPlaceId: null }, { latitude: 1, longitude: 1, providerPlaceId: null }],
     [{ latitude: 0, longitude: Number.NaN, providerPlaceId: null }, { latitude: 1, longitude: 1, providerPlaceId: null }],

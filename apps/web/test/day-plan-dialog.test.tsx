@@ -3,7 +3,7 @@ import { type ReactNode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DayRouteDto, DayRouteOrder } from "@along-the-way/contracts/day-plans";
+import type { DayRouteDto, DayRouteOrder, DayRouteShapesResponse } from "@along-the-way/contracts/day-plans";
 import { DayPlanDialog, type PlannedDay } from "../src/DayPlanDialog";
 
 vi.mock("@vis.gl/react-google-maps", () => ({
@@ -106,6 +106,7 @@ function inputOf(options?: RequestInit) {
 function immediateRequest(overrides?: {
   current?: DayRouteDto;
   suggested?: DayRouteDto;
+  routeShapes?: DayRouteShapesResponse;
   custom?(ids: string[]): DayRouteDto;
   mutate?(call: RequestCall): Promise<unknown>;
 }) {
@@ -116,6 +117,7 @@ function immediateRequest(overrides?: {
     if (url === "/api/maps/config") return { browserKey: null, mapId: null } as T;
     if (url === "/api/maps/load") return undefined as T;
     if (options?.method === "PUT") return await overrides?.mutate?.(call) as T;
+    if (url.endsWith("/route-shapes") && overrides?.routeShapes) return overrides.routeShapes as T;
     if (url.endsWith("/route")) {
       const input = inputOf(options)!;
       if (input.order === "current") return { route: overrides?.current ?? route("current") } as T;
@@ -269,6 +271,139 @@ describe("day-plan view tabs", () => {
     const candidate = screen.getByRole("region", { name: "可以儲存的順序" });
     fireEvent.click(within(candidate).getByRole("tab", { name: "Google Map" }));
     expect(calls.filter((call) => call.url.endsWith("/route-shapes"))).toHaveLength(1);
+  });
+});
+
+describe("NAVITIME bus-likely leg guidance", () => {
+  it("shows the warning legend only for the drawn long walk", async () => {
+    const suggested = route("suggested", {
+      names: { b: "上賀茂神社", a: "鴨川三角洲" },
+      transitProvider: "navitime",
+      travelSource: "navitime",
+      routeShapesAvailable: true,
+    });
+    const [from, originalTo] = suggested.stops;
+    const to = {
+      ...originalTo!,
+      latitude: from!.latitude! + 0.02,
+      longitude: from!.longitude,
+      metersFromPrevious: 2_200,
+      minutesFromPrevious: 31,
+      linesFromPrevious: [],
+    };
+    const navitime = {
+      ...suggested,
+      stops: [from!, to],
+      totalMeters: 2_200,
+      totalMinutes: 31,
+    };
+    const routeShapes: DayRouteShapesResponse = {
+      legs: [{
+        fromId: from!.tripPlaceId,
+        toId: to.tripPlaceId,
+        geojson: {
+          type: "FeatureCollection",
+          features: [{
+            type: "Feature",
+            geometry: {
+              type: "LineString",
+              coordinates: [[from!.longitude!, from!.latitude!], [to.longitude!, to.latitude!]],
+            },
+            properties: { ways: "walk", inline: { color: null } },
+          }],
+        },
+      }],
+    };
+    const { request } = immediateRequest({ suggested: navitime, routeShapes });
+    render(dialog(request));
+    const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+
+    fireEvent.click(within(candidate).getByRole("tab", { name: "Google Map" }));
+
+    expect(await within(candidate).findByText("可能要搭公車（NAVITIME 不含公車路線）")).toBeInTheDocument();
+    expect(within(candidate).queryByText("步行")).not.toBeInTheDocument();
+  });
+
+  it("links the long NAVITIME walk row directly to Google Maps transit directions", async () => {
+    const suggested = route("suggested", {
+      names: { b: "上賀茂神社", a: "鴨川三角洲" },
+      transitProvider: "navitime",
+      travelSource: "navitime",
+    });
+    const [from, originalTo] = suggested.stops;
+    const navitime = {
+      ...suggested,
+      stops: [
+        from!,
+        {
+          ...originalTo!,
+          // About 3.9 km north: the classification uses the endpoints, not the rounded DTO metres.
+          latitude: from!.latitude! + 0.035,
+          longitude: from!.longitude,
+          metersFromPrevious: 3_800,
+          minutesFromPrevious: 49,
+          linesFromPrevious: [],
+        },
+      ],
+      totalMeters: 3_800,
+      totalMinutes: 49,
+    };
+    const { request } = immediateRequest({ suggested: navitime });
+    render(dialog(request));
+    const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+
+    expect(within(candidate).getByText("步行約 3.8 km・可能要搭公車")).toBeInTheDocument();
+    const link = within(candidate).getByRole("link", { name: /Google Maps 查公車/ });
+    expect(link).toHaveTextContent("Google Maps 查公車");
+    expect(new URL(link.getAttribute("href")!).searchParams.get("travelmode")).toBe("transit");
+
+    const saved = screen.getByRole("region", { name: "已儲存的順序" });
+    expect(within(saved).queryByText(/可能要搭公車/)).not.toBeInTheDocument();
+  });
+
+  it("warns in the list from a loaded walk-only shape even before transit minutes were fetched", async () => {
+    const suggested = route("suggested", {
+      names: { b: "上賀茂神社", a: "鴨川三角洲" },
+      transitProvider: "navitime",
+      travelSource: "straight_line",
+      routeShapesAvailable: true,
+    });
+    const [from, originalTo] = suggested.stops;
+    const to = {
+      ...originalTo!,
+      latitude: from!.latitude! + 0.02,
+      longitude: from!.longitude,
+      metersFromPrevious: 2_224,
+      minutesFromPrevious: null,
+      linesFromPrevious: [],
+    };
+    const cacheOnly = { ...suggested, stops: [from!, to], totalMeters: 2_224, totalMinutes: null };
+    const routeShapes: DayRouteShapesResponse = {
+      legs: [{
+        fromId: from!.tripPlaceId,
+        toId: to.tripPlaceId,
+        geojson: {
+          type: "FeatureCollection",
+          features: [{
+            type: "Feature",
+            geometry: { type: "LineString", coordinates: [[from!.longitude!, from!.latitude!], [to.longitude!, to.latitude!]] },
+            properties: { ways: "walk", inline: { color: null } },
+          }],
+        },
+      }],
+    };
+    const { request } = immediateRequest({ suggested: cacheOnly, routeShapes });
+    render(dialog(request));
+    const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+    expect(within(candidate).queryByText(/可能要搭公車/)).not.toBeInTheDocument();
+
+    fireEvent.click(within(candidate).getByRole("tab", { name: "Google Map" }));
+    expect(await within(candidate).findByText("可能要搭公車（NAVITIME 不含公車路線）")).toBeInTheDocument();
+    fireEvent.click(within(candidate).getByRole("tab", { name: "路線" }));
+
+    expect(within(candidate).getByText("步行約 2.2 km・可能要搭公車")).toBeInTheDocument();
+    const link = within(candidate).getByRole("link", { name: /Google Maps 查公車/ });
+    expect(new URL(link.getAttribute("href")!).searchParams.get("travelmode")).toBe("transit");
   });
 });
 

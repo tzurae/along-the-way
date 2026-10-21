@@ -1239,11 +1239,15 @@
 .route-leg-track { position: relative; }
 .route-leg-track::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--border); }
 .route-leg-text { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 2px 0; color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; }
+.route-leg--bus-likely .route-leg-track::before { width: 2px; background: color-mix(in srgb, var(--color-accent-strong) 55%, var(--border)); }
+.route-leg-warning { color: var(--color-accent-strong); font-weight: 750; }
 /* Every leg retains an accessible link to Google's live directions. */
 .route-leg-directions { display: inline-flex; align-items: center; gap: 3px; min-height: 44px; border-radius: 999px; padding: 0 10px; background: var(--secondary); color: var(--secondary-foreground); font-size: 12px; font-weight: 650; line-height: 1; text-decoration: none; }
 .route-leg-directions:hover { background: var(--muted); }
 .route-leg-directions:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .route-leg-directions svg { width: 10px; height: 10px; }
+.route-leg-directions--transit { background: var(--color-accent-strong); color: var(--color-on-dark); font-weight: 750; }
+.route-leg-directions--transit:hover { background: color-mix(in srgb, var(--color-accent-strong) 88%, black); }
 /* Reordering a suggested or arranged order: handle, dragged row, landing line. */
 .route-stop-draggable { position: relative; transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1); }
 .route-stop-draggable.is-dragging { opacity: 0.35; }
@@ -1292,6 +1296,22 @@
   width: 100%;
   height: 100%;
 }
+.route-map-bus-likely-label {
+  display: inline-flex;
+  min-height: 24px;
+  transform: translateY(-8px);
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--color-on-dark) 45%, transparent);
+  border-radius: 999px;
+  background: var(--color-accent-strong);
+  box-shadow: 0 3px 9px #1f302933;
+  color: var(--color-on-dark);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 0 9px;
+  white-space: nowrap;
+}
 .route-map-caption {
   display: grid;
   gap: 9px;
@@ -1324,6 +1344,11 @@
   height: 3px;
   border-radius: 0;
   background: repeating-linear-gradient(90deg, #52645c 0 6px, transparent 6px 10px);
+}
+.route-map-legend-swatch--bus-likely {
+  height: 6px;
+  border-radius: 0;
+  background: repeating-linear-gradient(90deg, var(--color-accent-strong) 0 8px, transparent 8px 12px);
 }
 .route-map-attribution {
   margin: 0;
