@@ -31,6 +31,9 @@ export const auth = {
   switchWarning: (email: string) => `目前登入的是 ${email}，繼續會登出這個帳號。`,
   confirmSignIn: "確認登入",
   cancelSignIn: "取消，保留目前帳號",
+  sessionRestoreUnavailable: "暫時連不上伺服器，你的登入還在。",
+  reconnect: "重新連線",
+  reconnecting: "正在重新連線…",
   progress: {
     restoring: "正在確認登入狀態…",
     "consuming-link": "正在驗證登入連結…",
