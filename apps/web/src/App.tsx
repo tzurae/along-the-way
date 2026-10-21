@@ -1359,7 +1359,10 @@ export function App() {
               if (!active) return;
               if (!existing) {
                 const denied = sessionError instanceof ApiRequestError && sessionError.status === 401;
-                if (!denied) {
+                // After an explicit sign-out, reconnect() refuses to run, so the reconnect page would
+                // be a dead end: those users get the sign-in screen with the link explanation instead.
+                const locallySignedOut = signedOut.current || store?.isLocallySignedOut();
+                if (!denied && !locallySignedOut) {
                   // The link is spent but the session may still be valid: treat it like any other
                   // transient restore failure instead of claiming the user must sign in again.
                   if (epoch === sessionEpoch.current) deferSessionRestore();

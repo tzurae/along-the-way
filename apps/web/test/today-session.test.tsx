@@ -436,6 +436,18 @@ it("does not claim the user must sign in when an old link meets a transient sess
   expect(new URLSearchParams(location.hash.slice(1)).has("magicToken")).toBe(false);
 });
 
+it("gives a signed-out user the sign-in screen, not a dead-end reconnect page, for an old link during a session outage", async () => {
+  new TodaySnapshotStore(localStorage).setLocallySignedOut(true);
+  history.replaceState({}, "", "/?trip=A&tab=today#magicToken=already-used-token");
+  magicConsumeFailure = "terminal";
+  sessionFailure = 500;
+  await mount();
+
+  await waitFor(() => expect(document.querySelector('[role="alert"]')).toHaveTextContent("請寄一封新的登入信。"));
+  expect(document.querySelector('input[type="email"]')).toBeInTheDocument();
+  expect(document.body).not.toHaveTextContent("暫時連不上伺服器，你的登入還在。");
+});
+
 it("signs in but explains when a linked invitation expired or was revoked", async () => {
   await mount();
   magicInviteOutcome = true;
