@@ -38,9 +38,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useI18n } from "./i18n";
+import { useI18n, type Messages } from "./i18n";
 import { ApiRequestError } from "./api-error";
 import { notify } from "./AppToaster";
+import { busLikelyShapeLegs, isBusLikelyMinutesLeg, routeLegKey } from "./bus-likely-leg";
 import { googleMapsDirectionsUrl } from "./google-maps";
 import { PlaceListSkeleton } from "./PlaceListSkeleton";
 
@@ -216,6 +217,7 @@ function routeMapPoints(route: DayRouteDto): RouteMapPoint[] {
 
 const TRANSIT_ROUTE_COLOR = "#1f3029";
 const WALK_ROUTE_COLOR = "#52645c";
+const BUS_LIKELY_ROUTE_COLOR = "#b55737";
 
 interface RouteLegendLine {
   color: string;
@@ -256,10 +258,12 @@ function routeLegendLines(
 function RouteMapOverlay({
   points,
   shapes,
+  busLikelyKeys,
   visibilityRevision,
 }: {
   points: RouteMapPoint[];
   shapes: DayRouteShapesResponse["legs"];
+  busLikelyKeys: ReadonlySet<string>;
   visibilityRevision: boolean;
 }) {
   const map = useMap();
@@ -282,6 +286,7 @@ function RouteMapOverlay({
     if (!map) return;
     const lines: google.maps.Polyline[] = [];
     for (const leg of shapes) {
+      const busLikely = busLikelyKeys.has(routeLegKey(leg.fromId, leg.toId));
       for (const feature of leg.geojson?.features ?? []) {
         const walk = feature.properties.ways === "walk";
         const paths = feature.geometry.type === "LineString"
@@ -291,36 +296,51 @@ function RouteMapOverlay({
             map,
             path: path.map(([lng, lat]) => ({ lat, lng })),
             geodesic: false,
-            strokeColor: walk ? WALK_ROUTE_COLOR : feature.properties.inline.color ?? TRANSIT_ROUTE_COLOR,
+            strokeColor: busLikely
+              ? BUS_LIKELY_ROUTE_COLOR
+              : walk ? WALK_ROUTE_COLOR : feature.properties.inline.color ?? TRANSIT_ROUTE_COLOR,
             strokeOpacity: walk ? 0 : 1,
-            strokeWeight: 5,
+            strokeWeight: busLikely ? 6 : 5,
+            zIndex: busLikely ? 2 : 1,
             ...(walk ? { icons: [{
-              icon: { path: "M 0,-1 0,1", strokeColor: WALK_ROUTE_COLOR, strokeOpacity: 1, strokeWeight: 3, scale: 2 },
-              offset: "0", repeat: "12px",
+              icon: {
+                path: "M 0,-1 0,1",
+                strokeColor: busLikely ? BUS_LIKELY_ROUTE_COLOR : WALK_ROUTE_COLOR,
+                strokeOpacity: 1,
+                strokeWeight: busLikely ? 6 : 3,
+                scale: 2,
+              },
+              offset: "0",
+              repeat: busLikely ? "16px" : "12px",
             }] } : {}),
           }));
         }
       }
     }
     return () => lines.forEach((line) => line.setMap(null));
-  }, [map, shapes]);
+  }, [busLikelyKeys, map, shapes]);
 
   return null;
 }
 
 function RouteMapView({
+  route,
   date,
   points,
   shapes,
   mapId,
   visibilityRevision,
 }: {
+  route: DayRouteDto;
   date: string;
   points: RouteMapPoint[];
   shapes: DayRouteShapesResponse["legs"];
   mapId: string | null;
   visibilityRevision: boolean;
 }) {
+  const { t } = useI18n();
+  const likelyBusLegs = useMemo(() => busLikelyShapeLegs(route, shapes), [route, shapes]);
+  const busLikelyKeys = useMemo(() => new Set(likelyBusLegs.map((leg) => leg.key)), [likelyBusLegs]);
   return (
     <div className="route-map-shell" aria-label={`${date} 的路線地圖`}>
       <GoogleMap
@@ -330,7 +350,17 @@ function RouteMapView({
         gestureHandling="cooperative"
         mapId={mapId ?? "DEMO_MAP_ID"}
       >
-        <RouteMapOverlay points={points} shapes={shapes} visibilityRevision={visibilityRevision} />
+        <RouteMapOverlay
+          points={points}
+          shapes={shapes}
+          busLikelyKeys={busLikelyKeys}
+          visibilityRevision={visibilityRevision}
+        />
+        {likelyBusLegs.map((leg) => (
+          <AdvancedMarker key={`bus-likely-${leg.key}`} position={leg.midpoint} title={t.dayPlan.busLikely}>
+            <span className="route-map-bus-likely-label">{t.dayPlan.busLikely}</span>
+          </AdvancedMarker>
+        ))}
         {points.map((point) => (
           <AdvancedMarker key={point.key} position={point.position} title={`${point.label}・${point.name}`}>
             <Pin
@@ -454,7 +484,7 @@ function ReservedRouteMap({
   }
   return (
     <APIProvider apiKey={browserKey} onError={() => setState("script-error")}>
-      <RouteMapView date={route.date} points={points} shapes={shapes} mapId={mapId} visibilityRevision={visibilityRevision} />
+      <RouteMapView route={route} date={route.date} points={points} shapes={shapes} mapId={mapId} visibilityRevision={visibilityRevision} />
     </APIProvider>
   );
 }
@@ -508,30 +538,50 @@ function RouteMapPanel({
 }
 
 type LegEnd = { name: string; latitude: number | null; longitude: number | null; providerPlaceId: string | null };
+type LegRowCopy = Pick<Messages["dayPlan"], "busLikely" | "busLikelyWalkDistance" | "googleMapsTransit">;
 
 /** Saved rows retain distance-only copy; candidate rows can show transit or an estimate. */
-function legRow(key: string, meters: number | null, from: LegEnd, to: LegEnd, minutes: number | null, lines: string[], shapeFailed: boolean, version: "saved" | "candidate") {
+function legRow(
+  key: string,
+  meters: number | null,
+  from: LegEnd,
+  to: LegEnd,
+  minutes: number | null,
+  lines: string[],
+  shapeFailed: boolean,
+  version: "saved" | "candidate",
+  provider: DayRouteDto["transitProvider"],
+  copy: LegRowCopy,
+  /** Classification from a loaded shape for this leg; null when no shape evidence exists. */
+  shapeBusLikely: boolean | null = null,
+) {
+  const busLikely = version === "candidate"
+    && (shapeBusLikely ?? isBusLikelyMinutesLeg(provider, from, to, minutes, lines));
   const distance = meters === null ? "缺少座標" : meters < 1_000 ? `${meters} 公尺` : `${(meters / 1_000).toFixed(1)} 公里`;
-  const directions = googleMapsDirectionsUrl(from, to);
-  const travel = version === "saved" ? distance
-    : minutes === null ? `估計・${distance}`
-      : lines.length > 0 ? `${minutes} 分鐘・${lines.join(" → ")}` : `步行 ${minutes} 分鐘`;
+  const directions = googleMapsDirectionsUrl(from, to, busLikely ? "transit" : undefined);
+  const travel = busLikely
+    ? copy.busLikelyWalkDistance(((meters ?? 0) / 1_000).toFixed(1))
+    : version === "saved" ? distance
+      : minutes === null ? `估計・${distance}`
+        : lines.length > 0 ? `${minutes} 分鐘・${lines.join(" → ")}` : `步行 ${minutes} 分鐘`;
   return (
-    <li key={key} className="route-leg">
+    <li key={key} className={`route-leg${busLikely ? " route-leg--bus-likely" : ""}`}>
       <span aria-hidden="true" />
       <span className="route-leg-track" aria-hidden="true" />
       <span className="route-leg-text">
-        <span><span aria-hidden="true">↓ </span>{travel}</span>
+        <span className={busLikely ? "route-leg-warning" : undefined}><span aria-hidden="true">↓ </span>{travel}</span>
         {shapeFailed ? <span>這段路線無法取得</span> : null}
         {directions ? (
           <a
-            className="route-leg-directions"
+            className={`route-leg-directions${busLikely ? " route-leg-directions--transit" : ""}`}
             href={directions}
             target="_blank"
             rel="noopener noreferrer"
-            aria-label={`在 Google Maps 查看「${from.name}」到「${to.name}」的交通方式（另開新分頁）`}
+            aria-label={busLikely
+              ? `${copy.googleMapsTransit}：「${from.name}」到「${to.name}」（另開新分頁）`
+              : `在 Google Maps 查看「${from.name}」到「${to.name}」的交通方式（另開新分頁）`}
           >
-            <MapPin aria-hidden="true" /> Google Maps
+            <MapPin aria-hidden="true" /> {busLikely ? copy.googleMapsTransit : "Google Maps"}
           </a>
         ) : null}
       </span>
@@ -613,13 +663,25 @@ export function DayPlanDialog({
       || (state?.status === "ready" && !state.legs.some((leg) => leg.fromId === fromId && leg.toId === toId && leg.geojson));
   }
 
+  /** True/false when a loaded candidate shape decides this leg; null when only minute data can. */
+  function shapeBusLikely(route: DayRouteDto, fromId: string, toId: string) {
+    const state = shapeStates[routeShapeKey(route)];
+    if (state?.status !== "ready") return null;
+    const leg = state.legs.find((entry) => entry.fromId === fromId && entry.toId === toId);
+    if (!leg?.geojson) return null;
+    return busLikelyShapeLegs(route, [leg]).length > 0;
+  }
+
   function routeMap(route: DayRouteDto, version: "saved" | "candidate") {
     const state = version === "candidate" ? shapeStates[routeShapeKey(route)] : undefined;
     const legendLines = state?.status === "ready"
       ? routeLegendLines(route, state.legs, t.dayPlan.genericTransit)
       : [];
+    const likelyBusLegs = state?.status === "ready" ? busLikelyShapeLegs(route, state.legs) : [];
+    const busLikelyKeys = new Set(likelyBusLegs.map((leg) => leg.key));
     const hasWalk = state?.status === "ready"
-      && state.legs.some((leg) => leg.geojson?.features.some((feature) => feature.properties.ways === "walk"));
+      && state.legs.some((leg) => !busLikelyKeys.has(routeLegKey(leg.fromId, leg.toId))
+        && leg.geojson?.features.some((feature) => feature.properties.ways === "walk"));
     const names = new Map([
       ...route.stops.map((stop) => [stop.tripPlaceId, stop.name] as const),
       ...(route.startsAt ? [[route.startsAt.placeId, route.startsAt.name] as const] : []),
@@ -659,7 +721,7 @@ export function DayPlanDialog({
         />
         {version === "candidate" && route.routeShapesAvailable ? (
           <div className="route-map-caption">
-            {legendLines.length > 0 || hasWalk ? (
+            {legendLines.length > 0 || hasWalk || likelyBusLegs.length > 0 ? (
               <ul className="route-map-legend" aria-label={t.dayPlan.mapLegendLabel}>
                 {legendLines.map((line) => (
                   <li key={`${line.color}:${line.label}`}>
@@ -671,6 +733,12 @@ export function DayPlanDialog({
                   <li>
                     <span className="route-map-legend-swatch route-map-legend-swatch--walk" aria-hidden="true" />
                     <span>{t.dayPlan.walking}</span>
+                  </li>
+                ) : null}
+                {likelyBusLegs.length > 0 ? (
+                  <li>
+                    <span className="route-map-legend-swatch route-map-legend-swatch--bus-likely" aria-hidden="true" />
+                    <span>{t.dayPlan.busLikelyLegend}</span>
                   </li>
                 ) : null}
               </ul>
@@ -1084,7 +1152,9 @@ export function DayPlanDialog({
               {index > 0 || route.startsAt
                 ? legRow(`leg-${stop.tripPlaceId}`, stop.metersFromPrevious, index > 0 ? route.stops[index - 1]! : route.startsAt!, stop,
                   stop.minutesFromPrevious, stop.linesFromPrevious,
-                  version === "candidate" && shapeFailed(route, index > 0 ? route.stops[index - 1]!.tripPlaceId : route.startsAt!.placeId, stop.tripPlaceId), version)
+                  version === "candidate" && shapeFailed(route, index > 0 ? route.stops[index - 1]!.tripPlaceId : route.startsAt!.placeId, stop.tripPlaceId),
+                  version, route.transitProvider, t.dayPlan,
+                  version === "candidate" ? shapeBusLikely(route, index > 0 ? route.stops[index - 1]!.tripPlaceId : route.startsAt!.placeId, stop.tripPlaceId) : null)
                 : null}
               <li
                 data-trip-place-id={stop.tripPlaceId}
@@ -1115,7 +1185,9 @@ export function DayPlanDialog({
         })}
         {route.stops.length > 0 && route.endsAt ? legRow("leg-end", route.metersToEnd, route.stops.at(-1)!, route.endsAt,
           route.minutesToEnd, route.linesToEnd,
-          version === "candidate" && shapeFailed(route, route.stops.at(-1)!.tripPlaceId, route.endsAt.placeId), version) : null}
+          version === "candidate" && shapeFailed(route, route.stops.at(-1)!.tripPlaceId, route.endsAt.placeId),
+          version, route.transitProvider, t.dayPlan,
+          version === "candidate" ? shapeBusLikely(route, route.stops.at(-1)!.tripPlaceId, route.endsAt.placeId) : null) : null}
         <li className="route-stop route-distance-anchor">
           <span className="route-stop-number">終</span>
           <span className="route-stop-track" aria-hidden="true" />

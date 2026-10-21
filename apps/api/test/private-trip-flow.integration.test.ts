@@ -654,9 +654,9 @@ describe("private trip flow through HTTP and PostgreSQL", () => {
     await smtpWorker.runOnce();
     const message = sendMail.mock.calls[0]![0];
     expect(message.to).toEqual({ address: "owner@example.test", name: "" });
-    const code = /一次性登入碼：(\d{6})/.exec(message.text)?.[1];
+    const code = /你的登入碼：(\d{6})/.exec(message.text)?.[1];
     expect(code).toMatch(/^\d{6}$/);
-    expect(message.text).toContain("請在你索取連結的瀏覽器");
+    expect(message.text).toContain("請回到你正在使用的 Along the Way");
     const verified = await authPost("/api/auth/magic-links/verify-code", { email: message.to.address, code }, cookieFrom(requested));
     expect(verified.status).toBe(200);
     const trip = (await createTrip(cookieFrom(verified))).trip;

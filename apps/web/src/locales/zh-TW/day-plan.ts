@@ -8,5 +8,9 @@ export const dayPlan = {
   mapLegendLabel: "地圖路線圖例",
   genericTransit: "大眾運輸",
   walking: "步行",
+  busLikely: "可能要搭公車",
+  busLikelyLegend: "可能要搭公車（NAVITIME 不含公車路線）",
+  busLikelyWalkDistance: (kilometres: string) => `步行約 ${kilometres} km・可能要搭公車`,
+  googleMapsTransit: "Google Maps 查公車",
   routeProvider: (provider: string) => `路線由 ${provider} 提供。`,
 };
