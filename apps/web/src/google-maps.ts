@@ -28,12 +28,17 @@ export function googleMapsCoordinatesUrl(destination: Coordinates, origin?: Coor
 type DirectionsEnd = Coordinates & { providerPlaceId: string | null };
 
 /**
- * Google Maps directions between two route points, leaving the travel mode to the reader. Each end
- * is sent as coordinates, so Google never guesses a place from a name; a Google place ID, when
- * known, rides along so Maps shows the place's name (the ID needs that coordinate companion).
+ * Google Maps directions between two route points. A caller may force transit when it is warning
+ * that a provider omitted a likely bus leg; otherwise Maps leaves the travel mode to the reader.
+ * Each end is sent as coordinates, so Google never guesses a place from a name; a Google place ID,
+ * when known, rides along so Maps shows the place's name (the ID needs that coordinate companion).
  * https://developers.google.com/maps/documentation/urls/get-started#directions
  */
-export function googleMapsDirectionsUrl(origin: DirectionsEnd, destination: DirectionsEnd) {
+export function googleMapsDirectionsUrl(
+  origin: DirectionsEnd,
+  destination: DirectionsEnd,
+  travelMode?: "transit",
+) {
   if (!validCoordinates(origin) || !validCoordinates(destination)) return null;
   const url = new URL("https://www.google.com/maps/dir/");
   url.searchParams.set("api", "1");
@@ -41,6 +46,7 @@ export function googleMapsDirectionsUrl(origin: DirectionsEnd, destination: Dire
     url.searchParams.set(role, `${end.latitude},${end.longitude}`);
     if (end.providerPlaceId) url.searchParams.set(`${role}_place_id`, end.providerPlaceId);
   }
+  if (travelMode) url.searchParams.set("travelmode", travelMode);
   return url.toString();
 }
 
