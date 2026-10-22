@@ -1518,7 +1518,7 @@
 .travel-date-choice__weekday { font-size: 12px; font-weight: 600; opacity: .8; white-space: nowrap; }
 .travel-date-choice:hover:not(:disabled) { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 6%, var(--background)); }
 .travel-date-choice:focus-visible { outline: 3px solid color-mix(in srgb, var(--ring) 35%, transparent); outline-offset: 2px; }
-.travel-date-choice[data-range="middle"] { border-color: color-mix(in srgb, var(--primary) 30%, var(--border)); background: color-mix(in srgb, var(--primary) 10%, var(--background)); color: var(--foreground); }
+.travel-date-choice[data-range="middle"] { border-color: color-mix(in srgb, var(--primary) 55%, var(--border)); background: color-mix(in srgb, var(--primary) 26%, var(--background)); color: var(--foreground); }
 .travel-date-choice[data-range="start"], .travel-date-choice[data-range="end"] { border-color: var(--primary); background: var(--primary); color: var(--primary-foreground); }
 .travel-date-choice:disabled { cursor: not-allowed; border-color: var(--border); background: var(--muted); color: var(--muted-foreground); opacity: .72; }
 .travel-date-choice small { font-size: 10px; font-weight: 600; }

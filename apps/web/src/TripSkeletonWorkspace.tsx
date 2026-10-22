@@ -1200,10 +1200,6 @@ export function TripSkeletonWorkspace({
             const assignedPlaces = tripPlaces.filter((place) =>
               !place.scheduled && place.assignedDayId === day.id
             ).sort(byDayPosition);
-            const chronologicalEntries = [...day.entries].sort(
-              (left, right) => left.sortInstant.localeCompare(right.sortInstant),
-            );
-            const itemCount = assignedPlaces.length + day.entries.length;
             const previousDate = Temporal.PlainDate.from(day.date).subtract({ days: 1 }).toString();
             // Lodging booked for a night but saved without a map location cannot be routed from either.
             const bookedFor = (date: string) => skeleton.items.find((item) => {
@@ -1212,12 +1208,46 @@ export function TripSkeletonWorkspace({
               const end = item.endpoints.find((endpoint) => endpoint.role === "end");
               return Boolean(start && end && start.localDateTime.slice(0, 10) <= date && end.localDateTime.slice(0, 10) > date);
             }) ?? null;
+            // The day starts from last night's lodging and ends at tonight's: the same stay 幫我排順路 routes between
+            // (bookedLodgingForNight in the day-plan API), named by its hotel place as 行程 does.
+            const anchorFor = (date: string) => {
+              const item = bookedFor(date);
+              const placeId = item?.endpoints.find((endpoint) => endpoint.role === "start")?.placeId;
+              const place = skeleton.places.find((entry) => entry.id === placeId);
+              return item && place ? { item, name: place.name } : null;
+            };
+            const startLodging = anchorFor(previousDate);
+            const endLodging = anchorFor(day.date);
+            const chronologicalEntries = [...day.entries].sort(
+              (left, right) => left.sortInstant.localeCompare(right.sortInstant),
+            );
+            const itemCount = assignedPlaces.length + day.entries.length;
             const nights = [
               ...(index > 0 ? [previousDate] : []),
               ...(index < skeleton.days.length - 1 ? [day.date] : []),
             ].filter((date) => lodgingForNight(skeleton, date) === null);
             const unlocatedLodging = nights.map(bookedFor).find((item) => item !== null) ?? null;
             const missingLodging = nights.length > 0;
+            const lodgingAnchor = (role: "start" | "end", item: ItineraryItemDto, label: string) => (
+              <li key={`anchor-${role}`} className="plan-lodging-anchor">
+                <button
+                  type="button"
+                  className="plan-item-row"
+                  data-item-id={item.id}
+                  onClick={() => {
+                    setError("");
+                    setViewingItem({ itemId: item.id, continuation: false });
+                  }}
+                >
+                  <span className="plan-item-copy">
+                    <span className="plan-place-name">
+                      <span className="lodging-mark" aria-hidden="true"><BedDouble /></span>
+                      <strong>{label}</strong>
+                    </span>
+                  </span>
+                </button>
+              </li>
+            );
             return (
               <section key={day.id} className="day-column" data-date={day.date}>
                 <header className="day-heading">
@@ -1314,6 +1344,9 @@ export function TripSkeletonWorkspace({
                   </aside>
                 ) : null}
                 <ul className={`plan-day-list${drag?.moved && drag.targetDayId === day.id ? " is-drop-target" : ""}`} data-drop-day={day.id}>
+                  {startLodging
+                    ? lodgingAnchor("start", startLodging.item, t.tripSkeleton.lodgingAnchorStart(startLodging.name))
+                    : null}
                   {itemCount === 0 ? (
                     <li className="plan-no-plan">
                       <CalendarDays aria-hidden="true" />
@@ -1401,6 +1434,9 @@ export function TripSkeletonWorkspace({
                       );
                     });
                   })()}
+                  {endLodging
+                    ? lodgingAnchor("end", endLodging.item, t.tripSkeleton.lodgingAnchorEnd(endLodging.name))
+                    : null}
                 </ul>
                 <DayAlternatives
                   tripId={trip.id}
