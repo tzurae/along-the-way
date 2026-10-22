@@ -71,6 +71,7 @@ import {
 } from "@along-the-way/contracts/place-details";
 import type { PlaceDetailModule } from "./place-details/place-detail-module";
 import type { PlaceGuideModule } from "./place-guides/place-guide-module";
+import type { NearbyActivityModule } from "./nearby-activities/nearby-activity-module";
 import type { FeedbackModule } from "./admin/postgres-feedback-module";
 import type { GoogleUsageModule } from "./admin/google-usage-module";
 
@@ -85,6 +86,7 @@ export interface AppDependencies {
   identityAccess: IdentityAccessModule;
   mapsConfig?: MapsConfigResponse;
   appVersion?: string;
+  nearbyActivities?: NearbyActivityModule;
   placeDetails: PlaceDetailModule;
   placeGuides?: PlaceGuideModule;
   planningSettings?: PlanningSettingsModule;
@@ -432,6 +434,7 @@ export function createApp({
   googleUsage,
   identityAccess,
   mapsConfig = { browserKey: null, mapId: null },
+  nearbyActivities,
   placeDetails,
   placeGuides,
   planningSettings,
@@ -1250,6 +1253,20 @@ export function createApp({
       uuidParam(context, "dayId"),
       uuidParam(context, "tripPlaceId"),
     )));
+  });
+
+  // 附近活動: view only, so any active member may ask; only uncached lookups count against the quota.
+  app.post("/api/trips/:tripId/days/:dayId/trip-places/:tripPlaceId/nearby-activities", async (context) => {
+    const { user } = await authenticated(context);
+    if (!nearbyActivities) throw new AppError("activities_unavailable", "Nearby activities are not configured", 503);
+    context.header("Cache-Control", "private, no-store");
+    return context.json(await nearbyActivities.nearbyActivities(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "dayId"),
+      uuidParam(context, "tripPlaceId"),
+      () => rateLimiter.consume("nearby_activities", clientIp(context), user.id),
+    ));
   });
 
   app.post("/api/trips/:tripId/days/:dayId/trip-places/:tripPlaceId/replacement", async (context) => {

@@ -1,7 +1,7 @@
 import { isPlaceType } from "@along-the-way/contracts/trip-skeleton";
 import type { TodayModel } from "./today-model";
 
-export const TODAY_SCHEMA_VERSION = 7;
+export const TODAY_SCHEMA_VERSION = 8;
 const PREFIX = "along-the-way:today:";
 const ACCOUNT_KEY = "along-the-way:today-account";
 const PLACE_FILTER_PREFIX = "along-the-way:place-filters:";
@@ -33,12 +33,11 @@ function zone(value: unknown) {
 function coordinate(value: unknown, limit: number) { return value === null || (typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= limit); }
 
 /**
- * Upgrade compatible schema-2/3/4/5/6 snapshots, then validate the complete
- * account-scoped result. Missing references, participant status, place types,
- * legacy wishlist coordinates, and replacement relations remain unknown;
- * never infer them from another snapshot.
+ * Upgrade compatible schema-2/3/4/5/6 snapshots to the schema-7 shape. Missing
+ * references, participant status, place types, legacy wishlist coordinates, and
+ * replacement relations remain unknown; never infer them from another snapshot.
  */
-function migrateLegacySnapshot(value: unknown): unknown {
+function migrateToSchema7(value: unknown): unknown {
   if (record(value, "schemaVersion accountId fetchedAt model") && value.schemaVersion === 6) {
     const model = value.model;
     if (!record(model, "tripId tripName tripVersion memberId days items") || !Array.isArray(model.days)) return value;
@@ -52,7 +51,7 @@ function migrateLegacySnapshot(value: unknown): unknown {
       }
       days.push({ ...day, wishlist });
     }
-    return { ...value, schemaVersion: TODAY_SCHEMA_VERSION, model: { ...model, days } };
+    return { ...value, schemaVersion: 7, model: { ...model, days } };
   }
   if (!record(value, "schemaVersion accountId fetchedAt model")
     || (value.schemaVersion !== 2 && value.schemaVersion !== 3 && value.schemaVersion !== 4 && value.schemaVersion !== 5)) return value;
@@ -98,7 +97,25 @@ function migrateLegacySnapshot(value: unknown): unknown {
     if (participants?.some((person) => person === null)) return value;
     items.push({ ...item, endpoints, participants });
   }
-  return { ...value, schemaVersion: TODAY_SCHEMA_VERSION, model: { ...model, days, items } };
+  return { ...value, schemaVersion: 7, model: { ...model, days, items } };
+}
+
+/**
+ * Upgrade every compatible legacy snapshot to the current schema, then let
+ * `validSnapshot` check the complete account-scoped result. Schema 7 predates the
+ * day title and 玩法 note, so they stay unknown (null) until the next online sync.
+ */
+function migrateLegacySnapshot(value: unknown): unknown {
+  const schema7 = migrateToSchema7(value);
+  if (!record(schema7, "schemaVersion accountId fetchedAt model") || schema7.schemaVersion !== 7) return value;
+  const model = schema7.model;
+  if (!record(model, "tripId tripName tripVersion memberId days items") || !Array.isArray(model.days)) return value;
+  const days = [];
+  for (const day of model.days) {
+    if (!record(day, "id date timeZone itemIds wishlist")) return value;
+    days.push({ ...day, title: null, note: null });
+  }
+  return { ...schema7, schemaVersion: TODAY_SCHEMA_VERSION, model: { ...model, days } };
 }
 
 /** Validate the whole persisted boundary; reject extra fields as well as incompatible/corrupt data. */
@@ -107,9 +124,11 @@ function validSnapshot(value: unknown): value is TodaySnapshot {
   const model = value.model;
   if (!record(model, "tripId tripName tripVersion memberId days items") || !text(model.tripId) || !text(model.tripName) || !text(model.memberId) || !Number.isSafeInteger(model.tripVersion)) return false;
   if (!list(model.days, (day) =>
-    record(day, "id date timeZone itemIds wishlist")
+    record(day, "id date title note timeZone itemIds wishlist")
     && text(day.id)
     && text(day.date)
+    && nullableText(day.title)
+    && nullableText(day.note)
     && /^\d{4}-\d{2}-\d{2}$/.test(day.date)
     && Number.isFinite(Date.parse(day.date))
     && new Date(day.date).toISOString().slice(0, 10) === day.date

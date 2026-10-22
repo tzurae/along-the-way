@@ -8,6 +8,7 @@ import { EMPTY_PLANNING_OVERRIDE } from "@along-the-way/contracts/planning";
 import {
   parseProviderCandidatesResponse,
   parseNearbyAlternativesResponse,
+  parseNearbyActivitiesResponse,
   parseTripPlaceListResponse,
   parseTripPlaceResponse,
   type ProviderPlaceCandidateDto,
@@ -63,6 +64,13 @@ import {
   type ProviderPlaceCandidate,
 } from "../src/trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "../src/trip-places/postgres-trip-place-module";
+import { straightLineMeters } from "../src/planning/day-route-order";
+import { PostgresNearbyActivityModule } from "../src/nearby-activities/postgres-nearby-activity-module";
+import type {
+  FoundNearbyActivity,
+  NearbyActivityModel,
+  NearbyActivityQuery,
+} from "../src/nearby-activities/nearby-activity-module";
 import { unrelatedDiscoveryModule } from "./discovery-test-support";
 import { tripFlights } from "./travel-test-support";
 
@@ -3630,6 +3638,170 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
       languageCode: "zh-TW",
       regionCode: "JP",
     });
+  });
+
+  it("lets any member see nearby activities, reuses a stop's answer for the rest of the local day, and measures each venue", async () => {
+    const owner = await login("activities-owner@example.test");
+    const editor = await login("activities-editor@example.test");
+    const outsider = await login("activities-outsider@example.test");
+    const trip = await createTrip(owner.cookie, "Nearby activities");
+    await addMember(trip.id, editor.user.id);
+    const dayId = trip.days[0]!.id;
+    const otherDayId = trip.days[1]!.id;
+    const stop = await addLocatedManualPlace(owner.cookie, trip.id, "activities-stop", "Activities stop", 35, 135.77);
+    const otherDayStop = await addLocatedManualPlace(owner.cookie, trip.id, "activities-other", "Other day stop", 35.1, 135.7);
+    const unlocated = await addManualPlace(owner.cookie, trip.id, "activities-unlocated", "Unlocated stop");
+    await assignToDay(owner.cookie, trip.id, dayId, [stop, unlocated], "activities-assign");
+    await assignToDay(owner.cookie, trip.id, otherDayId, [otherDayStop], "activities-assign-other");
+
+    const venue: FoundNearbyActivity = {
+      title: "夜間參拜",
+      description: "寺院晚上點燈開放參拜。",
+      timeText: null,
+      startsAt: "2026-10-21T18:00",
+      endsAt: "2026-10-21T21:30",
+      kind: "event",
+      venueName: "測試寺",
+      latitude: 35.005,
+      longitude: 135.77,
+      sourceUrl: "https://temple.example.jp/lightup",
+      sourceTitle: "測試寺 夜間參拜",
+    };
+    const unplaced: FoundNearbyActivity = {
+      ...venue,
+      title: "和服租借",
+      kind: "experience",
+      startsAt: null,
+      endsAt: null,
+      venueName: null,
+      latitude: null,
+      longitude: null,
+      sourceUrl: "https://kimono.example.jp/",
+      sourceTitle: "kimono.example.jp",
+    };
+    const queries: NearbyActivityQuery[] = [];
+    let failNext = false;
+    const model: NearbyActivityModel = {
+      available: true,
+      find: async (query) => {
+        queries.push(query);
+        if (failNext) {
+          failNext = false;
+          throw new Error("provider down");
+        }
+        return [venue, unplaced];
+      },
+    };
+    app = createApp({ ...appDependencies, nearbyActivities: new PostgresNearbyActivityModule({ database, model, now }) });
+    const ask = (cookie: string, askedDayId: string, tripPlaceId: string) => app.request(
+      `/api/trips/${trip.id}/days/${askedDayId}/trip-places/${tripPlaceId}/nearby-activities`,
+      { method: "POST", headers: { cookie, origin: "https://app.example.test" } },
+    );
+    const denied = await ask(outsider.cookie, dayId, stop.id);
+    expect(denied.status).toBe(404);
+    expect(queries).toHaveLength(0);
+
+    const notOnDay = await ask(owner.cookie, dayId, otherDayStop.id);
+    expect(notOnDay.status).toBe(409);
+    const missing = await ask(owner.cookie, dayId, randomUUID());
+    expect(missing.status).toBe(404);
+    const noCoordinates = await ask(owner.cookie, dayId, unlocated.id);
+    expect(noCoordinates.status).toBe(422);
+    expect(await noCoordinates.json()).toMatchObject({ error: { code: "activities_unsupported" } });
+    expect(queries).toHaveLength(0);
+
+    // An editor who cannot arrange the itinerary may still look: it changes nothing.
+    const first = await ask(editor.cookie, dayId, stop.id);
+    expect(first.status, await first.clone().text()).toBe(200);
+    const firstResult = parseNearbyActivitiesResponse(await first.json());
+    const firstFetchedAt = currentNow.toISOString();
+    expect(firstResult).toMatchObject({ stopTripPlaceId: stop.id, date: "2026-10-21", fetchedAt: firstFetchedAt });
+    expect(firstResult.activities.map((activity) => [activity.title, activity.straightLineMeters])).toEqual([
+      ["夜間參拜", Math.round(straightLineMeters(
+        { id: "stop", latitude: 35, longitude: 135.77 },
+        { id: "venue", latitude: 35.005, longitude: 135.77 },
+      ))],
+      ["和服租借", null],
+    ]);
+    expect(firstResult.activities[0]!.straightLineMeters).toBeGreaterThan(500);
+    expect(queries).toEqual([expect.objectContaining({
+      stopName: "Activities stop",
+      latitude: 35,
+      longitude: 135.77,
+      date: "2026-10-21",
+      timeZone: "Asia/Tokyo",
+      countryCode: "JP",
+    })]);
+
+    // 12:00Z is 21:00 in Tokyo: the answer is reused until local midnight (15:00Z), then asked again.
+    currentNow = new Date("2026-09-28T14:59:00.000Z");
+    const cached = await ask(owner.cookie, dayId, stop.id);
+    expect(cached.status).toBe(200);
+    expect(parseNearbyActivitiesResponse(await cached.json())).toEqual(firstResult);
+    expect(queries).toHaveLength(1);
+
+    currentNow = new Date("2026-09-28T15:01:00.000Z");
+    const refreshed = await ask(owner.cookie, dayId, stop.id);
+    expect(refreshed.status).toBe(200);
+    expect(parseNearbyActivitiesResponse(await refreshed.json()).fetchedAt).toBe(currentNow.toISOString());
+    expect(queries).toHaveLength(2);
+
+    // A failed lookup is not cached: the next tap asks again.
+    failNext = true;
+    const failed = await ask(owner.cookie, otherDayId, otherDayStop.id);
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toMatchObject({ error: { code: "provider_unavailable" } });
+    const retried = await ask(owner.cookie, otherDayId, otherDayStop.id);
+    expect(retried.status).toBe(200);
+    expect(queries).toHaveLength(4);
+
+    // Without an OpenAI key and model: a stored answer still shows, a new lookup is unavailable.
+    app = createApp({
+      ...appDependencies,
+      nearbyActivities: new PostgresNearbyActivityModule({
+        database,
+        model: { available: false, find: async () => { throw new Error("never called"); } },
+        now,
+      }),
+    });
+    expect((await ask(owner.cookie, dayId, stop.id)).status).toBe(200);
+    await database.deleteFrom("nearby_activity_results").execute();
+    const unconfigured = await ask(owner.cookie, dayId, stop.id);
+    expect(unconfigured.status).toBe(503);
+    expect(await unconfigured.json()).toMatchObject({ error: { code: "activities_unavailable" } });
+  });
+
+  it("limits uncached nearby activity lookups per account", async () => {
+    const owner = await login("activities-quota@example.test");
+    const trip = await createTrip(owner.cookie, "Nearby activity quota");
+    const dayId = trip.days[0]!.id;
+    const stop = await addLocatedManualPlace(owner.cookie, trip.id, "activities-quota-stop", "Quota stop", 35, 135.77);
+    await assignToDay(owner.cookie, trip.id, dayId, [stop], "activities-quota-assign");
+    let calls = 0;
+    app = createApp({
+      ...appDependencies,
+      nearbyActivities: new PostgresNearbyActivityModule({
+        database,
+        model: { available: true, find: async () => { calls += 1; return []; } },
+        now,
+      }),
+    });
+    const ask = () => app.request(
+      `/api/trips/${trip.id}/days/${dayId}/trip-places/${stop.id}/nearby-activities`,
+      { method: "POST", headers: { cookie: owner.cookie, origin: "https://app.example.test" } },
+    );
+    // Cache hits are free; only lookups that reach the provider count.
+    for (let lookup = 0; lookup < 30; lookup += 1) {
+      await database.deleteFrom("nearby_activity_results").execute();
+      expect((await ask()).status).toBe(200);
+      expect((await ask()).status).toBe(200);
+    }
+    expect(calls).toBe(30);
+    await database.deleteFrom("nearby_activity_results").execute();
+    const limited = await ask();
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toMatchObject({ error: { code: "rate_limited" } });
+    expect(calls).toBe(30);
   });
 
   it("selects Google for known non-Japan days, keeps NAVITIME for Japan, and fails closed without a country or key", async () => {

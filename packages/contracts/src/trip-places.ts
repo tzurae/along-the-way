@@ -54,6 +54,37 @@ export type NearbyAlternativesResponse = {
   alternatives: NearbyAlternativeDto[];
 };
 
+export type NearbyActivityKind = "event" | "experience";
+
+/** One thing happening near a stop on one local date; view-only, never part of the itinerary. */
+export type NearbyActivityDto = {
+  title: string;
+  /** One sentence in zh-TW. */
+  description: string;
+  /** Time wording a source states but that is not a plain start/end clock time; null when none. */
+  timeText: string | null;
+  /** Stop-local wall clock `YYYY-MM-DDTHH:MM`, only when a source states it. */
+  startsAt: string | null;
+  endsAt: string | null;
+  kind: NearbyActivityKind;
+  venueName: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  straightLineMeters: number | null;
+  /** A page the provider's web search returned in the same request. */
+  sourceUrl: string;
+  sourceTitle: string | null;
+};
+
+export type NearbyActivitiesResponse = {
+  stopTripPlaceId: string;
+  /** The day's local date the activities were searched for. */
+  date: string;
+  /** When the provider answered; a cached answer keeps its original time. */
+  fetchedAt: string;
+  activities: NearbyActivityDto[];
+};
+
 export type StopReplacementDto = {
   replacementId: string;
   originalTripPlaceId: string;
@@ -348,6 +379,63 @@ export function parseNearbyAlternativesResponse(value: unknown): NearbyAlternati
     stopTripPlaceId: text(row.stopTripPlaceId),
     dayVersion,
     alternatives: Array.isArray(row.alternatives) ? row.alternatives.map(nearbyAlternative) : invalid(),
+  };
+}
+
+const LOCAL_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const LOCAL_DATE_TIME = /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d$/;
+
+function httpUrl(value: unknown) {
+  const raw = text(value);
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" || url.protocol === "http:" ? raw : invalid();
+  } catch {
+    return invalid();
+  }
+}
+
+function nearbyActivity(value: unknown): NearbyActivityDto {
+  const row = record(value);
+  const { latitude, longitude } = row;
+  const located = latitude !== null || longitude !== null;
+  if (located && (typeof latitude !== "number" || !Number.isFinite(latitude) || Math.abs(latitude) > 90
+    || typeof longitude !== "number" || !Number.isFinite(longitude) || Math.abs(longitude) > 180)) return invalid();
+  const distance = nullableInteger(row.straightLineMeters);
+  // A distance is measured to the venue, so it never exists without the venue's coordinates.
+  if (distance !== null && (distance < 0 || !located)) return invalid();
+  if (row.kind !== "event" && row.kind !== "experience") return invalid();
+  for (const time of [row.startsAt, row.endsAt]) {
+    if (time !== null && (typeof time !== "string" || !LOCAL_DATE_TIME.test(time))) return invalid();
+  }
+  const title = text(row.title);
+  if (!title.trim()) return invalid();
+  return {
+    title,
+    description: text(row.description),
+    timeText: nullableText(row.timeText),
+    startsAt: row.startsAt as string | null,
+    endsAt: row.endsAt as string | null,
+    kind: row.kind,
+    venueName: nullableText(row.venueName),
+    latitude: located ? latitude as number : null,
+    longitude: located ? longitude as number : null,
+    straightLineMeters: distance,
+    sourceUrl: httpUrl(row.sourceUrl),
+    sourceTitle: nullableText(row.sourceTitle),
+  };
+}
+
+export function parseNearbyActivitiesResponse(value: unknown): NearbyActivitiesResponse {
+  const row = record(value);
+  const date = text(row.date);
+  const fetchedAt = text(row.fetchedAt);
+  if (!LOCAL_DATE.test(date) || !Number.isFinite(Date.parse(fetchedAt))) return invalid();
+  return {
+    stopTripPlaceId: text(row.stopTripPlaceId),
+    date,
+    fetchedAt,
+    activities: Array.isArray(row.activities) ? row.activities.map(nearbyActivity) : invalid(),
   };
 }
 

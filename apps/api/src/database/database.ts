@@ -691,6 +691,15 @@ export interface TransitLegCacheTable {
   shape_fetched_at: Timestamp | null;
 }
 
+/** Last successful 附近活動 answer per stop and local date; reused for six hours. */
+export interface NearbyActivityResultTable {
+  trip_id: string;
+  trip_place_id: string;
+  local_date: DateOnly;
+  results: ColumnType<unknown, string, string>;
+  fetched_at: Timestamp;
+}
+
 export interface AlongTheWayDatabase {
   users: UserTable;
   magic_link_tokens: MagicLinkTokenTable;
@@ -703,6 +712,7 @@ export interface AlongTheWayDatabase {
   trip_day_planning_overrides: TripDayPlanningOverrideTable;
   whole_trip_plan_proposals: WholeTripPlanProposalTable;
   transit_leg_cache: TransitLegCacheTable;
+  nearby_activity_results: NearbyActivityResultTable;
   places: PlaceTable;
   legacy_place_origins: LegacyPlaceOriginTable;
   place_identities: PlaceIdentityTable;

@@ -131,6 +131,8 @@ export class AppError extends Error {
       | "provider_unavailable"
       | "provider_quota"
       | "alternatives_unsupported"
+      | "activities_unsupported"
+      | "activities_unavailable"
       | "research_in_progress"
       | "clarification_incomplete"
       | "research_limit_reached"

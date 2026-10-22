@@ -42,8 +42,8 @@ function fixedItem(
   };
 }
 
-function tripDay(id: string, date: string, itemIds: string[] = [], wishlist: TodayDay["wishlist"] = []): TodayDay {
-  return { id, date, timeZone: "UTC", itemIds, wishlist };
+function tripDay(id: string, date: string, itemIds: string[] = [], wishlist: TodayDay["wishlist"] = [], details: Pick<TodayDay, "title" | "note"> = { title: null, note: null }): TodayDay {
+  return { id, date, ...details, timeZone: "UTC", itemIds, wishlist };
 }
 
 function todayModel(days: TodayDay[], items: TodayItem[] = []): TodayModel {
