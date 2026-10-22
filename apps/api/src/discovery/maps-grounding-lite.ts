@@ -193,8 +193,9 @@ export async function discoverPlaces(input: {
   center?: DiscoverySearchCenter | null;
 }): Promise<{ groups: DiscoveredPlaceGroup[]; found: number }> {
   const center = input.center ?? null;
+  // A chosen time limit narrows the bias to the straight-line radius it allows; 「都可以」 keeps ~2 km.
   const near = center
-    ? { latitude: center.latitude, longitude: center.longitude, radiusMeters: SEARCH_CENTER_RADIUS_METERS }
+    ? { latitude: center.latitude, longitude: center.longitude, radiusMeters: center.reach?.radiusMeters ?? SEARCH_CENTER_RADIUS_METERS }
     : undefined;
   const results = new Array<DiscoveredPlaceGroup | null>(input.queries.length).fill(null);
   let failed = 0;

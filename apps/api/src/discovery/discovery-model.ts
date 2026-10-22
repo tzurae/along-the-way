@@ -1,3 +1,5 @@
+import type { DiscoveryReachInput } from "@along-the-way/contracts/discovery";
+
 export interface DiscoveryTripFacts {
   name: string;
   startDate: string;
@@ -17,9 +19,14 @@ export interface DiscoverySearchCenter {
   label: string | null;
   latitude: number;
   longitude: number;
+  /**
+   * How and how far the traveler will go (research only; absent while clarifying). radiusMeters
+   * is the straight-line limit it allows, null for 「都可以」.
+   */
+  reach?: DiscoveryReachInput & { radiusMeters: number | null };
 }
 
-/** "Nearby" means walking distance (owner decision 2026-10-22). */
+/** "Nearby" means walking distance (owner decision 2026-10-22); the bias when no time limit was chosen. */
 export const SEARCH_CENTER_RADIUS_METERS = 2_000;
 
 export interface StructuredDiscoveryBrief {

@@ -6,6 +6,11 @@ import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import type { PostgresCollaborationModule } from "./private-trips/postgres-collaboration-module";
 import { conflictResolutionContext, normalizeEmail } from "./private-trips/postgres-private-trip-store";
+import {
+  DISCOVERY_REACH_MINUTES,
+  DISCOVERY_REACH_MODES,
+  type DiscoveryReachInput,
+} from "@along-the-way/contracts/discovery";
 import type {
   ConstraintInput,
   CreateItineraryItemInput,
@@ -297,6 +302,19 @@ function discoveryNearField(body: Record<string, unknown>) {
     throw new AppError("validation_error", "near must be { latitude: -90..90, longitude: -180..180 }");
   }
   return { latitude, longitude };
+}
+
+/** 調查's 交通方式 and 時間: { mode: walk|transit|taxi, maxMinutes: 5|10|15|null }, or absent. */
+function discoveryReachField(body: Record<string, unknown>): DiscoveryReachInput | null {
+  const value = body.reach;
+  if (value === undefined || value === null) return null;
+  const { mode, maxMinutes } = typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const knownMode = DISCOVERY_REACH_MODES.find((entry) => entry === mode);
+  const knownMinutes = maxMinutes === null ? null : DISCOVERY_REACH_MINUTES.find((entry) => entry === maxMinutes);
+  if (!knownMode || knownMinutes === undefined) {
+    throw new AppError("validation_error", "reach must be { mode: walk|transit|taxi, maxMinutes: 5|10|15|null }");
+  }
+  return { mode: knownMode, maxMinutes: knownMinutes };
 }
 
 
@@ -1156,7 +1174,11 @@ export function createApp({
         uuidParam(context, "tripId"),
         clientIp(context),
         idempotencyKey(context),
-        { expectedBriefVersion: numberField(body, "expectedBriefVersion"), near: discoveryNearField(body) },
+        {
+          expectedBriefVersion: numberField(body, "expectedBriefVersion"),
+          near: discoveryNearField(body),
+          reach: discoveryReachField(body),
+        },
       ),
     }, 202);
   });
