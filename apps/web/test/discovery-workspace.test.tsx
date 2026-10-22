@@ -543,8 +543,11 @@ function stubPhonePosition(outcome: { latitude: number; longitude: number } | "d
   return getCurrentPosition;
 }
 
-/** 調查 with no questions: one click asks for the checklist, then queues research at once. */
-async function investigateWithCenter(searchCenter: unknown) {
+/**
+ * 調查 with no questions: one click asks for the checklist; with a search center the dialog then
+ * asks 交通方式・時間 (these chip labels) before 開始找地點 queues research, without one research queues at once.
+ */
+async function investigateWithCenter(searchCenter: unknown, reach?: { mode: string; time: string }) {
   const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
   const queued = job({ status: "queued", stage: null, stages: stages([], null) });
   const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
@@ -561,6 +564,11 @@ async function investigateWithCenter(searchCenter: unknown) {
   const onJobStarted = vi.fn();
   render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} job={null} onJobStarted={onJobStarted} />);
   fireEvent.click(await screen.findByRole("button", { name: "下一步：讓 AI 先問幾題" }));
+  if (reach) {
+    fireEvent.click(await screen.findByRole("radio", { name: reach.mode }));
+    fireEvent.click(screen.getByRole("radio", { name: reach.time }));
+    fireEvent.click(await screen.findByRole("button", { name: "開始找地點" }));
+  }
   await waitFor(() => expect(onJobStarted).toHaveBeenCalledWith(expect.objectContaining({ id: queued.id })));
   return calls;
 }
@@ -568,12 +576,12 @@ async function investigateWithCenter(searchCenter: unknown) {
 it("sends the phone position rounded to 3 decimals with both 調查 starts and says it searched near you", async () => {
   const getCurrentPosition = stubPhonePosition({ latitude: 35.003456, longitude: 135.768912 });
 
-  const calls = await investigateWithCenter({ source: "device", label: null });
+  const calls = await investigateWithCenter({ source: "device", label: null }, { mode: "步行", time: "5 分鐘以內" });
 
   const near = { latitude: 35.003, longitude: 135.769 };
   expect(calls).toEqual([
     { path: "/clarification", body: { expectedBriefVersion: 1, near } },
-    { path: "/research", body: { expectedBriefVersion: 1, near } },
+    { path: "/research", body: { expectedBriefVersion: 1, near, reach: { mode: "walk", maxMinutes: 5 } } },
   ]);
   expect(getCurrentPosition).toHaveBeenCalledTimes(2);
   expect(getCurrentPosition.mock.calls[0]![2]).toEqual({ enableHighAccuracy: false, timeout: 8_000, maximumAge: 600_000 });
@@ -583,9 +591,12 @@ it("sends the phone position rounded to 3 decimals with both 調查 starts and s
 it("sends no position when the traveler denies it, and names tonight's lodging the server used", async () => {
   stubPhonePosition("denied");
 
-  const calls = await investigateWithCenter({ source: "lodging", label: "京都車站飯店" });
+  const calls = await investigateWithCenter({ source: "lodging", label: "京都車站飯店" }, { mode: "大眾運輸", time: "都可以" });
 
-  expect(calls.map((call) => call.body)).toEqual([{ expectedBriefVersion: 1 }, { expectedBriefVersion: 1 }]);
+  expect(calls.map((call) => call.body)).toEqual([
+    { expectedBriefVersion: 1 },
+    { expectedBriefVersion: 1, reach: { mode: "transit", maxMinutes: null } },
+  ]);
   expect((await screen.findAllByText("以今晚住宿「京都車站飯店」附近搜尋")).length).toBeGreaterThan(0);
   expect(screen.queryByText("以你目前位置附近搜尋")).toBeNull();
 });
