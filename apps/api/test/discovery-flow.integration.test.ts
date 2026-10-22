@@ -1292,29 +1292,32 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       });
       expect(asked.status, await asked.clone().text()).toBe(200);
       const askedText = await asked.text();
-      expect(JSON.parse(askedText).discovery.searchCenter).toEqual({ source: "device", label: null });
+      expect(JSON.parse(askedText).discovery.searchCenter).toEqual({ source: "device", label: null, position: null });
       expect(askedText).not.toMatch(phoneText);
       // The checklist worker gets the position, so it has no reason to ask where the traveler is.
       expect(model.clarifyInputs.at(-1)?.searchCenter).toEqual({ source: "device", label: null, ...phone });
 
+      // 「都可以」: no time limit, so the usual ~2 km bias and no distance filter.
+      const reach = { mode: "walk", maxMinutes: null };
       const queued = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "near-research", {
-        expectedBriefVersion: 1, near: phone,
+        expectedBriefVersion: 1, near: phone, reach,
       });
       expect(queued.status, await queued.clone().text()).toBe(202);
       const queuedText = await queued.text();
-      expect(JSON.parse(queuedText).discovery.searchCenter).toEqual({ source: "device", label: null });
+      expect(JSON.parse(queuedText).discovery.searchCenter).toEqual({ source: "device", label: null, position: null });
       expect(queuedText).not.toMatch(phoneText);
-      expect((await database.selectFrom("discovery_jobs").select("near").where("trip_id", "=", trip.id)
-        .executeTakeFirstOrThrow()).near).toEqual(phone);
+      expect(await database.selectFrom("discovery_jobs").select(["near", "reach"]).where("trip_id", "=", trip.id)
+        .executeTakeFirstOrThrow()).toEqual({ near: phone, reach });
       // A retry of the same request without a position reports the job it queued, not the retry.
       const replay = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "near-research", { expectedBriefVersion: 1 });
       expect(replay.status).toBe(202);
-      expect((await replay.json()).discovery.searchCenter).toEqual({ source: "device", label: null });
+      expect((await replay.json()).discovery.searchCenter).toEqual({ source: "device", label: null, position: null });
 
       const job = await runQueuedJob();
-      expect(job).toMatchObject({ status: "succeeded", near: null, client_ip: null });
-      expect(model.planInputs.at(-1)?.searchCenter).toEqual({ source: "device", label: null, ...phone });
-      expect(model.researchInputs.at(-1)?.searchCenter).toEqual({ source: "device", label: null, ...phone });
+      expect(job).toMatchObject({ status: "succeeded", near: null, client_ip: null, reach });
+      const reached = { source: "device", label: null, ...phone, reach: { ...reach, radiusMeters: null } };
+      expect(model.planInputs.at(-1)?.searchCenter).toEqual(reached);
+      expect(model.researchInputs.at(-1)?.searchCenter).toEqual(reached);
       expect(placeDiscovery.searchOptions.length).toBeGreaterThan(0);
       for (const options of placeDiscovery.searchOptions) expect(options.near).toEqual({ ...phone, radiusMeters: 2_000 });
       // The fake Google puts every place at 35, 135.7: about 6.2 km from the phone.
@@ -1339,13 +1342,13 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       })).status).toBe(200);
       model.researchFailure = new TypeError("unexpected");
       expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "near-fail-research", {
-        expectedBriefVersion: 1, near: phone,
+        expectedBriefVersion: 1, near: phone, reach: { mode: "taxi", maxMinutes: 15 },
       })).status).toBe(202);
       expect(await runQueuedJob()).toMatchObject({ status: "failed", error_code: "internal_error", near: null });
       model.researchFailure = null;
 
       expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "near-expire-research", {
-        expectedBriefVersion: 1, near: phone,
+        expectedBriefVersion: 1, near: phone, reach: { mode: "taxi", maxMinutes: 15 },
       })).status).toBe(202);
       // created_at is the database clock, so the sweep runs past it in real time.
       await sweepStaleDiscoveryJobs(database, new Date(Date.now() + 11 * 60_000));
@@ -1388,20 +1391,28 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
         originalText: "附近好吃的", expectedVersion: 1,
       })).status).toBe(200);
       const asked = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/clarification`, "center-lodging-clarify", { expectedBriefVersion: 2 });
-      expect((await asked.json()).discovery.searchCenter).toEqual({ source: "lodging", label: "Kyoto Hotel" });
+      const lodgingCenter = { source: "lodging", label: "Kyoto Hotel", position: { latitude: 35.0, longitude: 135.76 } };
+      expect((await asked.json()).discovery.searchCenter).toEqual(lodgingCenter);
       const tonight = { source: "lodging", label: "Kyoto Hotel", latitude: 35.0, longitude: 135.76 };
       expect(model.clarifyInputs.at(-1)?.searchCenter).toEqual(tonight);
-      const queued = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "center-lodging-research", { expectedBriefVersion: 2 });
-      expect((await queued.json()).discovery.searchCenter).toEqual({ source: "lodging", label: "Kyoto Hotel" });
-      expect(await runQueuedJob()).toMatchObject({ status: "succeeded", near: null });
-      expect(model.planInputs.at(-1)?.searchCenter).toEqual(tonight);
-      expect(placeDiscovery.searchOptions.at(-1)?.near).toEqual({ latitude: 35.0, longitude: 135.76, radiusMeters: 2_000 });
+      // Tonight's lodging is a center too: research waits for 交通方式・時間.
+      const unasked = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "center-lodging-unasked", { expectedBriefVersion: 2 });
+      expect(unasked.status).toBe(409);
+      expect((await unasked.json()).error.code).toBe("reach_required");
+      const reach = { mode: "transit", maxMinutes: 10 };
+      const queued = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "center-lodging-research", {
+        expectedBriefVersion: 2, reach,
+      });
+      expect((await queued.json()).discovery.searchCenter).toEqual(lodgingCenter);
+      expect(await runQueuedJob()).toMatchObject({ status: "succeeded", near: null, reach });
+      expect(model.planInputs.at(-1)?.searchCenter).toEqual({ ...tonight, reach: { ...reach, radiusMeters: 1_850 } });
+      expect(placeDiscovery.searchOptions.at(-1)?.near).toEqual({ latitude: 35.0, longitude: 135.76, radiusMeters: 1_850 });
 
       // A phone position wins over the lodging.
       const phoneFirst = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/clarification`, "center-phone-first", {
         expectedBriefVersion: 2, near: phone,
       });
-      expect((await phoneFirst.json()).discovery.searchCenter).toEqual({ source: "device", label: null });
+      expect((await phoneFirst.json()).discovery.searchCenter).toEqual({ source: "device", label: null, position: null });
 
       // Noon in Kyoto on check-out day: the stay no longer covers tonight.
       clock = new Date("2026-10-24T03:00:00.000Z");
