@@ -147,6 +147,30 @@ export function localDate(now: number, timeZone: string) {
   return Temporal.Instant.fromEpochMilliseconds(now).toZonedDateTimeISO(timeZone).toPlainDate().toString();
 }
 
+/**
+ * The stay covering night `date`: check-in local date ≤ date < check-out local date. Mirrors the
+ * day route's bookedLodgingForNight so 行程 and 幫我排順路 agree on where a day starts and ends.
+ */
+function lodgingForNight(model: TodayModel, date: string) {
+  for (const item of model.items) {
+    if (item.type !== "lodging") continue;
+    const start = item.endpoints.find((endpoint) => endpoint.role === "start");
+    const end = item.endpoints.find((endpoint) => endpoint.role === "end");
+    if (!start?.place || !end) continue;
+    if (localDate(Date.parse(start.instant), start.timeZone) > date || localDate(Date.parse(end.instant), end.timeZone) <= date) continue;
+    return { item, place: start.place };
+  }
+  return null;
+}
+
+/** A day starts at the previous night's stay and ends at that night's stay. */
+export function dayLodgingAnchors(model: TodayModel, date: string) {
+  return {
+    start: lodgingForNight(model, Temporal.PlainDate.from(date).subtract({ days: 1 }).toString()),
+    end: lodgingForNight(model, date),
+  };
+}
+
 export function tripClock(model: TodayModel, now: number) {
   const today = model.days.find((day) => day.timeZone && localDate(now, day.timeZone) === day.date);
   if (today) return { phase: "during" as const, today, daysUntil: 0 };

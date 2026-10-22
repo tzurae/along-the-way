@@ -6,6 +6,8 @@ const PREFIX = "along-the-way:today:";
 const ACCOUNT_KEY = "along-the-way:today-account";
 const PLACE_FILTER_PREFIX = "along-the-way:place-filters:";
 const ONBOARDING_PREFIX = "along-the-way:trip-onboarding:";
+/** 調查's last 交通方式・時間 per account and trip (DiscoveryWorkspace). */
+export const DISCOVERY_REACH_PREFIX = "along-the-way:discovery-reach:";
 export const TODAY_SIGNED_OUT_STORAGE_KEY = "along-the-way:locally-signed-out";
 export const PENDING_SERVER_LOGOUT_STORAGE_KEY = "along-the-way:pending-server-logout";
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -278,6 +280,7 @@ export class TodaySnapshotStore {
           key.startsWith(`${PREFIX}${accountId}:`)
           || key.startsWith(`${PLACE_FILTER_PREFIX}${accountId}:`)
           || key.startsWith(`${ONBOARDING_PREFIX}${accountId}:`)
+          || key.startsWith(`${DISCOVERY_REACH_PREFIX}${accountId}:`)
           || legacyFilterParts.length === 2
         ) this.storage.removeItem(key);
       }

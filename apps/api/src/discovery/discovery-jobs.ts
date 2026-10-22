@@ -1,7 +1,10 @@
 import {
+  DISCOVERY_REACH_MINUTES,
+  DISCOVERY_REACH_MODES,
   DISCOVERY_STAGES,
   type DiscoveryJobDto,
   type DiscoveryNearInput,
+  type DiscoveryReachInput,
   type DiscoveryStage,
   type DiscoveryStageState,
 } from "@along-the-way/contracts/discovery";
@@ -22,6 +25,8 @@ export interface ClaimedDiscoveryJob {
   clientIp: string;
   /** The requesting member's phone position; cleared from the row when the job ends. */
   near: DiscoveryNearInput | null;
+  /** How and how far the member chose to go from the center; null when none was asked. */
+  reach: DiscoveryReachInput | null;
 }
 
 /** A stored position, or null for anything else (no position, or a malformed row). */
@@ -31,6 +36,15 @@ export function storedNear(value: unknown): DiscoveryNearInput | null {
   return typeof latitude === "number" && Number.isFinite(latitude) && Math.abs(latitude) <= 90
     && typeof longitude === "number" && Number.isFinite(longitude) && Math.abs(longitude) <= 180
     ? { latitude, longitude } : null;
+}
+
+/** A stored reach, or null for anything else (none chosen, or a malformed row). */
+function storedReach(value: unknown): DiscoveryReachInput | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { mode, maxMinutes } = value as Record<string, unknown>;
+  const knownMode = DISCOVERY_REACH_MODES.find((entry) => entry === mode);
+  const knownMinutes = maxMinutes === null ? null : DISCOVERY_REACH_MINUTES.find((entry) => entry === maxMinutes);
+  return knownMode && knownMinutes !== undefined ? { mode: knownMode, maxMinutes: knownMinutes } : null;
 }
 
 type StageRecord = DiscoveryJobDto["stages"];
@@ -140,7 +154,7 @@ export async function sweepStaleDiscoveryJobs(database: Kysely<AlongTheWayDataba
 export async function claimNextDiscoveryJob(database: Kysely<AlongTheWayDatabase>, now: Date): Promise<ClaimedDiscoveryJob | null> {
   return database.transaction().execute(async (transaction) => {
     const job = await transaction.selectFrom("discovery_jobs")
-      .select(["id", "trip_id", "brief_version", "created_by", "client_ip", "near"])
+      .select(["id", "trip_id", "brief_version", "created_by", "client_ip", "near", "reach"])
       .where("status", "=", "queued")
       .orderBy("created_at")
       .limit(1)
@@ -159,6 +173,7 @@ export async function claimNextDiscoveryJob(database: Kysely<AlongTheWayDatabase
       createdBy: job.created_by,
       clientIp: job.client_ip ?? "unknown",
       near: storedNear(job.near),
+      reach: storedReach(job.reach),
     };
   });
 }
