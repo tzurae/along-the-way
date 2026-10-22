@@ -220,6 +220,25 @@ export interface DiscoveryWorkspaceDto {
   latestJob: DiscoveryJobDto | null;
   modelAvailable: boolean;
   placeProviderAvailable: boolean;
+  /**
+   * Where the 調查 request that returned this workspace searched around. Set only on the
+   * clarification and research start responses, for the member who sent them; null elsewhere.
+   * Never carries coordinates.
+   */
+  searchCenter: DiscoverySearchCenterDto | null;
+}
+
+/** The phone's position the client sends with a 調查 start; rounded to 3 decimals, never stored. */
+export interface DiscoveryNearInput {
+  latitude: number;
+  longitude: number;
+}
+
+export interface DiscoverySearchCenterDto {
+  /** device: the member's current position; lodging: tonight's booked stay. */
+  source: "device" | "lodging";
+  /** The lodging's name; null for the device position. */
+  label: string | null;
 }
 
 export interface DiscoveryWorkspaceResponse {
@@ -232,6 +251,7 @@ export interface SaveDiscoveryBriefInput {
 }
 export interface StartDiscoveryClarificationInput {
   expectedBriefVersion: number;
+  near?: DiscoveryNearInput | null;
 }
 
 export interface AnswerDiscoveryClarificationInput {
@@ -242,6 +262,7 @@ export interface AnswerDiscoveryClarificationInput {
 
 export interface StartDiscoveryResearchInput {
   expectedBriefVersion: number;
+  near?: DiscoveryNearInput | null;
 }
 
 export interface DecideCandidateProposalInput {
@@ -485,8 +506,16 @@ export function parseDiscoveryWorkspaceResponse(value: unknown): DiscoveryWorksp
       latestJob: root.latestJob == null ? null : parseDiscoveryJob(root.latestJob),
       modelAvailable: typeof root.modelAvailable === "boolean" ? root.modelAvailable : invalid(),
       placeProviderAvailable: typeof root.placeProviderAvailable === "boolean" ? root.placeProviderAvailable : invalid(),
+      // Responses other than the 調查 starts, and replays stored before it existed, carry none.
+      searchCenter: root.searchCenter == null ? null : searchCenter(root.searchCenter),
     },
   };
+}
+
+function searchCenter(value: unknown): DiscoverySearchCenterDto {
+  const item = record(value);
+  if (item.source !== "device" && item.source !== "lodging") invalid();
+  return { source: item.source, label: nullableText(item.label) };
 }
 
 const CLARIFY_VERDICTS: readonly DiscoveryClarifyVerdict[] = ["sufficient", "insufficient", "unreasonable", "unknown"];

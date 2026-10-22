@@ -9,6 +9,7 @@ import {
   type DiscoveryClaimSentenceDto,
   type DiscoveryEndorsement,
   type DiscoveryJobDto,
+  type DiscoverySearchCenterDto,
   type DiscoveryWorkspaceDto,
   type ScheduleDiscoveryProposalsInput,
   type ScheduleDiscoveryProposalsResponse,
@@ -31,6 +32,7 @@ import { canArrangeItinerary } from "./trip-permissions";
 import { PlaceFilterBar, PlaceFilterEmpty, placeArea, usePlaceFilters } from "./PlaceFilters";
 import { placeTypeFilterLabel } from "./locales/zh-TW/place-types";
 import { FlipList } from "./FlipList";
+import { currentNear } from "./device-position";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import { SchedulePlacesSheet } from "./SchedulePlacesSheet";
 import { SelectionBar } from "./SelectionBar";
@@ -261,6 +263,12 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
   const detailReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const [rejectConfirmation, setRejectConfirmation] = useState<CandidateProposalDto | null>(null);
   const [researchSettingsOpen, setResearchSettingsOpen] = useState(false);
+  /**
+   * The center the server reported for this member's last 調查 start, tied to the brief version
+   * it asked about and the job it queued. Only start responses carry it, so later reads keep this
+   * value; the lines below show it only while that checklist or job is the one on screen.
+   */
+  const [searchCenter, setSearchCenter] = useState<{ center: DiscoverySearchCenterDto; briefVersion: number; jobId: string | null } | null>(null);
   const scheduleToast = useScheduleToast();
   useEffect(() => () => {
     if (changedRowsTimer.current !== null) window.clearTimeout(changedRowsTimer.current);
@@ -422,7 +430,9 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
         method: method ?? (operation === "save-brief" ? "PUT" : "POST"),
         headers: {
           "Content-Type": "application/json",
-          "Idempotency-Key": retryKey(retryKeys.current, operation, payload),
+          // A re-read position must not mint a new key for the same retry (the server would answer
+          // research_in_progress), so the key ignores it.
+          "Idempotency-Key": retryKey(retryKeys.current, operation, { ...payload, near: undefined }),
           ...(conflictBase ? { "Conflict-Base-Version": String(conflictBase) } : {}),
         },
         body: JSON.stringify(payload),
@@ -490,9 +500,12 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
       if (!brief) return;
       const clarification = current.clarification?.briefVersion === brief.version ? current.clarification : null;
       if (!clarification) {
+        const near = await currentNear();
         const asked = await mutate("clarify", `/api/trips/${trip.id}/discovery/clarification`, {
           expectedBriefVersion: brief.version,
+          ...(near ? { near } : {}),
         }, "find");
+        if (asked) setSearchCenter(asked.searchCenter && { center: asked.searchCenter, briefVersion: brief.version, jobId: null });
         setBriefOpen(false);
         // With questions the member answers first, in the dialog (also when 重新調查 started this
         // from the page); with none, research starts right away.
@@ -518,10 +531,13 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
           return;
         }
       }
+      const near = await currentNear();
       const started = await mutate("research", `/api/trips/${trip.id}/discovery/research`, {
         expectedBriefVersion: brief.version,
+        ...(near ? { near } : {}),
       }, "find");
       if (!started) return;
+      setSearchCenter(started.searchCenter && { center: started.searchCenter, briefVersion: brief.version, jobId: started.latestJob?.id ?? null });
       onJobStarted(started.latestJob);
       // The dialog closes at once; the batch at the top of the list carries the progress from here.
       setResearchSettingsOpen(false);
@@ -1175,6 +1191,8 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
     </button>
   );
   const briefCollapsed = clarification !== null && clarification.items.length > 0 && !briefOpen;
+  const searchCenterLine = !searchCenter ? null
+    : searchCenter.center.source === "device" ? t.searchCenter.device : t.searchCenter.lodging(searchCenter.center.label);
   return (
     <section className="pd-workspace pd-discovery" data-selecting={selecting ? "true" : undefined} aria-labelledby="ai-discovery-heading">
       <div className={`pd-pagehead${selecting ? " pd-pagehead--selecting" : ""}`}>
@@ -1297,6 +1315,9 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
                   </dl>
                 </section>
               ) : null}
+              {searchCenterLine && clarification?.briefVersion === searchCenter?.briefVersion ? (
+                <p className="pd-field-help pd-search-center"><MapPin aria-hidden="true" />{searchCenterLine}</p>
+              ) : null}
               {clarification ? (
                 <ClarifyChecklist
                   clarification={clarification}
@@ -1313,6 +1334,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
             <ResearchBatch
               job={batchJob}
               failureReason={discoveryRunFailureReason(batchJob.errorCode, t)}
+              searchCenterLine={searchCenter?.jobId === batchJob.id ? searchCenterLine : null}
               busy={busy || pending !== null}
               canRetry={Boolean(briefDraft.trim())}
               onDismiss={() => setDismissedJobId(batchJob.id)}

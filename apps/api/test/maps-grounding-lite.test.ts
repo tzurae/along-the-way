@@ -41,6 +41,23 @@ describe("Maps Grounding Lite client", () => {
     expect(result.summary).toContain("Chitose");
   });
 
+  it("biases the search toward a center with Google's locationBias circle", async () => {
+    let body: { params: { arguments: Record<string, unknown> } } | null = null;
+    const client = new MapsGroundingLite({
+      apiKey: "server-key",
+      fetch: async (_input, init) => {
+        body = JSON.parse(String(init?.body));
+        return Response.json(rpc(toolResult));
+      },
+    });
+    await client.searchPlaces("お好み焼き", { languageCode: "zh-TW", near: { latitude: 34.669, longitude: 135.501, radiusMeters: 2_000 } });
+    expect(body!.params.arguments).toEqual({
+      textQuery: "お好み焼き",
+      languageCode: "zh-TW",
+      locationBias: { circle: { center: { latitude: 34.669, longitude: 135.501 }, radiusMeters: 2_000 } },
+    });
+  });
+
   it("reads a server-sent event answer and structured content", async () => {
     const client = new MapsGroundingLite({
       apiKey: "server-key",
@@ -97,6 +114,32 @@ describe("place discovery across the planned searches", () => {
     });
     expect(result.groups).toEqual([{ ...query("大阪 お好み焼き"), summary: "大阪 お好み焼き [0] [1]", placeIds: ["ChIJ-a", null] }]);
     expect(result.found).toBe(1);
+  });
+
+  it("with a center, biases every search toward it and gives each place its distance", async () => {
+    const options: unknown[] = [];
+    const discovery: PlaceDiscovery = {
+      available: true,
+      async searchPlaces(_text, sent) {
+        options.push(sent);
+        return { summary: "[0] [1]", places: [
+          { providerPlaceId: "ChIJ-near", latitude: 34.67, longitude: 135.5 },
+          { providerPlaceId: "ChIJ-unplaced", latitude: null, longitude: null },
+        ] };
+      },
+    };
+    const result = await discoverPlaces({
+      queries: [query("お好み焼き")],
+      discovery,
+      languageCode: "zh-TW",
+      known: new Set(),
+      center: { source: "device", label: null, latitude: 34.669, longitude: 135.501 },
+    });
+    expect(options).toEqual([{ languageCode: "zh-TW", near: { latitude: 34.669, longitude: 135.501, radiusMeters: 2_000 } }]);
+    // 0.001° of latitude and longitude at Osaka is about 140 m.
+    expect(result.groups[0]!.distancesMeters).toEqual([expect.any(Number), null]);
+    expect(result.groups[0]!.distancesMeters![0]).toBeGreaterThan(120);
+    expect(result.groups[0]!.distancesMeters![0]).toBeLessThan(160);
   });
 
   it("fails as unavailable when every search failed, and stops searching once the quota is spent", async () => {

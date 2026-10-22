@@ -101,11 +101,24 @@ beforeEach(() => {
   render(<AppToaster />);
 });
 
+/** Undo steps for properties a test replaced on window or navigator. */
+const restorers: Array<() => void> = [];
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  for (const restore of restorers.splice(0).reverse()) restore();
 });
+
+function replaceProperty(target: object, key: string, value: unknown) {
+  const original = Object.getOwnPropertyDescriptor(target, key);
+  Object.defineProperty(target, key, { configurable: true, value });
+  restorers.push(() => {
+    if (original) Object.defineProperty(target, key, original);
+    else Reflect.deleteProperty(target, key);
+  });
+}
 
 it("renders proposal behavior in the compact shared row without exposing the address", async () => {
   const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
@@ -517,4 +530,72 @@ it("shows a running job's current stage at the top, then the places that run fou
   // Older places stay in the list below, not in the batch.
   expect(batch.querySelector('[data-discovery-proposal="錦市場"]')).toBeNull();
   expect(document.querySelector('[data-discovery-proposal="錦市場"]')).not.toBeNull();
+});
+
+/** A phone that answers getCurrentPosition with this fix, or with a permission denial. */
+function stubPhonePosition(outcome: { latitude: number; longitude: number } | "denied", secure = true) {
+  replaceProperty(window, "isSecureContext", secure);
+  const getCurrentPosition = vi.fn((success: PositionCallback, failure?: PositionErrorCallback | null, _options?: PositionOptions) => {
+    if (outcome === "denied") failure?.({ code: 1, message: "User denied Geolocation", PERMISSION_DENIED: 1, POSITION_UNAVAILABLE: 2, TIMEOUT: 3 } as GeolocationPositionError);
+    else success({ coords: { ...outcome, accuracy: 25 }, timestamp: Date.now() } as unknown as GeolocationPosition);
+  });
+  replaceProperty(navigator, "geolocation", { getCurrentPosition });
+  return getCurrentPosition;
+}
+
+/** 調查 with no questions: one click asks for the checklist, then queues research at once. */
+async function investigateWithCenter(searchCenter: unknown) {
+  const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const queued = job({ status: "queued", stage: null, stages: stages([], null) });
+  const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
+    const method = init?.method ?? "GET";
+    if (method !== "GET") calls.push({ path: path.split("/discovery")[1]!, body: JSON.parse(String(init?.body)) });
+    let value: unknown;
+    if (path.endsWith("/discovery") && method === "GET") value = discovery({});
+    else if (path.endsWith("/trip-places")) value = { tripPlaces: [] };
+    else if (path.endsWith("/discovery/clarification") && method === "POST") value = discovery({ clarification: checklist("ready", "想", 1), searchCenter });
+    else if (path.endsWith("/discovery/research") && method === "POST") value = discovery({ clarification: checklist("ready", "想", 1), latestJob: queued, searchCenter });
+    else throw new Error(`Unexpected request: ${method} ${path}`);
+    return (init?.parse ? init.parse(value) : value) as T;
+  };
+  const onJobStarted = vi.fn();
+  render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} job={null} onJobStarted={onJobStarted} />);
+  fireEvent.click(await screen.findByRole("button", { name: "下一步：讓 AI 先問幾題" }));
+  await waitFor(() => expect(onJobStarted).toHaveBeenCalledWith(expect.objectContaining({ id: queued.id })));
+  return calls;
+}
+
+it("sends the phone position rounded to 3 decimals with both 調查 starts and says it searched near you", async () => {
+  const getCurrentPosition = stubPhonePosition({ latitude: 35.003456, longitude: 135.768912 });
+
+  const calls = await investigateWithCenter({ source: "device", label: null });
+
+  const near = { latitude: 35.003, longitude: 135.769 };
+  expect(calls).toEqual([
+    { path: "/clarification", body: { expectedBriefVersion: 1, near } },
+    { path: "/research", body: { expectedBriefVersion: 1, near } },
+  ]);
+  expect(getCurrentPosition).toHaveBeenCalledTimes(2);
+  expect(getCurrentPosition.mock.calls[0]![2]).toEqual({ enableHighAccuracy: false, timeout: 8_000, maximumAge: 600_000 });
+  expect((await screen.findAllByText("以你目前位置附近搜尋")).length).toBeGreaterThan(0);
+});
+
+it("sends no position when the traveler denies it, and names tonight's lodging the server used", async () => {
+  stubPhonePosition("denied");
+
+  const calls = await investigateWithCenter({ source: "lodging", label: "京都車站飯店" });
+
+  expect(calls.map((call) => call.body)).toEqual([{ expectedBriefVersion: 1 }, { expectedBriefVersion: 1 }]);
+  expect((await screen.findAllByText("以今晚住宿「京都車站飯店」附近搜尋")).length).toBeGreaterThan(0);
+  expect(screen.queryByText("以你目前位置附近搜尋")).toBeNull();
+});
+
+it("never asks for the position outside a secure page and shows no center line when the server had none", async () => {
+  const getCurrentPosition = stubPhonePosition({ latitude: 35, longitude: 135.7 }, false);
+
+  const calls = await investigateWithCenter(null);
+
+  expect(getCurrentPosition).not.toHaveBeenCalled();
+  expect(calls.map((call) => call.body)).toEqual([{ expectedBriefVersion: 1 }, { expectedBriefVersion: 1 }]);
+  expect(screen.queryByText(/附近搜尋/)).toBeNull();
 });

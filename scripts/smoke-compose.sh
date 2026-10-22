@@ -206,7 +206,7 @@ curl --connect-timeout 2 --max-time 5 --fail --silent --show-error \
   --dump-header "$header_file" --output /dev/null "$smoke_address/"
 assert_header "Content-Security-Policy" \
   "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-eval' https://*.googleapis.com https://*.gstatic.com *.google.com https://*.ggpht.com *.googleusercontent.com blob:; img-src 'self' data: blob: https://*.googleapis.com https://*.gstatic.com *.google.com *.googleusercontent.com; frame-src *.google.com; connect-src 'self' https://*.googleapis.com *.google.com https://*.gstatic.com data: blob:; font-src 'self' https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; worker-src 'self' blob:"
-assert_header "Permissions-Policy" "camera=(), geolocation=(), microphone=()"
+assert_header "Permissions-Policy" "camera=(), geolocation=(self), microphone=()"
 assert_header "Referrer-Policy" "strict-origin-when-cross-origin"
 assert_header "X-Content-Type-Options" "nosniff"
 assert_header "X-Frame-Options" "DENY"

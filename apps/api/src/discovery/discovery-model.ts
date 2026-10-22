@@ -7,6 +7,21 @@ export interface DiscoveryTripFacts {
   countries: Array<{ code: string; position: number }>;
 }
 
+/**
+ * Where 調查 searches around: the member's phone position, else tonight's booked lodging. The
+ * coordinates reach the models and Google only; they are never stored or logged.
+ */
+export interface DiscoverySearchCenter {
+  source: "device" | "lodging";
+  /** The lodging's name; null for the phone position. */
+  label: string | null;
+  latitude: number;
+  longitude: number;
+}
+
+/** "Nearby" means walking distance (owner decision 2026-10-22). */
+export const SEARCH_CENTER_RADIUS_METERS = 2_000;
+
 export interface StructuredDiscoveryBrief {
   interests: string[];
   pace: string | null;
@@ -59,6 +74,11 @@ export interface DiscoveredPlaceGroup extends DiscoverySearchQuery {
    * one the trip already has or rejected, so it cannot be picked again.
    */
   placeIds: Array<string | null>;
+  /**
+   * With a search center: each place's straight-line distance from it in meters, aligned with
+   * placeIds (null when Google gave no position), so research can prefer walking distance.
+   */
+  distancesMeters?: Array<number | null>;
 }
 
 /** Persisted per run and shown as the search plan. */
@@ -159,6 +179,8 @@ export interface DiscoveryModel {
     brief: string;
     trip: DiscoveryTripFacts;
     questionAnswers: DiscoveryQuestionAnswer[];
+    /** Absent or null: no center, search the brief's areas as before. */
+    searchCenter?: DiscoverySearchCenter | null;
   }): Promise<DiscoveryPlanResult>;
   research(input: {
     brief: StructuredDiscoveryBrief;
@@ -168,9 +190,15 @@ export interface DiscoveryModel {
     /** Real places to pick from; places the trip already has or rejected are removed beforehand. */
     discovered: DiscoveredPlaceGroup[];
     outputLanguage: string;
+    searchCenter?: DiscoverySearchCenter | null;
   }): Promise<DiscoveryResearchResult>;
   /** Worker: at most five questions whose answers materially change the recommendations. */
-  clarify(input: { brief: string; trip: DiscoveryTripFacts }): Promise<{ modelId: string; questions: ClarifyQuestionDraft[] }>;
+  clarify(input: {
+    brief: string;
+    trip: DiscoveryTripFacts;
+    /** Set: the worker must not ask where the traveler is or stays. */
+    searchCenter?: DiscoverySearchCenter | null;
+  }): Promise<{ modelId: string; questions: ClarifyQuestionDraft[] }>;
   /** Reviewer: judges whether each required answer is sufficient and reasonable. */
   reviewAnswers(input: { brief: string; trip: DiscoveryTripFacts; items: ClarifyReviewItem[] }): Promise<{ verdicts: ClarifyReviewVerdict[] }>;
 }

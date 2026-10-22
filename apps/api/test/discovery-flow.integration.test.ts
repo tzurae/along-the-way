@@ -1,5 +1,5 @@
 import { PostgresCollaborationModule } from "../src/private-trips/postgres-collaboration-module";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Hono } from "hono";
 import { sql, type Kysely } from "kysely";
 
@@ -27,8 +27,8 @@ import type {
   DiscoveryResearchResult,
   ResearchedCandidate,
 } from "../src/discovery/discovery-model";
-import { claimNextDiscoveryJob } from "../src/discovery/discovery-jobs";
-import type { PlaceDiscovery } from "../src/discovery/maps-grounding-lite";
+import { claimNextDiscoveryJob, sweepStaleDiscoveryJobs } from "../src/discovery/discovery-jobs";
+import type { PlaceDiscovery, PlaceSearchOptions } from "../src/discovery/maps-grounding-lite";
 import { PostgresDiscoveryModule } from "../src/discovery/postgres-discovery-module";
 import type { EmailSender } from "../src/private-trips/email-sender";
 import { PostgresEmailWorker } from "../src/private-trips/postgres-email-worker";
@@ -137,11 +137,14 @@ class ControlledPlaceProvider implements PlaceProvider, RatedPlaceLookup {
 class ControlledPlaceDiscovery implements PlaceDiscovery {
   readonly available = true;
   readonly searches: string[] = [];
+  /** The options each search was sent with (the location bias among them). */
+  readonly searchOptions: PlaceSearchOptions[] = [];
   quota = false;
   constructor(private readonly provider: ControlledPlaceProvider) {}
-  async searchPlaces(query: string) {
+  async searchPlaces(query: string, options: PlaceSearchOptions) {
     if (this.quota) throw new ProviderQuotaError();
     this.searches.push(query);
+    this.searchOptions.push(options);
     const names = ["Nishiki Market", "Tiny Cafe", "Takao Kanko Hotel", ...this.provider.known.keys()];
     return {
       summary: names.map((name, index) => `${name} [${index}]`).join(", "),
@@ -186,8 +189,10 @@ class ControlledDiscoveryModel implements DiscoveryModel {
     ({ id: item.id, verdict: "sufficient", reason: null, interpretation: item.answer });
   readonly planInputs: Array<Parameters<DiscoveryModel["plan"]>[0]> = [];
   readonly researchInputs: Array<Parameters<DiscoveryModel["research"]>[0]> = [];
+  readonly clarifyInputs: Array<Parameters<DiscoveryModel["clarify"]>[0]> = [];
 
-  async clarify() {
+  async clarify(input: Parameters<DiscoveryModel["clarify"]>[0]) {
+    this.clarifyInputs.push(input);
     return { modelId: this.modelId, questions: this.clarifyQuestions };
   }
 
@@ -336,7 +341,20 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
   let placeDiscovery: ControlledPlaceDiscovery;
   let sourceChecks: ControlledSourceChecks;
   let discovery: PostgresDiscoveryModule;
-  const now = () => new Date("2026-09-28T12:00:00.000Z");
+  /** Set by a test that needs another moment (e.g. a night of a booked stay); reset per test. */
+  let clock: Date | null = null;
+  const now = () => clock ?? new Date("2026-09-28T12:00:00.000Z");
+
+  /** Records every console line until the test ends (afterEach restores the console). */
+  function captureLogs() {
+    const lines: string[] = [];
+    for (const method of ["log", "info", "warn", "error"] as const) {
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        lines.push(args.map((arg) => typeof arg === "string" ? arg : JSON.stringify(arg)).join(" "));
+      });
+    }
+    return lines;
+  }
 
   beforeAll(async () => {
     database = createDatabase(databaseUrl);
@@ -344,6 +362,7 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
   });
 
   beforeEach(async () => {
+    clock = null;
     await sql`
       truncate table
         discovery_jobs,
@@ -437,6 +456,10 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       tripSkeleton: new PostgresTripSkeletonModule({ database, now }),
       tripWorkspace: new PostgresTripWorkspaceModule({ database, now }),
     });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   afterAll(async () => {
@@ -1253,5 +1276,161 @@ describe("AI place discovery through HTTP and PostgreSQL", () => {
       tradeoffSentences: null,
     })]);
     expect(workspace.proposals[0]).not.toHaveProperty("confidence");
+  });
+
+  describe("search center: the phone first, then tonight's lodging; the position is never kept", () => {
+    const phone = { latitude: 35.004, longitude: 135.768 };
+    const phoneText = /35\.004|135\.768/;
+
+    it("searches around the phone position, keeps it on the job only while it runs, and never echoes or logs it", async () => {
+      const logs = captureLogs();
+      const cookie = await login();
+      const trip = await createTrip(cookie);
+      await saveBrief(cookie, trip.id, "near-brief", "想吃好吃的，附近就好");
+      const asked = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/clarification`, "near-clarify", {
+        expectedBriefVersion: 1, near: phone,
+      });
+      expect(asked.status, await asked.clone().text()).toBe(200);
+      const askedText = await asked.text();
+      expect(JSON.parse(askedText).discovery.searchCenter).toEqual({ source: "device", label: null });
+      expect(askedText).not.toMatch(phoneText);
+      // The checklist worker gets the position, so it has no reason to ask where the traveler is.
+      expect(model.clarifyInputs.at(-1)?.searchCenter).toEqual({ source: "device", label: null, ...phone });
+
+      const queued = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "near-research", {
+        expectedBriefVersion: 1, near: phone,
+      });
+      expect(queued.status, await queued.clone().text()).toBe(202);
+      const queuedText = await queued.text();
+      expect(JSON.parse(queuedText).discovery.searchCenter).toEqual({ source: "device", label: null });
+      expect(queuedText).not.toMatch(phoneText);
+      expect((await database.selectFrom("discovery_jobs").select("near").where("trip_id", "=", trip.id)
+        .executeTakeFirstOrThrow()).near).toEqual(phone);
+      // A retry of the same request without a position reports the job it queued, not the retry.
+      const replay = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "near-research", { expectedBriefVersion: 1 });
+      expect(replay.status).toBe(202);
+      expect((await replay.json()).discovery.searchCenter).toEqual({ source: "device", label: null });
+
+      const job = await runQueuedJob();
+      expect(job).toMatchObject({ status: "succeeded", near: null, client_ip: null });
+      expect(model.planInputs.at(-1)?.searchCenter).toEqual({ source: "device", label: null, ...phone });
+      expect(model.researchInputs.at(-1)?.searchCenter).toEqual({ source: "device", label: null, ...phone });
+      expect(placeDiscovery.searchOptions.length).toBeGreaterThan(0);
+      for (const options of placeDiscovery.searchOptions) expect(options.near).toEqual({ ...phone, radiusMeters: 2_000 });
+      // The fake Google puts every place at 35, 135.7: about 6.2 km from the phone.
+      const distance = model.researchInputs.at(-1)?.discovered[0]?.distancesMeters?.[0];
+      expect(distance).toBeGreaterThan(6_000);
+      expect(distance).toBeLessThan(6_500);
+
+      // Plain reads never carry a center, and nothing the server logged holds the position.
+      const read = await app.request(`/api/trips/${trip.id}/discovery`, { headers: { cookie } });
+      expect((await read.json()).discovery.searchCenter).toBeNull();
+      expect(logs.some((line) => line.includes("discovery_run_timing") && line.includes("\"searchCenter\":\"device\""))).toBe(true);
+      expect(logs.join("\n")).not.toMatch(phoneText);
+    });
+
+    it("clears the phone position when the job fails or expires unclaimed", async () => {
+      const logs = captureLogs();
+      const cookie = await login();
+      const trip = await createTrip(cookie);
+      await saveBrief(cookie, trip.id, "near-fail-brief");
+      expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/clarification`, "near-fail-clarify", {
+        expectedBriefVersion: 1, near: phone,
+      })).status).toBe(200);
+      model.researchFailure = new TypeError("unexpected");
+      expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "near-fail-research", {
+        expectedBriefVersion: 1, near: phone,
+      })).status).toBe(202);
+      expect(await runQueuedJob()).toMatchObject({ status: "failed", error_code: "internal_error", near: null });
+      model.researchFailure = null;
+
+      expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "near-expire-research", {
+        expectedBriefVersion: 1, near: phone,
+      })).status).toBe(202);
+      // created_at is the database clock, so the sweep runs past it in real time.
+      await sweepStaleDiscoveryJobs(database, new Date(Date.now() + 11 * 60_000));
+      expect(await database.selectFrom("discovery_jobs").select(["status", "error_code", "near"])
+        .where("trip_id", "=", trip.id).orderBy("created_at", "desc").executeTakeFirstOrThrow())
+        .toMatchObject({ status: "failed", error_code: "expired", near: null });
+      expect(logs.join("\n")).not.toMatch(phoneText);
+    });
+
+    it("falls back to tonight's lodging without a phone position, and searches as before with neither", async () => {
+      const cookie = await login();
+      const trip = await createTrip(cookie);
+      const lodging = await app.request(`/api/trips/${trip.id}/lodgings`, {
+        method: "POST",
+        headers: { cookie, "content-type": "application/json", "idempotency-key": "center-lodging", origin: "https://app.example.test" },
+        body: json({
+          hotel: { name: "Kyoto Hotel", address: "Kyoto", latitude: 35.0, longitude: 135.76, timeZone: "Asia/Tokyo", sourceUrl: null },
+          countryStopId: trip.countryStops[0]!.id,
+          checkInLocalDateTime: "2026-10-22T15:00",
+          checkOutLocalDateTime: "2026-10-24T10:00",
+          expectedTripVersion: trip.version,
+        }),
+      });
+      expect(lodging.status, await lodging.clone().text()).toBe(201);
+
+      // 2026-09-28: no night of the stay and no phone position, so everything runs as before.
+      await saveBrief(cookie, trip.id, "center-brief-1");
+      const before = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/clarification`, "center-none", { expectedBriefVersion: 1 });
+      expect((await before.json()).discovery.searchCenter).toBeNull();
+      expect(model.clarifyInputs.at(-1)?.searchCenter).toBeNull();
+      await research(cookie, trip.id, "center-none-research");
+      expect(model.planInputs.at(-1)?.searchCenter).toBeNull();
+      expect(model.researchInputs.at(-1)?.searchCenter).toBeNull();
+      expect(placeDiscovery.searchOptions.every((options) => options.near === undefined)).toBe(true);
+      expect(model.researchInputs.at(-1)?.discovered[0]).not.toHaveProperty("distancesMeters");
+
+      // 23:30 in Kyoto on 10-22, the first night (14:30 UTC): the hotel is tonight's lodging.
+      clock = new Date("2026-10-22T14:30:00.000Z");
+      expect((await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/brief`, "center-brief-2", {
+        originalText: "附近好吃的", expectedVersion: 1,
+      })).status).toBe(200);
+      const asked = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/clarification`, "center-lodging-clarify", { expectedBriefVersion: 2 });
+      expect((await asked.json()).discovery.searchCenter).toEqual({ source: "lodging", label: "Kyoto Hotel" });
+      const tonight = { source: "lodging", label: "Kyoto Hotel", latitude: 35.0, longitude: 135.76 };
+      expect(model.clarifyInputs.at(-1)?.searchCenter).toEqual(tonight);
+      const queued = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/research`, "center-lodging-research", { expectedBriefVersion: 2 });
+      expect((await queued.json()).discovery.searchCenter).toEqual({ source: "lodging", label: "Kyoto Hotel" });
+      expect(await runQueuedJob()).toMatchObject({ status: "succeeded", near: null });
+      expect(model.planInputs.at(-1)?.searchCenter).toEqual(tonight);
+      expect(placeDiscovery.searchOptions.at(-1)?.near).toEqual({ latitude: 35.0, longitude: 135.76, radiusMeters: 2_000 });
+
+      // A phone position wins over the lodging.
+      const phoneFirst = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/clarification`, "center-phone-first", {
+        expectedBriefVersion: 2, near: phone,
+      });
+      expect((await phoneFirst.json()).discovery.searchCenter).toEqual({ source: "device", label: null });
+
+      // Noon in Kyoto on check-out day: the stay no longer covers tonight.
+      clock = new Date("2026-10-24T03:00:00.000Z");
+      const checkedOut = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/clarification`, "center-checked-out", { expectedBriefVersion: 2 });
+      expect((await checkedOut.json()).discovery.searchCenter).toBeNull();
+    });
+
+    it("rejects a phone position that is not two in-range numbers", async () => {
+      const cookie = await login();
+      const trip = await createTrip(cookie);
+      await saveBrief(cookie, trip.id, "near-invalid-brief");
+      for (const [index, near] of [
+        { latitude: 91, longitude: 135 },
+        { latitude: 35, longitude: -180.5 },
+        { latitude: "35", longitude: 135 },
+        { latitude: 35 },
+        [35, 135],
+        "35,135",
+      ].entries()) {
+        for (const step of ["clarification", "research"]) {
+          const response = await discoveryRequest(cookie, `/api/trips/${trip.id}/discovery/${step}`, `near-invalid-${step}-${index}`, {
+            expectedBriefVersion: 1, near,
+          });
+          expect(response.status, JSON.stringify(near)).toBe(400);
+          expect((await response.json()).error.code).toBe("validation_error");
+        }
+      }
+      expect(model.clarifyInputs).toHaveLength(0);
+      expect(await database.selectFrom("discovery_jobs").select("id").where("trip_id", "=", trip.id).execute()).toHaveLength(0);
+    });
   });
 });
