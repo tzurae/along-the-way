@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Check, Pencil, RotateCw, X } from "lucide-react";
+import { Check, MapPin, Pencil, RotateCw, X } from "lucide-react";
 
 import {
   DISCOVERY_STAGES,
@@ -269,9 +269,11 @@ export function focusDiscoveryBatch() {
  * reports it (nothing advances on a timer; the only clock is the running stage's elapsed time from
  * its real start); once saved, the places it found, in the same spot; if it failed, why.
  */
-export function ResearchBatch({ job, failureReason, children, onDismiss, onAgain, onRetry, onEdit, busy, canRetry, t }: {
+export function ResearchBatch({ job, failureReason, searchCenterLine, children, onDismiss, onAgain, onRetry, onEdit, busy, canRetry, t }: {
   job: DiscoveryJobDto;
   failureReason: string;
+  /** Where this member's own job searched around (「以你目前位置附近搜尋」); null for others' jobs. */
+  searchCenterLine?: string | null;
   /** The rows this job added; shown once the save stage finished. */
   children?: ReactNode;
   onDismiss(): void;
@@ -348,6 +350,7 @@ export function ResearchBatch({ job, failureReason, children, onDismiss, onAgain
           )}
         </div>
       </div>
+      {searchCenterLine ? <p className="pd-field-help pd-search-center"><MapPin aria-hidden="true" />{searchCenterLine}</p> : null}
       {/* Read once per stage change, e.g. 「查證地點，進行中」. */}
       <p className="sr-only" role="status" aria-live="polite">
         {runningStage && !saved ? `${t.stages[runningStage]}，${t.stages.running}` : title}

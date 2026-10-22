@@ -39,6 +39,11 @@ export const discovery = {
   thinkingButton: "AI 思考中",
   searchingButton: "正在找地點",
   investigateAgain: "重新調查",
+  /** Where the server searched around for this 調查 (phone position first, then tonight's lodging). */
+  searchCenter: {
+    device: "以你目前位置附近搜尋",
+    lodging: (name: string | null) => name ? `以今晚住宿「${name}」附近搜尋` : "以今晚住宿附近搜尋",
+  },
   clarify: {
     label: "AI 想先確認的問題",
     required: "必填",

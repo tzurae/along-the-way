@@ -773,6 +773,19 @@
   line-height: 1.5;
 }
 
+/* Where 調查 searched around: one quiet line, the pin sized to the 13px text. */
+.pd-search-center {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pd-search-center svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
 .pd-field-error {
   margin: 0;
   color: var(--destructive);

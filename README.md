@@ -787,6 +787,39 @@ Migration `014_discovery_feedback_answers` stores these answer records. The
 legacy `discovery_feedback` table and its columns remain for migration
 compatibility, but the application no longer reads, writes, or exposes them.
 
+## AI discovery near the traveler (migration 047)
+
+Owner decision 2026-10-22: 「AI 建議先用手機目前定位（要授權），拒絕或抓不到就用今晚住宿；位置不存。」
+
+- When 調查 starts the checklist (`POST /discovery/clarification`) and again when it queues
+  research (`POST /discovery/research`), the web asks `navigator.geolocation` once (secure page
+  only; `enableHighAccuracy: false`, `timeout: 8000`, `maximumAge: 600000`; the client gives up
+  after 8.5 s so an unanswered permission prompt never blocks 調查). On success the body carries
+  `near: { latitude, longitude }` rounded to 3 decimals; on denial, timeout or no API it carries
+  nothing. The idempotency key ignores `near`, so a retry with a re-read position replays.
+- The server picks the search center in this order: `near` (`source: "device"`); else tonight's
+  booked lodging (`source: "lodging"`): the lodging whose check-in local date ≤ today < check-out
+  local date, today being the date in the check-in's time zone (the trip's if unusable), and only
+  when the hotel has coordinates; else no center (unchanged behavior). An invalid `near` (not two
+  finite numbers, latitude outside −90..90 or longitude outside −180..180) is `400 validation_error`.
+- The checklist worker, the plan and the research model receive the center with "within about
+  2 km walking distance"; with a center the checklist must not ask where the traveler is or stays.
+  Every Grounding Lite `search_places` call carries `locationBias.circle` (center, 2000 m), and each
+  discovered place gets its straight-line distance so research prefers walking distance. The plan
+  calls that area exactly 「附近」 and no model may write the coordinates or a place inferred from
+  them into the stored plan, checklist or sentences, which every member sees. Every other rule
+  (cited sources, zh-TW, Places verification) is unchanged.
+- The clarification and research start responses return `searchCenter: { source, label } | null`
+  (label: the lodging's name; never coordinates) for the member who sent them; every other read
+  returns `null`. A replayed research request reports the job it queued (its stored position while
+  active, else none), not the retry's position. The web shows one line, under the checklist it
+  belongs to and on that member's own job: 「以你目前位置附近搜尋」 or 「以今晚住宿「{name}」附近搜尋」.
+- 位置不存: the position is never stored except on `discovery_jobs.near` (migration
+  `047_discovery_job_near`, expand-only nullable jsonb) while the job is queued or running; success,
+  failure and the stale-job sweep set it to NULL, like `client_ip`. Coordinates are never logged
+  (`discovery_run_timing` logs only `searchCenter: "device" | "lodging" | null`). The lodging
+  center is recomputed from itinerary data and never stored.
+
 ## AI proposal confidence and rejection wording (Issue #78)
 
 New discovery research no longer asks the model for a confidence label, stores

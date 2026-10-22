@@ -352,6 +352,44 @@ describe("OpenAI Responses discovery model", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("tells every model where the traveler is and that the checklist must not ask, only when a center is given", async () => {
+    const sent: Array<{ developer: string; user: string }> = [];
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init!.body)) as { input: Array<{ role: string; content: string }> };
+      sent.push({ developer: body.input[0]!.content, user: body.input[1]!.content });
+      return completed({ questions: [], candidates: [], structuredBrief: brief, unresolvedQuestions: [], request });
+    });
+    const center = { source: "device" as const, label: null, latitude: 35.004, longitude: 135.768 };
+    const client = model(fetch);
+    await client.clarify({ brief: "附近好吃的", trip: facts, searchCenter: center });
+    await client.plan({ brief: "附近好吃的", trip: facts, questionAnswers: [], searchCenter: center });
+    await client.research({
+      trip: facts, brief, request, questionAnswers: [], outputLanguage: "zh-TW", searchCenter: center,
+      discovered: [{ ...discovered[0]!, distancesMeters: [300, 2_500, null, 9_000, 9_100, 12_000] }],
+    });
+    const [clarify, plan, research] = sent;
+    expect(clarify!.developer).toContain("Never ask where the traveler is now, where they stay, or which area to search near");
+    expect(plan!.developer).toContain("without any city, district, or place name in the query text");
+    expect(research!.developer).toContain("prefer places within about 2 km walking distance");
+    expect(plan!.developer).toContain("call that area exactly \"附近\"");
+    for (const { developer, user } of sent) {
+      expect(developer).toContain("the traveler's current phone position");
+      expect(JSON.parse(user).searchCenter).toEqual({
+        is: "the traveler's current phone position", label: null, latitude: 35.004, longitude: 135.768,
+        nearby: "within about 2 km walking distance",
+      });
+    }
+    expect(JSON.parse(research!.user).discovered[0].distancesMeters).toEqual([300, 2_500, null, 9_000, 9_100, 12_000]);
+
+    sent.length = 0;
+    await client.clarify({ brief: "Kyoto food", trip: facts, searchCenter: null });
+    await client.plan({ brief: "Kyoto food", trip: facts, questionAnswers: [] });
+    for (const { developer, user } of sent) {
+      expect(developer).not.toContain("searchCenter");
+      expect(JSON.parse(user)).not.toHaveProperty("searchCenter");
+    }
+  });
+
   it("fails closed before making a request when no server credential is configured", async () => {
     const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => completed({}));
     const unavailable = new OpenAiResponsesDiscoveryModel({ model: "gpt-test", fetch });

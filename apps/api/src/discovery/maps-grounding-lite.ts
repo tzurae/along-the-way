@@ -1,5 +1,11 @@
 import { ProviderQuotaError, ProviderUnavailableError } from "../trip-places/google-places-provider";
-import type { DiscoveredPlaceGroup, DiscoverySearchQuery } from "./discovery-model";
+import { straightLineMeters } from "../planning/day-route-order";
+import {
+  SEARCH_CENTER_RADIUS_METERS,
+  type DiscoveredPlaceGroup,
+  type DiscoverySearchCenter,
+  type DiscoverySearchQuery,
+} from "./discovery-model";
 
 const MCP_URL = "https://mapstools.googleapis.com/mcp";
 const MAX_RESPONSE_BYTES = 256 * 1024;
@@ -20,9 +26,16 @@ export interface PlaceSearchResult {
   summary: string;
 }
 
+export interface PlaceSearchOptions {
+  languageCode?: string;
+  regionCode?: string;
+  /** Prefer places within radiusMeters of this point (search_places locationBias.circle). */
+  near?: { latitude: number; longitude: number; radiusMeters: number };
+}
+
 export interface PlaceDiscovery {
   readonly available: boolean;
-  searchPlaces(query: string, options: { languageCode?: string; regionCode?: string }): Promise<PlaceSearchResult>;
+  searchPlaces(query: string, options: PlaceSearchOptions): Promise<PlaceSearchResult>;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -90,7 +103,7 @@ export class MapsGroundingLite implements PlaceDiscovery {
     this.consumeBudget = options.consumeBudget ?? (async () => true);
   }
 
-  async searchPlaces(rawQuery: string, options: { languageCode?: string; regionCode?: string } = {}): Promise<PlaceSearchResult> {
+  async searchPlaces(rawQuery: string, options: PlaceSearchOptions = {}): Promise<PlaceSearchResult> {
     const query = rawQuery.trim();
     if (!query || query.length > 300) throw new TypeError("Search query must contain 1 to 300 characters");
     if (!this.apiKey) throw new ProviderUnavailableError();
@@ -116,6 +129,15 @@ export class MapsGroundingLite implements PlaceDiscovery {
               textQuery: query,
               ...(options.languageCode ? { languageCode: options.languageCode } : {}),
               ...(options.regionCode ? { regionCode: options.regionCode } : {}),
+              // A place named in textQuery wins over this bias (Google's documented behavior).
+              ...(options.near ? {
+                locationBias: {
+                  circle: {
+                    center: { latitude: options.near.latitude, longitude: options.near.longitude },
+                    radiusMeters: options.near.radiusMeters,
+                  },
+                },
+              } : {}),
             },
           },
         }),
@@ -160,14 +182,20 @@ const DISCOVERY_CONCURRENCY = 4;
 /**
  * Runs every planned search. A search that fails is skipped, so one bad query does not end the
  * run; if every search fails, Google Maps is unavailable. Places the trip already has or rejected
- * stay in their position as null, because the summary cites places by position.
+ * stay in their position as null, because the summary cites places by position. With a center,
+ * every search is biased toward it and each place carries its distance from it.
  */
 export async function discoverPlaces(input: {
   queries: readonly DiscoverySearchQuery[];
   discovery: PlaceDiscovery;
   languageCode: string;
   known: ReadonlySet<string>;
+  center?: DiscoverySearchCenter | null;
 }): Promise<{ groups: DiscoveredPlaceGroup[]; found: number }> {
+  const center = input.center ?? null;
+  const near = center
+    ? { latitude: center.latitude, longitude: center.longitude, radiusMeters: SEARCH_CENTER_RADIUS_METERS }
+    : undefined;
   const results = new Array<DiscoveredPlaceGroup | null>(input.queries.length).fill(null);
   let failed = 0;
   let next = 0;
@@ -179,11 +207,18 @@ export async function discoverPlaces(input: {
       next += 1;
       const query = input.queries[index]!;
       try {
-        const found = await input.discovery.searchPlaces(query.query, { languageCode: input.languageCode });
+        const found = await input.discovery.searchPlaces(query.query, { languageCode: input.languageCode, ...(near ? { near } : {}) });
         results[index] = {
           ...query,
           summary: found.summary,
           placeIds: found.places.map((place) => input.known.has(place.providerPlaceId) ? null : place.providerPlaceId),
+          ...(center ? {
+            distancesMeters: found.places.map((place) => place.latitude === null || place.longitude === null ? null
+              : Math.round(straightLineMeters(
+                { id: "center", latitude: center.latitude, longitude: center.longitude },
+                { id: place.providerPlaceId, latitude: place.latitude, longitude: place.longitude },
+              ))),
+          } : {}),
         };
       } catch (error) {
         if (error instanceof ProviderQuotaError) stopped = true;
