@@ -122,7 +122,8 @@ export class PostgresWholeTripPlanModule implements WholeTripPlanModule {
 
   async apply(userId: string, tripId: string, proposalId: string, rawKey: string): Promise<ApplyWholeTripPlanResponse> {
     const key = requireIdempotencyKey(rawKey);
-    const operation = `wtp:apply:${tripId.toLowerCase()}:${proposalId.toLowerCase()}`;
+    // mutation_requests.operation is varchar(80): "wtpa:" + two UUIDs is 78 characters.
+    const operation = `wtpa:${tripId.toLowerCase()}:${proposalId.toLowerCase()}`;
     return this.database.transaction().execute(async (transaction) => {
       // First row lock is always the trip, matching every itinerary/settings writer.
       await lockPlanningTrip(transaction, tripId);

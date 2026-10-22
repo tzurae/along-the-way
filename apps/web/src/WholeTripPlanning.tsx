@@ -34,7 +34,6 @@ import {
   BedDouble,
   ChevronRight,
   Lock,
-  SlidersHorizontal,
   Sparkles,
   TriangleAlert,
 } from "lucide-react";
@@ -518,7 +517,7 @@ function PlanningMeter({ label, actual, cap, display, level }: {
   );
 }
 
-export function PlanningMeters({ day }: { day: PlanningDayLoadDto }) {
+function PlanningMeters({ day }: { day: PlanningDayLoadDto }) {
   const { t } = useI18n();
   const copy = t.wholeTripPlanner.meters;
   const meters = [
@@ -585,41 +584,17 @@ export function WholeTripPlannerButton() {
   );
 }
 
-export function PlanningDaySummary({ dayId }: { dayId: string }) {
-  const { t } = useI18n();
-  const { load, loadError, inheritedSettings, canArrange, openOverride } = usePlanning();
-  const day = load?.days.find((entry) => entry.dayId === dayId);
-  const inherited = inheritedSettings.get(dayId);
-  if (loadError) return <p className="planning-load-error" role="alert">{loadError}</p>;
-  if (!day || !inherited) return <p className="planning-load-error" role="status">{t.wholeTripPlanner.meters.loading}</p>;
-  const kind = shortcutFor(day.override, inherited);
-  const over = day.status === "over_cap";
-  const unverifiable = day.status === "baseline_unverifiable";
-  const chip = over ? t.wholeTripPlanner.override.chip.over
-    : unverifiable ? t.wholeTripPlanner.meters.statuses.baselineUnverifiable
-    : t.wholeTripPlanner.override.chip[kind];
-  const contents = (
-    <>
-      {over || unverifiable ? <TriangleAlert aria-hidden="true" /> : <SlidersHorizontal aria-hidden="true" />}
-      {chip}
-    </>
-  );
-  return (
-    <div className="planning-day-summary">
-      {canArrange ? (
-        <button
-          type="button"
-          className="planning-override-chip"
-          data-status={over || unverifiable ? "over" : kind}
-          aria-label={`${t.wholeTripPlanner.override.open}：${chip}`}
-          onClick={() => openOverride(dayId)}
-        >
-          {contents}
-        </button>
-      ) : <span className="planning-override-chip" data-status={over || unverifiable ? "over" : kind}>{contents}</span>}
-      <PlanningMeters day={day} />
-    </div>
-  );
+/**
+ * Opens this day's 「調整這天」 sheet. Null outside the planning provider, without arrange permission,
+ * or while the day's load is unread or failed: the sheet renders nothing then, so a caller must not
+ * give up its own surface for it.
+ */
+export function useDayOverrideOpener(dayId: string | null): (() => void) | null {
+  const planning = useContext(PlanningContext);
+  if (!dayId || !planning?.canArrange || planning.loadError || !planning.inheritedSettings.has(dayId)
+    || !planning.load?.days.some((day) => day.dayId === dayId)) return null;
+  const { openOverride } = planning;
+  return () => openOverride(dayId);
 }
 
 interface OverrideFieldDefinition {

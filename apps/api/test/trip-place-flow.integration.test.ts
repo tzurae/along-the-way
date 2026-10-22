@@ -4,6 +4,7 @@ import { sql, type Kysely } from "kysely";
 import { Pool } from "pg";
 import type { Hono } from "hono";
 import { parseDayRouteResponse } from "@along-the-way/contracts/day-plans";
+import { EMPTY_PLANNING_OVERRIDE } from "@along-the-way/contracts/planning";
 import {
   parseProviderCandidatesResponse,
   parseNearbyAlternativesResponse,
@@ -40,6 +41,7 @@ import {
 } from "../src/database/migrations/020_trip_day_versions";
 import { seedDatabase } from "../src/database/seed";
 import { PostgresDayPlanModule } from "../src/planning/postgres-day-plan-module";
+import { PostgresPlanningSettingsModule } from "../src/planning/postgres-planning-settings-module";
 import { GoogleRoutesProvider } from "../src/planning/google-routes-provider";
 import { NavitimeProvider } from "../src/planning/navitime-provider";
 import type { EmailSender } from "../src/private-trips/email-sender";
@@ -4112,6 +4114,95 @@ describe("shared trip places through HTTP and PostgreSQL", () => {
     expect(route.stops).toEqual([]);
     expect(route.metersToEnd).toBeNull();
     expect(route.totalMeters).toBe(0);
+  });
+
+  it("gives the day route the day load's start, fixed time, stays and straight-line legs, with stations as zero-minute transfers", async () => {
+    const owner = await login("route-timing@example.test");
+    const trip = await createTrip(owner.cookie, "Route timing");
+    const headers = (key: string) => ({ cookie: owner.cookie, "content-type": "application/json", "idempotency-key": key, origin: "https://app.example.test" });
+    const lodging = await app.request(`/api/trips/${trip.id}/lodgings`, {
+      method: "POST",
+      headers: headers("route-timing-lodging"),
+      body: json({
+        hotel: { name: "Kyoto Hotel", address: "Kyoto", latitude: 35.0, longitude: 135.76, timeZone: "Asia/Tokyo", sourceUrl: null },
+        countryStopId: trip.countryStops[0]!.id,
+        checkInLocalDateTime: "2026-10-22T15:00",
+        checkOutLocalDateTime: "2026-10-24T10:00",
+        expectedTripVersion: trip.version,
+      }),
+    });
+    expect(lodging.status, await lodging.clone().text()).toBe(201);
+    const visited = await addLocatedManualPlace(owner.cookie, trip.id, "route-timing-member", "Member stay", 35.01, 135.77);
+    const defaulted = await addLocatedManualPlace(owner.cookie, trip.id, "route-timing-default", "Default stay", 35.02, 135.78);
+    const stationResponse = await app.request(`/api/trips/${trip.id}/trip-places`, {
+      method: "POST",
+      headers: headers("route-timing-station"),
+      body: json({ method: "manual", name: "Kyoto Station", type: "station", address: "Kyoto Station address",
+        latitude: 34.985, longitude: 135.758, timeZone: "Asia/Tokyo", sourceUrl: null, originalNote: null }),
+    });
+    expect(stationResponse.status, await stationResponse.clone().text()).toBe(201);
+    const station = parseTripPlaceResponse(await stationResponse.json()).tripPlace;
+    // A member-entered stay of 90 minutes (the helper also sets notes and a budget).
+    expect((await planning(owner.cookie, trip.id, visited.id, visited.version, "route-timing-stay", "member stay")).status).toBe(200);
+    const dayId = trip.days[2]!.id;
+    await assignToDay(owner.cookie, trip.id, dayId, (await list(owner.cookie, trip.id))
+      .filter((place) => [visited.id, defaulted.id, station.id].includes(place.id)), "route-timing-assign");
+    const planningModule = new PostgresPlanningSettingsModule({ database });
+    await planningModule.putOverride(owner.user.id, trip.id, dayId, "route-timing-override", {
+      expectedVersion: 0, values: { ...EMPTY_PLANNING_OVERRIDE, dayStart: "10:30" },
+    });
+
+    // Apply an explicit order so the saved route and the day load walk the same sequence.
+    const unordered = parseDayRouteResponse(await (await dayRoute(owner.cookie, trip.id, dayId, "current")).json()).route;
+    const ordered = await saveDay(owner.cookie, trip.id, dayId, "place-order", "route-timing-order", unordered.version,
+      [visited.id, station.id, defaulted.id]);
+    expect(ordered.status, await ordered.clone().text()).toBe(200);
+
+    const response = await dayRoute(owner.cookie, trip.id, dayId, "current");
+    expect(response.status, await response.clone().text()).toBe(200);
+    const route = parseDayRouteResponse(await response.json()).route;
+    const planningLoad = await planningModule.getLoad(owner.user.id, trip.id);
+    const load = planningLoad.days.find((day) => day.dayId === dayId)!;
+    const loadEstimates = planningLoad.estimates;
+
+    expect(route.dayStartMinute).toBe(10 * 60 + 30);
+    expect(route.fixedMinutes).toBe(load.fixedOccupancyMinutes);
+    const byId = new Map(route.stops.map((stop) => [stop.tripPlaceId, stop]));
+    expect(byId.get(visited.id)).toMatchObject({ stayMinutes: 90, stayEstimated: false });
+    expect(byId.get(defaulted.id)).toMatchObject({ stayMinutes: loadEstimates[defaulted.id]!.visitMinutes, stayEstimated: true });
+    expect(byId.get(station.id)).toMatchObject({ stayMinutes: 0, stayEstimated: false });
+    // Every leg, start and end included, carries the day load's own straight-line minutes.
+    const loadLegs = new Map(load.legs.map((leg) => [`${leg.fromId}:${leg.toId}`, leg.travelMinutes]));
+    const points = [route.startsAt!.placeId, ...route.stops.map((stop) => stop.tripPlaceId), route.endsAt!.placeId];
+    expect(route.orderedTripPlaceIds).toEqual([visited.id, station.id, defaulted.id]);
+    expect(load.route.map((node) => node.id)).toEqual(points);
+    const routeLegs = [...route.stops.map((stop) => stop.estimatedMoveMinutesFromPrevious), route.estimatedMoveMinutesToEnd];
+    expect(routeLegs.every((minutes) => typeof minutes === "number")).toBe(true);
+    expect(routeLegs).toEqual(points.slice(1).map((to, index) => loadLegs.get(`${points[index]}:${to}`)));
+  });
+
+  it("starts an arrival day's route clock an hour after the plane lands, like the day load", async () => {
+    const owner = await login("route-arrival@example.test");
+    const flights = tripFlights("2026-10-21", "2026-10-27", "Asia/Tokyo");
+    const created = await app.request("/api/trips", {
+      method: "POST",
+      headers: { cookie: owner.cookie, "content-type": "application/json", "idempotency-key": "create-route-arrival", origin: "https://app.example.test" },
+      body: json({
+        name: "Route arrival", startDate: "2026-10-21", endDate: "2026-10-27", countryCodes: ["JP"],
+        flights: { ...flights, outbound: { ...flights.outbound, departureLocalDateTime: "2026-10-21T11:00", arrivalLocalDateTime: "2026-10-21T14:00" } },
+      }),
+    });
+    expect(created.status, await created.clone().text()).toBe(201);
+    const trip = parseTripResponse(await created.json()).trip;
+    const place = await addLocatedManualPlace(owner.cookie, trip.id, "route-arrival-place", "After landing", 35.01, 135.77);
+    await assignToDay(owner.cookie, trip.id, trip.days[0]!.id, [place], "route-arrival-assign");
+
+    const response = await dayRoute(owner.cookie, trip.id, trip.days[0]!.id, "current");
+    expect(response.status, await response.clone().text()).toBe(200);
+    const route = parseDayRouteResponse(await response.json()).route;
+    // Landing 14:00 + the one-hour arrival buffer, not the 09:00 setting.
+    expect(route.dayStartMinute).toBe(15 * 60);
+    expect(route.fixedMinutes).toBe(0);
   });
 
   it("lets editors preview routes but hides every day and save mutation from non-schedulers", async () => {

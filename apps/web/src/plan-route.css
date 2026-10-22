@@ -1266,6 +1266,34 @@
 .route-remove-button { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; min-height: 44px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-foreground); font-size: 11px; font-weight: 650; }
 .route-remove-button:hover:not(:disabled) { color: var(--load-packed); border-color: currentColor; }
 .route-reset { margin: 8px 16px 0; }
+/* Candidate timing: when this order gets back to the night's lodging, and each stop's stay. */
+.route-return { display: flex; flex-wrap: wrap; align-items: center; gap: 0 12px; border-bottom: 1px solid var(--border); padding: 6px 16px; }
+.route-return-line { margin: 0; padding-block: 8px; color: var(--foreground); font-size: 15px; line-height: 1.45; font-variant-numeric: tabular-nums; text-wrap: balance; }
+.route-return-line strong { font-weight: 750; }
+.route-return-line span { color: var(--muted-foreground); font-size: 12px; font-weight: 600; }
+.route-stay-text,
+.route-stay-button { display: inline-flex; align-items: center; gap: 5px; margin: 0; color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; }
+.route-stay-text { min-height: 24px; }
+.route-stay-button { min-height: 44px; margin-left: -8px; border-radius: 8px; padding: 0 8px; text-align: left; }
+.route-stay-button:hover:not(:disabled) { background: #1f30290d; }
+.route-stay-button:disabled { cursor: default; opacity: .55; }
+.route-stay-text svg,
+.route-stay-button svg { width: 13px; height: 13px; flex: none; }
+.route-stay-edit { color: var(--color-ink); font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
+.route-stay-editor { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 4px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); padding: 10px 12px; }
+.route-stay-editor label { flex-basis: 100%; color: var(--foreground); font-size: 12px; font-weight: 700; }
+.route-stay-input { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; }
+.route-stay-input input { width: 88px; min-height: 44px; border: 1px solid var(--input); border-radius: 8px; background: var(--background); padding: 0 10px; color: var(--foreground); font-size: 16px; font-variant-numeric: tabular-nums; }
+.route-stay-input input[aria-invalid="true"] { border-color: var(--destructive); }
+.route-stay-actions { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+.route-stay-save { display: inline-flex; align-items: center; gap: 4px; min-height: 44px; border-radius: 999px; background: var(--primary); padding: 0 14px; color: var(--primary-foreground); font-size: 13px; font-weight: 750; }
+.route-stay-save:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 88%, white); }
+.route-stay-save:disabled { opacity: .55; }
+.route-stay-save svg { width: 14px; height: 14px; }
+.route-stay-button:focus-visible,
+.route-stay-input input:focus-visible,
+.route-stay-save:focus-visible { outline: 2px solid var(--color-focus, var(--ring)); outline-offset: 2px; }
+.route-stay-error { flex-basis: 100%; margin: 0; color: var(--destructive); font-size: 12px; line-height: 1.45; }
 .route-transit-action {
   display: flex;
   width: calc(100% - 32px);

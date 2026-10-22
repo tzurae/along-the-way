@@ -47,7 +47,6 @@ import "./plan-route.css";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import { readTripOverviewFilter, TRIP_OVERVIEW_FILTER_CHANGE_EVENT, writeTripOverviewFilter } from "./trip-location";
 import {
-  PlanningDaySummary,
   WholeTripPlannerButton,
   WholeTripPlanningOverlays,
   WholeTripPlanningProvider,
@@ -1295,7 +1294,6 @@ export function TripSkeletonWorkspace({
                     onCancel={() => setEditingDayId(null)}
                   />
                 ) : day.note ? <DayNote note={day.note} /> : null}
-                <PlanningDaySummary dayId={day.id} />
                 {missingLodging ? (
                   <aside className="plan-lodging-notice">
                     <BedDouble aria-hidden="true" />
@@ -1626,7 +1624,12 @@ export function TripSkeletonWorkspace({
           request={request}
           onClose={() => setPlanningDay(null)}
           canArrange={canArrange}
+          places={tripPlaces}
           onOrderSaved={async () => {
+            await load();
+            onPlacesChanged();
+          }}
+          onPlaceUpdated={async () => {
             await load();
             onPlacesChanged();
           }}

@@ -9,7 +9,6 @@ export const wholeTripPlanner = {
       near: "接近上限",
       over: "超出",
       unverifiable: "無法檢查距離",
-      baselineUnverifiable: "固定安排時間不完整",
     },
     expand: "查看估算內容",
     parts: {
@@ -23,7 +22,6 @@ export const wholeTripPlanner = {
     },
     straightLineNote: "移動以直線距離估算，不是實際路線或到站時間。",
     noLodging: "這天沒有住宿，距離只算地點之間。",
-    loading: "正在計算每天負荷…",
     loadError: "無法載入每天負荷。請重新載入後再試。",
   },
   override: {
@@ -32,7 +30,6 @@ export const wholeTripPlanner = {
       relaxed: "這天放輕鬆",
       heavier: "這天可以累一點",
       custom: "已自訂這天",
-      over: "超出這天設定",
     },
     open: "調整這天",
     title: (date: string) => `調整 ${date}`,

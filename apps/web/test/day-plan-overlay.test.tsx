@@ -63,6 +63,9 @@ function route(
       metersFromPrevious: index === 0 ? null : 1_000,
       minutesFromPrevious: null,
       linesFromPrevious: [],
+      estimatedMoveMinutesFromPrevious: null,
+      stayMinutes: null,
+      stayEstimated: false,
     })),
     metersToEnd: null,
     totalMeters: 1_000,
@@ -75,6 +78,9 @@ function route(
     transitMatrix: [],
     transitCallsNeeded: 0,
     transitCacheDays: null,
+    dayStartMinute: null,
+    fixedMinutes: null,
+    estimatedMoveMinutesToEnd: null,
   };
 }
 
@@ -87,6 +93,8 @@ function renderDialog(request: <T>(url: string, options?: RequestInit) => Promis
       request={request}
       onClose={() => {}}
       onOrderSaved={async () => {}}
+      places={[]}
+      onPlaceUpdated={async () => {}}
     />,
   );
 }

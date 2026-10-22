@@ -26,6 +26,9 @@ function route(provider: TransitProvider, latitudeDelta: number): DayRouteDto {
         metersFromPrevious: null,
         minutesFromPrevious: null,
         linesFromPrevious: [],
+        estimatedMoveMinutesFromPrevious: null,
+        stayMinutes: null,
+        stayEstimated: false,
       },
       {
         tripPlaceId: "to",
@@ -36,6 +39,9 @@ function route(provider: TransitProvider, latitudeDelta: number): DayRouteDto {
         metersFromPrevious: 2_000,
         minutesFromPrevious: 28,
         linesFromPrevious: [],
+        estimatedMoveMinutesFromPrevious: null,
+        stayMinutes: null,
+        stayEstimated: false,
       },
     ],
     metersToEnd: null,
@@ -49,6 +55,9 @@ function route(provider: TransitProvider, latitudeDelta: number): DayRouteDto {
     transitMatrix: [],
     transitCallsNeeded: 0,
     transitCacheDays: 7,
+    dayStartMinute: null,
+    fixedMinutes: null,
+    estimatedMoveMinutesToEnd: null,
   };
 }
 

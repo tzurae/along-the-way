@@ -67,7 +67,8 @@ export class PostgresPlanningSettingsModule implements PlanningSettingsModule {
     return this.writeOverride(userId, tripId, dayId.toLowerCase(), rawKey, parsed.expectedVersion, null);
   }
   private async writeOverride(userId: string, tripId: string, dayId: string, rawKey: string, expectedVersion: number, values: PutPlanningOverrideInput["values"] | null): Promise<PlanningOverrideResponse> {
-    return this.mutate(userId, tripId, rawKey, `planning-override:${tripId}:${dayId}`, { draftOverrides: [{ dayId, expectedVersion, values }] }, async (transaction) => {
+    // mutation_requests.operation is varchar(80): "pov:" + two UUIDs is 77 characters.
+    return this.mutate(userId, tripId, rawKey, `pov:${tripId}:${dayId}`, { draftOverrides: [{ dayId, expectedVersion, values }] }, async (transaction) => {
       await recordEvent(transaction, { tripId, actorId: userId, eventType: "trip_day.planning_override_updated",
         targetType: "trip_day", targetId: dayId, summary: values ? "Updated day planning override" : "Inherited trip planning settings", relatedTargetIds: [dayId] });
       return this.readOverride(transaction, tripId, dayId);

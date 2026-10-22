@@ -27,6 +27,9 @@ const validRouteResponse = {
       metersFromPrevious: null,
       minutesFromPrevious: null,
       linesFromPrevious: [],
+      estimatedMoveMinutesFromPrevious: null,
+      stayMinutes: 90,
+      stayEstimated: true,
     }],
     metersToEnd: 123,
     totalMeters: 123,
@@ -39,12 +42,23 @@ const validRouteResponse = {
     transitMatrix: [],
     transitCallsNeeded: 0,
     transitCacheDays: null,
+    dayStartMinute: 540,
+    fixedMinutes: 0,
+    estimatedMoveMinutesToEnd: 7,
   },
 } as const;
 
 describe("parseDayRouteResponse", () => {
   it("accepts a complete route including unlocated lodging and unknown legs", () => {
     expect(parseDayRouteResponse(validRouteResponse)).toEqual(validRouteResponse);
+  });
+
+  it("reads a route from an API without timing fields as unknown timing", () => {
+    const { dayStartMinute: _start, fixedMinutes: _fixed, estimatedMoveMinutesToEnd: _end, ...older } = validRouteResponse.route;
+    const { estimatedMoveMinutesFromPrevious: _move, stayMinutes: _stay, stayEstimated: _estimated, ...olderStop } = validRouteResponse.route.stops[0];
+    const { route } = parseDayRouteResponse({ route: { ...older, stops: [olderStop] } });
+    expect(route).toMatchObject({ dayStartMinute: null, fixedMinutes: null, estimatedMoveMinutesToEnd: null });
+    expect(route.stops[0]).toMatchObject({ estimatedMoveMinutesFromPrevious: null, stayMinutes: null, stayEstimated: false });
   });
 
   it.each([
@@ -59,6 +73,12 @@ describe("parseDayRouteResponse", () => {
       },
     }],
     ["invalid stop list", { route: { ...validRouteResponse.route, stops: null } }],
+    ["non-boolean stay estimate", {
+      route: { ...validRouteResponse.route, stops: [{ ...validRouteResponse.route.stops[0], stayEstimated: "yes" }] },
+    }],
+    ["negative stay minutes", {
+      route: { ...validRouteResponse.route, stops: [{ ...validRouteResponse.route.stops[0], stayMinutes: -5 }] },
+    }],
   ])("rejects %s", (_name, value) => {
     expect(() => parseDayRouteResponse(value)).toThrow("Invalid day route response");
   });
