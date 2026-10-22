@@ -38,6 +38,9 @@ function route(order: DayRouteOrder): DayRouteDto {
       metersFromPrevious: null,
       minutesFromPrevious: null,
       linesFromPrevious: [],
+      estimatedMoveMinutesFromPrevious: null,
+      stayMinutes: null,
+      stayEstimated: false,
     }],
     metersToEnd: null,
     totalMeters: 0,
@@ -50,6 +53,9 @@ function route(order: DayRouteOrder): DayRouteDto {
     transitMatrix: [],
     transitCallsNeeded: 0,
     transitCacheDays: null,
+    dayStartMinute: null,
+    fixedMinutes: null,
+    estimatedMoveMinutesToEnd: null,
   };
 }
 
@@ -97,6 +103,8 @@ function setup(loadMap: () => Promise<unknown>) {
         request={request}
         onClose={() => {}}
         onOrderSaved={async () => {}}
+        places={[]}
+        onPlaceUpdated={async () => {}}
       />
     </StrictMode>,
   );

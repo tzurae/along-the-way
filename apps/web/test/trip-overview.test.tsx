@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
+import { DEFAULT_PLANNING_SETTINGS } from "@along-the-way/contracts/planning";
 import { TripSkeletonWorkspace } from "../src/TripSkeletonWorkspace";
 import { todaySkeleton, todayTrip, todayWishlist } from "./today-fixtures";
 
@@ -57,6 +58,43 @@ it("filters multiple days, ignores foreign dates, and keeps pending collapsed", 
   expect(document.querySelectorAll(".day-column")).toHaveLength(3);
   expect(within(group).getByRole("button", { name: "全部" })).toHaveAttribute("aria-pressed", "true");
   expect(new URLSearchParams(location.search).has("days")).toBe(false);
+});
+
+it("shows no per-day load meters or over-limit pill on day sections once the day loads are read", async () => {
+  history.replaceState({}, "", "/?trip=A&tab=itinerary&segment=daily");
+  const trip = todayTrip();
+  const skeleton = todaySkeleton(trip);
+  const tripPlaces = todayWishlist();
+  let loadRead = false;
+  // An over-limit day: before this change each day section showed 「超出這天設定」 and its meters.
+  const overCapDay = (dayId: string, date: string) => ({
+    dayId, date, status: "over_cap", caps: DEFAULT_PLANNING_SETTINGS, override: null, overrideVersion: 0,
+    windowStartMinute: 0, windowEndMinute: 720, windowMinutes: 720, fixedOccupancyMinutes: 0, mealReserveMinutes: 90,
+    restMinutes: 30, slackMinutes: 72, budgetMinutes: 528, visitMinutes: 600, travelMinutes: 60, loadMinutes: 660, totalMinutes: 852,
+    count: 9, effort: 15, straightMetres: 4000, utilisation: 2.25, noLodging: false, missingCoordinateIds: [], unresolvedItemIds: [],
+    route: [], legs: [], checks: [{ dayId, code: "count", current: 9, added: 0, cap: 4 }],
+  });
+  const request = async <T,>(path: string, init?: RequestInit & { parse?: (value: unknown) => unknown }): Promise<T> => {
+    let value: unknown;
+    if (path.endsWith("/skeleton")) value = { skeleton };
+    else if (path.endsWith("/planning-load")) {
+      loadRead = true;
+      value = { days: skeleton.days.map((day) => overCapDay(day.id, day.date)), estimates: {},
+        counts: { flexible: 1, fixedSelected: 0, days: skeleton.days.length, aiPending: 0 }, settingsVersion: 1 };
+    } else if (path.endsWith("/planning-settings")) {
+      value = { raw: null, resolved: DEFAULT_PLANNING_SETTINGS, defaults: DEFAULT_PLANNING_SETTINGS, version: 1 };
+    } else value = { tripPlaces };
+    return (init?.parse ? init.parse(value) : value) as T;
+  };
+  render(<TripSkeletonWorkspace trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} onTravelEdit={vi.fn()} />);
+  // The whole-trip planner still reads the loads: its button enables only after they parse.
+  await waitFor(() => expect(screen.getByRole("button", { name: "全部排行程" })).toBeEnabled());
+  expect(loadRead).toBe(true);
+  expect(document.querySelectorAll(".day-column").length).toBeGreaterThan(0);
+  expect(screen.queryByText("超出這天設定")).not.toBeInTheDocument();
+  expect(screen.queryByText("查看估算內容")).not.toBeInTheDocument();
+  expect(document.querySelector("meter")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /調整這天：/ })).not.toBeInTheDocument();
 });
 
 it("moves a place between two visible non-adjacent days with versioned assignment then order writes", async () => {

@@ -23,11 +23,14 @@ import {
 } from "@along-the-way/contracts/day-plans";
 import {
   parseTripPlaceListResponse,
+  parseTripPlaceResponse,
+  type TripPlaceDto,
   type TripPlaceListResponse,
+  type TripPlaceResponse,
 } from "@along-the-way/contracts/trip-places";
 import { parseMapsConfigResponse, type MapsConfigResponse } from "@along-the-way/contracts/maps";
 import { AdvancedMarker, APIProvider, Map as GoogleMap, Pin, useMap } from "@vis.gl/react-google-maps";
-import { Check, GripVertical, MapPin, RotateCcw, Route, X } from "lucide-react";
+import { Check, Clock3, GripVertical, MapPin, RotateCcw, Route, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -44,6 +47,8 @@ import { notify } from "./AppToaster";
 import { busLikelyShapeLegs, isBusLikelyMinutesLeg, routeLegKey } from "./bus-likely-leg";
 import { googleMapsDirectionsUrl } from "./google-maps";
 import { PlaceListSkeleton } from "./PlaceListSkeleton";
+import { dayReturnLine, durationText, estimateDayReturn, stayText } from "./day-return-time";
+import { useDayOverrideOpener } from "./WholeTripPlanning";
 
 type JsonRequest = <T>(
   url: string,
@@ -596,6 +601,8 @@ export function DayPlanDialog({
   request,
   onClose,
   onOrderSaved,
+  places,
+  onPlaceUpdated,
 }: {
   tripId: string;
   day: PlannedDay | null;
@@ -604,6 +611,10 @@ export function DayPlanDialog({
   request: JsonRequest;
   onClose(): void;
   onOrderSaved(): Promise<void>;
+  /** The trip's places: a stay edit writes the same planning facts the place sheet edits, at this version. */
+  places: readonly TripPlaceDto[];
+  /** A place's planning facts were saved; refresh the places this dialog was given. */
+  onPlaceUpdated(): Promise<void>;
 }) {
   const { t } = useI18n();
   const routeViewId = useId();
@@ -616,8 +627,10 @@ export function DayPlanDialog({
   const [mapsConfig, setMapsConfig] = useState<MapsConfigResponse | null>(null);
   const [mapsConfigLoading, setMapsConfigLoading] = useState(false);
   const [mapsConfigError, setMapsConfigError] = useState("");
-  const [busy, setBusy] = useState<"planning" | "transit" | "saving" | null>(null);
+  const [busy, setBusy] = useState<"planning" | "transit" | "saving" | "stay" | null>(null);
   const [transitCallsNotice, setTransitCallsNotice] = useState("");
+  const [stayEdit, setStayEdit] = useState<{ tripPlaceId: string; value: string; error: string } | null>(null);
+  const openDayOverride = useDayOverrideOpener(day?.id ?? null);
   const latestRequest = useRef(0);
   const mapsConfigRequest = useRef(0);
   const dialogEpoch = useRef(0);
@@ -887,6 +900,7 @@ export function DayPlanDialog({
     setView("candidate");
     setBusy(null);
     setTransitCallsNotice("");
+    setStayEdit(null);
     setSavedTab("route");
     setCandidateTab("route");
     shapeRequests.current.clear();
@@ -934,6 +948,7 @@ export function DayPlanDialog({
     shapeRequests.current.clear();
     setShapeStates({});
     setRoutes({});
+    setStayEdit(null);
     onClose();
   }
 
@@ -1051,6 +1066,89 @@ export function DayPlanDialog({
     void arrange([...others.slice(0, at), id, ...others.slice(at)]);
   }
 
+  /** Saves through the place sheet's planning endpoint, then re-reads this order's timing from the cache only. */
+  async function saveStay(tripPlaceId: string, value: string) {
+    if (!day || !candidate || busy !== null) return;
+    const minutes = Number(value);
+    if (!Number.isInteger(minutes) || minutes < 15 || minutes > 720) {
+      setStayEdit({ tripPlaceId, value, error: "請輸入 15 到 720 分鐘。" });
+      return;
+    }
+    const place = places.find((entry) => entry.id === tripPlaceId);
+    if (!place) {
+      setStayEdit({ tripPlaceId, value, error: "找不到這個地點的資料，請關閉後重新開啟。" });
+      return;
+    }
+    const epoch = dialogEpoch.current;
+    const dayId = day.id;
+    const orderedTripPlaceIds = candidate.orderedTripPlaceIds;
+    // The endpoint replaces every planning fact, so the others go back unchanged.
+    const payload = {
+      durationMinutes: minutes,
+      effortLevel: place.effortLevel,
+      budgetAmountMinor: place.budgetAmountMinor,
+      budgetCurrency: place.budgetCurrency,
+      notes: place.notes,
+      expectedVersion: place.version,
+    };
+    const identity = `planning:${place.id}:${JSON.stringify(payload)}`;
+    setBusy("stay");
+    try {
+      try {
+        await request<TripPlaceResponse>(`/api/trips/${tripId}/trip-places/${place.id}/planning`, {
+          method: "PATCH",
+          headers: { "Idempotency-Key": keyFor(identity) },
+          body: JSON.stringify(payload),
+          parse: parseTripPlaceResponse,
+        });
+      } catch (reason) {
+        if (epoch !== dialogEpoch.current) return;
+        if (reason instanceof ApiRequestError && (reason.code === "forbidden" || reason.status === 403)) {
+          setStayEdit({ tripPlaceId, value, error: t.schedule.ownerOnlyAction });
+        } else if (reason instanceof ApiRequestError && reason.code === "conflict") {
+          // The next attempt sends the refreshed version (and a new key, since the payload changes).
+          let refreshed = true;
+          await onPlaceUpdated().catch(() => { refreshed = false; });
+          if (epoch !== dialogEpoch.current) return;
+          setStayEdit({ tripPlaceId, value, error: refreshed
+            ? "這個地點剛被其他人改過，已讀取最新資料；請再儲存一次。"
+            : "這個地點剛被其他人改過，請關閉後重新開啟再改。" });
+        } else {
+          setStayEdit({ tripPlaceId, value, error: reason instanceof Error && reason.message ? reason.message : "無法儲存停留時間。" });
+        }
+        return;
+      }
+      actionKeys.current.delete(identity);
+      if (epoch !== dialogEpoch.current) return;
+      setStayEdit(null);
+      try {
+        await onPlaceUpdated();
+        // A custom read never calls a transit provider; it only carries the new stay.
+        const fresh = await fetchRoute(dayId, { order: "custom", orderedTripPlaceIds });
+        if (epoch !== dialogEpoch.current) return;
+        const stays = new Map(fresh.stops.map((stop) => [stop.tripPlaceId, stop]));
+        const withStays = (route: DayRouteDto | undefined) => route && {
+          ...route,
+          dayStartMinute: fresh.dayStartMinute,
+          fixedMinutes: fresh.fixedMinutes,
+          stops: route.stops.map((stop) => {
+            const next = stays.get(stop.tripPlaceId);
+            return next ? { ...stop, stayMinutes: next.stayMinutes, stayEstimated: next.stayEstimated } : stop;
+          }),
+        };
+        setRoutes((current) => ({
+          current: withStays(current.current),
+          suggested: withStays(current.suggested),
+          custom: withStays(current.custom),
+        }));
+      } catch {
+        if (epoch === dialogEpoch.current) notify("error", "已儲存停留時間，但無法更新回住宿時間；請關閉後重新開啟。");
+      }
+    } finally {
+      if (epoch === dialogEpoch.current) setBusy(null);
+    }
+  }
+
   const [drag, setDrag] = useState<{
     id: string;
     startY: number;
@@ -1123,6 +1221,72 @@ export function DayPlanDialog({
     );
   }
 
+  /** Candidate-side stay: read-only text, or (when the member may arrange) a button opening an inline minutes editor. */
+  function stayRow(stop: DayRouteDto["stops"][number], editable: boolean) {
+    const text = stayText(stop);
+    if (!text) return null;
+    if (editable && stayEdit?.tripPlaceId === stop.tripPlaceId) {
+      const inputId = `${routeViewId}-stay-${stop.tripPlaceId}`;
+      const errorId = `${inputId}-error`;
+      const minutes = Number(stayEdit.value);
+      return (
+        <form
+          className="route-stay-editor"
+          noValidate
+          onSubmit={(event) => {
+            event.preventDefault();
+            void saveStay(stop.tripPlaceId, stayEdit.value);
+          }}
+        >
+          <label htmlFor={inputId}>「{stop.name}」停留時間</label>
+          <span className="route-stay-input">
+            <input
+              id={inputId}
+              type="number"
+              inputMode="numeric"
+              min={15}
+              max={720}
+              step={15}
+              value={stayEdit.value}
+              autoFocus
+              aria-invalid={stayEdit.error ? true : undefined}
+              aria-describedby={stayEdit.error ? errorId : undefined}
+              onChange={(event) => {
+                const value = event.target.value;
+                setStayEdit((current) => current && { ...current, value, error: "" });
+              }}
+            />
+            <span>分鐘</span>
+            {Number.isInteger(minutes) && minutes >= 60 ? <span className="route-stay-hint">＝{durationText(minutes)}</span> : null}
+          </span>
+          <span className="route-stay-actions">
+            <button type="button" className="route-link-button" disabled={busy === "stay"} onClick={() => setStayEdit(null)}>取消</button>
+            <button type="submit" className="route-stay-save" disabled={busy !== null}>
+              <Check aria-hidden="true" /> {busy === "stay" ? "儲存中…" : "儲存停留時間"}
+            </button>
+          </span>
+          {stayEdit.error ? <p id={errorId} role="alert" className="route-stay-error">{stayEdit.error}</p> : null}
+        </form>
+      );
+    }
+    if (!editable) {
+      return <p className="route-stay-text"><Clock3 aria-hidden="true" />{text}</p>;
+    }
+    return (
+      <button
+        type="button"
+        className="route-stay-button"
+        disabled={busy !== null}
+        aria-label={`改「${stop.name}」的停留時間（目前${text}）`}
+        onClick={() => setStayEdit({ tripPlaceId: stop.tripPlaceId, value: String(stop.stayMinutes), error: "" })}
+      >
+        <Clock3 aria-hidden="true" />
+        <span>{text}</span>
+        <span className="route-stay-edit">改停留時間</span>
+      </button>
+    );
+  }
+
   function routeList(route: DayRouteDto, editable: boolean, version: "saved" | "candidate") {
     const otherStops = drag?.moved
       ? route.stops.filter((stop) => stop.tripPlaceId !== drag.id)
@@ -1178,6 +1342,7 @@ export function DayPlanDialog({
                       </button>
                     ) : null}
                   </div>
+                  {version === "candidate" ? stayRow(stop, editable) : null}
                 </div>
               </li>
             </Fragment>
@@ -1268,6 +1433,8 @@ export function DayPlanDialog({
       )
       : null;
     const removedNames = removedIds.map((id) => saved.stops.find((stop) => stop.tripPlaceId === id)?.name ?? "地點");
+    const returnEstimate = estimateDayReturn(candidate);
+    const returnText = returnEstimate ? dayReturnLine(returnEstimate) : null;
     return (
       <section className="route-version" data-active={view === "candidate"} data-route-version="candidate" aria-label="可以儲存的順序">
         <header className="route-version-heading">
@@ -1294,6 +1461,28 @@ export function DayPlanDialog({
             ) : null}
           </div>
         </header>
+        {returnText ? (
+          <div className="route-return">
+            <p className="route-return-line" aria-live="polite">
+              <strong>{returnText.line}</strong>
+              {returnText.note ? <span>{returnText.note}</span> : null}
+            </p>
+            {canArrange && openDayOverride ? (
+              <button
+                type="button"
+                className="route-link-button"
+                disabled={busy !== null}
+                onClick={() => {
+                  // One dialog at a time: this sheet replaces the route dialog, like editing a place from the planner.
+                  close();
+                  openDayOverride();
+                }}
+              >
+                調整這天時間
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         {transitCallsNeeded > 0 ? (
           <button
             type="button"

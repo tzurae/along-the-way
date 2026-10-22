@@ -75,6 +75,8 @@ describe("owner-only schedule surfaces", () => {
       request,
       onClose: () => {},
       onOrderSaved: async () => {},
+      places: [],
+      onPlaceUpdated: async () => {},
     };
     const { rerender } = render(<DayPlanDialog {...props} canArrange={false} />);
 
@@ -106,6 +108,8 @@ describe("owner-only schedule surfaces", () => {
           request={request}
           onClose={() => {}}
           onOrderSaved={async () => {}}
+          places={[]}
+          onPlaceUpdated={async () => {}}
         />
         <AppToaster />
       </>,
@@ -212,6 +216,9 @@ function route(order: "current" | "suggested"): DayRouteDto {
       metersFromPrevious: index === 0 ? null : 1_000,
       minutesFromPrevious: null,
       linesFromPrevious: [],
+      estimatedMoveMinutesFromPrevious: null,
+      stayMinutes: null,
+      stayEstimated: false,
     })),
     metersToEnd: null,
     totalMeters: 1_000,
@@ -224,5 +231,8 @@ function route(order: "current" | "suggested"): DayRouteDto {
     transitMatrix: [],
     transitCallsNeeded: 0,
     transitCacheDays: null,
+    dayStartMinute: null,
+    fixedMinutes: null,
+    estimatedMoveMinutesToEnd: null,
   };
 }

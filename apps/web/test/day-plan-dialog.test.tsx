@@ -3,8 +3,10 @@ import { type ReactNode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DayRouteDto, DayRouteOrder, DayRouteShapesResponse } from "@along-the-way/contracts/day-plans";
+import type { DayRouteDto, DayRouteOrder, DayRouteShapesResponse, DayRouteStopDto } from "@along-the-way/contracts/day-plans";
+import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
 import { DayPlanDialog, type PlannedDay } from "../src/DayPlanDialog";
+import { todayWishlist } from "./today-fixtures";
 
 vi.mock("@vis.gl/react-google-maps", () => ({
   APIProvider: ({ apiKey, children }: { apiKey: string; children: ReactNode }) => (
@@ -53,6 +55,9 @@ function route(order: DayRouteOrder, options: RouteOptions = {}): DayRouteDto {
       metersFromPrevious: index === 0 ? null : 1_000,
       minutesFromPrevious: null,
       linesFromPrevious: [],
+      estimatedMoveMinutesFromPrevious: null,
+      stayMinutes: null,
+      stayEstimated: false,
     })),
     metersToEnd: null,
     totalMeters: options.totalMeters ?? Math.max(0, ids.length - 1) * 1_000,
@@ -65,6 +70,9 @@ function route(order: DayRouteOrder, options: RouteOptions = {}): DayRouteDto {
     transitMatrix: [],
     transitCallsNeeded: options.transitCallsNeeded ?? 0,
     transitCacheDays: null,
+    dayStartMinute: null,
+    fixedMinutes: null,
+    estimatedMoveMinutesToEnd: null,
   };
 }
 
@@ -158,6 +166,8 @@ function dialog(request: <T>(url: string, options?: RequestInit) => Promise<T>, 
       request={request}
       onClose={() => {}}
       onOrderSaved={async () => {}}
+      places={[]}
+      onPlaceUpdated={async () => {}}
     />
   );
 }
@@ -667,5 +677,237 @@ describe("day-plan draft and save behavior", () => {
 
     expect(await within(candidate).findByText("和原本順序一樣長")).toBeInTheDocument();
     expect(within(candidate).queryByText("已是最短")).not.toBeInTheDocument();
+  });
+});
+
+const hotel = { placeId: "hotel", name: "飯店", latitude: 35.0, longitude: 135.7, providerPlaceId: null };
+
+type StopTiming = Partial<Pick<DayRouteStopDto, "minutesFromPrevious" | "estimatedMoveMinutesFromPrevious" | "stayMinutes" | "stayEstimated">>;
+
+/** A day from the morning hotel back to the night hotel, with server timing fields. */
+function timedRoute(order: DayRouteOrder, stops: Record<string, StopTiming>, options: {
+  dayStartMinute?: number;
+  fixedMinutes?: number;
+  toEnd?: { minutes: number | null; estimate: number | null };
+  noNightLodging?: boolean;
+} = {}): DayRouteDto {
+  const base = route(order, { ids: Object.keys(stops) });
+  return {
+    ...base,
+    startsAt: hotel,
+    endsAt: options.noNightLodging ? null : hotel,
+    metersToEnd: options.noNightLodging ? null : 1_000,
+    stops: base.stops.map((stop) => ({ ...stop, ...stops[stop.tripPlaceId] })),
+    minutesToEnd: options.toEnd?.minutes ?? null,
+    estimatedMoveMinutesToEnd: options.toEnd?.estimate ?? null,
+    dayStartMinute: options.dayStartMinute ?? 540,
+    fixedMinutes: options.fixedMinutes ?? 0,
+  };
+}
+
+function timedRequest(suggested: DayRouteDto, options: {
+  custom?(ids: string[]): DayRouteDto;
+  patch?(call: RequestCall): unknown;
+} = {}) {
+  const calls: RequestCall[] = [];
+  const request = async <T,>(url: string, init?: RequestInit): Promise<T> => {
+    calls.push({ url, options: init });
+    if (url === "/api/maps/config") return { browserKey: null, mapId: null } as T;
+    if (init?.method === "PATCH" && options.patch) return options.patch({ url, options: init }) as T;
+    if (url.endsWith("/route")) {
+      const input = inputOf(init)!;
+      if (input.order === "current") return { route: route("current", { ids: suggested.orderedTripPlaceIds }) } as T;
+      if (input.order === "suggested") return { route: suggested } as T;
+      return { route: options.custom?.(input.orderedTripPlaceIds ?? []) ?? route("custom", { ids: input.orderedTripPlaceIds ?? [] }) } as T;
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  };
+  return { request, calls };
+}
+
+function timedDialog(request: <T>(url: string, options?: RequestInit) => Promise<T>, props: {
+  canArrange?: boolean;
+  places?: TripPlaceDto[];
+  onPlaceUpdated?(): Promise<void>;
+} = {}) {
+  return (
+    <DayPlanDialog
+      tripId="trip-1"
+      day={day1}
+      canArrange={props.canArrange ?? true}
+      request={request}
+      onClose={() => {}}
+      onOrderSaved={async () => {}}
+      places={props.places ?? []}
+      onPlaceUpdated={props.onPlaceUpdated ?? (async () => {})}
+    />
+  );
+}
+
+describe("day-plan return time", () => {
+  // 09:00 start + 60 fixed; a: member 90 min, b: estimated 60 min.
+  const legsAndStays = (a: StopTiming, b: StopTiming): Record<string, StopTiming> => ({
+    a: { stayMinutes: 90, stayEstimated: false, ...a },
+    b: { stayMinutes: 60, stayEstimated: true, ...b },
+  });
+  it.each([
+    {
+      name: "transit minutes win over the straight-line estimate",
+      route: timedRoute("suggested", legsAndStays({ minutesFromPrevious: 20, estimatedMoveMinutesFromPrevious: 30 }, { estimatedMoveMinutesFromPrevious: 15 }), { fixedMinutes: 60, toEnd: { minutes: null, estimate: 25 } }),
+      line: "09:00 出門・約 13:30 回到住宿",
+      note: "（停留、移動是估計）",
+    },
+    {
+      name: "a leg without transit minutes falls back to the estimate",
+      route: timedRoute("suggested", legsAndStays({ estimatedMoveMinutesFromPrevious: 30 }, { estimatedMoveMinutesFromPrevious: 15 }), { fixedMinutes: 60, toEnd: { minutes: null, estimate: 25 } }),
+      line: "09:00 出門・約 13:40 回到住宿",
+      note: "（停留、移動是估計）",
+    },
+    {
+      name: "a leg with neither is called out but the time is still shown",
+      route: timedRoute("suggested", legsAndStays({ minutesFromPrevious: 20 }, { estimatedMoveMinutesFromPrevious: 15 }), { fixedMinutes: 60, toEnd: { minutes: null, estimate: null } }),
+      line: "09:00 出門・約 13:05 回到住宿",
+      note: "（停留、移動是估計）（部分路段無法估計）",
+    },
+    {
+      name: "only estimated stays are labelled when every leg has transit minutes",
+      route: timedRoute("suggested", legsAndStays({ minutesFromPrevious: 20 }, { minutesFromPrevious: 10 }), { fixedMinutes: 60, toEnd: { minutes: 25, estimate: 40 } }),
+      line: "09:00 出門・約 13:25 回到住宿",
+      note: "（停留時間是估計）",
+    },
+    {
+      name: "only estimated moves are labelled when every stay is member-entered",
+      route: timedRoute("suggested", legsAndStays({ minutesFromPrevious: 20 }, { estimatedMoveMinutesFromPrevious: 15, stayEstimated: false }), { fixedMinutes: 60, toEnd: { minutes: null, estimate: 25 } }),
+      line: "09:00 出門・約 13:30 回到住宿",
+      note: "（移動是估計）",
+    },
+    {
+      name: "a return after midnight says 隔天",
+      route: timedRoute("suggested", legsAndStays({ minutesFromPrevious: 20 }, { minutesFromPrevious: 10, stayEstimated: false }), { dayStartMinute: 1320, toEnd: { minutes: 10, estimate: null } }),
+      line: "22:00 出門・約 隔天 01:10 回到住宿",
+      note: "",
+    },
+    {
+      name: "a day without night lodging ends at its last stop",
+      route: timedRoute("suggested", legsAndStays({ minutesFromPrevious: 20 }, { minutesFromPrevious: 10, stayEstimated: false }), { noNightLodging: true }),
+      line: "09:00 出門・約 12:00 結束最後一站",
+      note: "",
+    },
+  ])("$name", async ({ route: suggested, line, note }) => {
+    const { request } = timedRequest(suggested);
+    render(timedDialog(request));
+    const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+    const summary = within(candidate).getByText(line).closest("p")!;
+    expect(summary.textContent).toBe(`${line}${note}`);
+    // The saved column keeps its distance-only view.
+    const saved = screen.getByRole("region", { name: "已儲存的順序" });
+    expect(within(saved).queryByText(/出門・約/)).not.toBeInTheDocument();
+    expect(within(saved).queryByText(/停留/)).not.toBeInTheDocument();
+  });
+
+  it("shows past midnight as 隔天 00:40", async () => {
+    const suggested = timedRoute("suggested", {
+      a: { minutesFromPrevious: 20, stayMinutes: 60, stayEstimated: false },
+      b: { minutesFromPrevious: 10, stayMinutes: 60, stayEstimated: false },
+    }, { dayStartMinute: 1320, toEnd: { minutes: 10, estimate: null } });
+    render(timedDialog(timedRequest(suggested).request));
+    const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+    expect(within(candidate).getByText("22:00 出門・約 隔天 00:40 回到住宿")).toBeInTheDocument();
+  });
+
+  it("shows each stay with 約 only when estimated, and nothing for a station", async () => {
+    const suggested = timedRoute("suggested", {
+      a: { minutesFromPrevious: 20, stayMinutes: 90, stayEstimated: false },
+      station: { minutesFromPrevious: 10, stayMinutes: 0, stayEstimated: false },
+      b: { minutesFromPrevious: 5, stayMinutes: 45, stayEstimated: true },
+    }, { toEnd: { minutes: 25, estimate: null } });
+    render(timedDialog(timedRequest(suggested).request));
+    const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+    // 09:00 + 20 + 90 + 10 + 0 + 5 + 45 + 25: the station adds only its legs.
+    expect(within(candidate).getByText("09:00 出門・約 12:15 回到住宿")).toBeInTheDocument();
+    expect(within(candidate).getByRole("button", { name: "改「地點 a」的停留時間（目前停留 1 小時 30 分）" })).toBeInTheDocument();
+    expect(within(candidate).getByRole("button", { name: "改「地點 b」的停留時間（目前停留約 45 分）" })).toBeInTheDocument();
+    expect(within(candidate).queryByRole("button", { name: /改「地點 station」/ })).not.toBeInTheDocument();
+    const stationRow = candidate.querySelector<HTMLElement>('[data-trip-place-id="station"]')!;
+    expect(within(stationRow).queryByText(/停留/)).not.toBeInTheDocument();
+  });
+
+  it("shows stays as plain text to members who cannot arrange", async () => {
+    const suggested = timedRoute("suggested", { a: { minutesFromPrevious: 20, stayMinutes: 90, stayEstimated: true } }, { toEnd: { minutes: 25, estimate: null } });
+    render(timedDialog(timedRequest(suggested).request, { canArrange: false }));
+    const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+    expect(within(candidate).getByText("停留約 1 小時 30 分")).toBeInTheDocument();
+    expect(within(candidate).queryByRole("button", { name: /停留時間/ })).not.toBeInTheDocument();
+  });
+
+  it("recomputes the time for the remaining stops after one is taken off the day", async () => {
+    const suggested = timedRoute("suggested", {
+      a: { minutesFromPrevious: 20, stayMinutes: 90, stayEstimated: false },
+      b: { minutesFromPrevious: 10, stayMinutes: 60, stayEstimated: false },
+    }, { toEnd: { minutes: 25, estimate: null } });
+    const custom = (ids: string[]) => {
+      expect(ids).toEqual(["a"]);
+      return timedRoute("custom", { a: { minutesFromPrevious: 20, stayMinutes: 90, stayEstimated: false } }, { toEnd: { minutes: 15, estimate: null } });
+    };
+    render(timedDialog(timedRequest(suggested, { custom }).request));
+    const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+    expect(within(candidate).getByText("09:00 出門・約 12:25 回到住宿")).toBeInTheDocument();
+
+    fireEvent.click(within(candidate).getByRole("button", { name: "這天不去「地點 b」" }));
+
+    expect(await within(candidate).findByText("09:00 出門・約 11:05 回到住宿")).toBeInTheDocument();
+    expect(within(candidate).queryByText("09:00 出門・約 12:25 回到住宿")).not.toBeInTheDocument();
+  });
+
+  it("saves a stay through the place planning API with the place's other facts and version, then updates the time", async () => {
+    const [wishlist] = todayWishlist();
+    const place: TripPlaceDto = { ...wishlist!, id: "a", effortLevel: 2, durationMinutes: null, budgetAmountMinor: 1500, budgetCurrency: "JPY", notes: "早上去", version: 3 };
+    const suggested = timedRoute("suggested", {
+      a: { minutesFromPrevious: 20, stayMinutes: 90, stayEstimated: true },
+      b: { minutesFromPrevious: 10, stayMinutes: 60, stayEstimated: false },
+    }, { toEnd: { minutes: 25, estimate: null } });
+    const patches: RequestCall[] = [];
+    const { request, calls } = timedRequest(suggested, {
+      patch: (call) => {
+        patches.push(call);
+        return { tripPlace: { ...place, durationMinutes: 120, version: 4 } };
+      },
+      custom: (ids) => timedRoute("custom", Object.fromEntries(ids.map((id) => [id, id === "a"
+        ? { minutesFromPrevious: 20, stayMinutes: 120, stayEstimated: false }
+        : { minutesFromPrevious: 10, stayMinutes: 60, stayEstimated: false }])), { toEnd: { minutes: 25, estimate: null } }),
+    });
+    const onPlaceUpdated = vi.fn(async () => {});
+    render(timedDialog(request, { places: [place], onPlaceUpdated }));
+    const candidate = await screen.findByRole("region", { name: "可以儲存的順序" });
+    expect(within(candidate).getByText("09:00 出門・約 12:25 回到住宿")).toBeInTheDocument();
+
+    fireEvent.click(within(candidate).getByRole("button", { name: "改「地點 a」的停留時間（目前停留約 1 小時 30 分）" }));
+    const input = within(candidate).getByLabelText("「地點 a」停留時間");
+    fireEvent.change(input, { target: { value: "10" } });
+    fireEvent.click(within(candidate).getByRole("button", { name: "儲存停留時間" }));
+    expect(within(candidate).getByRole("alert")).toHaveTextContent("請輸入 15 到 720 分鐘。");
+    expect(patches).toHaveLength(0);
+
+    fireEvent.change(input, { target: { value: "120" } });
+    fireEvent.click(within(candidate).getByRole("button", { name: "儲存停留時間" }));
+
+    expect(await within(candidate).findByText("09:00 出門・約 12:55 回到住宿")).toBeInTheDocument();
+    expect(within(candidate).queryByText(/（停留時間是估計）/)).not.toBeInTheDocument();
+    expect(within(candidate).getByRole("button", { name: "改「地點 a」的停留時間（目前停留 2 小時）" })).toBeInTheDocument();
+    expect(patches).toHaveLength(1);
+    expect(patches[0]!.url).toBe("/api/trips/trip-1/trip-places/a/planning");
+    expect(new Headers(patches[0]!.options?.headers).get("Idempotency-Key")).toBeTruthy();
+    expect(JSON.parse(String(patches[0]!.options?.body))).toEqual({
+      durationMinutes: 120,
+      effortLevel: 2,
+      budgetAmountMinor: 1500,
+      budgetCurrency: "JPY",
+      notes: "早上去",
+      expectedVersion: 3,
+    });
+    expect(onPlaceUpdated).toHaveBeenCalledTimes(1);
+    // The re-read is cache-only: a custom order never carries a transit fetch.
+    const reread = calls.filter((call) => call.url.endsWith("/route")).map((call) => inputOf(call.options)).at(-1);
+    expect(reread).toEqual({ order: "custom", orderedTripPlaceIds: ["a", "b"] });
   });
 });

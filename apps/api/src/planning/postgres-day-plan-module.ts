@@ -26,12 +26,14 @@ import {
 } from "../private-trips/postgres-private-trip-store";
 import type { TripPlaceModule } from "../trip-places/trip-place-module";
 import type { TripSkeletonModule } from "../trip-skeleton/trip-skeleton-module";
-import { buildDayRoute, type DayRouteInput, type RoutePlace } from "./day-route";
+import { computePlanningWindow, estimatedMoveMinutes } from "./day-load";
+import { buildDayRoute, type DayRouteInput, type DayRouteTiming, type RoutePlace } from "./day-route";
 import { orderByCost, routeLength, type GeoPoint } from "./day-route-order";
 import { NavitimeError, type NavitimeProvider } from "./navitime-provider";
 import type { GoogleRoutesProvider } from "./google-routes-provider";
 import { mapTransitLegs, TransitError } from "./transit-batch";
 import { PostgresTransitLegCache, TRANSIT_CACHE_DAYS, transitLegKey } from "./postgres-transit-leg-cache";
+import { buildPlanningSnapshot, PLACE_ESTIMATE_DEFAULTS_V1 } from "./planning-snapshot";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -193,6 +195,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
     tripId: string,
     dayId: string,
     input: CreateDayRouteInput,
+    withTiming: boolean,
   ): Promise<{ input: DayRouteInput; transitProvider: TransitProvider | null; timeZone: string | null }> {
     const order = input?.order;
     if (order !== "current" && order !== "suggested" && order !== "custom") {
@@ -217,13 +220,16 @@ export class PostgresDayPlanModule implements DayPlanModule {
 
     const normalizedDayId = dayId.toLowerCase();
     const beforeVersion = await this.dayVersion(userId, tripId, normalizedDayId);
-    const [skeleton, places, countries] = await Promise.all([
+    const [skeleton, places, countries, snapshot] = await Promise.all([
       this.tripSkeleton.getSkeleton(userId, tripId),
       this.tripPlaces.list(userId, tripId),
       this.navitime?.configured || this.googleRoutes?.configured
         ? this.database.selectFrom("trip_country_stops").select(["id", "country_code", "time_zone"])
           .where("trip_id", "=", tripId).execute()
         : Promise.resolve([]),
+      // The day load's own sources (settings with this day's override, stored AI profiles, fixed items);
+      // reading stored profiles never calls a model.
+      withTiming ? buildPlanningSnapshot(this.database, tripId, { useAi: true }) : Promise.resolve(null),
     ]);
     const version = await this.dayVersion(userId, tripId, normalizedDayId);
     if (version !== beforeVersion) {
@@ -260,6 +266,27 @@ export class PostgresDayPlanModule implements DayPlanModule {
         ?.providerPlaceId ?? null;
       return { place: { ...lodging, providerPlaceId } };
     };
+    const planningDay = snapshot?.input.days.find((entry) => entry.id === normalizedDayId);
+    let timing: DayRouteTiming | undefined;
+    if (snapshot && planningDay) {
+      const caps = planningDay.caps;
+      // The day load's window: settings/override start, pushed past a landing plus its buffer.
+      const planningWindow = computePlanningWindow(planningDay, caps);
+      const start = Temporal.Instant.fromEpochMilliseconds(Math.round(planningWindow.windowStartMinute * 60_000)).toZonedDateTimeISO(planningDay.timeZone);
+      timing = {
+        dayStartMinute: Temporal.PlainDate.from(planningDay.date).until(start.toPlainDate()).days * 1440 + start.hour * 60 + start.minute,
+        fixedMinutes: planningWindow.fixedOccupancyMinutes,
+        stays: new Map(planned.map((place) => {
+          // Stations and airports are transfer points, not visits.
+          if (place.type === "station" || place.type === "airport") return [place.id, { minutes: 0, estimated: false }];
+          const estimate = snapshot.estimates[place.id];
+          return [place.id, estimate
+            ? { minutes: estimate.visitMinutes, estimated: estimate.visitSource !== "member" }
+            : { minutes: place.durationMinutes ?? PLACE_ESTIMATE_DEFAULTS_V1[place.type].visitMinutes, estimated: place.durationMinutes === null }];
+        })),
+        moveMinutes: (metres) => estimatedMoveMinutes(metres, caps),
+      };
+    }
     const routeInput: DayRouteInput = {
       dayId: normalizedDayId,
       date: day.date,
@@ -269,6 +296,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
       ...(order === "custom" ? { orderedIds: requestedIds } : {}),
       morningLodging: lodgingOn(Temporal.PlainDate.from(day.date).subtract({ days: 1 }).toString()),
       nightLodging: lodgingOn(day.date),
+      ...(timing ? { timing } : {}),
     };
     const relevant = dayCountries(skeleton, day.date, countries);
     const routePlaces = order === "custom" ? planned.filter((place) => requested.has(place.id)) : planned;
@@ -287,7 +315,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
   }
 
   async route(userId: string, tripId: string, dayId: string, request: CreateDayRouteInput): Promise<DayRouteDto> {
-    const { input, transitProvider, timeZone } = await this.routeInput(userId, tripId, dayId, request);
+    const { input, transitProvider, timeZone } = await this.routeInput(userId, tripId, dayId, request, true);
     const fallback = { ...buildDayRoute(input), transitProvider, routeShapesAvailable: transitProvider !== null };
     if (!transitProvider || input.order === "current") return fallback;
     const selected = input.order === "custom" ? new Set(input.orderedIds) : null;
@@ -397,7 +425,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
   }
 
   async routeShapes(userId: string, tripId: string, dayId: string, orderedTripPlaceIds: string[]): Promise<DayRouteShapesResponse> {
-    const { input, transitProvider, timeZone } = await this.routeInput(userId, tripId, dayId, { order: "custom", orderedTripPlaceIds });
+    const { input, transitProvider, timeZone } = await this.routeInput(userId, tripId, dayId, { order: "custom", orderedTripPlaceIds }, false);
     if (!transitProvider) throw new AppError("route_shapes_unavailable", "Transit route shapes are unavailable for this day", 422);
     const byId = new Map(input.planned.map((place) => [place.id, place]));
     // Keep the requested adjacency, including unlocated places; never bridge a missing point.

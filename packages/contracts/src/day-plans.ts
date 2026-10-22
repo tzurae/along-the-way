@@ -41,6 +41,12 @@ export interface DayRouteStopDto {
   minutesFromPrevious: number | null;
   /** Empty for a walk-only leg. */
   linesFromPrevious: string[];
+  /** Straight-line move estimate for the leg from the previous point, with the day's planning settings (same formula as day load); null when metersFromPrevious is null. */
+  estimatedMoveMinutesFromPrevious: number | null;
+  /** Minutes spent at this stop: member-entered, else AI or type default; 0 for stations and airports. Null from an older API. */
+  stayMinutes: number | null;
+  /** True when stayMinutes is not member-entered (AI or type default). */
+  stayEstimated: boolean;
 }
 
 export interface DayRouteDto {
@@ -74,6 +80,12 @@ export interface DayRouteDto {
   transitCallsNeeded: number;
   /** Fresh cached minutes cover the matrix; the value is the cache validity window in days. */
   transitCacheDays: number | null;
+  /** Local minutes after midnight the day starts (planning settings with this day's override); null from an older API. */
+  dayStartMinute: number | null;
+  /** Minutes of the day's timed fixed items inside its planning window, as the day load counts them; null from an older API. */
+  fixedMinutes: number | null;
+  /** Straight-line move estimate from the last stop to endsAt; null when metersToEnd is null. */
+  estimatedMoveMinutesToEnd: number | null;
 }
 
 export interface DayRouteResponse {
@@ -159,6 +171,10 @@ function stop(value: unknown): DayRouteStopDto {
     metersFromPrevious: nullableInteger(entry.metersFromPrevious),
     minutesFromPrevious: nullableInteger(entry.minutesFromPrevious ?? null),
     linesFromPrevious: texts(entry.linesFromPrevious ?? []),
+    estimatedMoveMinutesFromPrevious: nullableInteger(entry.estimatedMoveMinutesFromPrevious ?? null),
+    stayMinutes: nullableInteger(entry.stayMinutes ?? null),
+    stayEstimated: entry.stayEstimated === undefined ? false
+      : typeof entry.stayEstimated === "boolean" ? entry.stayEstimated : invalid(),
   };
 }
 
@@ -201,6 +217,9 @@ function route(value: unknown): DayRouteDto {
     totalMinutes: nullableInteger(entry.totalMinutes ?? null),
     transitCallsNeeded: integer(entry.transitCallsNeeded ?? 0),
     transitCacheDays: nullableInteger(entry.transitCacheDays ?? null),
+    dayStartMinute: nullableInteger(entry.dayStartMinute ?? null),
+    fixedMinutes: nullableInteger(entry.fixedMinutes ?? null),
+    estimatedMoveMinutesToEnd: nullableInteger(entry.estimatedMoveMinutesToEnd ?? null),
     transitMatrix: entry.transitMatrix === undefined ? [] : Array.isArray(entry.transitMatrix)
       ? entry.transitMatrix.map((value) => {
         const leg = record(value);
