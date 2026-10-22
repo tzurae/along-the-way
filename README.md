@@ -389,7 +389,17 @@ is the [place-details/photo specification](docs/superpowers/specs/2026-10-09-pla
 日本日程右側先讀七天內的 NAVITIME 逐段快取，足夠時依交通時間排序，不足時先顯示直線建議；
 已知非日本日程且有 server key 時使用 Google Routes，但沒有快取，所以開啟時一律先顯示直線建議。
 左側「已儲存」一直只有直線距離，不顯示交通分鐘，也不查詢或畫出任何供應商的路線。
-不計算停留、營業時間等待、行程容量、行李可行性或實際到站時間表。
+不計算營業時間等待、行程容量、行李可行性或實際到站時間表。
+
+右側候選欄最上方顯示一行「09:00 出門・約 21:30 回到住宿」（沒有當晚住宿時是「約 21:30 結束最後一站」，
+過了午夜是「隔天 00:40」）。算法是 出門時間＋當天固定安排分鐘＋每站停留＋每段移動；每段移動優先用
+dialog 裡已有的 NAVITIME／Google 分鐘，沒有才用直線估計，兩者都沒有時仍顯示「約」並加「（部分路段無法估計）」。
+停留不是成員填的、或有一段用直線估計時，時間後面標「（停留時間是估計）」／「（移動是估計）」／「（停留、移動是估計）」。
+拖曳或移除地點後隨新的 custom 回應即時重算，不呼叫交通供應商。每站顯示「停留約 1 小時 30 分」（成員填的不加「約」），
+車站與機場不顯示停留。可安排行程的人按停留文字可直接改（15–720 分鐘，沿用地點的
+`PATCH /api/trips/:tripId/trip-places/:tripPlaceId/planning`，其他規劃欄位原樣送回），存好後只用 `custom` 重讀
+route，不付費查詢；有權限時旁邊另有「調整這天時間」開啟這天的設定。
+「安排」分頁的每日區塊不再顯示地點／體力／估計總時數負荷條與「超出這天設定」；「全部排行程」仍照原本的負荷檢查。
 
 `POST /api/trips/:tripId/days/:dayId/route` accepts:
 
@@ -461,6 +471,11 @@ shapes 保留已完成的路段、未完成的回 null。矩陣遇第一個失�
 只表示 NAVITIME 這次不用供應商查詢就有完整矩陣；Google 永遠是 null。缺少路段資料時分鐘為 null、線名為空陣列，
 總分鐘也為 null，不把部分時間冒充整天總計。舊回應 parser 預設直線、空 matrix、
 null 分鐘、0 次待查與 null 快取天數。
+回應另含 `dayStartMinute`（這天的出門時間，含當日調整，當地午夜後分鐘）、`fixedMinutes`（與每日負荷相同的固定安排分鐘）、
+每站 `stayMinutes`／`stayEstimated`（成員填的為 false；AI 或類型預設為 true；車站與機場為 0／false）、
+每站 `estimatedMoveMinutesFromPrevious` 與 `estimatedMoveMinutesToEnd`（與每日負荷同一公式：
+`ceil(直線公尺 × 繞路係數 ÷ 速度) + 每段固定分鐘`，該段公尺為 null 時為 null）。舊回應缺這些欄位時 parser 補 null／false，
+前端就不顯示回住宿時間。
 候選順序使用回應 matrix；其兩端座標必須與當前 route 完全相同，不能把同 ID 的舊位置
 分鐘套到新位置。NAVITIME 的 DB 快取 key 依指定規則將座標取小數六位；日程日期不同時不共用。
 儲存後重讀 current 與 cached suggestion，不會自動付費產生建議；左側仍不套用 matrix。

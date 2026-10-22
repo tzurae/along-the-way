@@ -85,6 +85,11 @@ export function formatClockMinutes(minutes: number) {
   return `${Math.floor(minutes / 60).toString().padStart(2, "0")}:${(minutes % 60).toString().padStart(2, "0")}`;
 }
 
+/** Straight-line move estimate for one leg; the day route shows exactly what the day load counts. */
+export function estimatedMoveMinutes(metres: number, caps: Pick<PlannerEffectiveCaps, "detourFactor" | "speedKmh" | "perLegMinutes">) {
+  return Math.ceil(metres * caps.detourFactor / (caps.speedKmh * 1000 / 60)) + caps.perLegMinutes;
+}
+
 /** Explicit input date, never Temporal.Now. 24:00 is midnight on the following date. */
 function localEpochMinute(day: PlannerDaySnapshot, value: string) {
   const minute = clockMinutes(value);
@@ -197,13 +202,12 @@ export function createDayLoadEvaluator(day: PlannerDaySnapshot, distance: Planne
     const legs: PlannerDayLoad["legs"] = [];
     let straightMetres = 0;
     let travelMinutes = 0;
-    const speedMpm = caps.speedKmh * 1000 / 60;
     for (let index = 1; index < route.length; index += 1) {
       const from = route[index - 1]!.end;
       const to = route[index]!.start;
       const metres = distance(from, to);
       if (metres === null) continue;
-      const minutes = Math.ceil(metres * caps.detourFactor / speedMpm) + caps.perLegMinutes;
+      const minutes = estimatedMoveMinutes(metres, caps);
       legs.push({ fromId: from.id, toId: to.id, metres, travelMinutes: minutes });
       straightMetres += metres;
       travelMinutes += minutes;

@@ -24,6 +24,17 @@ export interface DayRouteInput {
   morningLodging: { place: RoutePlace } | null;
   /** Where the day ends: that night's lodging. */
   nightLodging: { place: RoutePlace } | null;
+  /** Planning-derived timing; omitted, every timing field of the DTO is null. */
+  timing?: DayRouteTiming;
+}
+
+export interface DayRouteTiming {
+  dayStartMinute: number;
+  fixedMinutes: number;
+  /** Every planned place's stay. */
+  stays: ReadonlyMap<string, { minutes: number; estimated: boolean }>;
+  /** The day load's straight-line move estimate for rounded metres. */
+  moveMinutes(metres: number): number;
 }
 
 function located(place: RoutePlace): place is RoutePlace & GeoPoint {
@@ -80,11 +91,13 @@ export function buildDayRoute(input: DayRouteInput): DayRouteDto {
   }
   const orderedPlaces = [...orderedLocated, ...unlocated];
 
+  const timing = input.timing;
   const stops = orderedPlaces.map((place, index) => {
     const previous = index === 0 ? morning : orderedPlaces[index - 1]!;
     const metersFromPrevious = previous && located(previous) && located(place)
       ? Math.round(straightLineMeters(previous, place))
       : null;
+    const stay = timing?.stays.get(place.id);
     return {
       tripPlaceId: place.id,
       name: place.name,
@@ -94,6 +107,9 @@ export function buildDayRoute(input: DayRouteInput): DayRouteDto {
       metersFromPrevious,
       minutesFromPrevious: null,
       linesFromPrevious: [],
+      estimatedMoveMinutesFromPrevious: timing && metersFromPrevious !== null ? timing.moveMinutes(metersFromPrevious) : null,
+      stayMinutes: stay?.minutes ?? null,
+      stayEstimated: stay?.estimated ?? false,
     };
   });
   const last = orderedPlaces.at(-1);
@@ -124,5 +140,8 @@ export function buildDayRoute(input: DayRouteInput): DayRouteDto {
     transitMatrix: [],
     transitCallsNeeded: 0,
     transitCacheDays: null,
+    dayStartMinute: timing?.dayStartMinute ?? null,
+    fixedMinutes: timing?.fixedMinutes ?? null,
+    estimatedMoveMinutesToEnd: timing && metersToEnd !== null ? timing.moveMinutes(metersToEnd) : null,
   };
 }

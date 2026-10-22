@@ -28,12 +28,6 @@
 .whole-trip-open svg { width: 17px; height: 17px; }
 .whole-trip-open-note { margin-top: 7px; color: var(--muted-foreground); font-size: 12px; line-height: 1.45; text-align: right; }
 
-.planning-day-summary {
-  display: grid;
-  gap: 10px;
-  margin: 0 2px 12px;
-}
-
 .planning-override-chip {
   display: inline-flex;
   min-height: 32px;
@@ -51,12 +45,7 @@
   line-height: 1.2;
 }
 
-button.planning-override-chip { min-height: 44px; cursor: pointer; }
-button.planning-override-chip:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--foreground); }
-.planning-override-chip[data-status="over"] { border-color: color-mix(in srgb, var(--destructive) 45%, var(--border)); color: var(--destructive); }
-.planning-override-chip svg { width: 15px; height: 15px; flex: none; }
 .whole-trip-open:focus-visible,
-.planning-override-chip:focus-visible,
 .planning-shortcut:has(input:focus-visible),
 .whole-trip-choice:has(input:focus-visible),
 .planning-field-switch:has(input:focus-visible),
@@ -119,7 +108,6 @@ button.planning-override-chip:hover { border-color: color-mix(in srgb, var(--acc
 .planning-load-parts div { display: flex; min-width: 0; justify-content: space-between; gap: 8px; color: var(--muted-foreground); font-size: 11px; line-height: 1.4; }
 .planning-load-parts dd { margin: 0; color: var(--foreground); font-variant-numeric: tabular-nums; font-weight: 700; }
 .planning-load-note { grid-column: 1 / -1; margin: 3px 0 0; color: var(--muted-foreground); font-size: 11px; line-height: 1.45; }
-.planning-load-error { margin: 0; color: var(--destructive); font-size: 12px; line-height: 1.45; }
 
 .planning-override-form { display: grid; gap: 18px; padding-block: 8px 18px; }
 .planning-override-shortcuts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; border: 0; padding: 0; }
