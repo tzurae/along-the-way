@@ -12,7 +12,7 @@ import {
 import { useI18n, type Messages } from "./i18n";
 import { googleMapsCoordinatesUrl, googleMapsDirectionsUrl, googleMapsNavigationUrl } from "./google-maps";
 import { safeExternalUrl } from "./external-url";
-import { dayItems, localDate, parallelItemIds, personalState, tripClock, type TodayDay, type TodayItem, type TodayModel } from "./today-model";
+import { dayItems, dayLodgingAnchors, localDate, parallelItemIds, personalState, tripClock, type TodayDay, type TodayItem, type TodayModel, type TodayPlace } from "./today-model";
 import { readTripLocation } from "./trip-location";
 import { ApiRequestError } from "./api-error";
 import { PlaceDetailContent } from "./PlaceDetailContent";
@@ -157,7 +157,7 @@ function TodayCard({ item, zone, selectedDate, parallel, state, onOpen }: {
   selectedDate: string;
   parallel: boolean;
   state: TimelineState;
-  onOpen(item: TodayItem): void;
+  onOpen(item: TodayItem, triggerKey?: string): void;
 }) {
   const { t } = useI18n();
   const display = itemDisplayOnDay(item, zone, selectedDate);
@@ -193,10 +193,37 @@ function TodayCard({ item, zone, selectedDate, parallel, state, onOpen }: {
   </li>;
 }
 
+/** Where the day starts or ends: a compact row, not a stop; opens the stay's own detail. */
+function TodayLodgingAnchor({ edge, item, place, onOpen }: {
+  edge: "start" | "end";
+  item: TodayItem;
+  place: TodayPlace;
+  onOpen(item: TodayItem, triggerKey?: string): void;
+}) {
+  const { t } = useI18n();
+  const label = edge === "start" ? t.today.lodgingAnchorStart(place.name) : t.today.lodgingAnchorEnd(place.name);
+  const triggerKey = `anchor-${edge}:${item.id}`;
+  return <li className={`today-stop today-anchor is-anchor-${edge}`}>
+    <span className="today-stop-kind" aria-hidden="true"><BedDouble size={16} /></span>
+    <span className="today-stop-track" aria-hidden="true" />
+    <button
+      type="button"
+      className="today-stop-body today-anchor-body"
+      data-today-item-trigger={triggerKey}
+      aria-label={t.today.viewItemDetail(label)}
+      onClick={() => onOpen(item, triggerKey)}
+    >
+      <span>{label}</span>
+      <ChevronRight size={16} aria-hidden="true" />
+    </button>
+  </li>;
+}
+
 type WishlistPlace = TodayDay["wishlist"][number];
 type TimelineEntry =
   | { kind: "fixed"; item: TodayItem; state: TimelineState }
-  | { kind: "place"; place: WishlistPlace; order: number };
+  | { kind: "place"; place: WishlistPlace; order: number }
+  | { kind: "anchor"; edge: "start" | "end"; item: TodayItem; place: TodayPlace };
 
 interface TimelineRouteEnd {
   name: string;
@@ -207,6 +234,7 @@ interface TimelineRouteEnd {
 
 function routeEnd(entry: TimelineEntry, edge: "before" | "after", zone: string | null, selectedDate: string): TimelineRouteEnd | null {
   if (entry.kind === "place") return entry.place;
+  if (entry.kind === "anchor") return { name: entry.place.name, latitude: entry.place.latitude, longitude: entry.place.longitude, providerPlaceId: null };
   const display = itemDisplayOnDay(entry.item, zone, selectedDate);
   let place;
   if (entry.item.type === "flight" || entry.item.type === "transport") {
@@ -232,7 +260,10 @@ function TodayDirectionsLeg({ from, to, zone, selectedDate, controls, alternativ
 }) {
   const origin = routeEnd(from, "after", zone, selectedDate);
   const destination = to ? routeEnd(to, "before", zone, selectedDate) : null;
-  const directions = origin && destination ? googleMapsDirectionsUrl(origin, destination) : null;
+  // Check-in/check-out day: the stay's own card sits next to its anchor; a hotel → hotel leg says nothing.
+  const sameStay = (from.kind === "anchor" || to?.kind === "anchor")
+    && origin?.latitude != null && origin.latitude === destination?.latitude && origin.longitude === destination.longitude;
+  const directions = origin && destination && !sameStay ? googleMapsDirectionsUrl(origin, destination) : null;
   if (!directions && controls.length === 0 && !alternativesPanel) return null;
   return <li className={`today-route-leg${alternativesPanel ? " has-backups" : ""}`}>
     <span aria-hidden="true" />
@@ -530,6 +561,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
   const activitySequence = useRef(0);
   const detailReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const itemReturnPosition = useRef<{ x: number; y: number } | null>(null);
+  const itemReturnTrigger = useRef<string | null>(null);
   const timelineRef = useRef<HTMLElement | null>(null);
   const detailTitleRef = useRef<HTMLHeadingElement>(null);
   const searchSequence = useRef(0);
@@ -692,7 +724,14 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
   if (!day) return <p>{text.empty}</p>;
   const activeDay = day;
   const index = model.days.indexOf(day);
-  const items = dayItems(model, day);
+  const lodgingAnchors = dayLodgingAnchors(model, day.date);
+  // A stay that is only where this day starts/ends (neither check-in nor check-out today) is not a stop.
+  const anchorOnlyIds = new Set([lodgingAnchors.start, lodgingAnchors.end].flatMap((anchor) => {
+    if (!anchor) return [];
+    const display = itemDisplayOnDay(anchor.item, day.timeZone, day.date);
+    return display.startsOnSelectedDay || display.endsOnSelectedDay ? [] : [anchor.item.id];
+  }));
+  const items = dayItems(model, day).filter((item) => !anchorOnlyIds.has(item.id));
   const parallel = parallelItemIds(items);
   const selectedIsToday = clock.phase === "during" && clock.today?.id === day.id;
   const personal = personalState(items, model.memberId, now);
@@ -1096,7 +1135,11 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     .filter((item) => item.end && Date.parse(item.end) <= now)
     .sort((a, b) => Date.parse(a.end!) - Date.parse(b.end!))
     .at(-1) ?? null : null;
-  const navigationOrigin = (leadCurrent ?? previousMemberOrUnknown)?.endpoints.find((endpoint) => endpoint.role === "end")?.place ?? null;
+  // Before anything is current or has ended, the day starts from last night's stay.
+  const originItem = leadCurrent ?? previousMemberOrUnknown;
+  const navigationOrigin = originItem
+    ? originItem.endpoints.find((endpoint) => endpoint.role === "end")?.place ?? null
+    : lodgingAnchors.start?.place ?? null;
   const routeCopy = navigationItem
     ? navigationPlace
       ? navigationOrigin ? text.route(navigationOrigin.name, navigationPlace.name) : text.destinationCopy(navigationPlace.name)
@@ -1137,7 +1180,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     }).format(new Date(displayedInstant)));
     return hour < 12 ? [item.id] : [];
   }));
-  const timelineEntries: TimelineEntry[] = [
+  const stopEntries: TimelineEntry[] = [
     ...fixedByDisplayTime
       .filter(({ item }) => morningFixedIds.has(item.id))
       .map(({ item }) => ({ kind: "fixed" as const, item, state: stateById[item.id] ?? "later" })),
@@ -1146,20 +1189,28 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
       .filter(({ item }) => !morningFixedIds.has(item.id))
       .map(({ item }) => ({ kind: "fixed" as const, item, state: stateById[item.id] ?? "later" })),
   ];
+  // Anchors frame the day's stops; a day without stops stays empty rather than hotel → hotel.
+  const timelineEntries: TimelineEntry[] = stopEntries.length ? [
+    ...(lodgingAnchors.start ? [{ kind: "anchor" as const, edge: "start" as const, ...lodgingAnchors.start }] : []),
+    ...stopEntries,
+    ...(lodgingAnchors.end ? [{ kind: "anchor" as const, edge: "end" as const, ...lodgingAnchors.end }] : []),
+  ] : [];
   const selectedItem = selectedItemId
     ? model.items.find((item) => item.id === selectedItemId) ?? null
     : null;
-  function openItem(item: TodayItem) {
+  function openItem(item: TodayItem, triggerKey = item.id) {
     itemReturnPosition.current = { x: window.scrollX, y: window.scrollY };
+    itemReturnTrigger.current = triggerKey;
     setSelectedItemId(item.id);
   }
   function closeItem() {
-    const id = selectedItemId;
+    const trigger = itemReturnTrigger.current;
     const position = itemReturnPosition.current;
     setSelectedItemId(null);
     itemReturnPosition.current = null;
+    itemReturnTrigger.current = null;
     window.requestAnimationFrame(() => {
-      if (id) document.querySelector<HTMLElement>(`[data-today-item-trigger="${id}"]`)?.focus({ preventScroll: true });
+      if (trigger) document.querySelector<HTMLElement>(`[data-today-item-trigger="${CSS.escape(trigger)}"]`)?.focus({ preventScroll: true });
       if (position) window.scrollTo({ left: position.x, top: position.y, behavior: "instant" });
     });
   }
@@ -1192,10 +1243,11 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
   const selectedItemDay = selectedItem
     ? (day.itemIds.includes(selectedItem.id) ? day : model.days.find((entry) => entry.itemIds.includes(selectedItem.id)) ?? day)
     : day;
+  // Same stop set as the cards: a stay that only frames this day is not 並行 with its stops.
   const selectedItemParallel = selectedItem
-    ? parallelItemIds(dayItems(model, selectedItemDay)).has(selectedItem.id)
+    ? selectedItemDay === day ? parallel.has(selectedItem.id) : parallelItemIds(dayItems(model, selectedItemDay)).has(selectedItem.id)
     : false;
-  const emptyDay = timelineEntries.length === 0;
+  const emptyDay = stopEntries.length === 0;
   // 「今天玩法」 only for the trip's actual today; any other day reads 「這天玩法」.
   const dayPlanTitle = selectedIsToday ? text.dayPlanTitle : text.otherDayPlanTitle;
   const operationErrorHasRow = operationError
@@ -1255,14 +1307,14 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
           <div className="today-sectionhead">
             <h3>{clock.phase === "before" && index === 0 ? text.firstDayPlan : text.timeline}</h3>
             <div className="today-sectionhead-actions">
-              <span>{text.itemCount(timelineEntries.length)}</span>
+              <span>{text.itemCount(stopEntries.length)}</span>
               {day.wishlist.length && canArrange && onArrangeDay && !offline ? <button type="button" className="today-adjust-order" onClick={() => onArrangeDay(day.date)}><ListOrdered size={15} aria-hidden="true" />{text.adjustOrder}</button> : null}
             </div>
           </div>
           {pastItems.length ? <div className="today-past-label"><Clock3 size={15} aria-hidden="true" />{text.elapsedItems(pastItems.length)}</div> : null}
           <ol className="today-timeline-list">{timelineEntries.map((entry, entryIndex) => {
             const next = timelineEntries[entryIndex + 1] ?? null;
-            const key = entry.kind === "fixed" ? `fixed:${entry.item.id}` : `place:${entry.place.id}`;
+            const key = entry.kind === "place" ? `place:${entry.place.id}` : entry.kind === "anchor" ? `anchor-${entry.edge}:${entry.item.id}` : `fixed:${entry.item.id}`;
             const place = entry.kind === "place" ? entry.place : null;
             const alternativesOpen = Boolean(place && alternatives?.stopTripPlaceId === place.id);
             const canChooseAlternative = Boolean(
@@ -1319,19 +1371,21 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
             return <Fragment key={key}>
               {entry.kind === "fixed"
                 ? <TodayCard item={entry.item} zone={day.timeZone} selectedDate={day.date} parallel={parallel.has(entry.item.id)} state={entry.state} onOpen={openItem} />
-                : <TodayPlaceCard
-                  place={entry.place}
-                  order={entry.order}
-                  date={day.date}
-                  preview={wishlistPreviews.previews.get(entry.place.id)}
-                  previewsLoading={wishlistPreviews.loading}
-                  openPlace={openPlace}
-                  canManage={canManageAlternatives}
-                  undoingReplacementId={undoingReplacementId}
-                  operationError={operationMessage}
-                  alternativesOpen={alternativesOpen}
-                  undo={(currentPlace) => void undoReplacement(currentPlace)}
-                />}
+                : entry.kind === "anchor"
+                  ? <TodayLodgingAnchor edge={entry.edge} item={entry.item} place={entry.place} onOpen={openItem} />
+                  : <TodayPlaceCard
+                    place={entry.place}
+                    order={entry.order}
+                    date={day.date}
+                    preview={wishlistPreviews.previews.get(entry.place.id)}
+                    previewsLoading={wishlistPreviews.loading}
+                    openPlace={openPlace}
+                    canManage={canManageAlternatives}
+                    undoingReplacementId={undoingReplacementId}
+                    operationError={operationMessage}
+                    alternativesOpen={alternativesOpen}
+                    undo={(currentPlace) => void undoReplacement(currentPlace)}
+                  />}
               <TodayDirectionsLeg
                 from={entry}
                 to={next}
