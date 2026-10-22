@@ -26,6 +26,8 @@ import { DefaultGoogleUsageModule } from "./admin/google-usage-module";
 import { OpenAiPlaceGuideModel } from "./place-guides/openai-place-guide-model";
 import { PlaceGuideSourceFetcher } from "./place-guides/place-guide-sources";
 import { PostgresPlaceGuideModule } from "./place-guides/postgres-place-guide-module";
+import { OpenAiNearbyActivityModel } from "./nearby-activities/openai-nearby-activity-model";
+import { PostgresNearbyActivityModule } from "./nearby-activities/postgres-nearby-activity-module";
 import packageJson from "../../../package.json";
 
 function requireSetting(name: string) {
@@ -128,6 +130,13 @@ const app = createApp({
   googleUsage,
   identityAccess,
   mapsConfig,
+  nearbyActivities: new PostgresNearbyActivityModule({
+    database,
+    model: new OpenAiNearbyActivityModel({
+      apiKey: process.env.OPENAI_API_KEY,
+      model: process.env.OPENAI_MODEL,
+    }),
+  }),
   placeDetails: new PostgresPlaceDetailModule({
     database,
     assetRoot: packagedPhotoRoot,

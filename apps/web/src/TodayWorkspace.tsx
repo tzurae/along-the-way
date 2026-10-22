@@ -1,8 +1,10 @@
 import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowLeft, ArrowRight, BedDouble, BellRing, CalendarDays, ChevronRight, CircleDot, Clock3, ExternalLink, GitFork, ImageOff, ListOrdered, LoaderCircle, Lock, MapPin, Navigation, Plane, TriangleAlert, Users, WifiOff } from "lucide-react";
+import { ArrowLeft, ArrowRight, BedDouble, BellRing, CalendarDays, ChevronRight, CircleDot, Clock3, ExternalLink, GitFork, ImageOff, ListOrdered, LoaderCircle, Lock, MapPin, Navigation, Plane, Sparkles, TriangleAlert, Users, WifiOff } from "lucide-react";
 import {
+  parseNearbyActivitiesResponse,
   parseNearbyAlternativesResponse,
   parseTripPlaceListResponse,
+  type NearbyActivitiesResponse,
   type NearbyAlternativeDto,
   type NearbyAlternativesResponse,
   type TripPlaceListResponse,
@@ -16,7 +18,9 @@ import { ApiRequestError } from "./api-error";
 import { PlaceDetailContent } from "./PlaceDetailContent";
 import { PlacePhotoCredit, PlaceThumbnail, usePlacePreviews, type PlaceDetailRequest, type PlaceDetailRequestOptions, type PlacePreviewValue } from "./PlaceThumbnail";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
+import { ClampedText } from "./ClampedText";
 import { TodayPlaceGuide, type TodayPlaceGuideReference } from "./TodayPlaceGuide";
+import { NearbyActivitiesContent, type NearbyActivitiesState } from "./TodayNearbyActivities";
 import { NativeSelect } from "./components/ui/native-select";
 import { placeTypeLabels } from "./locales/zh-TW/place-types";
 
@@ -217,18 +221,19 @@ function routeEnd(entry: TimelineEntry, edge: "before" | "after", zone: string |
   return place ? { name: place.name, latitude: place.latitude, longitude: place.longitude, providerPlaceId: null } : null;
 }
 
-function TodayDirectionsLeg({ from, to, zone, selectedDate, alternativeControl, alternativesPanel }: {
+/** Each stop's quiet actions (備案, 附近活動) share the leg row under it, after the Maps link. */
+function TodayDirectionsLeg({ from, to, zone, selectedDate, controls, alternativesPanel }: {
   from: TimelineEntry;
   to: TimelineEntry | null;
   zone: string | null;
   selectedDate: string;
-  alternativeControl?: ReactNode;
+  controls: Array<{ key: string; node: ReactNode }>;
   alternativesPanel?: ReactNode;
 }) {
   const origin = routeEnd(from, "after", zone, selectedDate);
   const destination = to ? routeEnd(to, "before", zone, selectedDate) : null;
   const directions = origin && destination ? googleMapsDirectionsUrl(origin, destination) : null;
-  if (!directions && !alternativeControl && !alternativesPanel) return null;
+  if (!directions && controls.length === 0 && !alternativesPanel) return null;
   return <li className={`today-route-leg${alternativesPanel ? " has-backups" : ""}`}>
     <span aria-hidden="true" />
     <span className="today-route-leg-track" aria-hidden="true" />
@@ -242,8 +247,10 @@ function TodayDirectionsLeg({ from, to, zone, selectedDate, alternativeControl, 
       >
         <MapPin aria-hidden="true" /> Google Maps
       </a> : null}
-      {directions && alternativeControl ? <span className="today-route-leg-separator" aria-hidden="true">·</span> : null}
-      {alternativeControl}
+      {controls.map((control, controlIndex) => <Fragment key={control.key}>
+        {directions || controlIndex > 0 ? <span className="today-route-leg-separator" aria-hidden="true">·</span> : null}
+        {control.node}
+      </Fragment>)}
     </span>
     {alternativesPanel ? <div className="today-route-leg-backups">{alternativesPanel}</div> : null}
   </li>;
@@ -519,6 +526,8 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
   const [busyProviderPlaceId, setBusyProviderPlaceId] = useState<string | null>(null);
   const [undoingReplacementId, setUndoingReplacementId] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<{ stopTripPlaceId: string; message: string } | null>(null);
+  const [activities, setActivities] = useState<NearbyActivitiesState | null>(null);
+  const activitySequence = useRef(0);
   const detailReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const itemReturnPosition = useRef<{ x: number; y: number } | null>(null);
   const timelineRef = useRef<HTMLElement | null>(null);
@@ -558,6 +567,8 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     setAlternatives(null);
     setSelectedCandidate(null);
     setOperationError(null);
+    activitySequence.current += 1;
+    setActivities(null);
   }, [model.tripId, day?.id]);
   useEffect(() => {
     if (!alternatives || !day || day.wishlist.some((place) => place.id === alternatives.stopTripPlaceId)) return;
@@ -710,6 +721,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     }
   }
   const canManageAlternatives = Boolean(request && onChanged && canArrange && !offline);
+  const canSeeActivities = Boolean(request && !offline);
   function focusTripPlace(tripPlaceId: string) {
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
@@ -780,6 +792,50 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     setAlternatives(null);
     setSelectedCandidate(null);
     setOperationError(null);
+  }
+
+  /** View only, so any member may look; one request per tap, dropped if the day changed meanwhile. */
+  async function findActivities(place: WishlistPlace) {
+    if (!request || !canSeeActivities || place.latitude === null || place.longitude === null) return;
+    const sequence = ++activitySequence.current;
+    const requestDayKey = visibleDayKey.current;
+    const base = {
+      dayId: activeDay.id,
+      date: activeDay.date,
+      stopTripPlaceId: place.id,
+      stopName: place.name,
+      triggerKey: stopTriggerKey(place.id),
+    };
+    setActivities({ ...base, phase: "loading", response: null, error: null });
+    try {
+      const response = await request<NearbyActivitiesResponse>(
+        `/api/trips/${model.tripId}/days/${activeDay.id}/trip-places/${place.id}/nearby-activities`,
+        { method: "POST", parse: parseNearbyActivitiesResponse },
+      );
+      if (activitySequence.current !== sequence
+        || visibleDayKey.current !== requestDayKey
+        || response.stopTripPlaceId !== place.id) return;
+      setActivities({ ...base, phase: "ready", response, error: null });
+    } catch (reason) {
+      if (activitySequence.current !== sequence || visibleDayKey.current !== requestDayKey) return;
+      setActivities({
+        ...base,
+        phase: "error",
+        response: null,
+        error: reason instanceof ApiRequestError && reason.code === "rate_limited" ? "quota" : "unavailable",
+      });
+    }
+  }
+
+  function closeActivities() {
+    const triggerKey = activities?.triggerKey;
+    activitySequence.current += 1;
+    setActivities(null);
+    if (triggerKey) {
+      window.requestAnimationFrame(() => {
+        document.querySelector<HTMLElement>(`[data-today-activities-trigger="${triggerKey}"]`)?.focus({ preventScroll: true });
+      });
+    }
   }
 
   function openCandidate(candidate: NearbyAlternativeDto) {
@@ -1108,11 +1164,12 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     });
   }
 
+  const datedTitle = day.title ? `${formattedDay}・${day.title}` : formattedDay;
   const heading = clock.phase === "before"
     ? text.departureBefore
-    : selectedIsToday ? `${text.title}・${formattedDay}` : formattedDay;
+    : selectedIsToday ? `${text.title}・${datedTitle}` : datedTitle;
   const headingContext = clock.phase === "before"
-    ? `${text.before(clock.daysUntil)}・${formattedDay}`
+    ? `${text.before(clock.daysUntil)}・${datedTitle}`
     : day.timeZone ? `${text.localTime(day.timeZone)}・${text.version(model.tripVersion)}` : `${text.zoneUnknown}・${text.version(model.tripVersion)}`;
   const leadLabel = clock.phase === "before"
     ? text.departureBefore
@@ -1139,6 +1196,8 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     ? parallelItemIds(dayItems(model, selectedItemDay)).has(selectedItem.id)
     : false;
   const emptyDay = timelineEntries.length === 0;
+  // 「今天玩法」 only for the trip's actual today; any other day reads 「這天玩法」.
+  const dayPlanTitle = selectedIsToday ? text.dayPlanTitle : text.otherDayPlanTitle;
   const operationErrorHasRow = operationError
     ? day.wishlist.some((place) => place.id === operationError.stopTripPlaceId)
     : false;
@@ -1162,7 +1221,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     </header>
     {offline ? <aside className="today-notice" role="status"><WifiOff size={20} /><div><strong>{text.offline}</strong><p>{text.offlineHelp}</p><small>{text.fetchedAt(snapshotTime)}</small></div></aside> : null}
     {!persisted ? <p className="today-notice" role="status">{text.storageUnavailable}</p> : null}
-    <div className={`today-grid${emptyDay ? " is-empty" : ""}${reminderLines.length ? " has-reminder" : ""}`}>
+    <div className={`today-grid${emptyDay ? " is-empty" : ""}${reminderLines.length ? " has-reminder" : ""}${day.note ? " has-dayplan" : ""}`}>
       {!emptyDay ? (
       <section className="today-lead" aria-label={leadLabel}>
         <div className="today-lead-label">{clock.phase === "before" || !selectedIsToday ? <CalendarDays size={16} /> : leadCurrent ? <CircleDot size={16} /> : <MapPin size={16} />}{leadLabel}</div>
@@ -1186,6 +1245,10 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
         <span className="today-reminder-icon" aria-hidden="true"><BellRing size={17} /></span>
         <ul>{reminderLines.map((line) => <li key={line.key} className={line.emphasis ? "is-emphasis" : undefined}>{line.copy}</li>)}</ul>
       </aside> : null}
+      {day.note ? <section className="today-dayplan" aria-label={dayPlanTitle}>
+        <h3>{dayPlanTitle}</h3>
+        <ClampedText key={day.id} text={day.note} lines={2} expandLabel={text.expandDayPlan} collapseLabel={text.collapseDayPlan} />
+      </section> : null}
       <section ref={timelineRef} className="today-timeline" aria-label={text.group} tabIndex={-1}>
         {!operationErrorHasRow && operationError ? <p className="today-backups__operation-error today-backups__operation-error--global" role="alert">{operationError.message}</p> : null}
         {timelineEntries.length ? <>
@@ -1238,6 +1301,21 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
               openCandidate={openCandidate}
               swap={(candidate) => void swapAlternative(candidate)}
             /> : null;
+            const activityControl = place && canSeeActivities && place.latitude !== null && place.longitude !== null ? <button
+              type="button"
+              className="today-route-backup-trigger"
+              aria-label={text.nearbyActivities.open(place.name)}
+              aria-haspopup="dialog"
+              data-today-activities-trigger={stopTriggerKey(place.id)}
+              onClick={() => void findActivities(place)}
+            >
+              <Sparkles size={11} aria-hidden="true" />
+              <span>{text.nearbyActivities.trigger}</span>
+            </button> : null;
+            const legControls = [
+              ...(alternativeControl ? [{ key: "backups", node: alternativeControl }] : []),
+              ...(activityControl ? [{ key: "activities", node: activityControl }] : []),
+            ];
             return <Fragment key={key}>
               {entry.kind === "fixed"
                 ? <TodayCard item={entry.item} zone={day.timeZone} selectedDate={day.date} parallel={parallel.has(entry.item.id)} state={entry.state} onOpen={openItem} />
@@ -1259,7 +1337,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
                 to={next}
                 zone={day.timeZone}
                 selectedDate={day.date}
-                alternativeControl={alternativeControl}
+                controls={legControls}
                 alternativesPanel={alternativesPanel}
               />
             </Fragment>;
@@ -1278,7 +1356,7 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     <p className="today-last-sync">{text.syncedAt(snapshotTime)}</p>
     <PlaceDetailSheet
       appearance="workspace"
-      open={Boolean(selectedItem) && !selectedDetail && !selectedCandidate}
+      open={Boolean(selectedItem) && !selectedDetail && !selectedCandidate && !activities}
       title={selectedItem?.title ?? ""}
       onClose={closeItem}
     >
@@ -1299,6 +1377,22 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
       footer={candidateFooter}
     >
       {candidateDetail}
+    </PlaceDetailSheet>
+    <PlaceDetailSheet
+      appearance="workspace"
+      open={Boolean(activities)}
+      title={activities ? text.nearbyActivities.title(activities.stopName) : ""}
+      onClose={closeActivities}
+    >
+      {activities ? <NearbyActivitiesContent
+        state={activities}
+        timeZone={day.timeZone}
+        todayDate={clock.phase === "during" ? clock.today?.date ?? null : null}
+        retry={() => {
+          const place = day.wishlist.find((entry) => entry.id === activities.stopTripPlaceId);
+          if (place) void findActivities(place);
+        }}
+      /> : null}
     </PlaceDetailSheet>
   </section>;
 }

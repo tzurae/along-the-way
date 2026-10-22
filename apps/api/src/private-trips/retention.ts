@@ -5,6 +5,8 @@ import { rateLimitRetentionRules } from "./postgres-rate-limiter";
 
 const RETENTION_WORKER = "security_retention";
 const RUN_INTERVAL_MS = 60 * 60 * 1_000;
+/** A 附近活動 answer is reused for the rest of its local day; two days covers every time zone. */
+const NEARBY_ACTIVITY_RETENTION_MS = 2 * 24 * 60 * 60 * 1_000;
 const MUTATION_REPLAY_MS = 7 * 24 * 60 * 60 * 1_000;
 
 /** Periodic deletion for bounded replay data and rate counters; one database row gates all workers. */
@@ -39,6 +41,10 @@ export class PostgresRetention {
         .execute();
       await transaction.deleteFrom("whole_trip_plan_proposals")
         .where("expires_at", "<=", now)
+        .execute();
+      // A 附近活動 answer from a past day is never served again.
+      await transaction.deleteFrom("nearby_activity_results")
+        .where("fetched_at", "<=", new Date(now.valueOf() - NEARBY_ACTIVITY_RETENTION_MS))
         .execute();
       for (const rule of rateLimitRetentionRules()) {
         await transaction.deleteFrom("rate_limit_windows")

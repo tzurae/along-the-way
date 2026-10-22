@@ -102,6 +102,8 @@ export const tripSkeleton = {
   dayNoteField: "玩法筆記",
   dayNotePlaceholder: "例如：早上先去伏見稻荷避開人潮，中午在錦市場邊走邊吃。",
   dayNoteLabel: "這天的玩法筆記",
+  expandDayNote: "展開全文",
+  collapseDayNote: "收起",
   saveDayDetails: "儲存",
   savingDayDetails: "儲存中…",
   cancelDayDetails: "取消",

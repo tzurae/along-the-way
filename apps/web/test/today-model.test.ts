@@ -11,8 +11,8 @@ const a = activity("A", "甲", "2026-10-21T01:00:00Z", "2026-10-21T03:00:00Z");
 const b = activity("B", "乙", "2026-10-21T02:00:00Z", "2026-10-21T04:00:00Z");
 const later = activity("C", "甲", "2026-10-21T05:00:00Z", "2026-10-21T06:00:00Z");
 const model: TodayModel = { tripId: "trip", tripName: "Trip", tripVersion: 1, memberId: "甲", items: [b, later, a], days: [
-  { id: "d1", date: "2026-10-21", timeZone: "Asia/Tokyo", itemIds: ["B", "C", "A"], wishlist: [] },
-  { id: "d2", date: "2026-10-22", timeZone: "Asia/Tokyo", itemIds: [], wishlist: [] },
+  { id: "d1", date: "2026-10-21", title: null, note: null, timeZone: "Asia/Tokyo", itemIds: ["B", "C", "A"], wishlist: [] },
+  { id: "d2", date: "2026-10-22", title: null, note: null, timeZone: "Asia/Tokyo", itemIds: [], wishlist: [] },
 ] };
 
 describe("Today uses each trip day's zone and the device clock only as an instant", () => {
