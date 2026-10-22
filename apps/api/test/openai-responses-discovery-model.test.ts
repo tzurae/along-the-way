@@ -376,7 +376,7 @@ describe("OpenAI Responses discovery model", () => {
       expect(developer).toContain("the traveler's current phone position");
       expect(JSON.parse(user).searchCenter).toEqual({
         is: "the traveler's current phone position", label: null, latitude: 35.004, longitude: 135.768,
-        nearby: "within about 2 km walking distance",
+        travel: null, limitMeters: null, rule: null, nearby: "within about 2 km walking distance",
       });
     }
     expect(JSON.parse(research!.user).discovered[0].distancesMeters).toEqual([300, 2_500, null, 9_000, 9_100, 12_000]);

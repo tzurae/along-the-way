@@ -315,11 +315,15 @@ describe("Today Google Maps legs", () => {
 
     const queries = directionQueries(renderToday(todayModel([day], [checkout, checkin]), day.date));
 
-    expect(queries).toHaveLength(2);
-    expect(queries[0]!.get("origin")).toBe("71,71");
-    expect(queries[0]!.get("destination")).toBe("1,1");
-    expect(queries[1]!.get("origin")).toBe("1,1");
-    expect(queries[1]!.get("destination")).toBe("72,72");
+    // The day starts at last night's stay (its check-in place) and ends at tonight's; the
+    // check-in → tonight's anchor leg is the same hotel, so it has no directions.
+    expect(queries).toHaveLength(3);
+    expect(queries[0]!.get("origin")).toBe("70,70");
+    expect(queries[0]!.get("destination")).toBe("71,71");
+    expect(queries[1]!.get("origin")).toBe("71,71");
+    expect(queries[1]!.get("destination")).toBe("1,1");
+    expect(queries[2]!.get("origin")).toBe("1,1");
+    expect(queries[2]!.get("destination")).toBe("72,72");
   });
 
   it("does not create a directions badge across an adjacent place without coordinates", () => {
