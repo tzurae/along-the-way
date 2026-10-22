@@ -92,6 +92,8 @@ export const tripSkeleton = {
   checkIn: "入住",
   checkOut: "退房",
   staying: "續住",
+  lodgingAnchorStart: (name: string) => `從住宿出發・${name}`,
+  lodgingAnchorEnd: (name: string) => `回到住宿・${name}`,
   unlocatedLodgingNotice: (name: string) => `住宿「${name}」沒有地圖位置，順路距離不會包含這間住宿。`,
   locateLodging: "去補上住宿位置",
   arrangeThisDay: "安排這一天",
