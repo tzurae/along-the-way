@@ -809,8 +809,9 @@ Owner decision 2026-10-22: 「AI 建議先用手機目前定位（要授權）�
   calls that area exactly 「附近」 and no model may write the coordinates or a place inferred from
   them into the stored plan, checklist or sentences, which every member sees. Every other rule
   (cited sources, zh-TW, Places verification) is unchanged.
-- The clarification and research start responses return `searchCenter: { source, label } | null`
-  (label: the lodging's name; never coordinates) for the member who sent them; every other read
+- The clarification and research start responses return `searchCenter: { source, label, position } | null`
+  (label: the lodging's name; position: the lodging's coordinates, a trip place every member already
+  sees, and `null` for the device — the phone position is never echoed) for the member who sent them; every other read
   returns `null`. A replayed research request reports the job it queued (its stored position while
   active, else none), not the retry's position. The web shows one line, under the checklist it
   belongs to and on that member's own job: 「以你目前位置附近搜尋」 or 「以今晚住宿「{name}」附近搜尋」.
@@ -819,6 +820,36 @@ Owner decision 2026-10-22: 「AI 建議先用手機目前定位（要授權）�
   failure and the stale-job sweep set it to NULL, like `client_ip`. Coordinates are never logged
   (`discovery_run_timing` logs only `searchCenter: "device" | "lodging" | null`). The lodging
   center is recomputed from itinerary data and never stored.
+
+### 交通方式・時間 (migration 048)
+
+Owner rule 2026-10-22: 「當用戶問附近要做什麼之類的要求時，一定要反問目前交通工具，然後時間是 5 分鐘以內、6–10 分鐘、15 分鐘以內，或以上都可以。」
+
+- Whenever 調查 has a search center (device or lodging), the dialog shows two required chip
+  questions above the AI checklist — 交通方式「步行・大眾運輸・計程車／開車」 and 時間「5 分鐘以內・6–10
+  分鐘・15 分鐘以內・都可以」 — even when the AI asks nothing. They are fixed UI, not model
+  questions; the checklist model is told never to ask about transport, travel time or distance when
+  a center exists. 「開始找地點」 stays disabled until both are picked. Nothing is preselected the
+  first time; the last pick is kept in `localStorage` (`along-the-way:discovery-reach:{accountId}:{tripId}`,
+  cleared on logout) and preselected next time. When the page does not know this brief's center (a
+  reload, or a checklist another member started) it asks `POST /discovery/clarification` again (no
+  model call for an existing checklist) and shows the chips before research.
+- `POST /discovery/research` takes `reach: { mode: "walk" | "transit" | "taxi", maxMinutes: 5 | 10 | 15 | null }`
+  (`null` = 都可以). Anything else is `400 validation_error`; a start with a center and no `reach` is
+  `409 reach_required`. `discovery_jobs.reach` (expand-only nullable jsonb with a CHECK) keeps the
+  two enum values with the job; they are not personal data, so they are not cleared at job end.
+  `discovery_run_timing` logs `reachMode`, `reachMaxMinutes` and `droppedTooFar` (a count).
+- `DISCOVERY_REACH_METERS_PER_MINUTE` (contracts) is an ESTIMATE of straight-line meters per minute:
+  walk 60, transit 185, taxi 250. 5/10/15 minutes allow walk 300/600/900 m, transit 925/1850/2775 m,
+  taxi 1250/2500/3750 m from the center. That radius replaces the 2000 m `locationBias.circle` and
+  is written into the research prompt (「只推薦從中心點出發，{交通方式}約 N 分鐘內可到的地方」). 都可以
+  keeps the 2 km bias and no limit.
+- Hard filter: after verification, every proposal farther than the radius (or without coordinates)
+  is dropped before saving. No shortfall code means "too far", so only the count is logged.
+- Each new row of the member's own job shows 「直線 X m・{交通方式}約 N 分鐘（估計）」, N =
+  ceil(X ÷ speed). The page computes it from the position it sent (or the lodging's position);
+  nothing distance-related is stored, so the line is gone after a reload and other members never
+  see it — per-place distances from the phone would let anyone recover its position.
 
 ## AI proposal confidence and rejection wording (Issue #78)
 

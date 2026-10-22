@@ -239,6 +239,45 @@ export interface DiscoverySearchCenterDto {
   source: "device" | "lodging";
   /** The lodging's name; null for the device position. */
   label: string | null;
+  /**
+   * The lodging's map position (a trip place every member already sees), so the requesting phone
+   * can show each result's distance from it. Null for the device: the phone knows its own.
+   */
+  position: DiscoveryNearInput | null;
+}
+
+/** How the traveler gets around from the search center (調查 asks before research). */
+export type DiscoveryReachMode = "walk" | "transit" | "taxi";
+export const DISCOVERY_REACH_MODES: readonly DiscoveryReachMode[] = ["walk", "transit", "taxi"];
+/** Upper bound of 「5 分鐘以內」「6–10 分鐘」「15 分鐘以內」; null is 「都可以」. */
+export type DiscoveryReachMinutes = 5 | 10 | 15;
+export const DISCOVERY_REACH_MINUTES: readonly DiscoveryReachMinutes[] = [5, 10, 15];
+
+export interface DiscoveryReachInput {
+  mode: DiscoveryReachMode;
+  /** null: no time limit (the search keeps its usual ~2 km bias and no distance filter). */
+  maxMinutes: DiscoveryReachMinutes | null;
+}
+
+/**
+ * Straight-line meters covered per minute: an ESTIMATE, not a route time. Walking ~3.6 km/h of
+ * map distance; transit and taxi include waiting and street detours. 5/10/15 minutes therefore
+ * mean walk 300/600/900 m, transit 925/1850/2775 m, taxi 1250/2500/3750 m from the center.
+ */
+export const DISCOVERY_REACH_METERS_PER_MINUTE: Readonly<Record<DiscoveryReachMode, number>> = {
+  walk: 60,
+  transit: 185,
+  taxi: 250,
+};
+
+/** The straight-line radius a reach allows; null when the traveler chose 「都可以」. */
+export function discoveryReachRadiusMeters(reach: DiscoveryReachInput): number | null {
+  return reach.maxMinutes === null ? null : reach.maxMinutes * DISCOVERY_REACH_METERS_PER_MINUTE[reach.mode];
+}
+
+/** Estimated minutes for a straight-line distance by this mode, rounded up. */
+export function discoveryReachEstimatedMinutes(mode: DiscoveryReachMode, meters: number) {
+  return Math.max(1, Math.ceil(meters / DISCOVERY_REACH_METERS_PER_MINUTE[mode]));
 }
 
 export interface DiscoveryWorkspaceResponse {
@@ -263,6 +302,8 @@ export interface AnswerDiscoveryClarificationInput {
 export interface StartDiscoveryResearchInput {
   expectedBriefVersion: number;
   near?: DiscoveryNearInput | null;
+  /** Required whenever the server finds a search center (phone position or tonight's lodging). */
+  reach?: DiscoveryReachInput | null;
 }
 
 export interface DecideCandidateProposalInput {
@@ -515,7 +556,15 @@ export function parseDiscoveryWorkspaceResponse(value: unknown): DiscoveryWorksp
 function searchCenter(value: unknown): DiscoverySearchCenterDto {
   const item = record(value);
   if (item.source !== "device" && item.source !== "lodging") invalid();
-  return { source: item.source, label: nullableText(item.label) };
+  // Responses from before the position existed carry none.
+  const position = item.position == null ? null : record(item.position);
+  return {
+    source: item.source,
+    label: nullableText(item.label),
+    position: position && typeof position.latitude === "number" && Number.isFinite(position.latitude)
+      && typeof position.longitude === "number" && Number.isFinite(position.longitude)
+      ? { latitude: position.latitude, longitude: position.longitude } : null,
+  };
 }
 
 const CLARIFY_VERDICTS: readonly DiscoveryClarifyVerdict[] = ["sufficient", "insufficient", "unreasonable", "unknown"];

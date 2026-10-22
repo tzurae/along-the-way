@@ -14,7 +14,8 @@ export function routeLegKey(fromId: string, toId: string) {
   return `${fromId}:${toId}`;
 }
 
-function straightLineMeters(from: CoordinatePoint, to: CoordinatePoint) {
+/** Great-circle (haversine) distance in meters. */
+export function straightLineMeters(from: CoordinatePoint, to: CoordinatePoint) {
   const toRadians = Math.PI / 180;
   const latitudeDelta = (to.latitude - from.latitude) * toRadians;
   const longitudeDelta = (to.longitude - from.longitude) * toRadians;

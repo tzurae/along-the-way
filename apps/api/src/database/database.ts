@@ -298,6 +298,8 @@ export interface DiscoveryJobTable {
   client_ip: string | null;
   /** The member's phone position ({ latitude, longitude }); only while the job is queued or running. */
   near: unknown;
+  /** DiscoveryReachInput ({ mode, maxMinutes }) the member chose; null without a search center. */
+  reach: unknown;
   status: "queued" | "running" | "succeeded" | "failed";
   stage: "plan" | "discover" | "research" | "verify" | "save" | "photos" | null;
   /** Record<stage, { state, startedAt, endedAt, counts? }> */

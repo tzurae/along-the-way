@@ -8,6 +8,7 @@ export const discovery = {
     researchUnavailable: (services: string) => `無法進行 AI 研究：此伺服器尚未設定${services}。你的旅程說明會保留。`,
     ownerOnly: "只有旅程建立者可以請 AI 找地點。",
     clarifyIncomplete: "還有必填的問題沒有通過檢查，請先補完再按「調查」。",
+    reachRequired: "搜尋中心有變動，請再按一次，選好交通方式和時間後開始。",
   },
   services: {
     openAi: "AI 服務金鑰與模型",
@@ -43,6 +44,17 @@ export const discovery = {
   searchCenter: {
     device: "以你目前位置附近搜尋",
     lodging: (name: string | null) => name ? `以今晚住宿「${name}」附近搜尋` : "以今晚住宿附近搜尋",
+  },
+  /** 調查 near a center always asks these two first (owner rule 2026-10-22). */
+  reach: {
+    label: "怎麼去、多遠",
+    modeQuestion: "交通方式",
+    timeQuestion: "單程時間",
+    why: "只推薦這個範圍內到得了的地方；距離用直線估算，不是實際路線時間。",
+    modes: { walk: "步行", transit: "大眾運輸", taxi: "計程車／開車" },
+    times: { 5: "5 分鐘以內", 10: "6–10 分鐘", 15: "15 分鐘以內", any: "都可以" },
+    /** Card line for a place this member's own 調查 found. */
+    cardLine: (meters: number, mode: string, minutes: number) => `直線 ${meters} m・${mode}約 ${minutes} 分鐘（估計）`,
   },
   clarify: {
     label: "AI 想先確認的問題",
