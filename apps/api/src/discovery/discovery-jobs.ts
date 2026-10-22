@@ -1,6 +1,7 @@
 import {
   DISCOVERY_STAGES,
   type DiscoveryJobDto,
+  type DiscoveryNearInput,
   type DiscoveryStage,
   type DiscoveryStageState,
 } from "@along-the-way/contracts/discovery";
@@ -19,6 +20,17 @@ export interface ClaimedDiscoveryJob {
   briefVersion: number;
   createdBy: string;
   clientIp: string;
+  /** The requesting member's phone position; cleared from the row when the job ends. */
+  near: DiscoveryNearInput | null;
+}
+
+/** A stored position, or null for anything else (no position, or a malformed row). */
+export function storedNear(value: unknown): DiscoveryNearInput | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { latitude, longitude } = value as Record<string, unknown>;
+  return typeof latitude === "number" && Number.isFinite(latitude) && Math.abs(latitude) <= 90
+    && typeof longitude === "number" && Number.isFinite(longitude) && Math.abs(longitude) <= 180
+    ? { latitude, longitude } : null;
 }
 
 type StageRecord = DiscoveryJobDto["stages"];
@@ -91,7 +103,7 @@ export class DiscoveryJobProgress {
   async succeed(checklist: { tripId: string; briefVersion: number }) {
     await this.database.transaction().execute(async (transaction) => {
       const ended = await transaction.updateTable("discovery_jobs").set({
-        status: "succeeded", finished_at: this.now(), heartbeat_at: this.now(), client_ip: null,
+        status: "succeeded", finished_at: this.now(), heartbeat_at: this.now(), client_ip: null, near: null,
       }).where("id", "=", this.jobId).where("status", "=", "running").returning("id").executeTakeFirst();
       if (!ended) return;
       await transaction.deleteFrom("discovery_clarifications")
@@ -105,7 +117,7 @@ export class DiscoveryJobProgress {
     const now = this.now();
     await sql`
       update discovery_jobs
-      set status = 'failed', error_code = ${code.slice(0, 40)}, finished_at = ${now}, client_ip = null,
+      set status = 'failed', error_code = ${code.slice(0, 40)}, finished_at = ${now}, client_ip = null, near = null,
         stages = case when stage is null then stages
           else jsonb_set(stages, array[stage::text], coalesce(stages->stage, '{}'::jsonb) || jsonb_build_object('state', 'failed', 'endedAt', ${now.toISOString()}::text), true) end
       where id = ${this.jobId} and status = 'running'
@@ -117,7 +129,7 @@ export class DiscoveryJobProgress {
 export async function sweepStaleDiscoveryJobs(database: Kysely<AlongTheWayDatabase>, now: Date) {
   await sql`
     update discovery_jobs
-    set status = 'failed', finished_at = ${now}, client_ip = null,
+    set status = 'failed', finished_at = ${now}, client_ip = null, near = null,
       error_code = case when status = 'running' then 'interrupted' else 'expired' end
     where (status = 'running' and coalesce(heartbeat_at, created_at) < ${new Date(now.valueOf() - JOB_HEARTBEAT_STALE_MS)})
       or (status = 'queued' and created_at < ${new Date(now.valueOf() - JOB_QUEUE_EXPIRY_MS)})
@@ -128,7 +140,7 @@ export async function sweepStaleDiscoveryJobs(database: Kysely<AlongTheWayDataba
 export async function claimNextDiscoveryJob(database: Kysely<AlongTheWayDatabase>, now: Date): Promise<ClaimedDiscoveryJob | null> {
   return database.transaction().execute(async (transaction) => {
     const job = await transaction.selectFrom("discovery_jobs")
-      .select(["id", "trip_id", "brief_version", "created_by", "client_ip"])
+      .select(["id", "trip_id", "brief_version", "created_by", "client_ip", "near"])
       .where("status", "=", "queued")
       .orderBy("created_at")
       .limit(1)
@@ -146,6 +158,7 @@ export async function claimNextDiscoveryJob(database: Kysely<AlongTheWayDatabase
       briefVersion: job.brief_version,
       createdBy: job.created_by,
       clientIp: job.client_ip ?? "unknown",
+      near: storedNear(job.near),
     };
   });
 }

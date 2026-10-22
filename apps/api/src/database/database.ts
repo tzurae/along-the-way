@@ -296,6 +296,8 @@ export interface DiscoveryJobTable {
   brief_version: number;
   created_by: string;
   client_ip: string | null;
+  /** The member's phone position ({ latitude, longitude }); only while the job is queued or running. */
+  near: unknown;
   status: "queued" | "running" | "succeeded" | "failed";
   stage: "plan" | "discover" | "research" | "verify" | "save" | "photos" | null;
   /** Record<stage, { state, startedAt, endedAt, counts? }> */

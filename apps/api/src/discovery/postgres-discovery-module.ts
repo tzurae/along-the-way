@@ -5,6 +5,7 @@ import type {
   DiscoveryDecisionDto,
   DiscoveryEndorsement,
   DiscoveryJobDto,
+  DiscoveryNearInput,
   DiscoveryShortfallDto,
   DiscoveryWorkspaceDto,
   SaveDiscoveryBriefInput,
@@ -15,6 +16,7 @@ import type {
 } from "@along-the-way/contracts/discovery";
 import { parseDiscoveryWorkspaceResponse, parseUpdateCandidateProposalVoteResponse } from "@along-the-way/contracts/discovery";
 import type { ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
+import { Temporal } from "@js-temporal/polyfill";
 import { sql, type Kysely, type Selectable, type Transaction } from "kysely";
 
 import type { AlongTheWayDatabase, CandidateProposalTable } from "../database/database";
@@ -42,6 +44,7 @@ import {
   type DiscoveryClaimSentence,
   type DiscoveryModel,
   type DiscoverySearchPlan,
+  type DiscoverySearchCenter,
   type DiscoveryTripFacts,
   type StructuredDiscoveryBrief,
 } from "./discovery-model";
@@ -64,7 +67,7 @@ import {
   newClarifyItems,
   storedClarifyItems,
 } from "./discovery-clarification";
-import { discoveryJobDto, DiscoveryJobProgress, emptyStages, type ClaimedDiscoveryJob } from "./discovery-jobs";
+import { discoveryJobDto, DiscoveryJobProgress, emptyStages, storedNear, type ClaimedDiscoveryJob } from "./discovery-jobs";
 import { discoverPlaces, type PlaceDiscovery } from "./maps-grounding-lite";
 
 interface PostgresDiscoveryModuleOptions {
@@ -390,12 +393,13 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     const version = expectedVersion(input.expectedBriefVersion);
     await this.requireMember(this.database, userId, tripId);
     const brief = await this.currentBrief(version, tripId);
+    const center = await this.searchCenter(tripId, input.near);
     const existing = await this.database.selectFrom("discovery_clarifications").select("trip_id")
       .where("trip_id", "=", tripId).where("brief_version", "=", version).executeTakeFirst();
     if (!existing) {
       if (!this.model.available) throw new AppError("model_unavailable", "AI discovery is not configured", 503);
       const trip = await this.tripFacts(userId, tripId);
-      const drafted = await this.model.clarify({ brief: brief.original_text, trip }).catch(modelFailure);
+      const drafted = await this.model.clarify({ brief: brief.original_text, trip, searchCenter: center }).catch(modelFailure);
       const items = newClarifyItems(drafted.questions);
       await this.database.insertInto("discovery_clarifications").values({
         trip_id: tripId,
@@ -407,7 +411,11 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         updated_by: userId,
       }).onConflict((conflict) => conflict.columns(["trip_id", "brief_version"]).doNothing()).execute();
     }
-    return this.readWorkspace(this.database, tripId, userId);
+    // A member sees the center's kind and the lodging's name, never coordinates.
+    return {
+      ...await this.readWorkspace(this.database, tripId, userId),
+      searchCenter: center && { source: center.source, label: center.label },
+    };
   }
 
   /**
@@ -472,7 +480,20 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     // string, so another spelling must not count as another trip.
     const operation = `${GENERATE_OPERATION_PREFIX}${tripId.toLowerCase()}`;
     await this.requireMember(this.database, userId, tripId);
-    if (await replayed(this.database, userId, operation, key)) return this.readWorkspace(this.database, tripId, userId);
+    // A member sees the center's kind and the lodging's name, never coordinates.
+    const workspace = async (center: DiscoverySearchCenter | null) => ({
+      ...await this.readWorkspace(this.database, tripId, userId),
+      searchCenter: center && { source: center.source, label: center.label },
+    });
+    // A replay reports the job the first request queued, not this retry's position: the job's own
+    // stored position while it is active; once it ended that position is gone, so none.
+    const queuedCenter = async () => {
+      const active = await this.database.selectFrom("discovery_jobs").select("near")
+        .where("trip_id", "=", tripId).where("created_by", "=", userId)
+        .where("status", "in", ["queued", "running"]).executeTakeFirst();
+      return active ? this.searchCenter(tripId, storedNear(active.near)) : null;
+    };
+    if (await replayed(this.database, userId, operation, key)) return workspace(await queuedCenter());
     await this.currentBrief(version, tripId);
     const clarification = await this.database.selectFrom("discovery_clarifications").select("status")
       .where("trip_id", "=", tripId).where("brief_version", "=", version).executeTakeFirst();
@@ -495,6 +516,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         brief_version: version,
         created_by: userId,
         client_ip: clientIp.slice(0, 64),
+        // Kept only until the job ends (位置不存): succeed, fail and the stale sweep clear it.
+        near: input.near ? JSON.stringify({ latitude: input.near.latitude, longitude: input.near.longitude }) : null,
         status: "queued",
         stages: JSON.stringify(emptyStages()),
       }).returning("id").executeTakeFirstOrThrow();
@@ -513,7 +536,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         throw error;
       }
     }
-    return this.readWorkspace(this.database, tripId, userId);
+    return workspace(jobId ? await this.searchCenter(tripId, input.near) : await queuedCenter());
   }
 
   /** The trip's newest research job, polled by the client while one is active. */
@@ -575,6 +598,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     }
     const questionAnswers = clarificationQuestionAnswers(storedClarifyItems(clarification.items));
     const trip = await this.tripFacts(userId, tripId);
+    // The phone position the job row carries (cleared when the job ends), else tonight's lodging.
+    const center = await this.searchCenter(tripId, job.near);
     const rejected = await this.database.selectFrom("candidate_proposals")
       .select("provider_place_id")
       .where("trip_id", "=", tripId)
@@ -605,6 +630,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         brief: brief.original_text,
         trip,
         questionAnswers,
+        searchCenter: center,
       });
       if (this.placeLookup.available === false || !this.placeDiscovery.available) {
         throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
@@ -624,6 +650,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         discovery: this.placeDiscovery,
         languageCode: plan.outputLanguage,
         known,
+        center,
       }).catch((error: unknown) => {
         if (error instanceof ProviderQuotaError) throw error;
         if (error instanceof ProviderUnavailableError) {
@@ -641,6 +668,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         questionAnswers,
         discovered: discovered.groups,
         outputLanguage: plan.outputLanguage,
+        searchCenter: center,
       });
       // Read after research, so a place added to the wishlist meanwhile is not proposed again.
       const wishlist = await wishlistPlaceIds();
@@ -859,6 +887,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         verifyMs,
         saveMs: Date.now() - stageStarted - planMs - discoverMs - researchMs - verifyMs,
         searches: plan.request.searchQueries.length,
+        // The kind of center only; coordinates are never logged.
+        searchCenter: center?.source ?? null,
         discovered: discovered.found,
         researched: research.candidates.length,
         shown: verification.gate.shown.length,
@@ -1326,6 +1356,51 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     }
   }
 
+  /** 調查's search center: the phone position the member sent, else tonight's lodging, else none. */
+  private async searchCenter(tripId: string, near: DiscoveryNearInput | null | undefined): Promise<DiscoverySearchCenter | null> {
+    if (near) return { source: "device", label: null, latitude: near.latitude, longitude: near.longitude };
+    return this.tonightsLodging(tripId);
+  }
+
+  /**
+   * The booked lodging whose check-in local date ≤ today < check-out local date, today being the
+   * lodging's own local date (its check-in time zone; the trip's if that is unusable). Only a
+   * hotel with map coordinates can center a search.
+   */
+  private async tonightsLodging(tripId: string): Promise<DiscoverySearchCenter | null> {
+    const trip = await this.database.selectFrom("trips").select("time_zone").where("id", "=", tripId).executeTakeFirst();
+    const stays = await this.database.selectFrom("itinerary_items as item")
+      .innerJoin("itinerary_endpoints as checkIn", (join) => join.onRef("checkIn.itinerary_item_id", "=", "item.id")
+        .onRef("checkIn.trip_id", "=", "item.trip_id").on("checkIn.endpoint_role", "=", "start"))
+      .innerJoin("itinerary_endpoints as checkOut", (join) => join.onRef("checkOut.itinerary_item_id", "=", "item.id")
+        .onRef("checkOut.trip_id", "=", "item.trip_id").on("checkOut.endpoint_role", "=", "end"))
+      .innerJoin("places as place", (join) => join.onRef("place.id", "=", "checkIn.place_id")
+        .onRef("place.trip_id", "=", "checkIn.trip_id"))
+      .select([
+        "place.name", "place.latitude", "place.longitude", "checkIn.time_zone",
+        "checkIn.local_date_time as checkInAt", "checkOut.local_date_time as checkOutAt",
+      ])
+      .where("item.trip_id", "=", tripId)
+      .where("item.item_type", "=", "lodging")
+      .orderBy("checkIn.local_date_time")
+      .execute();
+    const now = Temporal.Instant.fromEpochMilliseconds(this.now().valueOf());
+    const localToday = (timeZone: string) => {
+      try {
+        return now.toZonedDateTimeISO(timeZone).toPlainDate().toString();
+      } catch {
+        return null;
+      }
+    };
+    for (const stay of stays) {
+      const today = localToday(stay.time_zone) ?? (trip ? localToday(trip.time_zone) : null);
+      if (!today || stay.checkInAt.slice(0, 10) > today || stay.checkOutAt.slice(0, 10) <= today) continue;
+      if (stay.latitude === null || stay.longitude === null) return null;
+      return { source: "lodging", label: stay.name, latitude: stay.latitude, longitude: stay.longitude };
+    }
+    return null;
+  }
+
   private async tripFacts(userId: string, tripId: string): Promise<DiscoveryTripFacts> {
     await this.requireMember(this.database, userId, tripId);
     const trip = await this.database.selectFrom("trips").select([
@@ -1675,6 +1750,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       latestJob: latestJobRow ? discoveryJobDto(latestJobRow) : null,
       modelAvailable: this.model.available,
       placeProviderAvailable: this.placeLookup.available !== false && this.placeDiscovery.available,
+      searchCenter: null,
     };
   }
 

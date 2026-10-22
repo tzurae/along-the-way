@@ -287,6 +287,18 @@ function discoveryClarifyAnswersField(body: Record<string, unknown>) {
   });
 }
 
+/** Optional phone position for 調查; never logged or echoed. */
+function discoveryNearField(body: Record<string, unknown>) {
+  const value = body.near;
+  if (value === undefined || value === null) return null;
+  const { latitude, longitude } = typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  if (typeof latitude !== "number" || !Number.isFinite(latitude) || latitude < -90 || latitude > 90
+    || typeof longitude !== "number" || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+    throw new AppError("validation_error", "near must be { latitude: -90..90, longitude: -180..180 }");
+  }
+  return { latitude, longitude };
+}
+
 
 function tripPlaceInput(body: Record<string, unknown>): CreateTripPlaceInput {
   const method = stringField(body, "method");
@@ -1115,6 +1127,7 @@ export function createApp({
     return context.json({
       discovery: await discovery.startClarification(user.id, uuidParam(context, "tripId"), {
         expectedBriefVersion: numberField(body, "expectedBriefVersion"),
+        near: discoveryNearField(body),
       }),
     });
   });
@@ -1143,7 +1156,7 @@ export function createApp({
         uuidParam(context, "tripId"),
         clientIp(context),
         idempotencyKey(context),
-        { expectedBriefVersion: numberField(body, "expectedBriefVersion") },
+        { expectedBriefVersion: numberField(body, "expectedBriefVersion"), near: discoveryNearField(body) },
       ),
     }, 202);
   });
