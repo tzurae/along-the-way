@@ -14,7 +14,7 @@ import type {
   StartDiscoveryResearchInput,
   UpdateCandidateProposalVoteInput,
 } from "@along-the-way/contracts/discovery";
-import { parseDiscoveryWorkspaceResponse, parseUpdateCandidateProposalVoteResponse } from "@along-the-way/contracts/discovery";
+import { discoveryReachRadiusMeters, parseDiscoveryWorkspaceResponse, parseUpdateCandidateProposalVoteResponse } from "@along-the-way/contracts/discovery";
 import type { ProviderPlaceCandidateDto } from "@along-the-way/contracts/trip-places";
 import { Temporal } from "@js-temporal/polyfill";
 import { sql, type Kysely, type Selectable, type Transaction } from "kysely";
@@ -56,6 +56,7 @@ import {
 } from "../trip-places/google-places-provider";
 import { PostgresTripPlaceModule } from "../trip-places/postgres-trip-place-module";
 import { upsertGooglePlaceIdentity } from "../trip-places/google-place-identity";
+import { straightLineMeters } from "../planning/day-route-order";
 import type { CommonsCandidateGenerator } from "../place-details/commons-photo-candidates";
 import {
   applyClarifyAnswers,
@@ -411,10 +412,14 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         updated_by: userId,
       }).onConflict((conflict) => conflict.columns(["trip_id", "brief_version"]).doNothing()).execute();
     }
-    // A member sees the center's kind and the lodging's name, never coordinates.
+    // A member sees the center's kind and the lodging's name and map position, never the phone's.
     return {
       ...await this.readWorkspace(this.database, tripId, userId),
-      searchCenter: center && { source: center.source, label: center.label },
+      searchCenter: center && {
+        source: center.source,
+        label: center.label,
+        position: center.source === "lodging" ? { latitude: center.latitude, longitude: center.longitude } : null,
+      },
     };
   }
 
@@ -480,10 +485,14 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     // string, so another spelling must not count as another trip.
     const operation = `${GENERATE_OPERATION_PREFIX}${tripId.toLowerCase()}`;
     await this.requireMember(this.database, userId, tripId);
-    // A member sees the center's kind and the lodging's name, never coordinates.
+    // A member sees the center's kind and the lodging's name and map position, never the phone's.
     const workspace = async (center: DiscoverySearchCenter | null) => ({
       ...await this.readWorkspace(this.database, tripId, userId),
-      searchCenter: center && { source: center.source, label: center.label },
+      searchCenter: center && {
+        source: center.source,
+        label: center.label,
+        position: center.source === "lodging" ? { latitude: center.latitude, longitude: center.longitude } : null,
+      },
     });
     // A replay reports the job the first request queued, not this retry's position: the job's own
     // stored position while it is active; once it ended that position is gone, so none.
@@ -504,6 +513,12 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     if (this.placeLookup.available === false || !this.placeDiscovery.available) {
       throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
     }
+    // Owner rule 2026-10-22: a search around the traveler always asks how they travel and for how
+    // long; the client shows the two choices, and this refuses a start that skipped them.
+    const center = await this.searchCenter(tripId, input.near);
+    if (center && !input.reach) {
+      throw new AppError("reach_required", "Choose how you get around and for how long before research", 409);
+    }
     const jobId = await this.database.transaction().execute(async (transaction) => {
       await lockMutation(transaction, userId, operation, key);
       if (await replayed(transaction, userId, operation, key)) return null;
@@ -518,6 +533,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         client_ip: clientIp.slice(0, 64),
         // Kept only until the job ends (位置不存): succeed, fail and the stale sweep clear it.
         near: input.near ? JSON.stringify({ latitude: input.near.latitude, longitude: input.near.longitude }) : null,
+        // Two enum values, not personal data: kept with the job like its brief version.
+        reach: center && input.reach ? JSON.stringify({ mode: input.reach.mode, maxMinutes: input.reach.maxMinutes }) : null,
         status: "queued",
         stages: JSON.stringify(emptyStages()),
       }).returning("id").executeTakeFirstOrThrow();
@@ -536,7 +553,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         throw error;
       }
     }
-    return workspace(jobId ? await this.searchCenter(tripId, input.near) : await queuedCenter());
+    return workspace(jobId ? center : await queuedCenter());
   }
 
   /** The trip's newest research job, polled by the client while one is active. */
@@ -598,8 +615,13 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     }
     const questionAnswers = clarificationQuestionAnswers(storedClarifyItems(clarification.items));
     const trip = await this.tripFacts(userId, tripId);
-    // The phone position the job row carries (cleared when the job ends), else tonight's lodging.
-    const center = await this.searchCenter(tripId, job.near);
+    // The phone position the job row carries (cleared when the job ends), else tonight's lodging,
+    // with how far the member chose to go from it.
+    const located = await this.searchCenter(tripId, job.near);
+    const center: DiscoverySearchCenter | null = located && job.reach
+      ? { ...located, reach: { ...job.reach, radiusMeters: discoveryReachRadiusMeters(job.reach) } }
+      : located;
+    const reachRadius = center?.reach?.radiusMeters ?? null;
     const rejected = await this.database.selectFrom("candidate_proposals")
       .select("provider_place_id")
       .where("trip_id", "=", tripId)
@@ -693,6 +715,19 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         throw error;
       });
       const verifyMs = Date.now() - stageStarted - planMs - discoverMs - researchMs;
+      // Hard limit for a chosen time (owner rule 2026-10-22): a place beyond the straight-line
+      // radius from the center is dropped, whatever the model picked. No existing shortfall code
+      // means "too far", so only the count is logged.
+      const shown = center && reachRadius !== null
+        ? verification.gate.shown.filter(({ index }) => {
+          const place = verification.candidates[index]!.place;
+          return place !== null && place.latitude !== null && place.longitude !== null
+            && straightLineMeters(
+              { id: "center", latitude: center.latitude, longitude: center.longitude },
+              { id: place.providerPlaceId, latitude: place.latitude, longitude: place.longitude },
+            ) <= reachRadius;
+        })
+        : verification.gate.shown;
       await progress.finish("verify");
       await progress.start("save");
       const searchPlan: DiscoverySearchPlan = {
@@ -783,7 +818,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
           .select("provider_place_id").where("trip_id", "=", tripId).execute())
           .map((row) => row.provider_place_id));
         let added = 0;
-        for (const { index, members, endorsements } of verification.gate.shown) {
+        for (const { index, members, endorsements } of shown) {
           const { researched, place } = verification.candidates[index]!;
           // Entries merged into this place may have found the pages that vouch for it.
           const merged = members.map((member) => verification.candidates[member]!);
@@ -887,11 +922,14 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         verifyMs,
         saveMs: Date.now() - stageStarted - planMs - discoverMs - researchMs - verifyMs,
         searches: plan.request.searchQueries.length,
-        // The kind of center only; coordinates are never logged.
+        // The kind of center and the chosen reach only; coordinates are never logged.
         searchCenter: center?.source ?? null,
+        reachMode: center?.reach?.mode ?? null,
+        reachMaxMinutes: center?.reach?.maxMinutes ?? null,
         discovered: discovered.found,
         researched: research.candidates.length,
-        shown: verification.gate.shown.length,
+        shown: shown.length,
+        droppedTooFar: verification.gate.shown.length - shown.length,
       }));
       await progress.start("photos");
       const photos = await this.findSuggestionPhotos(suggestionIdentityIds);

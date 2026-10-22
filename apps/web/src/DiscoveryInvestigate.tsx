@@ -2,10 +2,14 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Check, MapPin, Pencil, RotateCw, X } from "lucide-react";
 
 import {
+  DISCOVERY_REACH_MINUTES,
+  DISCOVERY_REACH_MODES,
   DISCOVERY_STAGES,
   type DiscoveryClarificationDto,
   type DiscoveryClarifyItemDto,
   type DiscoveryJobDto,
+  type DiscoveryReachMinutes,
+  type DiscoveryReachMode,
   type DiscoveryStage,
 } from "@along-the-way/contracts/discovery";
 import type { Messages } from "./i18n";
@@ -227,6 +231,67 @@ export function ClarifyChecklist({ clarification, drafts, readOnly, onChange, t 
           />
         ))}
       </ol>
+    </section>
+  );
+}
+
+/** 交通方式 and 時間 as picked; null is not picked yet, "any" is 「都可以」. */
+export interface ReachDraft {
+  mode: DiscoveryReachMode | null;
+  time: DiscoveryReachMinutes | "any" | null;
+}
+
+/**
+ * The two questions 調查 asks itself whenever it searches around a center (owner rule
+ * 2026-10-22), fixed chips instead of AI questions. Both are required; research waits for them.
+ */
+export function ReachChoices({ draft, readOnly, onChange, t, required }: {
+  draft: ReachDraft;
+  readOnly: boolean;
+  onChange(draft: ReachDraft): void;
+  t: DiscoveryCopy["reach"];
+  /** The 「必填」 pill text. */
+  required: string;
+}) {
+  const times: Array<DiscoveryReachMinutes | "any"> = [...DISCOVERY_REACH_MINUTES, "any"];
+  const questions = [
+    { id: "reach-mode", text: t.modeQuestion, options: DISCOVERY_REACH_MODES.map((mode) => ({
+      key: mode, label: t.modes[mode], checked: draft.mode === mode, pick: () => onChange({ ...draft, mode }),
+    })) },
+    { id: "reach-time", text: t.timeQuestion, options: times.map((time) => ({
+      key: String(time), label: t.times[time], checked: draft.time === time, pick: () => onChange({ ...draft, time }),
+    })) },
+  ];
+  return (
+    <section className="pd-clarify" aria-label={t.label}>
+      <h3 className="pd-clarify-title">{t.label}</h3>
+      <ol className="pd-clarify-list">
+        {questions.map((question) => (
+          <li key={question.id} className="pd-clarify-item" data-clarify-item={question.id}>
+            <div className="pd-clarify-head">
+              <span id={question.id} className="pd-clarify-text">{question.text}</span>
+              <span className="pd-clarify-pill" data-kind="required">{required}</span>
+            </div>
+            <div className="pd-options" role="radiogroup" aria-labelledby={question.id}>
+              {question.options.map((option) => (
+                <label key={option.key} className="pd-option" data-checked={option.checked || undefined}>
+                  <input
+                    type="radio"
+                    name={question.id}
+                    checked={option.checked}
+                    aria-disabled={readOnly || undefined}
+                    onChange={() => {
+                      if (!readOnly) option.pick();
+                    }}
+                  />
+                  {option.label}
+                </label>
+              ))}
+            </div>
+          </li>
+        ))}
+      </ol>
+      <p className="pd-clarify-why">{t.why}</p>
     </section>
   );
 }

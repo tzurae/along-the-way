@@ -32,6 +32,8 @@ export const today = {
   adjustOrder: "調整順序",
   zoneUnknown: "時區待確認", manualChecks: "待確認事項", fixed: "固定時間", locked: "已鎖定", immovable: "不可移動",
   continuesFromPreviousDay: "接續前一天",
+  lodgingAnchorStart: (name: string) => `從住宿出發・${name}`,
+  lodgingAnchorEnd: (name: string) => `回到住宿・${name}`,
   itemCount: (count: number) => `${count} 項`,
   elapsedItems: (count: number) => `已過時間 ${count} 項`,
   buffer: (minutes: number | null) => minutes === null ? "緩衝時間待確認" : `最少緩衝 ${minutes} 分鐘`, constraintStatus: { confirmed: "已確認", unknown: "待確認", conflicted: "需要檢查" },

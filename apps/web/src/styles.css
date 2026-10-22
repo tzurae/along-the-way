@@ -588,6 +588,14 @@ span.today-sync-status { flex: none; font-weight: 600; white-space: nowrap; }
 .today-stop.is-current + .today-stop.is-next { margin-top: 8px; }
 .today-stop.is-next + .today-stop:is(.is-later, .is-unscheduled) { margin-top: 16px; }
 .today-stop.is-place { min-height: 72px; }
+/* Where the day starts and ends: a quiet row framing the stops, not a stop itself. */
+.today-anchor { min-height: 44px; }
+.today-anchor.is-anchor-start::before { top: 50%; }
+.today-anchor .today-stop-kind { color: var(--primary); }
+.today-anchor .today-stop-track::after { border-radius: 3px; background: var(--primary); }
+.today-anchor-body { display: flex; min-height: 44px; align-items: center; justify-content: space-between; gap: 6px; padding-inline: 10px; color: var(--muted-foreground); font-size: 14px; font-weight: 650; line-height: 1.35; }
+.today-anchor-body > span { min-width: 0; overflow-wrap: anywhere; }
+.today-anchor-body > svg { flex: none; }
 .today-stop-order { grid-column: 1; align-self: center; justify-self: end; display: inline-grid; width: 26px; height: 26px; margin-right: 12px; place-items: center; border-radius: 999px; background: color-mix(in srgb, var(--primary) 9%, transparent); color: var(--foreground); font-size: 12px; font-weight: 750; font-variant-numeric: tabular-nums; }
 .today-place-body { display: flex; align-items: center; gap: 12px; padding-block: 9px; }
 .today-place-body [data-place-thumbnail] { width: 54px; height: 54px; flex: none; }
