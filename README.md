@@ -249,6 +249,34 @@ list, record collaboration events and replay by readback marker. Stale versions 
 candidates return 409; Google quota/unavailability return 503 without replacing the stop.
 Offline members and members without scheduling permission see no replacement actions.
 
+### Per-stop nearby activities (migration 046)
+
+On 行程, every located day stop gets a quiet 「附近活動」 pill beside 備案. It is view only
+(nothing is added to the trip), so any active member may use it; it is hidden offline. It shows
+what is on near that stop on the day's local date — dated events (夜間參拜、祭典、市集) and
+ongoing popular experiences (和服租借、季節點燈) — each with its source page.
+
+- `POST /api/trips/:tripId/days/:dayId/trip-places/:tripPlaceId/nearby-activities` (no body)
+  returns `{ stopTripPlaceId, date, fetchedAt, activities[] }` (`NearbyActivitiesResponse`).
+  Non-members get 404; a stop not on that day 409, a stop without coordinates 422
+  `activities_unsupported`; without `OPENAI_API_KEY`/`OPENAI_MODEL` 503 `activities_unavailable`;
+  a failed provider call 503 `provider_unavailable` (not cached).
+- Provider: one OpenAI Responses call with `web_search` (`search_context_size: "low"`, approximate
+  user location from the stop's country and time zone, at most 4 searches, 30 s timeout) and a
+  strict JSON schema; at most 6 items within about 1.5 km. Names are zh-TW (the original in
+  parentheses only when it differs; a self-repeating 「名稱（名稱）」 is collapsed).
+- Sources rule (same as 幫我找): an item is kept only when its `sourceUrl` is a page that web
+  search returned in that same response. An item without a stated time (no `startsAt` and no
+  `timeText`) is dropped, because it is not actionable on the road. The server adds rounded
+  straight-line metres when the venue's coordinates are known.
+- Cache: the last successful answer per stop and local date (`nearby_activity_results`) is reused
+  with no provider call while the stop's local day equals the day it was fetched (stop time zone,
+  then the matching country stop, else UTC); it keeps its original `fetchedAt`. The retention
+  worker deletes rows older than 2 days.
+- Cost guard: only uncached lookups count, under rate-limit action `nearby_activities`
+  (30 per account and 60 per IP per hour); over the limit returns 429 `rate_limited`.
+- Logs carry counts only (`nearby_activities_model_call`), never the key, prompt or provider body.
+
 
 ### Commons photo backfill (#149)
 

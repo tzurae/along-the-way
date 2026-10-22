@@ -11,6 +11,7 @@ import { NotebookPen } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiRequestError } from "./api-error";
+import { ClampedText } from "./ClampedText";
 import { useI18n } from "./i18n";
 
 type JsonRequest = <T>(url: string, options?: RequestInit & { parse?: (value: unknown) => unknown }) => Promise<T>;
@@ -21,13 +22,20 @@ function limitCharacters(value: string, maximum: number) {
   return characters.length > maximum ? characters.slice(0, maximum).join("") : value;
 }
 
-/** The day's 玩法 note, shown under its heading. */
+/** The day's 玩法 note, shown under its heading; long notes open in place. */
 export function DayNote({ note }: { note: string }) {
   const { t } = useI18n();
   return (
     <aside className="plan-day-note" aria-label={t.tripSkeleton.dayNoteLabel}>
       <NotebookPen aria-hidden="true" />
-      <p>{note}</p>
+      <div className="plan-day-note__body">
+        <ClampedText
+          text={note}
+          lines={3}
+          expandLabel={t.tripSkeleton.expandDayNote}
+          collapseLabel={t.tripSkeleton.collapseDayNote}
+        />
+      </div>
     </aside>
   );
 }

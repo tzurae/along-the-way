@@ -10,6 +10,19 @@ export function googleMapsPlaceUrl(name: string, providerPlaceId: string) {
   return url.toString();
 }
 
+/**
+ * A free-text Maps search for something a web source named (附近活動), not a verified place:
+ * coordinates, when the source stated them, narrow the search to the right spot.
+ */
+export function googleMapsSearchUrl(name: string, point: { latitude: number | null; longitude: number | null }) {
+  const url = new URL("https://www.google.com/maps/search/");
+  url.searchParams.set("api", "1");
+  url.searchParams.set("query", point.latitude !== null && point.longitude !== null
+    ? `${name} ${point.latitude},${point.longitude}`
+    : name);
+  return url.toString();
+}
+
 type Coordinates = { latitude: number | null; longitude: number | null };
 function validCoordinates(point: Coordinates) {
   return point.latitude !== null && point.longitude !== null && Number.isFinite(point.latitude) && Number.isFinite(point.longitude) && Math.abs(point.latitude) <= 90 && Math.abs(point.longitude) <= 180;

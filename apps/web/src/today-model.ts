@@ -35,6 +35,9 @@ export interface TodayStopReplacement {
 export interface TodayDay {
   id: string;
   date: string;
+  /** The day's own name and 玩法 note from 安排; null when the trip has none. */
+  title: string | null;
+  note: string | null;
   timeZone: string | null;
   itemIds: string[];
   wishlist: Array<{
@@ -120,7 +123,7 @@ export function createTodayModel(trip: TripDto, skeleton: TripSkeletonDto, place
           if (item.start && item.end && Date.parse(item.start) < dayEnd && Date.parse(item.end) > dayStart) itemIds.add(item.id);
         }
       }
-      return { id: day.id, date: day.date,
+      return { id: day.id, date: day.date, title: day.title, note: day.note,
         timeZone, itemIds: [...itemIds],
         wishlist: assigned.map((place) => ({
           id: place.id,

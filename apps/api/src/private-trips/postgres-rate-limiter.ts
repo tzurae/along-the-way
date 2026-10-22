@@ -21,7 +21,8 @@ export type RateLimitedAction =
   | "place_photo_metadata"
   | "discovery_ai"
   | "place_guide_generation"
-  | "whole_trip_plan_preview";
+  | "whole_trip_plan_preview"
+  | "nearby_activities";
 export type PaidProvider = "google_places" | "google_maps_js" | "google_routes" | "navitime";
 export interface PaidProviderReservation {
   /** Refund only before invoking fetch; retains the original window and identity. Idempotent. */
@@ -70,6 +71,8 @@ const RULES: Record<RateLimitedAction, Rule> = {
   discovery_ai: { windowSeconds: 60 * 60, ipLimit: 6, accountLimit: 10 },
   place_guide_generation: { windowSeconds: 60 * 60, accountLimit: 30 },
   whole_trip_plan_preview: { windowSeconds: 60, accountLimit: 10 },
+  // Each uncached 附近活動 lookup is one paid web-search model call; cache hits are not counted.
+  nearby_activities: { windowSeconds: 60 * 60, ipLimit: 60, accountLimit: 30 },
 };
 
 // Paid-provider budgets leave headroom below provider quotas.

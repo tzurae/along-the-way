@@ -1,0 +1,48 @@
+/* Shared line clamp for day notes. Hosts set font-size and line-height; the clamp only cuts. */
+.clamped-text[data-expanded="false"] {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--clamped-text-lines);
+  line-clamp: var(--clamped-text-lines);
+}
+
+/* Soft end on the cut line only: the lines above stay fully opaque, the last line fades out to
+   the right. 1lh is the host's own line height. */
+.clamped-text[data-expanded="false"][data-overflowing="true"] {
+  -webkit-mask-image: linear-gradient(#000, #000), linear-gradient(to right, #000 45%, transparent);
+  mask-image: linear-gradient(#000, #000), linear-gradient(to right, #000 45%, transparent);
+  -webkit-mask-size: 100% calc(100% - 1lh), 100% 1lh;
+  mask-size: 100% calc(100% - 1lh), 100% 1lh;
+  -webkit-mask-position: top, bottom;
+  mask-position: top, bottom;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+
+.clamped-text__toggle {
+  display: inline-flex;
+  width: fit-content;
+  min-width: 44px;
+  min-height: 44px;
+  align-items: center;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: #9a4a2c;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.clamped-text__toggle:hover {
+  color: var(--color-ink);
+}
+
+.clamped-text__toggle:focus-visible {
+  border-radius: 8px;
+  outline: 3px solid color-mix(in srgb, var(--ring) 45%, transparent);
+  outline-offset: 2px;
+}
