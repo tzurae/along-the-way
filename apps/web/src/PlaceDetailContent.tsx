@@ -21,6 +21,7 @@ import {
 import { useI18n, type Locale, type Messages } from "./i18n";
 import { displayPhotoAuthor, type PlaceDetailRequest, type PlaceDisplayPhoto } from "./PlaceThumbnail";
 import { PhotoFeedbackDialog } from "./PhotoFeedbackDialog";
+import { PlaceKeepToggle } from "./PlaceKeeps";
 import { safeExternalUrl } from "./external-url";
 import "./place-detail.css";
 
@@ -501,7 +502,7 @@ function DetailArticle({ detail, collapsible, disclosureLabel, disclosureHeading
   ) : article;
 }
 
-export function PlaceDetailContent({ tripId, reference, date, request, photoRevision = 0, interlude, collapsible = false, disclosureLabel, disclosureHeadingId, disclosureOpen, articlePrelude, focusHeadingId, showArticle = true }: {
+export function PlaceDetailContent({ tripId, reference, date, request, photoRevision = 0, interlude, collapsible = false, disclosureLabel, disclosureHeadingId, disclosureOpen, articlePrelude, focusHeadingId, showArticle = true, onKeepChanged }: {
   tripId: string;
   reference: PlaceDetailReference;
   date?: string | null;
@@ -516,6 +517,8 @@ export function PlaceDetailContent({ tripId, reference, date, request, photoRevi
   focusHeadingId?: string;
   /** False shows only the gallery and the caller's sections (AI 建議 cite sources inline instead). */
   showArticle?: boolean;
+  /** Called after 下次還要來 was marked, re-noted or removed for a trip place. */
+  onKeepChanged?(): void;
 }) {
   const { t } = useI18n();
   const identity = `${reference.kind}:${reference.id}`;
@@ -611,6 +614,17 @@ export function PlaceDetailContent({ tripId, reference, date, request, photoRevi
               window.requestAnimationFrame(() => photoFeedbackTrigger.current?.focus());
             }
           }}
+        />
+      ) : null}
+      {/* Keeps belong to the canonical place, so only trip places (which always have one) offer 下次還要來. */}
+      {detail?.reference.kind === "trip-place" && detail.canonicalPlaceId ? (
+        <PlaceKeepToggle
+          key={detail.reference.id}
+          tripId={tripId}
+          tripPlaceId={detail.reference.id}
+          placeIdentityId={detail.canonicalPlaceId}
+          request={request}
+          onChanged={onKeepChanged}
         />
       ) : null}
       {interlude}

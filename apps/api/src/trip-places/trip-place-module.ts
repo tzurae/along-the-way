@@ -11,6 +11,7 @@ import type {
   UpdateTripPlaceDayAssignmentsInput,
   UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
+import type { KeepTripPlaceInput, PlaceKeepDto } from "@along-the-way/contracts/place-keeps";
 
 export interface TripPlaceModule {
   list(userId: string, tripId: string): Promise<TripPlaceDto[]>;
@@ -117,6 +118,20 @@ export interface TripPlaceModule {
     userId: string,
     tripId: string,
     suggestionId: string,
+    idempotencyKey: string,
+  ): Promise<void>;
+  listKeeps(userId: string, tripId: string): Promise<PlaceKeepDto[]>;
+  keep(
+    userId: string,
+    tripId: string,
+    tripPlaceId: string,
+    idempotencyKey: string,
+    input: KeepTripPlaceInput,
+  ): Promise<PlaceKeepDto>;
+  unkeep(
+    userId: string,
+    tripId: string,
+    tripPlaceId: string,
     idempotencyKey: string,
   ): Promise<void>;
   remove(

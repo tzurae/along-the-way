@@ -206,7 +206,9 @@ it("distinguishes a temporary photo outage from a place with no photos", async (
 
 it("offers a 44px-class retry action that repeats a failed detail request", async () => {
   let attempts = 0;
-  const retryingRequest: PlaceDetailRequest = async <T,>(_path: string, init?: PlaceDetailRequestOptions) => {
+  const retryingRequest: PlaceDetailRequest = async <T,>(path: string, init?: PlaceDetailRequestOptions) => {
+    // The 下次還要來 toggle reads its own state; only the detail request is retried.
+    if (path.includes("/place-keeps")) return (init?.parse ? init.parse({ keeps: [] }) : { keeps: [] }) as T;
     attempts += 1;
     if (attempts === 1) throw new Error("upstream unavailable");
     return (init?.parse ? init.parse(response) : response) as T;

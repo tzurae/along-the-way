@@ -17,6 +17,7 @@ import {
   type UpdateTripPlaceDayAssignmentsInput,
   type UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
+import { parsePlaceKeepResponse, type KeepTripPlaceInput } from "@along-the-way/contracts/place-keeps";
 import { isPlaceType, type PlaceType } from "@along-the-way/contracts/trip-skeleton";
 import { sql, type Kysely, type Transaction } from "kysely";
 
@@ -56,6 +57,7 @@ import type { TripPlaceModule } from "./trip-place-module";
 import type { PreparedCommonsPhoto, RepresentativePhotoSource } from "../place-details/commons-place-photos";
 import type { CommonsCandidateGenerator } from "../place-details/commons-photo-candidates";
 import { upsertGooglePlaceIdentity } from "./google-place-identity";
+import { placeKeepNote, readPlaceKeeps } from "./place-keeps";
 
 interface ModuleOptions {
   database: Kysely<AlongTheWayDatabase>;
@@ -1898,6 +1900,73 @@ export class PostgresTripPlaceModule implements TripPlaceModule {
         summary: "Kept similar places as separate candidates",
       });
       await remember(transaction, userId, operation, key, { keptSeparate: true });
+    });
+  }
+
+  /** 下次還要來 visible from this trip: the viewer's own and their current fellow travellers'. */
+  async listKeeps(userId: string, tripId: string) {
+    await this.requireMember(this.database, userId, tripId);
+    return readPlaceKeeps(this.database, userId, tripId);
+  }
+
+  /** Marks (or re-notes) this trip place's canonical place as the user's 下次還要來. */
+  async keep(
+    userId: string,
+    tripId: string,
+    rawTripPlaceId: string,
+    rawKey: string,
+    input: KeepTripPlaceInput,
+  ) {
+    const tripPlaceId = uuid(rawTripPlaceId, "tripPlaceId").toLowerCase();
+    const note = placeKeepNote(input.note);
+    const key = requireIdempotencyKey(rawKey);
+    // 76 characters; mutation_requests.operation is varchar(80).
+    const operation = `pk:${tripId.toLowerCase()}:${tripPlaceId}`;
+    return this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      const replay = await replayed(transaction, userId, operation, key);
+      if (replay) return parsePlaceKeepResponse({ keep: replay }).keep;
+      const tripPlace = await transaction.selectFrom("trip_places").select("place_id")
+        .where("trip_id", "=", tripId).where("id", "=", tripPlaceId).executeTakeFirst();
+      if (!tripPlace) throw new AppError("trip_place_not_found", "Trip place not found", 404);
+      const now = this.now();
+      const kept = await transaction.insertInto("place_keeps").values({
+        user_id: userId,
+        place_identity_id: tripPlace.place_id,
+        from_trip_id: tripId,
+        note,
+        created_at: now,
+        updated_at: now,
+      }).onConflict((conflict) => conflict.columns(["user_id", "place_identity_id"]).doUpdateSet({
+        note,
+        updated_at: now,
+        // The first trip it was kept from stays the source; a re-note from another trip does not move it.
+        from_trip_id: sql<string | null>`coalesce(place_keeps.from_trip_id, excluded.from_trip_id)`,
+      })).returning("id").executeTakeFirstOrThrow();
+      const [response] = await readPlaceKeeps(transaction, userId, tripId, kept.id);
+      if (!response) throw new Error("A just-written place keep must be visible to its keeper");
+      await remember(transaction, userId, operation, key, response);
+      return response;
+    });
+  }
+
+  /** Removes the user's 下次還要來 for this trip place's canonical place; absent is already done. */
+  async unkeep(userId: string, tripId: string, rawTripPlaceId: string, rawKey: string) {
+    const tripPlaceId = uuid(rawTripPlaceId, "tripPlaceId").toLowerCase();
+    const key = requireIdempotencyKey(rawKey);
+    // 77 characters; mutation_requests.operation is varchar(80).
+    const operation = `pku:${tripId.toLowerCase()}:${tripPlaceId}`;
+    await this.database.transaction().execute(async (transaction) => {
+      await this.requireMember(transaction, userId, tripId);
+      await lockMutation(transaction, userId, operation, key);
+      if (await replayed(transaction, userId, operation, key)) return;
+      const tripPlace = await transaction.selectFrom("trip_places").select("place_id")
+        .where("trip_id", "=", tripId).where("id", "=", tripPlaceId).executeTakeFirst();
+      if (!tripPlace) throw new AppError("trip_place_not_found", "Trip place not found", 404);
+      await transaction.deleteFrom("place_keeps")
+        .where("user_id", "=", userId).where("place_identity_id", "=", tripPlace.place_id).execute();
+      await remember(transaction, userId, operation, key, { unkept: true });
     });
   }
 

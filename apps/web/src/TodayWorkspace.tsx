@@ -530,6 +530,12 @@ function TodayPlaceCard({
   </li>;
 }
 
+/**
+ * Trips whose 行程 was already shown in this page load. A home-screen shortcut or a reload restores the URL,
+ * including the `day` it was saved on; during the trip that first view shows today instead.
+ */
+const openedTrips = new Set<string>();
+
 export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, onArrangeDay, offline = false, fetchedAt, retry, retrying = false, persisted = true, request, onChanged, onPersistentError, photoRevision = 0 }: {
   model: TodayModel;
   selectedDate: string | null;
@@ -583,9 +589,15 @@ export function TodayWorkspace({ model, selectedDate, onDayChanged, canArrange, 
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
-  const day = model.days.find((entry) => entry.date === selectedDate)
+  // The first view of this trip in this page load shows today; later day switches in the app are kept.
+  const coldStart = clock.phase === "during" && !openedTrips.has(model.tripId);
+  const day = (coldStart ? clock.today : model.days.find((entry) => entry.date === selectedDate))
     ?? clock.today
     ?? (clock.phase === "after" ? model.days.at(-1) : model.days[0]);
+  useEffect(() => {
+    // Only a known clock settles the first view: an unknown zone must not use up the switch to today.
+    if (clock.phase !== "unknown") openedTrips.add(model.tripId);
+  }, [clock.phase, model.tripId]);
   visibleDayKey.current = `${model.tripId}:${day?.id ?? ""}`;
   useEffect(() => {
     if (readTripLocation().trip === model.tripId && day && day.date !== selectedDate) onDayChanged(day.date, true);

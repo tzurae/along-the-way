@@ -724,7 +724,7 @@ export function App() {
     const tripRead = isRead ? url.match(/^\/api\/trips\/([^/?]+)(?:\/(?:skeleton|trip-places))?$/) : null;
     const coreRead = isRead && (tripRead || url === "/api/session" || url === "/api/trips");
     // Optional reads: a failure stays with the feature that asked; it never starts the whole-trip re-read cycle.
-    const optionalPlaceRead = isRead && /^\/api\/trips\/[^/?]+\/(?:place-details|place-previews|discovery\/jobs\/latest)(?:\?|$)/.test(url);
+    const optionalPlaceRead = isRead && /^\/api\/trips\/[^/?]+\/(?:place-details|place-previews|place-keeps|discovery\/jobs\/latest)(?:\?|$)/.test(url);
     try { return await requestJson<T>(t.errors, url, options); }
     catch (reason) {
       if (reason instanceof ApiRequestError && (reason.status === 401 || (tripRead && [403, 404].includes(reason.status ?? 0)))) {

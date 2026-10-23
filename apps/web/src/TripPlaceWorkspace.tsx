@@ -66,6 +66,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { FellowPlaceKeeps } from "./PlaceKeeps";
 
 interface RequestOptions extends RequestInit {
   parse?: (value: unknown) => unknown;
@@ -707,6 +708,7 @@ export function TripPlaceWorkspace({
   const [candidatePhotoRevision, setCandidatePhotoRevision] = useState(0);
   const [planningEstimates, setPlanningEstimates] = useState<Record<string, PlanningEstimateDto>>({});
   const [planningEstimatesAvailable, setPlanningEstimatesAvailable] = useState(false);
+  const [keepsRevision, setKeepsRevision] = useState(0);
 
 
   const canSchedule = canArrangeItinerary(trip);
@@ -1177,6 +1179,7 @@ export function TripPlaceWorkspace({
         photoRevision={photoRevision + candidatePhotoRevision}
         request={previewRequest}
         collapsible
+        onKeepChanged={() => setKeepsRevision((current) => current + 1)}
         disclosureLabel="旅遊資訊與資料來源"
         interlude={<div className="pd-detail">
           <PlanningEditors key={place.id} tripId={trip.id} place={place} estimate={planningEstimates[place.id]}
@@ -1395,6 +1398,15 @@ export function TripPlaceWorkspace({
         )}
       </div>
       {!canSchedule ? <p className="pd-subhead">{schedule.ownerOnly}</p> : null}
+      {!selecting ? (
+        <FellowPlaceKeeps
+          tripId={trip.id}
+          request={request}
+          reloadKey={`${placesRevision}:${keepsRevision}`}
+          // addedPlace → onPlacesChanged bumps placesRevision, which reloads this list.
+          onAdded={addedPlace}
+        />
+      ) : null}
       {readError ? <div className="pd-notice pd-read-error" role="alert"><p>{readError}</p><button type="button" className="pd-secondary" disabled={loading} onClick={() => void load()}>{t.workspace.reload}</button></div> : null}
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">{voteAnnouncement}</p>
       {loading && places.length === 0 ? <PlaceListSkeleton label={t.workspace.loading} /> : null}

@@ -704,6 +704,17 @@ export interface NearbyActivityResultTable {
   fetched_at: Timestamp;
 }
 
+/** 下次還要來: one user's mark on a canonical place; `(user_id, place_identity_id)` is unique. */
+export interface PlaceKeepTable {
+  id: Generated<string>;
+  user_id: string;
+  place_identity_id: string;
+  from_trip_id: string | null;
+  note: string | null;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
 export interface AlongTheWayDatabase {
   users: UserTable;
   magic_link_tokens: MagicLinkTokenTable;
@@ -720,6 +731,7 @@ export interface AlongTheWayDatabase {
   places: PlaceTable;
   legacy_place_origins: LegacyPlaceOriginTable;
   place_identities: PlaceIdentityTable;
+  place_keeps: PlaceKeepTable;
   curated_place_details: CuratedPlaceDetailTable;
   curated_place_photos: CuratedPlacePhotoTable;
   place_photo_blobs: PlacePhotoBlobTable;
