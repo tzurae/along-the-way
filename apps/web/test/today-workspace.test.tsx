@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { TodayWorkspace } from "../src/TodayWorkspace";
 import type { TodayDay, TodayItem, TodayModel, TodayPlace } from "../src/today-model";
@@ -62,6 +64,15 @@ function renderToday(model: TodayModel, selectedDate: string) {
     />,
   );
   return host;
+}
+
+/** Shows the page load's first view (today), so a later render keeps a day picked inside the app. */
+function afterFirstView(model: TodayModel) {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const root = createRoot(document.createElement("div"));
+  act(() => root.render(<TodayWorkspace model={model} selectedDate={null} onDayChanged={() => {}} fetchedAt="2026-10-21T00:00:00Z" retry={() => {}} />));
+  act(() => root.unmount());
+  vi.unstubAllGlobals();
 }
 
 function directionQueries(host: HTMLElement) {
@@ -357,6 +368,7 @@ describe("Today trip reminders", () => {
       tripDay("day23", "2026-10-23", [lodging.id]),
     ];
     const model = todayModel(days, [lodging]);
+    afterFirstView(model);
 
     const firstReminder = renderToday(model, "2026-10-21").querySelector(".today-reminder");
     expect(firstReminder).toHaveTextContent("歡迎抵達");

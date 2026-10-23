@@ -10,6 +10,7 @@ import { feedback } from "./feedback";
 import { itemDialog } from "./item-dialog";
 import { placeDialog } from "./place-dialog";
 import { placeDetail } from "./place-detail";
+import { placeKeeps } from "./place-keeps";
 import { planningSettings } from "./planning-settings";
 import { schedule } from "./schedule";
 import { tripPlaces } from "./trip-places";
@@ -32,6 +33,7 @@ export const zhTW = {
   itemDialog,
   placeDetail,
   placeDialog,
+  placeKeeps,
   planningSettings,
   schedule,
   tripPlaces,

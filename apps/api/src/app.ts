@@ -1707,6 +1707,40 @@ export function createApp({
     },
   );
 
+  app.get("/api/trips/:tripId/place-keeps", async (context) => {
+    const { user } = await authenticated(context);
+    context.header("Cache-Control", "private, no-store");
+    return context.json({
+      keeps: await tripPlaces.listKeeps(user.id, uuidParam(context, "tripId")),
+    });
+  });
+
+  app.put("/api/trips/:tripId/trip-places/:tripPlaceId/keep", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    const body = await jsonBody(context);
+    const keep = await tripPlaces.keep(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "tripPlaceId"),
+      idempotencyKey(context),
+      { note: optionalStringField(body, "note") },
+    );
+    return context.json({ keep });
+  });
+
+  app.delete("/api/trips/:tripId/trip-places/:tripPlaceId/keep", async (context) => {
+    const { user } = await authenticated(context);
+    await rateLimiter.consume("trip_content", clientIp(context), user.id);
+    await tripPlaces.unkeep(
+      user.id,
+      uuidParam(context, "tripId"),
+      uuidParam(context, "tripPlaceId"),
+      idempotencyKey(context),
+    );
+    return context.body(null, 204);
+  });
+
   app.post(
     "/api/trips/:tripId/trip-places/:tripPlaceId/remove",
     async (context) => {

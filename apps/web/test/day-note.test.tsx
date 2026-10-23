@@ -133,14 +133,17 @@ describe("行程 tab day title and day-note card", () => {
     expect(order.indexOf("today-dayplan")).toBeGreaterThan(order.indexOf("today-reminder"));
   });
 
-  it("titles the card 這天玩法 when the selected day is not today in the trip's time zone", () => {
+  it("titles the card 這天玩法 when the selected day is not today in the trip's time zone", async () => {
     const trip = todayTrip();
     const skeleton = todaySkeleton(trip);
     const otherDay = skeleton.days[1]!;
     Object.assign(otherDay, { title: null, note: NOTE });
+    const model = createTodayModel(trip, skeleton, [], todayUser.id);
+    // The traveler switched to this day inside the app, after the page load's first view (today).
+    await mount(<TodayWorkspace model={model} selectedDate={null} onDayChanged={() => {}} fetchedAt="2026-10-21T01:30:00Z" retry={() => {}} />);
     const host = document.createElement("div");
     host.innerHTML = renderToStaticMarkup(<TodayWorkspace
-      model={createTodayModel(trip, skeleton, [], todayUser.id)}
+      model={model}
       selectedDate={otherDay.date}
       onDayChanged={() => {}}
       fetchedAt="2026-10-21T01:30:00Z"
