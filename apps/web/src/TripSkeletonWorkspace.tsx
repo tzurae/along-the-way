@@ -45,6 +45,7 @@ import { ApiRequestError } from "./api-error";
 import { safeExternalUrl } from "./external-url";
 import "./plan-route.css";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
+import { PlaceKeepToggle } from "./PlaceKeeps";
 import { readTripOverviewFilter, TRIP_OVERVIEW_FILTER_CHANGE_EVENT, writeTripOverviewFilter } from "./trip-location";
 import {
   WholeTripPlannerButton,
@@ -1620,6 +1621,13 @@ export function TripSkeletonWorkspace({
                 </div>
               </div>
             </dl>
+            <PlaceKeepToggle
+              key={viewingAssignedPlace.id}
+              tripId={trip.id}
+              tripPlaceId={viewingAssignedPlace.id}
+              placeIdentityId={viewingAssignedPlace.placeId}
+              request={request}
+            />
             {viewingAssignedPlace.latitude === null || viewingAssignedPlace.longitude === null
               ? renderLocationEditor(viewingAssignedPlace)
               : null}

@@ -1213,6 +1213,31 @@ prior notes and proposal decisions are not restored, and reopening events stay.*
 Implementation and added API, migration, contract and browser regressions are
 UNVERIFIED until the coordinator runs validation, including the real UI at 25080.
 
+## 下次還要來 (migration 049)
+
+Owner request 2026-10-23: 「像我剛剛去到一個點覺得很不錯，下一次來京都可以再去，所以可以留下一個紀錄讓我之後可以推薦。」
+Visibility: 「跟我一起出遊過的家人都看得到」.
+
+Any trip place's detail (地點, 行程, 安排) has a 「下次還要來」 toggle with an optional
+one-line reason 「為什麼（選填）」 (trimmed, at most 280 characters, blank stored as null).
+A keep belongs to the user and the canonical place (`place_keeps`, unique per
+user and `place_identity_id`), not to the trip, and remembers the trip it was first kept from.
+
+- `PUT /api/trips/:tripId/trip-places/:tripPlaceId/keep` `{ note?: string | null }`
+  (Idempotency-Key) marks or re-notes; `DELETE` on the same path removes the
+  caller's keep (204, also when there was none). Both require active membership of `:tripId`.
+- `GET /api/trips/:tripId/place-keeps` lists keeps by the caller and by every user who
+  currently shares at least one active trip membership with the caller. Keepers are named
+  by nickname only (null when unset; the UI says 「家人」); emails are never returned. The
+  source trip's name and start date appear only while the caller is still a member of it.
+  `alreadyInTrip` means an active place of `:tripId` has the same place identity.
+
+地點 shows 「家人說下次還要來」 above 口袋名單 when that list is not empty (three rows, then
+「看全部」). 「加入口袋名單」 uses the ordinary add-place API: Google places by provider ID,
+manual places by copying name, type, address, coordinates and time zone. A copied manual
+place gets a new place identity, so its keep row still offers 「加入口袋名單」 afterwards.
+Migration `049_place_keeps` is expand-only; down drops the table.
+
 ## Mobile Today and read-only offline trips (Issue #28)
 
 「今天」 is the first trip tab and the default when an actual TripDay matches
