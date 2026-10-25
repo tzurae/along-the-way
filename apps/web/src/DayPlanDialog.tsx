@@ -21,6 +21,7 @@ import {
   type DayRouteResponse,
   type DayRouteShapesResponse,
 } from "@along-the-way/contracts/day-plans";
+import { simulateDay, type DayTimeline, type DayTimelineRow } from "@along-the-way/contracts/day-timeline";
 import {
   parseTripPlaceListResponse,
   parseTripPlaceResponse,
@@ -28,6 +29,7 @@ import {
   type TripPlaceListResponse,
   type TripPlaceResponse,
 } from "@along-the-way/contracts/trip-places";
+import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 import { parseMapsConfigResponse, type MapsConfigResponse } from "@along-the-way/contracts/maps";
 import { AdvancedMarker, APIProvider, Map as GoogleMap, Pin, useMap } from "@vis.gl/react-google-maps";
 import { Check, Clock3, GripVertical, MapPin, RotateCcw, Route, X } from "lucide-react";
@@ -47,7 +49,11 @@ import { notify } from "./AppToaster";
 import { busLikelyShapeLegs, isBusLikelyMinutesLeg, routeLegKey } from "./bus-likely-leg";
 import { googleMapsDirectionsUrl } from "./google-maps";
 import { PlaceListSkeleton } from "./PlaceListSkeleton";
-import { dayReturnLine, durationText, estimateDayReturn, stayText } from "./day-return-time";
+import { durationText, stayText } from "./day-return-time";
+import {
+  anchorLabelText, earlyText, endText, freeTimeText, longLegText, mealFloorText, mealGapText,
+  NO_WINDOW_TEXT, stopLabelText, tailText, TIMELINE_INTRO, timelineClock,
+} from "./day-timeline-text";
 import { useDayOverrideOpener } from "./WholeTripPlanning";
 
 type JsonRequest = <T>(
@@ -93,35 +99,101 @@ export interface PlannedDay {
   label: string;
 }
 
-const kilometres = (meters: number) => `${(meters / 1_000).toFixed(1)} 公里`;
+/**
+ * The day's timeline for this order (f5 §1), or null when the API sent no frame (older server)
+ * or the day has no stops. Transit minutes already in the route are used leg by leg; every other
+ * leg is the shared straight-line estimate.
+ */
+function routeTimeline(route: DayRouteDto | null, types: ReadonlyMap<string, PlaceType>): DayTimeline | null {
+  if (!route?.frame) return null;
+  const transit = new Map<string, number>();
+  route.stops.forEach((stop, index) => {
+    const from = index === 0 ? route.startsAt?.placeId : route.stops[index - 1]!.tripPlaceId;
+    if (from && stop.minutesFromPrevious !== null) transit.set(`${from}:${stop.tripPlaceId}`, stop.minutesFromPrevious);
+  });
+  const last = route.stops.at(-1);
+  if (last && route.endsAt && route.minutesToEnd !== null) transit.set(`${last.tripPlaceId}:${route.endsAt.placeId}`, route.minutesToEnd);
+  return simulateDay(route.frame, route.stops.map((stop) => ({
+    id: stop.tripPlaceId, type: types.get(stop.tripPlaceId) ?? null, stayMinutes: stop.stayMinutes ?? 0,
+    latitude: stop.latitude, longitude: stop.longitude,
+  })), (from, to) => transit.get(`${from}:${to}`) ?? null);
+}
 
-/** A leg that should have a distance (both ends exist) but has none because a point lacks coordinates. */
-function missesLeg(route: DayRouteDto) {
-  return route.stops.some((stop, index) => stop.metersFromPrevious === null && (index > 0 || route.startsAt !== null))
-    || (route.stops.length > 0 && route.endsAt !== null && route.metersToEnd === null);
+/** Names for every id a route's timeline can mention: stops, lodgings, fixed items and their points. */
+function routeNames(route: DayRouteDto) {
+  const names = new Map(Object.entries(route.frame?.names ?? {}));
+  if (route.startsAt) names.set(route.startsAt.placeId, route.startsAt.name);
+  if (route.endsAt) names.set(route.endsAt.placeId, route.endsAt.name);
+  for (const stop of route.stops) names.set(stop.tripPlaceId, stop.name);
+  return names;
+}
+
+/** The route without a timeline (older API, no stops, or no window): its stops and legs, untimed. */
+function plainRows(route: DayRouteDto): DayTimelineRow[] {
+  const rows: DayTimelineRow[] = [{ kind: "start", minute: null, pointId: route.startsAt?.placeId ?? null }];
+  route.stops.forEach((stop, index) => {
+    const from = index > 0 ? route.stops[index - 1]!.tripPlaceId : route.startsAt?.placeId;
+    if (from) {
+      rows.push({ kind: "leg", fromId: from, toId: stop.tripPlaceId, minutes: stop.minutesFromPrevious ?? stop.estimatedMoveMinutesFromPrevious,
+        straightLine: stop.minutesFromPrevious === null, metres: stop.metersFromPrevious, long: false });
+    }
+    rows.push({ kind: "stop", stopId: stop.tripPlaceId, minute: null, stayMinutes: stop.stayMinutes ?? 0, mealFloor: false, earlyMinutes: 0, label: null });
+  });
+  const last = route.stops.at(-1);
+  if (last && route.endsAt) {
+    rows.push({ kind: "leg", fromId: last.tripPlaceId, toId: route.endsAt.placeId, minutes: route.minutesToEnd ?? route.estimatedMoveMinutesToEnd,
+      straightLine: route.minutesToEnd === null, metres: route.metersToEnd, long: false });
+  }
+  rows.push({ kind: "end", terminal: route.endsAt ? "lodging" : "none", minute: null, toId: route.endsAt?.placeId ?? null,
+    departureMinute: null, arriveByMinute: null });
+  return rows;
+}
+
+/** Where and when a meal falls: a stop, a fixed item, or a gap (placeId null). */
+function timelineMeal(timeline: DayTimeline | null, meal: "lunch" | "dinner") {
+  if (timeline?.kind !== "rows") return null;
+  for (const row of timeline.rows) {
+    if (row.kind === "stop" && row.minute !== null && row.label?.kind === "meal" && row.label.meal === meal) return { minute: row.minute, placeId: row.stopId };
+    if (row.kind === "anchor" && row.minute !== null && row.meal === meal) return { minute: row.minute, placeId: row.anchorId };
+    if (row.kind === "meal_gap" && row.meal === meal) return { minute: row.minute, placeId: null };
+  }
+  return null;
 }
 
 /**
- * How the candidate's straight-line total compares with its baseline: the saved order, or, once
- * places were taken off the day, the saved order without them, so dropping a far place is never
- * shown as a better ordering. Under 100 m apart counts as the same length, so rounding noise is
- * never presented as an improvement.
+ * f5 §4: how the candidate compares with its baseline (the saved order, or, once places were taken
+ * off the day, the saved order without them, so dropping a far place is never shown as a better
+ * ordering). Travel under 5 minutes apart counts as the same; then each meal that moved.
  */
-function candidateDelta(baseline: DayRouteDto, candidate: DayRouteDto, sameText: string) {
-  if (candidate.travelSource !== "straight_line") {
-    if (baseline.totalMinutes === null || candidate.totalMinutes === null) {
-      return { tone: "same", text: "部分路段為估計，無法比較總時間" } as const;
-    }
-    const minutes = candidate.totalMinutes - baseline.totalMinutes;
-    return minutes === 0 ? { tone: "same", text: "移動時間相同" } as const
-      : minutes < 0 ? { tone: "shorter", text: `↓ 少 ${-minutes} 分鐘` } as const
-        : { tone: "longer", text: `↑ 多 ${minutes} 分鐘` } as const;
+function candidateDelta(
+  baseline: DayRouteDto,
+  candidate: DayRouteDto,
+  baselineTimeline: DayTimeline | null,
+  candidateTimeline: DayTimeline | null,
+  names: ReadonlyMap<string, string>,
+) {
+  if (baseline.orderedTripPlaceIds.join("\u0000") === candidate.orderedTripPlaceIds.join("\u0000")) {
+    return { tone: "same", text: "建議跟目前順序一樣" } as const;
   }
-  const difference = candidate.totalMeters - baseline.totalMeters;
-  if (Math.abs(difference) < 100) return { tone: "same", text: sameText } as const;
-  return difference < 0
-    ? { tone: "shorter", text: `↓ 少 ${kilometres(-difference)}` } as const
-    : { tone: "longer", text: `↑ 多 ${kilometres(difference)}` } as const;
+  const before = baselineTimeline?.kind === "rows" ? baselineTimeline.moveMinutes : null;
+  const after = candidateTimeline?.kind === "rows" ? candidateTimeline.moveMinutes : null;
+  const difference = before === null || after === null ? null : after - before;
+  const parts = [difference === null ? "部分路段無法估計，無法比較移動時間"
+    : Math.abs(difference) < 5 ? "移動差不多"
+      : difference < 0 ? `移動少約 ${-difference} 分` : `移動多約 ${difference} 分`];
+  for (const meal of ["lunch", "dinner"] as const) {
+    const was = timelineMeal(baselineTimeline, meal);
+    const now = timelineMeal(candidateTimeline, meal);
+    if (!was || !now || (was.placeId === now.placeId && was.minute === now.minute)) continue;
+    const label = meal === "lunch" ? "午餐" : "晚餐";
+    const at = (entry: { minute: number; placeId: string | null }) => `${timelineClock(entry.minute)} ${entry.placeId === null
+      ? "還沒選地方" : `在${names.get(entry.placeId) ?? "地點"}`}`;
+    parts.push(was.placeId === now.placeId
+      ? `${label}從 ${timelineClock(was.minute)} ${now.minute < was.minute ? "提早" : "延後"}到 ${timelineClock(now.minute)}`
+      : `${label}改成 ${at(now)}（原本 ${at(was)}）`);
+  }
+  const tone = difference === null || Math.abs(difference) < 5 ? "same" : difference < 0 ? "shorter" : "longer";
+  return { tone, text: `跟目前順序比：${parts.join("，")}` } as const;
 }
 
 type ShapeState = { status: "loading" | "ready" | "error"; legs: DayRouteShapesResponse["legs"]; travelNotice?: DayRouteShapesResponse["travelNotice"] };
@@ -545,7 +617,7 @@ function RouteMapPanel({
 type LegEnd = { name: string; latitude: number | null; longitude: number | null; providerPlaceId: string | null };
 type LegRowCopy = Pick<Messages["dayPlan"], "busLikely" | "busLikelyWalkDistance" | "googleMapsTransit">;
 
-/** Saved rows retain distance-only copy; candidate rows can show transit or an estimate. */
+/** Saved rows retain distance-only copy; candidate rows show transit, else the straight-line estimate (f5 §4). */
 function legRow(
   key: string,
   meters: number | null,
@@ -553,6 +625,8 @@ function legRow(
   to: LegEnd,
   minutes: number | null,
   lines: string[],
+  /** Straight-line minutes when no transit minutes; null when the leg cannot be estimated. */
+  estimatedMinutes: number | null,
   shapeFailed: boolean,
   version: "saved" | "candidate",
   provider: DayRouteDto["transitProvider"],
@@ -567,7 +641,8 @@ function legRow(
   const travel = busLikely
     ? copy.busLikelyWalkDistance(((meters ?? 0) / 1_000).toFixed(1))
     : version === "saved" ? distance
-      : minutes === null ? `估計・${distance}`
+      // No minutes but a distance: the long leg and everything after it (f5 §1.4), names and distance only.
+      : minutes === null ? estimatedMinutes !== null ? `約 ${estimatedMinutes} 分・${distance}` : meters === null ? "無法估計" : distance
         : lines.length > 0 ? `${minutes} 分鐘・${lines.join(" → ")}` : `步行 ${minutes} 分鐘`;
   return (
     <li key={key} className={`route-leg${busLikely ? " route-leg--bus-likely" : ""}`}>
@@ -643,7 +718,13 @@ export function DayPlanDialog({
   const candidate = routes.custom ?? routes.suggested ?? null;
   const transitSource = candidate && candidate.travelSource !== "straight_line" ? candidate : null;
   const transitCallsNeeded = routes.suggested?.transitCallsNeeded ?? candidate?.transitCallsNeeded ?? 0;
-  const suggestedLabel = routes.suggested && routes.suggested.travelSource !== "straight_line" ? "依交通時間排" : "依直線距離排";
+  const suggestedLabel = "照順路排";
+  const placeTypes = useMemo(() => new Map(places.map((place) => [place.id, place.type])), [places]);
+  // f5 §3.1: the saved column is the whole saved order with this dialog's transit minutes;
+  // the removal-adjusted baseline only feeds the comparison sentence.
+  const savedRoute = saved && transitSource ? withTransitMatrix(saved, transitSource.transitMatrix, transitSource.transitProvider!) : saved;
+  const savedTimeline = routeTimeline(savedRoute, placeTypes);
+  const candidateTimeline = routeTimeline(candidate, placeTypes);
   const providerName = candidate?.transitProvider === "google_routes" ? "Google" : "NAVITIME";
 
   function selectRouteTab(version: "saved" | "candidate", next: RouteView) {
@@ -1221,9 +1302,13 @@ export function DayPlanDialog({
     );
   }
 
-  /** Candidate-side stay: read-only text, or (when the member may arrange) a button opening an inline minutes editor. */
-  function stayRow(stop: DayRouteDto["stops"][number], editable: boolean) {
-    const text = stayText(stop);
+  /**
+   * Candidate-side stay: read-only text, or (when the member may arrange) a button opening an inline minutes editor.
+   * `floor`: the timeline raised this stay to a meal's minimum (f5 §1.2 rule 9); the editor still starts from the member's value.
+   */
+  function stayRow(stop: DayRouteDto["stops"][number], editable: boolean, floor: { minutes: number; meal: "lunch" | "dinner" } | null = null) {
+    const shown = stayText(floor ? { ...stop, stayMinutes: floor.minutes } : stop);
+    const text = shown && floor ? `${shown}・${mealFloorText(floor.meal)}` : shown;
     if (!text) return null;
     if (editable && stayEdit?.tripPlaceId === stop.tripPlaceId) {
       const inputId = `${routeViewId}-stay-${stop.tripPlaceId}`;
@@ -1287,80 +1372,198 @@ export function DayPlanDialog({
     );
   }
 
-  function routeList(route: DayRouteDto, editable: boolean, version: "saved" | "candidate") {
+  /** f5 §3.1: the 「調整這天時間」 shortcut, now on the timeline's last row. */
+  function dayTimeAction() {
+    if (!canArrange || !openDayOverride) return null;
+    return (
+      <button
+        type="button"
+        className="route-link-button"
+        disabled={busy !== null}
+        onClick={() => {
+          // One dialog at a time: this sheet replaces the route dialog, like editing a place from the planner.
+          close();
+          openDayOverride();
+        }}
+      >
+        調整這天時間
+      </button>
+    );
+  }
+
+  /** A thin row between stops, styled like a leg: free time, a meal note, a long-leg sentence. */
+  function noteRow(key: string, text: string) {
+    return (
+      <li key={key} className="route-leg route-timeline-note">
+        <span aria-hidden="true" />
+        <span className="route-leg-track" aria-hidden="true" />
+        <span className="route-leg-text"><span>{text}</span></span>
+      </li>
+    );
+  }
+
+  /** The day as a list: timeline rows when the API sent a frame, else the plain stop order (older API). */
+  function routeList(route: DayRouteDto, timeline: DayTimeline | null, editable: boolean, version: "saved" | "candidate") {
     const otherStops = drag?.moved
       ? route.stops.filter((stop) => stop.tripPlaceId !== drag.id)
       : route.stops;
+    const names = routeNames(route);
+    const nameOf = (id: string) => names.get(id) ?? "地點";
+    const timed = timeline?.kind === "rows";
+    const rows = timeline?.kind === "rows" ? timeline.rows : plainRows(route);
+    const stopsById = new Map(route.stops.map((stop, index) => [stop.tripPlaceId, { stop, index }]));
+    const ends = new Map<string, LegEnd>();
+    const frame = route.frame;
+    for (const anchor of [
+      ...(frame?.origin?.kind === "anchor" ? [frame.origin.anchor] : []),
+      ...(frame?.anchors ?? []),
+      ...(frame?.terminal?.kind === "anchor" ? [frame.terminal.anchor] : []),
+    ]) {
+      for (const point of [anchor.start, anchor.end]) {
+        ends.set(point.id, { name: nameOf(point.id), latitude: point.latitude, longitude: point.longitude, providerPlaceId: null });
+      }
+    }
+    if (route.startsAt) ends.set(route.startsAt.placeId, route.startsAt);
+    if (route.endsAt) ends.set(route.endsAt.placeId, route.endsAt);
+    for (const stop of route.stops) ends.set(stop.tripPlaceId, stop);
+    // Transit lines and route shapes exist only for the route's own consecutive legs.
+    const routeLegs = new Map<string, string[]>();
+    route.stops.forEach((stop, index) => {
+      const from = index > 0 ? route.stops[index - 1]!.tripPlaceId : route.startsAt?.placeId;
+      if (from) routeLegs.set(`${from}:${stop.tripPlaceId}`, stop.linesFromPrevious);
+    });
+    const lastStop = route.stops.at(-1);
+    if (lastStop && route.endsAt) routeLegs.set(`${lastStop.tripPlaceId}:${route.endsAt.placeId}`, route.linesToEnd);
+    const endAction = version === "candidate" ? dayTimeAction() : null;
+    const endRow = (key: string, name: string, meta: string | null) => (
+      <li key={key} className="route-stop route-distance-anchor">
+        <span className="route-stop-number">終</span>
+        <span className="route-stop-track" aria-hidden="true" />
+        <div className="route-stop-content">
+          <strong>{name}</strong>
+          {meta ? <span className="route-stop-meta">{meta}</span> : null}
+          {endAction}
+        </div>
+      </li>
+    );
     return (
-      <ol className="route-timeline route-distance-list" aria-label={`${route.date} 的地點順序`}>
-        <li className="route-stop route-distance-anchor">
-          <span className="route-stop-number">起</span>
-          <span className="route-stop-track" aria-hidden="true" />
-          <div className="route-stop-content">
-            <strong>{route.startsAt?.name ?? "未設定出發住宿"}</strong>
-            {route.startsAt ? <span className="route-stop-meta">住宿出發</span> : null}
-          </div>
-        </li>
-        {route.stops.map((stop, index) => {
-          const dragged = drag?.moved && drag.id === stop.tripPlaceId;
-          const slot = otherStops.findIndex((entry) => entry.tripPlaceId === stop.tripPlaceId);
-          const marker = !drag?.moved || dragged
-            ? ""
-            : slot === drag.targetIndex
-              ? " drop-before"
-              : slot === otherStops.length - 1 && drag.targetIndex >= otherStops.length
-                ? " drop-after"
-                : "";
-          return (
-            <Fragment key={stop.tripPlaceId}>
-              {index > 0 || route.startsAt
-                ? legRow(`leg-${stop.tripPlaceId}`, stop.metersFromPrevious, index > 0 ? route.stops[index - 1]! : route.startsAt!, stop,
-                  stop.minutesFromPrevious, stop.linesFromPrevious,
-                  version === "candidate" && shapeFailed(route, index > 0 ? route.stops[index - 1]!.tripPlaceId : route.startsAt!.placeId, stop.tripPlaceId),
-                  version, route.transitProvider, t.dayPlan,
-                  version === "candidate" ? shapeBusLikely(route, index > 0 ? route.stops[index - 1]!.tripPlaceId : route.startsAt!.placeId, stop.tripPlaceId) : null)
-                : null}
-              <li
-                data-trip-place-id={stop.tripPlaceId}
-                className={`route-stop${editable ? " route-stop-draggable" : ""}${dragged ? " is-dragging" : ""}${marker}`}
-              >
-                <span className="route-stop-number">{index + 1}</span>
-                <span className="route-stop-track" aria-hidden="true" />
-                <div className="route-stop-content">
-                  <div className="route-stop-title">
-                    {editable ? dragHandle(stop.tripPlaceId, stop.name, index) : null}
-                    <strong>{stop.name}</strong>
-                    {editable ? (
-                      <button
-                        type="button"
-                        className="route-remove-button"
-                        disabled={busy !== null}
-                        aria-label={`這天不去「${stop.name}」`}
-                        onClick={() => remove(stop.tripPlaceId)}
-                      >
-                        <X aria-hidden="true" /> 這天不去
-                      </button>
-                    ) : null}
-                  </div>
-                  {version === "candidate" ? stayRow(stop, editable) : null}
-                </div>
-              </li>
-            </Fragment>
-          );
-        })}
-        {route.stops.length > 0 && route.endsAt ? legRow("leg-end", route.metersToEnd, route.stops.at(-1)!, route.endsAt,
-          route.minutesToEnd, route.linesToEnd,
-          version === "candidate" && shapeFailed(route, route.stops.at(-1)!.tripPlaceId, route.endsAt.placeId),
-          version, route.transitProvider, t.dayPlan,
-          version === "candidate" ? shapeBusLikely(route, route.stops.at(-1)!.tripPlaceId, route.endsAt.placeId) : null) : null}
-        <li className="route-stop route-distance-anchor">
-          <span className="route-stop-number">終</span>
-          <span className="route-stop-track" aria-hidden="true" />
-          <div className="route-stop-content">
-            <strong>{route.endsAt?.name ?? "未設定當晚住宿"}</strong>
-          </div>
-        </li>
-      </ol>
+      <>
+        {timeline?.kind === "no_window" ? <p className="route-version-note">{NO_WINDOW_TEXT}</p> : null}
+        <ol className="route-timeline route-distance-list" aria-label={`${route.date} 的地點順序`}>
+          {rows.map((row, rowIndex) => {
+            switch (row.kind) {
+              case "breakfast_before":
+                return noteRow("breakfast", "早餐・出門前");
+              case "start":
+                return (
+                  <li key="start" className="route-stop route-distance-anchor">
+                    <span className="route-stop-number">起</span>
+                    <span className="route-stop-track" aria-hidden="true" />
+                    <div className="route-stop-content">
+                      <strong>{row.pointId ? nameOf(row.pointId) : "未設定出發住宿"}</strong>
+                      {row.pointId ? (
+                        <span className="route-stop-meta">{row.minute === null ? "住宿出發" : `${timelineClock(row.minute)} 從住宿出發`}</span>
+                      ) : null}
+                    </div>
+                  </li>
+                );
+              case "anchor":
+                return (
+                  <li key={`anchor-${rowIndex}`} className="route-stop route-distance-anchor">
+                    <span className="route-stop-number">固</span>
+                    <span className="route-stop-track" aria-hidden="true" />
+                    <div className="route-stop-content">
+                      <strong>{nameOf(row.anchorId)}</strong>
+                      <span className="route-stop-meta">
+                        {[row.minute === null ? null : timelineClock(row.minute), anchorLabelText(row), earlyText(row.earlyMinutes, false)]
+                          .filter(Boolean).join("・")}
+                      </span>
+                    </div>
+                  </li>
+                );
+              case "leg": {
+                const key = `${row.fromId}:${row.toId}`;
+                const onRoute = routeLegs.has(key);
+                const unknown = (id: string): LegEnd => ({ name: nameOf(id), latitude: null, longitude: null, providerPlaceId: null });
+                return (
+                  <Fragment key={`leg-${rowIndex}`}>
+                    {legRow(`leg-${rowIndex}`, row.metres, ends.get(row.fromId) ?? unknown(row.fromId), ends.get(row.toId) ?? unknown(row.toId),
+                      row.straightLine ? null : row.minutes, routeLegs.get(key) ?? [], row.straightLine ? row.minutes : null,
+                      version === "candidate" && onRoute && shapeFailed(route, row.fromId, row.toId),
+                      version, route.transitProvider, t.dayPlan,
+                      version === "candidate" && onRoute ? shapeBusLikely(route, row.fromId, row.toId) : null)}
+                    {row.long ? noteRow(`long-${rowIndex}`, longLegText(nameOf(row.fromId), nameOf(row.toId))) : null}
+                  </Fragment>
+                );
+              }
+              case "free":
+                return noteRow(`free-${rowIndex}`, `${timelineClock(row.minute)} ${freeTimeText(row.minutes)}`);
+              case "stop": {
+                const entry = stopsById.get(row.stopId);
+                if (!entry) return null;
+                const { stop, index } = entry;
+                const dragged = drag?.moved && drag.id === stop.tripPlaceId;
+                const slot = otherStops.findIndex((other) => other.tripPlaceId === stop.tripPlaceId);
+                const marker = !drag?.moved || dragged
+                  ? ""
+                  : slot === drag.targetIndex
+                    ? " drop-before"
+                    : slot === otherStops.length - 1 && drag.targetIndex >= otherStops.length
+                      ? " drop-after"
+                      : "";
+                const notes = [row.label ? stopLabelText(row.label) : null, earlyText(row.earlyMinutes, true)].filter(Boolean);
+                return (
+                  <li
+                    key={stop.tripPlaceId}
+                    data-trip-place-id={stop.tripPlaceId}
+                    className={`route-stop${editable ? " route-stop-draggable" : ""}${dragged ? " is-dragging" : ""}${marker}`}
+                  >
+                    <span className="route-stop-number">{index + 1}</span>
+                    <span className="route-stop-track" aria-hidden="true" />
+                    <div className="route-stop-content">
+                      <div className="route-stop-title">
+                        {editable ? dragHandle(stop.tripPlaceId, stop.name, index) : null}
+                        {row.minute === null ? null : <span className="route-stop-time">{timelineClock(row.minute)}</span>}
+                        <strong>{stop.name}</strong>
+                        {editable ? (
+                          <button
+                            type="button"
+                            className="route-remove-button"
+                            disabled={busy !== null}
+                            aria-label={`這天不去「${stop.name}」`}
+                            onClick={() => remove(stop.tripPlaceId)}
+                          >
+                            <X aria-hidden="true" /> 這天不去
+                          </button>
+                        ) : null}
+                      </div>
+                      {notes.length > 0 ? <span className="route-stop-meta">{notes.join("・")}</span> : null}
+                      {version === "candidate"
+                        ? stayRow(stop, editable, row.mealFloor && row.label?.kind === "meal" ? { minutes: row.stayMinutes, meal: row.label.meal } : null)
+                        : null}
+                    </div>
+                  </li>
+                );
+              }
+              case "meal_gap":
+                return (
+                  <li key={`gap-${rowIndex}`} className="route-stop route-distance-anchor">
+                    <span className="route-stop-number">餐</span>
+                    <span className="route-stop-track" aria-hidden="true" />
+                    <div className="route-stop-content">
+                      <strong>{timelineClock(row.minute)} {mealGapText(row, nameOf(row.nearId))}</strong>
+                    </div>
+                  </li>
+                );
+              case "end":
+                return endRow("end", row.toId ? nameOf(row.toId) : "未設定當晚住宿",
+                  timed ? endText(row, row.toId ? nameOf(row.toId) : null) : null);
+              case "tail_unknown":
+                return endRow("end", nameOf(row.toId), tailText(row, nameOf(row.fromId), nameOf(row.toId)));
+            }
+          })}
+        </ol>
+      </>
     );
   }
 
@@ -1372,9 +1575,6 @@ export function DayPlanDialog({
           <div>
             <h3>已儲存</h3>
             <span>目前的地點順序</span>
-          </div>
-          <div className="route-total">
-            <span className="route-total-value" data-tone="original">{kilometres(saved.totalMeters)}</span>
           </div>
         </header>
         <div className="route-view-tabs" role="tablist" aria-label="已儲存的檢視方式">
@@ -1408,7 +1608,7 @@ export function DayPlanDialog({
           </button>
         </div>
         <div id={`${savedTabPrefix}-route-panel`} role="tabpanel" aria-labelledby={`${savedTabPrefix}-route-tab`} hidden={savedTab !== "route"}>
-          {routeList(saved, false, "saved")}
+          {routeList(savedRoute ?? saved, savedTimeline, false, "saved")}
         </div>
         <div id={`${savedTabPrefix}-map-panel`} role="tabpanel" aria-labelledby={`${savedTabPrefix}-map-tab`} hidden={savedTab !== "map"}>
           {savedTab === "map" ? routeMap(saved, "saved") : null}
@@ -1426,15 +1626,16 @@ export function DayPlanDialog({
       ? withTransitMatrix(rawBaseline, transitSource.transitMatrix, transitSource.transitProvider!) : rawBaseline;
     const comparisonPending = removedIds.length > 0 && baseline?.key !== baselineKey;
     const delta = comparedWith
-      ? candidateDelta(
-        comparedWith,
-        candidate,
-        arranged || removedIds.length > 0 ? "和原本順序一樣長" : "已是最短",
-      )
+      ? candidateDelta(comparedWith, candidate, routeTimeline(comparedWith, placeTypes), candidateTimeline,
+        new Map([...routeNames(comparedWith), ...routeNames(candidate)]))
       : null;
     const removedNames = removedIds.map((id) => saved.stops.find((stop) => stop.tripPlaceId === id)?.name ?? "地點");
-    const returnEstimate = estimateDayReturn(candidate);
-    const returnText = returnEstimate ? dayReturnLine(returnEstimate) : null;
+    const description = [
+      arranged ? "從目前順序調整；拖曳即可再改。"
+        // A long day's own sentence already says no meals are placed (f5 §1.4).
+        : candidateTimeline?.kind === "rows" && candidateTimeline.longLeg ? null : "建議順序還是照順路排，還沒考慮吃飯時間。",
+      candidate.travelSource !== "straight_line" ? "交通時間以當地 09:00 出發查詢。" : null,
+    ].filter(Boolean).join("");
     return (
       <section className="route-version" data-active={view === "candidate"} data-route-version="candidate" aria-label="可以儲存的順序">
         <header className="route-version-heading">
@@ -1444,11 +1645,8 @@ export function DayPlanDialog({
           </div>
           <div className="route-total" aria-live="polite">
             {candidate.totalMinutes !== null ? <span className="route-total-value">約 {candidate.totalMinutes} 分鐘</span> : null}
-            <span key={`value-${candidate.totalMeters}`} className="route-total-value" data-tone={delta?.tone ?? "original"}>
-              {kilometres(candidate.totalMeters)}
-            </span>
             {delta ? (
-              <span key={`delta-${candidate.totalMeters}`} className="route-total-delta" data-tone={delta.tone}>{delta.text}</span>
+              <span key={`delta-${delta.text}`} className="route-total-delta" data-tone={delta.tone}>{delta.text}</span>
             ) : null}
             {removedIds.length > 0 ? (
               <span className="route-total-basis">
@@ -1461,28 +1659,6 @@ export function DayPlanDialog({
             ) : null}
           </div>
         </header>
-        {returnText ? (
-          <div className="route-return">
-            <p className="route-return-line" aria-live="polite">
-              <strong>{returnText.line}</strong>
-              {returnText.note ? <span>{returnText.note}</span> : null}
-            </p>
-            {canArrange && openDayOverride ? (
-              <button
-                type="button"
-                className="route-link-button"
-                disabled={busy !== null}
-                onClick={() => {
-                  // One dialog at a time: this sheet replaces the route dialog, like editing a place from the planner.
-                  close();
-                  openDayOverride();
-                }}
-              >
-                調整這天時間
-              </button>
-            ) : null}
-          </div>
-        ) : null}
         {transitCallsNeeded > 0 ? (
           <button
             type="button"
@@ -1536,12 +1712,7 @@ export function DayPlanDialog({
           </button>
         </div>
         <div id={`${candidateTabPrefix}-route-panel`} role="tabpanel" aria-labelledby={`${candidateTabPrefix}-route-tab`} hidden={candidateTab !== "route"}>
-          <p className="route-version-note">
-            {arranged ? "從目前順序調整；拖曳即可再改。"
-              : candidate.travelSource !== "straight_line"
-                ? `依 ${providerName} 交通時間排序；每段都以當地當天 09:00 出發估算，不是到站時間表。`
-                : "只依地點間的直線距離排序。"}
-          </p>
+          {description ? <p className="route-version-note">{description}</p> : null}
           {arranged && routes.suggested ? (
             <button
               type="button"
@@ -1552,7 +1723,7 @@ export function DayPlanDialog({
               <RotateCcw aria-hidden="true" /> 還原成{suggestedLabel}
             </button>
           ) : null}
-          {routeList(candidate, canArrange, "candidate")}
+          {routeList(candidate, candidateTimeline, canArrange, "candidate")}
         </div>
         <div id={`${candidateTabPrefix}-map-panel`} role="tabpanel" aria-labelledby={`${candidateTabPrefix}-map-tab`} hidden={candidateTab !== "map"}>
           {candidateTab === "map" ? routeMap(candidate, "candidate") : null}
@@ -1575,9 +1746,8 @@ export function DayPlanDialog({
   const summary = saved
     ? {
       headline: `${saved.stops.length} 個地點`,
-      note: candidate && candidate.travelSource !== "straight_line"
-        ? `${providerName} 交通時間以當地 09:00 估算；公里數仍是直線距離${missesLeg(saved) || missesLeg(candidate) ? "；缺少資料的路段另標估計" : ""}`
-        : `比的是直線距離，不是實際路程${missesLeg(saved) || (candidate && missesLeg(candidate)) ? "；不含缺少座標的路段" : ""}`,
+      intro: savedTimeline?.kind === "rows" || candidateTimeline?.kind === "rows" ? TIMELINE_INTRO : null,
+      note: candidate && candidate.travelSource !== "straight_line" ? `${providerName} 交通時間以當地 09:00 估算` : null,
     }
     : null;
 
@@ -1593,8 +1763,8 @@ export function DayPlanDialog({
         {busy === "planning" ? <p role="status" className="route-status">{t.dayPlan.planning}</p> : null}
         {routes.suggested?.travelNotice ? <p role="status" className="route-status">
           {routes.suggested.travelNotice === "navitime_quota" || routes.suggested.travelNotice === "transit_quota"
-            ? `${providerName} 的交通查詢額度已用完，這次先依直線距離排。每段仍可點 Google Maps 查看走法。`
-            : `目前無法取得 ${providerName} 交通時間，這次先依直線距離排。每段仍可點 Google Maps 查看走法。`}
+            ? `${providerName} 的交通查詢額度已用完，這次交通時間用距離粗估。每段仍可點 Google Maps 查看走法。`
+            : `目前無法取得 ${providerName} 交通時間，這次交通時間用距離粗估。每段仍可點 Google Maps 查看走法。`}
         </p> : null}
 
         {saved ? (
@@ -1603,7 +1773,8 @@ export function DayPlanDialog({
               <Route aria-hidden="true" />
               <div>
                 <strong>{summary?.headline}</strong>
-                <span>{summary?.note}</span>
+                {summary?.intro ? <span>{summary.intro}</span> : null}
+                {summary?.note ? <span>{summary.note}</span> : null}
               </div>
             </div>
 

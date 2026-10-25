@@ -1,4 +1,5 @@
 import type { DayRouteDto, DayRouteOrder } from "@along-the-way/contracts/day-plans";
+import type { DayTimelineFrame } from "@along-the-way/contracts/day-timeline";
 
 import { orderByStraightLine, straightLineMeters, type GeoPoint } from "./day-route-order";
 
@@ -35,6 +36,8 @@ export interface DayRouteTiming {
   stays: ReadonlyMap<string, { minutes: number; estimated: boolean }>;
   /** The day load's straight-line move estimate for rounded metres. */
   moveMinutes(metres: number): number;
+  /** The day's timeline frame (f5 §1.1). */
+  frame: DayTimelineFrame;
 }
 
 function located(place: RoutePlace): place is RoutePlace & GeoPoint {
@@ -143,5 +146,6 @@ export function buildDayRoute(input: DayRouteInput): DayRouteDto {
     dayStartMinute: timing?.dayStartMinute ?? null,
     fixedMinutes: timing?.fixedMinutes ?? null,
     estimatedMoveMinutesToEnd: timing && metersToEnd !== null ? timing.moveMinutes(metersToEnd) : null,
+    frame: timing?.frame ?? null,
   };
 }

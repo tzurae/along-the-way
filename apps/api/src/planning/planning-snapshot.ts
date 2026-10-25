@@ -219,9 +219,12 @@ export async function buildPlanningSnapshot(executor: DatabaseExecutor, tripId: 
       }
       if (unresolved) unresolvedItemIds.push(item.id);
       if (start && Number.isFinite(startMinute)) {
-        const localStart = Temporal.Instant.fromEpochMilliseconds(startMinute * 60_000).toZonedDateTimeISO(timeZone);
-        const localDayDifference = plainDate.until(localStart.toPlainDate()).days;
-        anchors.push({ id: item.id, startMinute, localStartMinute: localDayDifference * 1440 + localStart.hour * 60 + localStart.minute,
+        const localMinute = (epochMinute: number) => {
+          const local = Temporal.Instant.fromEpochMilliseconds(epochMinute * 60_000).toZonedDateTimeISO(timeZone);
+          return plainDate.until(local.toPlainDate()).days * 1440 + local.hour * 60 + local.minute;
+        };
+        anchors.push({ id: item.id, startMinute, localStartMinute: localMinute(startMinute),
+          localEndMinute: Number.isFinite(endMinute) ? localMinute(endMinute) : NaN, itemType: item.item_type,
           start: endpointPoint(start), end: endpointPoint(end ?? start) });
       }
       if (!unresolved) occupancy.push({ id: item.id, startMinute, endMinute });

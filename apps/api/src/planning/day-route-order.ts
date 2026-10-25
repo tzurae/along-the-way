@@ -1,23 +1,19 @@
+import { straightLineMeters } from "@along-the-way/contracts/day-timeline";
+
+// One implementation, shared with the timeline; existing importers (and tests) keep this path.
+export { straightLineMeters };
+
 export interface GeoPoint {
   id: string;
   latitude: number;
   longitude: number;
 }
 
-const EARTH_RADIUS_METERS = 6_371_000;
 // Exhaustive search is exact and fast up to 8 stops (8! = 40,320 orders).
 const EXHAUSTIVE_LIMIT = 8;
 export const TWO_OPT_MAX_PASSES = 12;
 type RouteDistance = (from: GeoPoint, to: GeoPoint) => number;
 
-export function straightLineMeters(a: GeoPoint, b: GeoPoint) {
-  const radians = (degrees: number) => degrees * Math.PI / 180;
-  const dLat = radians(b.latitude - a.latitude);
-  const dLon = radians(b.longitude - a.longitude);
-  const h = Math.sin(dLat / 2) ** 2
-    + Math.cos(radians(a.latitude)) * Math.cos(radians(b.latitude)) * Math.sin(dLon / 2) ** 2;
-  return 2 * EARTH_RADIUS_METERS * Math.asin(Math.min(1, Math.sqrt(h)));
-}
 
 /**
  * The route the day dialog shows: from `start` (the morning's lodging) through the stops in order

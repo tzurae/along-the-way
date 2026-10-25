@@ -49,6 +49,7 @@ import {
 } from "@/components/ui/dialog";
 import { ApiRequestError } from "./api-error";
 import { notify } from "./AppToaster";
+import { NO_WINDOW_TEXT, timelineRowText } from "./day-timeline-text";
 import { useI18n, type Messages } from "./i18n";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import "./whole-trip-planner.css";
@@ -1080,6 +1081,16 @@ function PlannerDialog() {
                             );
                           })}
                         </ol>
+                        {/* f5 1a: the same timeline rules as the day dialog; an older draft has no timeline. */}
+                        {resultDay.timeline?.kind === "no_window" ? <p className="planning-load-note">{NO_WINDOW_TEXT}</p> : null}
+                        {resultDay.timeline?.kind === "rows" ? (
+                          <ol className="whole-trip-day__timeline" aria-label={copy.timelineLabel}>
+                            {resultDay.timeline.rows.map((row, rowIndex) => {
+                              const text = timelineRowText(row, (id) => names.get(id) ?? "地點");
+                              return text === null ? null : <li key={rowIndex}>{text}</li>;
+                            })}
+                          </ol>
+                        ) : null}
                         <PlanningMeters day={day} />
                       </div>
                     </details>

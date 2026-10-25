@@ -1,5 +1,6 @@
+import type { DayTimeline } from "@along-the-way/contracts/day-timeline";
 import type { PlanningOverride, PlanningSettings } from "@along-the-way/contracts/planning";
-import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
+import type { ItineraryItemType, PlaceType } from "@along-the-way/contracts/trip-skeleton";
 
 export const PLANNER_MAX_DAYS = 30;
 export const PLANNER_MAX_FLEXIBLE_PLACES = 150;
@@ -40,6 +41,9 @@ export interface PlannerAnchor {
   id: string;
   startMinute: number;
   localStartMinute: number;
+  /** Local minutes after the day's midnight, like localStartMinute; NaN when the end is unresolved. */
+  localEndMinute: number;
+  itemType: ItineraryItemType;
   start: PlannerEndpoint;
   end: PlannerEndpoint;
 }
@@ -141,6 +145,8 @@ export interface PlannerOutputDay {
   /** Only the middle segment: flexible plus pinned, never fixed-selected. */
   orderedPlaceIds: string[];
   load: PlannerDayLoad;
+  /** Straight-line timeline stored with a draft (f5 1a); absent on older drafts, null for a day without stops. */
+  timeline?: DayTimeline | null;
 }
 
 export type PlannerConflictCode = "fixed_baseline_over_cap" | "baseline_unverifiable"

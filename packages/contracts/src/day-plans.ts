@@ -1,3 +1,4 @@
+import { parseDayTimelineFrame, type DayTimelineFrame } from "./day-timeline";
 import { isRecord } from "./type-guards";
 
 /** `current` is saved order, `suggested` minimizes travel cost, `custom` is member-arranged. */
@@ -86,6 +87,8 @@ export interface DayRouteDto {
   fixedMinutes: number | null;
   /** Straight-line move estimate from the last stop to endsAt; null when metersToEnd is null. */
   estimatedMoveMinutesToEnd: number | null;
+  /** The day's timeline frame (window, start, end, fixed items, straight-line settings); null from an older API, then no timeline is drawn. */
+  frame?: DayTimelineFrame | null;
 }
 
 export interface DayRouteResponse {
@@ -220,6 +223,7 @@ function route(value: unknown): DayRouteDto {
     dayStartMinute: nullableInteger(entry.dayStartMinute ?? null),
     fixedMinutes: nullableInteger(entry.fixedMinutes ?? null),
     estimatedMoveMinutesToEnd: nullableInteger(entry.estimatedMoveMinutesToEnd ?? null),
+    frame: entry.frame == null ? null : parseDayTimelineFrame(entry.frame),
     transitMatrix: entry.transitMatrix === undefined ? [] : Array.isArray(entry.transitMatrix)
       ? entry.transitMatrix.map((value) => {
         const leg = record(value);

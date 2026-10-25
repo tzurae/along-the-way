@@ -1,3 +1,4 @@
+import { parseDayTimeline, type DayTimeline } from "./day-timeline";
 import { isRecord } from "./type-guards";
 
 export type PacePreset = "chill" | "balanced" | "packed" | "custom";
@@ -203,7 +204,8 @@ export type PlanningConflictCode = "fixed_baseline_over_cap" | "baseline_unverif
   | "missing_coordinates" | "total_capacity" | "place_exceeds_every_day";
 export interface WholeTripPlanResultDto {
   status: WholeTripPlanStatus;
-  days: { dayId: string; orderedPlaceIds: string[]; load: PlanningDayLoadDto }[];
+  /** timeline: the day's straight-line timeline (f5 1a); absent on older drafts, null for a day without stops. */
+  days: { dayId: string; orderedPlaceIds: string[]; load: PlanningDayLoadDto; timeline?: DayTimeline | null }[];
   conflicts: { code: PlanningConflictCode; dayId?: string; placeId?: string; checks: PlanningBlockingCheckDto[] }[];
   unplaced: { placeId: string; reasons: PlanningBlockingCheckDto[] }[];
   excludedPlaceIds: string[];
@@ -283,7 +285,11 @@ export function parseWholeTripPlanResult(value: unknown): WholeTripPlanResultDto
   const row = record(value);
   return {
     status: oneOf(row.status, ["complete", "baseline_conflict", "proven_infeasible", "search_incomplete"]),
-    days: array(row.days, (value) => { const day = record(value); return { dayId: text(day.dayId), orderedPlaceIds: array(day.orderedPlaceIds, text), load: parsePlanningDayLoad(day.load) }; }),
+    days: array(row.days, (value) => {
+      const day = record(value);
+      return { dayId: text(day.dayId), orderedPlaceIds: array(day.orderedPlaceIds, text), load: parsePlanningDayLoad(day.load),
+        ...(day.timeline === undefined ? {} : { timeline: day.timeline === null ? null : parseDayTimeline(day.timeline) }) };
+    }),
     conflicts: array(row.conflicts, (value) => {
       const conflict = record(value);
       return { code: oneOf(conflict.code, ["fixed_baseline_over_cap", "baseline_unverifiable", "existing_count_over_cap", "existing_effort_over_cap", "existing_budget_over_cap", "existing_unverifiable_distance", "missing_coordinates", "total_capacity", "place_exceeds_every_day"] as const),

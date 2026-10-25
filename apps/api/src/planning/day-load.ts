@@ -1,5 +1,5 @@
 import { Temporal } from "@js-temporal/polyfill";
-import { straightLineMeters } from "./day-route-order";
+import { estimatedMoveMinutes, straightLineMeters } from "@along-the-way/contracts/day-timeline";
 import type {
   PlannerBlockingCheck,
   PlannerCoordinates,
@@ -83,11 +83,6 @@ export function clockMinutes(value: string) {
 
 export function formatClockMinutes(minutes: number) {
   return `${Math.floor(minutes / 60).toString().padStart(2, "0")}:${(minutes % 60).toString().padStart(2, "0")}`;
-}
-
-/** Straight-line move estimate for one leg; the day route shows exactly what the day load counts. */
-export function estimatedMoveMinutes(metres: number, caps: Pick<PlannerEffectiveCaps, "detourFactor" | "speedKmh" | "perLegMinutes">) {
-  return Math.ceil(metres * caps.detourFactor / (caps.speedKmh * 1000 / 60)) + caps.perLegMinutes;
 }
 
 /** Explicit input date, never Temporal.Now. 24:00 is midnight on the following date. */

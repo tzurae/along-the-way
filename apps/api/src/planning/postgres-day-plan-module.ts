@@ -9,6 +9,7 @@ import {
   type TransitGeoJson,
   type TransitProvider,
 } from "@along-the-way/contracts/day-plans";
+import { estimatedMoveMinutes } from "@along-the-way/contracts/day-timeline";
 import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
 import type { TripSkeletonDto } from "@along-the-way/contracts/trip-skeleton";
 import type { Kysely, Transaction } from "kysely";
@@ -26,7 +27,8 @@ import {
 } from "../private-trips/postgres-private-trip-store";
 import type { TripPlaceModule } from "../trip-places/trip-place-module";
 import type { TripSkeletonModule } from "../trip-skeleton/trip-skeleton-module";
-import { computePlanningWindow, estimatedMoveMinutes } from "./day-load";
+import { computePlanningWindow } from "./day-load";
+import { buildDayFrame } from "./day-frame";
 import { buildDayRoute, type DayRouteInput, type DayRouteTiming, type RoutePlace } from "./day-route";
 import { orderByCost, routeLength, type GeoPoint } from "./day-route-order";
 import { NavitimeError, type NavitimeProvider } from "./navitime-provider";
@@ -285,6 +287,11 @@ export class PostgresDayPlanModule implements DayPlanModule {
             : { minutes: place.durationMinutes ?? PLACE_ESTIMATE_DEFAULTS_V1[place.type].visitMinutes, estimated: place.durationMinutes === null }];
         })),
         moveMinutes: (metres) => estimatedMoveMinutes(metres, caps),
+        // Fixed items and points are named here: the dialog has no itinerary of its own.
+        frame: buildDayFrame(planningDay, new Map([
+          ...skeleton.places.map((place) => [place.id, place.name] as const),
+          ...skeleton.items.map((item) => [item.id, item.title] as const),
+        ])),
       };
     }
     const routeInput: DayRouteInput = {
