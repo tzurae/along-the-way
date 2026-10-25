@@ -467,6 +467,9 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
    * Replace a day's 「備案」 list. A place newly added must still be in 口袋名單 (not chosen for the
    * itinerary, not on any day), so 全部排行程 never turns a backup into a stop. Places already in
    * the list stay even if their state changed since; the itinerary hides one that is now a stop.
+   * Every listed place that is on no day and has no fixed item leaves 待安排 (f5 §2.3): a 備案 is
+   * back in 口袋名單, so 全部排行程 no longer reads it; 「移到備案」 relies on this after taking a
+   * place off its day.
    */
   async updateDayAlternatives(
     userId: string,
@@ -489,6 +492,8 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
     }
     return this.database.transaction().execute(async (transaction) => {
       await requireScheduler(transaction, userId, tripId);
+      // Same trip-first lock order as every other trip_places writer: this transaction un-selects listed places.
+      await this.lockTripContent(transaction, tripId);
       await lockMutation(transaction, userId, operation, key);
       const replay = await replayed(transaction, userId, operation, key);
       if (replay) return replayedDayAlternatives(replay);
@@ -532,6 +537,25 @@ export class PostgresTripSkeletonModule implements TripSkeletonModule {
             position,
             created_by: userId,
           })))
+          .execute();
+        // Listed, on no day, no fixed item, still 已選: back to 口袋名單. Not only the newly added ones (j1 #1):
+        // a place hidden in this list while it was a stop is now off the day, and must leave 待安排 too.
+        await transaction.updateTable("trip_places").set({
+          selected_for_itinerary: false,
+          unplaced_from_date: null,
+          version: sql`version + 1`,
+          updated_at: this.now(),
+        }).where("trip_id", "=", tripId)
+          .where("id", "in", tripPlaceIds)
+          .where("selected_for_itinerary", "=", true)
+          .where(sql<boolean>`not exists (
+            select 1 from trip_place_day_assignments as assignment
+            where assignment.trip_place_id = trip_places.id
+          )`)
+          .where(sql<boolean>`not exists (
+            select 1 from itinerary_endpoints as endpoint
+            where endpoint.trip_id = trip_places.trip_id and endpoint.place_id = trip_places.legacy_place_id
+          )`)
           .execute();
       }
       const updated = await transaction.updateTable("trip_days")

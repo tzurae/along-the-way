@@ -26,14 +26,18 @@ export function approxDuration(minutes: number) {
 
 const late = (minutes: number) => minutes > 0 ? `，晚了約 ${approxDuration(minutes)}` : "";
 
+/** f5 §4 row labels. 1b: an editable dialog row shows 「也是餐廳」 with ［當晚餐］［移到備案］ instead of the full sentence. */
 export function stopLabelText(label: DayTimelineStopLabel) {
   switch (label.kind) {
     case "breakfast_candidate": return "可當早餐";
-    case "meal": return `${MEAL_NAMES[label.meal]}・系統判斷${late(label.lateMinutes)}`;
+    case "meal": return label.tooEarly ? `${MEAL_NAMES[label.meal]}・太早`
+      : `${MEAL_NAMES[label.meal]}${label.marked ? "" : "・系統判斷"}${late(label.lateMinutes)}`;
     case "lunch_exists": return "午餐已經有了，這家也是餐廳";
     case "off_meal_time": return "不在午餐、晚餐時間";
   }
 }
+
+export const MEAL_ROLE_NAMES = { ...MEAL_NAMES, none: "不算一餐" } as const;
 
 /** A wait under 30 minutes folds into the row it precedes; under 5 is not worth a note. */
 export function earlyText(minutes: number, seat: boolean) {

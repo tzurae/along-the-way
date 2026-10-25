@@ -144,7 +144,7 @@ export async function buildPlanningSnapshot(executor: DatabaseExecutor, tripId: 
       && place.type !== "lodging" && place.type !== "airport") aiPending += 1;
     estimates[row.id] = estimate;
     const assignment = assignmentByPlace.get(row.id);
-    plannerPlaces.set(row.id, { id: row.id, type: place.type, coordinates: place.coordinates, estimate,
+    plannerPlaces.set(row.id, { id: row.id, type: place.type, coordinates: place.coordinates, estimate, mealRole: row.meal_role,
       votes: votesByPlace.get(row.id)?.length ?? 0, assignedDayId: assignment?.trip_day_id ?? null, position: assignment?.day_position ?? null });
   }
   const flexiblePlaces = selected.filter((place) => !place.scheduled && place.type !== "lodging" && place.type !== "airport").map((place) => plannerPlaces.get(place.row.id)!);
@@ -261,7 +261,7 @@ export async function buildPlanningSnapshot(executor: DatabaseExecutor, tripId: 
     const row = place.row;
     const assignment = assignmentByPlace.get(row.id);
     entities[row.id] = { selected: row.selected_for_itinerary, scheduled: place.scheduled, type: place.type, coordinates: place.coordinates,
-      timeZone: place.timeZone, memberVisitMinutes: row.duration_minutes, memberEffortLevel: row.effort_level,
+      timeZone: place.timeZone, memberVisitMinutes: row.duration_minutes, memberEffortLevel: row.effort_level, mealRole: row.meal_role,
       votes: votesByPlace.get(row.id) ?? [], assignment: assignment ? { dayId: assignment.trip_day_id, position: assignment.day_position } : null,
       legacyPlaceId: row.legacy_place_id, identityId: row.place_id };
   }

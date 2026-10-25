@@ -101,7 +101,7 @@ export class PostgresWholeTripPlanModule implements WholeTripPlanModule {
         if (!snapshotDay) return day;
         return { ...day, timeline: simulateDay(buildDayFrame(snapshotDay), day.orderedPlaceIds.flatMap((id) => {
           const place = places.get(id);
-          return place ? [{ id, type: place.type, stayMinutes: place.estimate.visitMinutes,
+          return place ? [{ id, type: place.type, stayMinutes: place.estimate.visitMinutes, mealRole: place.mealRole,
             latitude: place.coordinates?.latitude ?? null, longitude: place.coordinates?.longitude ?? null }] : [];
         })) };
       }) };

@@ -25,14 +25,16 @@ import { simulateDay, type DayTimeline, type DayTimelineRow } from "@along-the-w
 import {
   parseTripPlaceListResponse,
   parseTripPlaceResponse,
+  TRIP_PLACE_MEAL_ROLES,
   type TripPlaceDto,
   type TripPlaceListResponse,
+  type TripPlaceMealRole,
   type TripPlaceResponse,
 } from "@along-the-way/contracts/trip-places";
-import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
+import { parseTripSkeletonResponse, type PlaceType, type TripSkeletonResponse } from "@along-the-way/contracts/trip-skeleton";
 import { parseMapsConfigResponse, type MapsConfigResponse } from "@along-the-way/contracts/maps";
 import { AdvancedMarker, APIProvider, Map as GoogleMap, Pin, useMap } from "@vis.gl/react-google-maps";
-import { Check, Clock3, GripVertical, MapPin, RotateCcw, Route, X } from "lucide-react";
+import { Check, Clock3, GripVertical, MapPin, RotateCcw, Route, Utensils, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -49,9 +51,10 @@ import { notify } from "./AppToaster";
 import { busLikelyShapeLegs, isBusLikelyMinutesLeg, routeLegKey } from "./bus-likely-leg";
 import { googleMapsDirectionsUrl } from "./google-maps";
 import { PlaceListSkeleton } from "./PlaceListSkeleton";
+import { saveDayAlternatives } from "./DayAlternatives";
 import { durationText, stayText } from "./day-return-time";
 import {
-  anchorLabelText, earlyText, endText, freeTimeText, longLegText, mealFloorText, mealGapText,
+  anchorLabelText, earlyText, endText, freeTimeText, longLegText, MEAL_ROLE_NAMES, mealFloorText, mealGapText,
   NO_WINDOW_TEXT, stopLabelText, tailText, TIMELINE_INTRO, timelineClock,
 } from "./day-timeline-text";
 import { useDayOverrideOpener } from "./WholeTripPlanning";
@@ -99,12 +102,18 @@ export interface PlannedDay {
   label: string;
 }
 
+/** What the timeline needs to know about a place beyond the route: its type and 哪一餐 (f5 §1.2). */
+interface PlaceFacts {
+  type: PlaceType;
+  mealRole: TripPlaceMealRole | null;
+}
+
 /**
  * The day's timeline for this order (f5 §1), or null when the API sent no frame (older server)
  * or the day has no stops. Transit minutes already in the route are used leg by leg; every other
  * leg is the shared straight-line estimate.
  */
-function routeTimeline(route: DayRouteDto | null, types: ReadonlyMap<string, PlaceType>): DayTimeline | null {
+function routeTimeline(route: DayRouteDto | null, facts: ReadonlyMap<string, PlaceFacts>): DayTimeline | null {
   if (!route?.frame) return null;
   const transit = new Map<string, number>();
   route.stops.forEach((stop, index) => {
@@ -114,8 +123,8 @@ function routeTimeline(route: DayRouteDto | null, types: ReadonlyMap<string, Pla
   const last = route.stops.at(-1);
   if (last && route.endsAt && route.minutesToEnd !== null) transit.set(`${last.tripPlaceId}:${route.endsAt.placeId}`, route.minutesToEnd);
   return simulateDay(route.frame, route.stops.map((stop) => ({
-    id: stop.tripPlaceId, type: types.get(stop.tripPlaceId) ?? null, stayMinutes: stop.stayMinutes ?? 0,
-    latitude: stop.latitude, longitude: stop.longitude,
+    id: stop.tripPlaceId, type: facts.get(stop.tripPlaceId)?.type ?? null, stayMinutes: stop.stayMinutes ?? 0,
+    mealRole: facts.get(stop.tripPlaceId)?.mealRole ?? null, latitude: stop.latitude, longitude: stop.longitude,
   })), (from, to) => transit.get(`${from}:${to}`) ?? null);
 }
 
@@ -702,9 +711,16 @@ export function DayPlanDialog({
   const [mapsConfig, setMapsConfig] = useState<MapsConfigResponse | null>(null);
   const [mapsConfigLoading, setMapsConfigLoading] = useState(false);
   const [mapsConfigError, setMapsConfigError] = useState("");
-  const [busy, setBusy] = useState<"planning" | "transit" | "saving" | "stay" | null>(null);
+  const [busy, setBusy] = useState<"planning" | "transit" | "saving" | "stay" | "meal" | null>(null);
   const [transitCallsNotice, setTransitCallsNotice] = useState("");
   const [stayEdit, setStayEdit] = useState<{ tripPlaceId: string; value: string; error: string } | null>(null);
+  /** The stop whose 哪一餐 choices are open (f5 §2.3), with its last save error. */
+  const [mealEdit, setMealEdit] = useState<{ tripPlaceId: string; error: string } | null>(null);
+  /** The stop that just saved its 哪一餐: its row says 「已存，全家都會看到」 until the next edit. */
+  const [mealSaved, setMealSaved] = useState<string | null>(null);
+  const [mealNotice, setMealNotice] = useState("");
+  /** 「移到備案」 (f5 §2.3): taken off the candidate order now, put into this day's 備案 only when saved. */
+  const [pendingAlternatives, setPendingAlternatives] = useState<{ id: string; index: number }[]>([]);
   const openDayOverride = useDayOverrideOpener(day?.id ?? null);
   const latestRequest = useRef(0);
   const mapsConfigRequest = useRef(0);
@@ -719,12 +735,12 @@ export function DayPlanDialog({
   const transitSource = candidate && candidate.travelSource !== "straight_line" ? candidate : null;
   const transitCallsNeeded = routes.suggested?.transitCallsNeeded ?? candidate?.transitCallsNeeded ?? 0;
   const suggestedLabel = "照順路排";
-  const placeTypes = useMemo(() => new Map(places.map((place) => [place.id, place.type])), [places]);
+  const placeFacts = useMemo(() => new Map(places.map((place): [string, PlaceFacts] => [place.id, { type: place.type, mealRole: place.mealRole ?? null }])), [places]);
   // f5 §3.1: the saved column is the whole saved order with this dialog's transit minutes;
   // the removal-adjusted baseline only feeds the comparison sentence.
   const savedRoute = saved && transitSource ? withTransitMatrix(saved, transitSource.transitMatrix, transitSource.transitProvider!) : saved;
-  const savedTimeline = routeTimeline(savedRoute, placeTypes);
-  const candidateTimeline = routeTimeline(candidate, placeTypes);
+  const savedTimeline = routeTimeline(savedRoute, placeFacts);
+  const candidateTimeline = routeTimeline(candidate, placeFacts);
   const providerName = candidate?.transitProvider === "google_routes" ? "Google" : "NAVITIME";
 
   function selectRouteTab(version: "saved" | "candidate", next: RouteView) {
@@ -982,6 +998,10 @@ export function DayPlanDialog({
     setBusy(null);
     setTransitCallsNotice("");
     setStayEdit(null);
+    setMealEdit(null);
+    setMealSaved(null);
+    setMealNotice("");
+    setPendingAlternatives([]);
     setSavedTab("route");
     setCandidateTab("route");
     shapeRequests.current.clear();
@@ -1030,6 +1050,10 @@ export function DayPlanDialog({
     setShapeStates({});
     setRoutes({});
     setStayEdit(null);
+    setMealEdit(null);
+    setMealSaved(null);
+    setMealNotice("");
+    setPendingAlternatives([]);
     onClose();
   }
 
@@ -1087,9 +1111,30 @@ export function DayPlanDialog({
         );
       }
       actionKeys.current.delete(identity);
+      // f5 §2.3 「移到備案」 step 2: the places taken off the day join its 備案. The list and its version are
+      // re-read now, after step 1, never taken from when the dialog opened; a place already listed is moved
+      // to the end rather than repeated. The server also drops them from 待安排 (back to 口袋名單).
+      const moving = pendingAlternatives.map((entry) => entry.id).filter((id) => !candidate.orderedTripPlaceIds.includes(id));
+      let alternativesSaved = moving.length > 0;
+      if (moving.length > 0) {
+        try {
+          const latestDay = (await request<TripSkeletonResponse>(`/api/trips/${tripId}/skeleton`, { parse: parseTripSkeletonResponse }))
+            .skeleton.days.find((entry) => entry.id === day.id);
+          if (!latestDay) throw new Error("Day not found");
+          await saveDayAlternatives(request, tripId, latestDay,
+            [...latestDay.alternativeTripPlaceIds.filter((id) => !moving.includes(id)), ...moving]);
+        } catch {
+          alternativesSaved = false;
+        }
+      }
+      setPendingAlternatives([]);
       await onOrderSaved();
       if (epoch !== dialogEpoch.current) return;
-      notify("success", `已儲存為${day.label}的順序。`);
+      const movedNames = moving.map((id) => saved.stops.find((stop) => stop.tripPlaceId === id)?.name ?? "地點");
+      notify("success", `已儲存為${day.label}的順序${alternativesSaved ? `，${movedNames.map((name) => `「${name}」`).join("、")}已放進備案` : ""}。`);
+      if (moving.length > 0 && !alternativesSaved) {
+        notify("error", "已經移出這天，但沒放進備案。到安排頁這天的「備案」按「加入備案」就能補上。");
+      }
       // Refresh saved data and the cache-only suggestion; saving never starts paid calls.
       const [current, suggested] = await Promise.all([
         fetchRoute(day.id, { order: "current" }),
@@ -1118,6 +1163,7 @@ export function DayPlanDialog({
         notify("error", t.schedule.ownerOnlyAction);
       } else if (reason instanceof ApiRequestError && reason.code === "conflict") {
         notify("error", t.collaboration.replanDay);
+        setPendingAlternatives([]);
         try {
           const current = await fetchRoute(day.id, { order: "current" });
           if (epoch !== dialogEpoch.current) return;
@@ -1145,6 +1191,94 @@ export function DayPlanDialog({
     const others = candidate.orderedTripPlaceIds.filter((entry) => entry !== id);
     const at = Math.max(0, Math.min(index, others.length));
     void arrange([...others.slice(0, at), id, ...others.slice(at)]);
+  }
+
+  /** f5 §2.3 「移到備案」: off the candidate order now; it becomes a 備案 only when the order is saved. */
+  function moveToAlternatives(id: string) {
+    if (!candidate) return;
+    const index = candidate.orderedTripPlaceIds.indexOf(id);
+    if (index === -1) return;
+    setPendingAlternatives((current) => [...current.filter((entry) => entry.id !== id), { id, index }]);
+    remove(id);
+  }
+
+  function keepOnDay(id: string) {
+    const entry = pendingAlternatives.find((pending) => pending.id === id);
+    setPendingAlternatives((current) => current.filter((pending) => pending.id !== id));
+    if (entry && candidate && !candidate.orderedTripPlaceIds.includes(id)) reorder(id, entry.index);
+  }
+
+  /**
+   * f5 §2.3: writes 哪一餐 through the place sheet's planning endpoint (the other facts go back unchanged),
+   * then re-reads the saved order and the cache-only suggestion; a dragged order (`custom`) is kept and
+   * only its timeline is redrawn. Never starts a paid call.
+   */
+  async function saveMealRole(tripPlaceId: string, mealRole: TripPlaceMealRole | null) {
+    if (!day || busy !== null) return;
+    const place = places.find((entry) => entry.id === tripPlaceId);
+    if (!place) {
+      setMealEdit({ tripPlaceId, error: "找不到這個地點的資料，請關閉後重新開啟。" });
+      return;
+    }
+    const epoch = dialogEpoch.current;
+    const dayId = day.id;
+    const payload = {
+      durationMinutes: place.durationMinutes,
+      effortLevel: place.effortLevel,
+      mealRole,
+      budgetAmountMinor: place.budgetAmountMinor,
+      budgetCurrency: place.budgetCurrency,
+      notes: place.notes,
+      expectedVersion: place.version,
+    };
+    const identity = `planning:${place.id}:${JSON.stringify(payload)}`;
+    setBusy("meal");
+    setMealSaved(null);
+    try {
+      try {
+        await request<TripPlaceResponse>(`/api/trips/${tripId}/trip-places/${place.id}/planning`, {
+          method: "PATCH",
+          headers: { "Idempotency-Key": keyFor(identity) },
+          body: JSON.stringify(payload),
+          parse: parseTripPlaceResponse,
+        });
+      } catch (reason) {
+        if (epoch !== dialogEpoch.current) return;
+        if (reason instanceof ApiRequestError && (reason.code === "forbidden" || reason.status === 403)) {
+          setMealEdit({ tripPlaceId, error: t.schedule.ownerOnlyAction });
+        } else if (reason instanceof ApiRequestError && reason.code === "conflict") {
+          let refreshed = true;
+          await onPlaceUpdated().catch(() => { refreshed = false; });
+          if (epoch !== dialogEpoch.current) return;
+          setMealEdit({ tripPlaceId, error: refreshed
+            ? "這個地點剛被其他人改過，已讀取最新資料；請再選一次。"
+            : "這個地點剛被其他人改過，請關閉後重新開啟再改。" });
+        } else {
+          setMealEdit({ tripPlaceId, error: reason instanceof Error && reason.message ? reason.message : "無法儲存哪一餐。" });
+        }
+        return;
+      }
+      actionKeys.current.delete(identity);
+      if (epoch !== dialogEpoch.current) return;
+      setMealEdit(null);
+      setMealSaved(tripPlaceId);
+      try {
+        await onPlaceUpdated();
+        const [current, suggested] = await Promise.all([
+          fetchRoute(dayId, { order: "current" }),
+          fetchRoute(dayId, { order: "suggested", transit: "cached" }),
+        ]);
+        if (epoch !== dialogEpoch.current) return;
+        const retained = retainGoogleSuggestion(routes.suggested, suggested);
+        setRoutes((state) => ({ ...state, current, suggested: retained }));
+        // A kept paid Google suggestion was not recomputed for the new meal (f5 §2.3, i1 #8).
+        setMealNotice(retained === suggested ? "" : "改了哪一餐，要重新查交通時間，建議順序才會照新的三餐排。");
+      } catch {
+        if (epoch === dialogEpoch.current) notify("error", "已存哪一餐，但無法更新建議順序；請關閉後重新開啟。");
+      }
+    } finally {
+      if (epoch === dialogEpoch.current) setBusy(null);
+    }
   }
 
   /** Saves through the place sheet's planning endpoint, then re-reads this order's timing from the cache only. */
@@ -1372,6 +1506,69 @@ export function DayPlanDialog({
     );
   }
 
+  /**
+   * f5 §2.3 哪一餐 on an editable candidate row: one small button with the stop's state (the timeline's
+   * meal label, the member's mark, or 「哪一餐？」) opening its choices in place; 「改回自動判斷」 only
+   * when the stop is marked. A choice writes at once and the row then says 「已存，全家都會看到」.
+   */
+  function mealRow(stop: DayRouteDto["stops"][number], row: Extract<DayTimelineRow, { kind: "stop" }>) {
+    const role = placeFacts.get(stop.tripPlaceId)?.mealRole ?? null;
+    const state = row.label?.kind === "meal" ? stopLabelText(row.label) : role ? MEAL_ROLE_NAMES[role] : "哪一餐？";
+    if (mealEdit?.tripPlaceId === stop.tripPlaceId) {
+      const labelId = `${routeViewId}-meal-${stop.tripPlaceId}`;
+      const errorId = `${labelId}-error`;
+      return (
+        <div className="route-stay-editor" role="group" aria-labelledby={labelId} aria-describedby={mealEdit.error ? errorId : undefined}>
+          <span id={labelId} className="route-meal-legend">「{stop.name}」算哪一餐</span>
+          <span className="route-meal-options">
+            {TRIP_PLACE_MEAL_ROLES.map((choice) => (
+              <button
+                key={choice}
+                type="button"
+                className="route-link-button"
+                aria-pressed={role === choice}
+                disabled={busy !== null}
+                onClick={() => void saveMealRole(stop.tripPlaceId, choice)}
+              >
+                {MEAL_ROLE_NAMES[choice]}
+              </button>
+            ))}
+            {role !== null ? (
+              <button type="button" className="route-link-button" disabled={busy !== null} onClick={() => void saveMealRole(stop.tripPlaceId, null)}>
+                改回自動判斷
+              </button>
+            ) : null}
+          </span>
+          <span className="route-stay-actions">
+            <button type="button" className="route-link-button" disabled={busy === "meal"} onClick={() => setMealEdit(null)}>
+              {busy === "meal" ? "儲存中…" : "取消"}
+            </button>
+          </span>
+          {mealEdit.error ? <p id={errorId} role="alert" className="route-stay-error">{mealEdit.error}</p> : null}
+        </div>
+      );
+    }
+    return (
+      <span className="route-meal-row">
+        <button
+          type="button"
+          className="route-stay-button"
+          disabled={busy !== null}
+          aria-label={`改「${stop.name}」算哪一餐（目前${state}）`}
+          onClick={() => {
+            setMealSaved(null);
+            setMealEdit({ tripPlaceId: stop.tripPlaceId, error: "" });
+          }}
+        >
+          <Utensils aria-hidden="true" />
+          <span>{state}</span>
+          <span className="route-stay-edit">改哪一餐</span>
+        </button>
+        {mealSaved === stop.tripPlaceId ? <span className="route-meal-saved" role="status">已存，全家都會看到</span> : null}
+      </span>
+    );
+  }
+
   /** f5 §3.1: the 「調整這天時間」 shortcut, now on the timeline's last row. */
   function dayTimeAction() {
     if (!canArrange || !openDayOverride) return null;
@@ -1511,7 +1708,14 @@ export function DayPlanDialog({
                     : slot === otherStops.length - 1 && drag.targetIndex >= otherStops.length
                       ? " drop-after"
                       : "";
-                const notes = [row.label ? stopLabelText(row.label) : null, earlyText(row.earlyMinutes, true)].filter(Boolean);
+                // f5 §2.3 (1b): an editable candidate row carries its meal label on the 哪一餐 button, and
+                // writes 「也是餐廳」 with ［當晚餐］［移到備案］; other rows show the text labels only.
+                const mealControls = version === "candidate" && editable;
+                const labelText = row.label === null ? null
+                  : mealControls && row.label.kind === "meal" ? null
+                    : mealControls && row.label.kind === "lunch_exists" ? "也是餐廳" : stopLabelText(row.label);
+                const notes = [labelText, earlyText(row.earlyMinutes, true)].filter(Boolean);
+                const alsoRestaurant = mealControls && row.label?.kind === "lunch_exists";
                 return (
                   <li
                     key={stop.tripPlaceId}
@@ -1537,9 +1741,23 @@ export function DayPlanDialog({
                           </button>
                         ) : null}
                       </div>
-                      {notes.length > 0 ? <span className="route-stop-meta">{notes.join("・")}</span> : null}
+                      {notes.length > 0 || alsoRestaurant ? (
+                        <span className="route-stop-meta">
+                          {notes.join("・")}
+                          {alsoRestaurant ? (
+                            <>
+                              <button type="button" className="route-link-button" disabled={busy !== null}
+                                onClick={() => void saveMealRole(stop.tripPlaceId, "dinner")}>當晚餐</button>
+                              <button type="button" className="route-link-button" disabled={busy !== null}
+                                onClick={() => moveToAlternatives(stop.tripPlaceId)}>移到備案</button>
+                            </>
+                          ) : null}
+                        </span>
+                      ) : null}
+                      {mealControls ? mealRow(stop, row) : null}
                       {version === "candidate"
-                        ? stayRow(stop, editable, row.mealFloor && row.label?.kind === "meal" ? { minutes: row.stayMinutes, meal: row.label.meal } : null)
+                        ? stayRow(stop, editable, row.mealFloor && row.label?.kind === "meal" && row.label.meal !== "breakfast"
+                          ? { minutes: row.stayMinutes, meal: row.label.meal } : null)
                         : null}
                     </div>
                   </li>
@@ -1626,10 +1844,12 @@ export function DayPlanDialog({
       ? withTransitMatrix(rawBaseline, transitSource.transitMatrix, transitSource.transitProvider!) : rawBaseline;
     const comparisonPending = removedIds.length > 0 && baseline?.key !== baselineKey;
     const delta = comparedWith
-      ? candidateDelta(comparedWith, candidate, routeTimeline(comparedWith, placeTypes), candidateTimeline,
+      ? candidateDelta(comparedWith, candidate, routeTimeline(comparedWith, placeFacts), candidateTimeline,
         new Map([...routeNames(comparedWith), ...routeNames(candidate)]))
       : null;
     const removedNames = removedIds.map((id) => saved.stops.find((stop) => stop.tripPlaceId === id)?.name ?? "地點");
+    // Only places really off the candidate are written as 備案 on save (f5 §2.3).
+    const movingToAlternatives = pendingAlternatives.filter((entry) => !candidate.orderedTripPlaceIds.includes(entry.id));
     const description = [
       arranged ? "從目前順序調整；拖曳即可再改。"
         // A long day's own sentence already says no meals are placed (f5 §1.4).
@@ -1713,17 +1933,27 @@ export function DayPlanDialog({
         </div>
         <div id={`${candidateTabPrefix}-route-panel`} role="tabpanel" aria-labelledby={`${candidateTabPrefix}-route-tab`} hidden={candidateTab !== "route"}>
           {description ? <p className="route-version-note">{description}</p> : null}
+          {mealNotice ? <p role="status" className="route-version-note">{mealNotice}</p> : null}
           {arranged && routes.suggested ? (
             <button
               type="button"
               className="route-link-button route-reset"
               disabled={busy !== null}
-              onClick={() => setRoutes((current) => ({ ...current, custom: undefined }))}
+              onClick={() => {
+                setPendingAlternatives([]);
+                setRoutes((current) => ({ ...current, custom: undefined }));
+              }}
             >
               <RotateCcw aria-hidden="true" /> 還原成{suggestedLabel}
             </button>
           ) : null}
           {routeList(candidate, candidateTimeline, canArrange, "candidate")}
+          {movingToAlternatives.map((entry) => (
+            <p key={`alternative-${entry.id}`} className="route-version-note route-pending-alternative">
+              「{saved.stops.find((stop) => stop.tripPlaceId === entry.id)?.name ?? "地點"}」儲存後會放進備案
+              <button type="button" className="route-link-button" disabled={busy !== null} onClick={() => keepOnDay(entry.id)}>取消</button>
+            </p>
+          ))}
         </div>
         <div id={`${candidateTabPrefix}-map-panel`} role="tabpanel" aria-labelledby={`${candidateTabPrefix}-map-tab`} hidden={candidateTab !== "map"}>
           {candidateTab === "map" ? routeMap(candidate, "candidate") : null}

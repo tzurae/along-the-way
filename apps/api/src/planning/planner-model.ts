@@ -1,5 +1,6 @@
 import type { DayTimeline } from "@along-the-way/contracts/day-timeline";
 import type { PlanningOverride, PlanningSettings } from "@along-the-way/contracts/planning";
+import type { TripPlaceMealRole } from "@along-the-way/contracts/trip-places";
 import type { ItineraryItemType, PlaceType } from "@along-the-way/contracts/trip-skeleton";
 
 export const PLANNER_MAX_DAYS = 30;
@@ -26,6 +27,8 @@ export interface PlannerPlace {
   type: PlaceType;
   coordinates: PlannerCoordinates | null;
   estimate: PlannerEstimate;
+  /** 哪一餐 (f5 §2.1): the member's mark; null leaves the meal to the timeline's automatic rule. */
+  mealRole: TripPlaceMealRole | null;
   votes: number;
   assignedDayId: string | null;
   position: number | null;

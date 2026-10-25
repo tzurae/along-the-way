@@ -24,13 +24,14 @@ import type {
   TripLodgingInput,
 } from "@along-the-way/contracts/trip-skeleton";
 import type { TripFlightInput } from "@along-the-way/contracts/private-trips";
-import type {
-  CreateTripPlaceInput,
-  MergeTripPlacesInput,
-  MustItemKind,
-  UpdateMemberVoteInput,
-  UpdateTripPlaceDayAssignmentsInput,
-  UpdateTripPlacePlanningInput,
+import {
+  isTripPlaceMealRole,
+  type CreateTripPlaceInput,
+  type MergeTripPlacesInput,
+  type MustItemKind,
+  type UpdateMemberVoteInput,
+  type UpdateTripPlaceDayAssignmentsInput,
+  type UpdateTripPlacePlanningInput,
 } from "@along-the-way/contracts/trip-places";
 import type { CreateDayRouteInput } from "@along-the-way/contracts/day-plans";
 import type { MapsConfigResponse } from "@along-the-way/contracts/maps";
@@ -352,10 +353,16 @@ function planningInput(
     && (!Number.isInteger(effortLevel) || effortLevel < 1 || effortLevel > 5)) {
     throw new AppError("validation_error", "effortLevel must be an integer from 1 to 5 or null");
   }
+  // Like effortLevel (f5 §2.1): absent leaves the mark alone; null clears it; anything else must be a meal role.
+  const mealRole = body.mealRole;
+  if (mealRole !== undefined && mealRole !== null && !isTripPlaceMealRole(mealRole)) {
+    throw new AppError("validation_error", "mealRole must be breakfast, lunch, dinner, none or null");
+  }
   return {
     expectedVersion: numberField(body, "expectedVersion"),
     durationMinutes: optionalNumberField(body, "durationMinutes"),
     ...(effortLevel === undefined ? {} : { effortLevel }),
+    ...(mealRole === undefined ? {} : { mealRole }),
     budgetAmountMinor: optionalNumberField(body, "budgetAmountMinor"),
     budgetCurrency: optionalStringField(body, "budgetCurrency"),
     notes: optionalStringField(body, "notes"),

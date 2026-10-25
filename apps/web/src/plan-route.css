@@ -1308,6 +1308,14 @@
 .route-stay-input input:focus-visible,
 .route-stay-save:focus-visible { outline: 2px solid var(--color-focus, var(--ring)); outline-offset: 2px; }
 .route-stay-error { flex-basis: 100%; margin: 0; color: var(--destructive); font-size: 12px; line-height: 1.45; }
+/* 哪一餐 (f5 1b): the state button shares the stay button's look; its choices open in place like the stay editor. */
+.route-meal-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.route-meal-legend { flex-basis: 100%; color: var(--foreground); font-size: 12px; font-weight: 700; }
+.route-meal-saved { color: var(--primary); font-size: 12px; font-weight: 700; }
+.route-meal-options { display: flex; flex-wrap: wrap; align-items: center; gap: 0 14px; }
+.route-meal-options .route-link-button[aria-pressed="true"] { color: var(--primary); text-decoration: none; }
+.route-stop-meta .route-link-button { min-height: 24px; }
+.route-pending-alternative { display: flex; flex-wrap: wrap; align-items: center; gap: 0 10px; }
 .route-transit-action {
   display: flex;
   width: calc(100% - 32px);

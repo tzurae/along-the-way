@@ -6,6 +6,7 @@ import {
 } from "kysely";
 import { Pool } from "pg";
 import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
+import type { TripPlaceMealRole } from "@along-the-way/contracts/trip-places";
 import type { TransitGeoJson } from "@along-the-way/contracts/day-plans";
 import type {
   FeedbackStatus,
@@ -152,6 +153,8 @@ export interface TripPlaceTable {
   time_zone: string | null;
   duration_minutes: number | null;
   effort_level: Generated<number | null>;
+  /** 哪一餐 (migration 050): null leaves the meal to the automatic rule. */
+  meal_role: Generated<TripPlaceMealRole | null>;
   selected_for_itinerary: Generated<boolean>;
   unplaced_from_date: DateOnly | null;
   budget_amount_minor: BigInteger | null;

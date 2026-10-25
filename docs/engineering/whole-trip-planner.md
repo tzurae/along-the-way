@@ -139,7 +139,7 @@ repair 的原子 move：從 D1 移出 A，插入 E，D1 暫時是 C+E=120；A �
 - preview 使用 repeatable-read snapshot，只新增 proposal，不改 itinerary/settings，也不 enqueue AI。proposal 存 30 分鐘；existing account limiter 是每帳號每分鐘 10 次 preview。
 - apply 先鎖 trip，再檢查 scheduler，接著鎖 idempotency/proposal。canonical provider identities 以穩定順序 `FOR SHARE`，避免跨 trip facts refresh 插進 revision/寫入之間。
 - apply 先以 saved-only、`useAi:false`、不帶 frozen 的 snapshot 比 revision。這樣新 selected place 沒有舊 frozen 值時，會先正確得到 `plan_stale`，而不是誤判 estimate validation error。revision 相符後保存 drafts，再一律用同一份 frozen estimates 重建實際 caps 的 snapshot 做 independent validation。
-- revision 排除背景 AI publication，包含 member estimates、votes、分類、resolved facts/coordinates/timezones、items、lodging、day/date、assignments/order、settings/override versions 與 policy。preview 直接保存 snapshot estimates，含固定項目可能引用但不在 trip 日期內的地點。
+- revision 排除背景 AI publication，包含 member estimates、`meal_role`（哪一餐，migration 050）、votes、分類、resolved facts/coordinates/timezones、items、lodging、day/date、assignments/order、settings/override versions 與 policy。preview 直接保存 snapshot estimates，含固定項目可能引用但不在 trip 日期內的地點。
 - bulk writer 以 desired-days 為 assignment source，維護 positions、selection history、versions、actor/time；fixed-selected 不寫，pinned 只改原日順序；保留 scheduled guard。
 - 舊／新／order-only days 使用既有 migration 020 assignment trigger bump version。只有一個 `whole_trip_plan.applied` aggregate event，related ids 含 affected days + changed places；draft saves 不另外發事件。
 - **bulk write 後、commit 前**，在同一 transaction 用同一 builder 與 frozen estimates 再建 snapshot、再跑 validator；若不一致就是 internal error，全部 rollback。這是 revision/constructor 以外的最後安全網。

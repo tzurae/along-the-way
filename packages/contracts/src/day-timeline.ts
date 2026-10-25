@@ -1,3 +1,4 @@
+import type { TripPlaceMealRole } from "./trip-places";
 import type { ItineraryItemType, PlaceType } from "./trip-skeleton";
 import { isRecord } from "./type-guards";
 
@@ -92,6 +93,8 @@ export interface DayTimelineStop {
   type: PlaceType | null;
   /** Lodging, airport and station stays count as 0 regardless. */
   stayMinutes: number;
+  /** 哪一餐 (f5 §1.2, 1b): a marked meal is that meal; "none" is never one; null leaves it to the automatic rule. */
+  mealRole: TripPlaceMealRole | null;
   latitude: number | null;
   longitude: number | null;
 }
@@ -104,9 +107,12 @@ export type DayTimelineMeal = "breakfast" | "lunch" | "dinner";
 export type DayTimelineStopLabel =
   /** 「可當早餐」 */
   | { kind: "breakfast_candidate" }
-  /** 「午餐・系統判斷」「晚餐・系統判斷」, with 「，晚了約 N 分」 when lateMinutes > 0. */
-  | { kind: "meal"; meal: "lunch" | "dinner"; lateMinutes: number }
-  /** 「午餐已經有了，這家也是餐廳」 */
+  /**
+   * marked: the member's 哪一餐, 「早餐」「午餐」「晚餐」; else the automatic 「午餐・系統判斷」「晚餐・系統判斷」.
+   * tooEarly: a marked meal reached before its band, 「午餐・太早」「晚餐・太早」. 「，晚了約 N 分」 when lateMinutes > 0.
+   */
+  | { kind: "meal"; meal: DayTimelineMeal; marked: boolean; tooEarly: boolean; lateMinutes: number }
+  /** 1a 「午餐已經有了，這家也是餐廳」; 1b 「也是餐廳」 with ［當晚餐］［移到備案］ */
   | { kind: "lunch_exists" }
   /** 「不在午餐、晚餐時間」 */
   | { kind: "off_meal_time" };
@@ -186,7 +192,7 @@ interface StopPlan {
   arrival: number;
   wait: number;
   stay: number;
-  meal: "breakfast_candidate" | "lunch" | "dinner" | null;
+  meal: { kind: "meal"; meal: DayTimelineMeal; marked: boolean; tooEarly: boolean } | { kind: "breakfast_candidate" } | null;
 }
 
 function run(
@@ -225,10 +231,19 @@ function run(
   const meals = options.meals && startClock !== null;
   const lunchNeeded = meals && startClock! < LUNCH_BAND_END_MINUTE && frame.windowEndMinute >= LUNCH_SEAT_MINUTE + LUNCH_MINUTES;
   const dinnerNeeded = meals && frame.windowEndMinute >= DINNER_SEAT_MINUTE + DINNER_MINUTES;
+  // f5 §1.2 (1b): a marked stop is that meal, whatever its type or position; the automatic rule only fills a meal nobody marked.
+  /**
+   * δ (p9 §2.2.2, §5): only on a day that places dinner (rule 8); with several stops marked dinner only
+   * one is the dinner, the last in this order (preferring a located one); the others are plain stops.
+   */
+  const dinnerStopId = dinnerNeeded
+    ? (stops.findLast((stop) => stop.mealRole === "dinner" && stop.latitude !== null && stop.longitude !== null)
+      ?? stops.findLast((stop) => stop.mealRole === "dinner"))?.id ?? null
+    : null;
   /** A stop or a fixed meal is lunch (「午餐已經有了」); a gap is not. */
-  let lunchByPlace = fixedMeals.has("lunch");
+  let lunchByPlace = fixedMeals.has("lunch") || stops.some((stop) => stop.mealRole === "lunch");
   let lunchClaimed = lunchByPlace;
-  let dinnerClaimed = fixedMeals.has("dinner");
+  let dinnerClaimed = fixedMeals.has("dinner") || dinnerStopId !== null;
   // Asserted, not inferred: closures below move it to every state.
   let lunchGap = (options.lunchGap && lunchNeeded && !lunchClaimed ? "pending" : "off") as LunchGapState;
   let longLeg = false;
@@ -283,18 +298,35 @@ function run(
     let meal: StopPlan["meal"] = null;
     if (meals) {
       const restaurant = stop.type === "restaurant";
-      if (!firstStopSeen && arrival < BREAKFAST_LATEST_MINUTE && (restaurant || stop.type === "cafe")) {
-        meal = "breakfast_candidate";
-      } else if (restaurant && !lunchClaimed && arrival >= BREAKFAST_LATEST_MINUTE && arrival <= LUNCH_BAND_END_MINUTE) {
-        meal = "lunch";
-        wait = Math.max(0, LUNCH_SEAT_MINUTE - arrival);
+      const last = index === stops.length - 1;
+      const role = stop.mealRole;
+      if (role === "breakfast") {
+        meal = { kind: "meal", meal: "breakfast", marked: true, tooEarly: false };
+      } else if (role === "lunch") {
+        // Rules 3–4: within an hour early waits for a seat; before the band is 「午餐・太早」, no wait.
+        meal = { kind: "meal", meal: "lunch", marked: true, tooEarly: arrival < BREAKFAST_LATEST_MINUTE };
+        wait = arrival >= BREAKFAST_LATEST_MINUTE ? Math.max(0, LUNCH_SEAT_MINUTE - arrival) : 0;
         stay = Math.max(stay, LUNCH_MINUTES);
-      } else if (restaurant && !dinnerClaimed && index === stops.length - 1
-        && arrival >= DINNER_BAND_START_MINUTE && arrival <= DINNER_LATEST_MINUTE) {
-        meal = "dinner";
-        wait = Math.max(0, DINNER_SEAT_MINUTE - arrival);
+      } else if (role === "dinner" && stop.id === dinnerStopId) {
+        // Rule 3's exception: the marked dinner at the end of the day waits for 17:30 however early it arrives.
+        const tooEarly = !last && arrival < DINNER_BAND_START_MINUTE;
+        meal = { kind: "meal", meal: "dinner", marked: true, tooEarly };
+        wait = tooEarly ? 0 : Math.max(0, DINNER_SEAT_MINUTE - arrival);
         stay = Math.max(stay, DINNER_MINUTES);
+      } else if (role === null) {
+        if (!firstStopSeen && arrival < BREAKFAST_LATEST_MINUTE && (restaurant || stop.type === "cafe")) {
+          meal = { kind: "breakfast_candidate" };
+        } else if (restaurant && !lunchClaimed && arrival >= BREAKFAST_LATEST_MINUTE && arrival <= LUNCH_BAND_END_MINUTE) {
+          meal = { kind: "meal", meal: "lunch", marked: false, tooEarly: false };
+          wait = Math.max(0, LUNCH_SEAT_MINUTE - arrival);
+          stay = Math.max(stay, LUNCH_MINUTES);
+        } else if (restaurant && !dinnerClaimed && last && arrival >= DINNER_BAND_START_MINUTE && arrival <= DINNER_LATEST_MINUTE) {
+          meal = { kind: "meal", meal: "dinner", marked: false, tooEarly: false };
+          wait = Math.max(0, DINNER_SEAT_MINUTE - arrival);
+          stay = Math.max(stay, DINNER_MINUTES);
+        }
       }
+      // "none" (rule 1), a second marked dinner (p9 §5) and a marked dinner on a day without dinner (rule 8) are plain stops.
     }
     return { arrival, wait, stay, meal };
   };
@@ -380,11 +412,11 @@ function run(
         rows.push({ kind: "stop", stopId: stop.id, minute: arrival, stayMinutes: plan.stay, mealFloor: plan.stay > stayOf(stop),
           earlyMinutes: wait < FREE_TIME_ROW_MINUTES ? wait : 0, label: null });
         plans.set(rows.length - 1, plan.meal);
-        if (plan.meal === "lunch") {
+        if (plan.meal?.kind === "meal" && plan.meal.meal === "lunch") {
           lunchByPlace = true;
           lunchClaimed = true;
         }
-        if (plan.meal === "dinner") dinnerClaimed = true;
+        if (plan.meal?.kind === "meal" && plan.meal.meal === "dinner") dinnerClaimed = true;
         clock = arrival + plan.stay;
       }
       firstStopSeen = true;
@@ -426,27 +458,36 @@ function run(
     rows.push({ kind: "end", terminal: "none", minute: clock, toId: null, departureMinute: null, arriveByMinute: null });
   }
 
-  if (meals && !longLeg) {
-    const firstStop = rows.findIndex((row) => row.kind === "stop");
-    const breakfastOpen = !fixedMeals.has("breakfast") && frame.origin?.kind === "lodging"
-      && frame.windowStartMinute <= BREAKFAST_LATEST_MINUTE;
-    rows.forEach((row, index) => {
-      if (row.kind !== "stop" || row.minute === null) return;
-      const meal = plans.get(index);
-      const restaurant = stops.find((stop) => stop.id === row.stopId)?.type === "restaurant";
-      if (meal === "lunch" || meal === "dinner") {
-        const latest = meal === "lunch" ? LUNCH_LATEST_MINUTE : DINNER_LATEST_MINUTE;
-        row.label = { kind: "meal", meal, lateMinutes: Math.max(0, row.minute - latest) };
-      } else if (meal === "breakfast_candidate" && breakfastOpen) {
-        row.label = { kind: "breakfast_candidate" };
-      } else if (restaurant) {
-        row.label = { kind: lunchByPlace ? "lunch_exists" : "off_meal_time" };
+  const timed = meals && !longLeg;
+  const firstStop = rows.findIndex((row) => row.kind === "stop");
+  const breakfastOpen = timed && !fixedMeals.has("breakfast") && !stops.some((stop) => stop.mealRole === "breakfast")
+    && frame.origin?.kind === "lodging" && frame.windowStartMinute <= BREAKFAST_LATEST_MINUTE;
+  const stopsById = new Map(stops.map((stop) => [stop.id, stop]));
+  rows.forEach((row, index) => {
+    if (row.kind !== "stop") return;
+    const stop = stopsById.get(row.stopId)!;
+    if (!timed || row.minute === null) {
+      // Untimed (long day, unknown leg; f5 §1.4, 1b): a marked stop still names its meal, without a time or a wait.
+      if (stop.mealRole !== null && stop.mealRole !== "none") {
+        row.label = { kind: "meal", meal: stop.mealRole, marked: true, tooEarly: false, lateMinutes: 0 };
       }
-    });
-    const first = rows[firstStop];
-    if (breakfastOpen && first?.kind === "stop" && first.minute !== null && first.label?.kind !== "breakfast_candidate") {
-      rows.unshift({ kind: "breakfast_before" });
+      return;
     }
+    const plan = plans.get(index);
+    if (plan?.kind === "meal") {
+      const latest = plan.meal === "breakfast" ? BREAKFAST_LATEST_MINUTE : plan.meal === "lunch" ? LUNCH_LATEST_MINUTE : DINNER_LATEST_MINUTE;
+      row.label = { kind: "meal", meal: plan.meal, marked: plan.marked, tooEarly: plan.tooEarly,
+        lateMinutes: plan.tooEarly ? 0 : Math.max(0, row.minute - latest) };
+    } else if (plan?.kind === "breakfast_candidate" && breakfastOpen) {
+      row.label = { kind: "breakfast_candidate" };
+    } else if (stop.type === "restaurant" && stop.mealRole === null) {
+      // Rule 5; a stop marked "none" or a second marked dinner gets no label (rule 1, p9 §5).
+      row.label = { kind: lunchByPlace ? "lunch_exists" : "off_meal_time" };
+    }
+  });
+  const first = rows[firstStop];
+  if (breakfastOpen && first?.kind === "stop" && first.minute !== null && first.label?.kind !== "breakfast_candidate") {
+    rows.unshift({ kind: "breakfast_before" });
   }
   return { rows, longLeg, moveMinutes, needsLunchGap: lunchNeeded && !lunchClaimed && !longLeg };
 }
@@ -541,7 +582,11 @@ function stopLabel(value: unknown): DayTimelineStopLabel | null {
   if (value === null) return null;
   const row = record(value);
   if (row.kind === "breakfast_candidate" || row.kind === "lunch_exists" || row.kind === "off_meal_time") return { kind: row.kind };
-  if (row.kind === "meal") return { kind: "meal", meal: oneOf(row.meal, ["lunch", "dinner"] as const), lateMinutes: finite(row.lateMinutes) };
+  if (row.kind === "meal") {
+    // Drafts written by P1 (f5 1a) carry neither flag: an automatic, in-band meal.
+    return { kind: "meal", meal: oneOf(row.meal, MEALS), marked: row.marked === undefined ? false : bool(row.marked),
+      tooEarly: row.tooEarly === undefined ? false : bool(row.tooEarly), lateMinutes: finite(row.lateMinutes) };
+  }
   return invalid();
 }
 
