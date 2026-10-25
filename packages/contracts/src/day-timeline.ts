@@ -230,7 +230,7 @@ export interface DayWalk {
   /** anchorEnds[i]: the latest end among anchors[0..i−1]; a late seat is measured from the fixed item that pushed it (f5 :174). */
   readonly anchorEnds: readonly number[];
   readonly origin: Position | null;
-  /** Null when the day cannot be timed (unknown start, unresolved fixed item, meals off). */
+  /** Null when the day cannot be timed (unknown start, unresolved fixed item). Known also when meals are off: stops before a long leg still get times (f5 §1.4). */
   readonly startClock: number | null;
   /** Meals are placed: the start is known and the caller asked for meals. */
   readonly meals: boolean;
@@ -384,7 +384,7 @@ export function createDayWalk(
   const markedLunch = stops.some((stop) => stop.mealRole === "lunch") || dayRoles.lastRestaurantLunch;
   const dinnerStop = dayRoles.dinnerStopId === null ? null : stops.find((stop) => stop.id === dayRoles.dinnerStopId) ?? null;
   return {
-    frame, roles: dayRoles, anchors, anchorEnds, origin, startClock: timed ? startClock : null, meals: timed,
+    frame, roles: dayRoles, anchors, anchorEnds, origin, startClock, meals: timed,
     lunchNeeded, dinnerNeeded,
     lunchMode: !lunchNeeded ? "off" : fixedMeals.has("lunch") ? "fixed" : markedLunch ? "marked" : "auto",
     fixedMeals,
