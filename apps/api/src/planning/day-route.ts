@@ -1,6 +1,9 @@
-import type { DayRouteDto, DayRouteOrder } from "@along-the-way/contracts/day-plans";
-import type { DayTimelineFrame } from "@along-the-way/contracts/day-timeline";
+import type { DayRouteDto, DayRouteOrder, DayRouteOrderBasis, DayRouteOrderReason } from "@along-the-way/contracts/day-plans";
+import type { DayTimelineFrame, DayTimelineStop } from "@along-the-way/contracts/day-timeline";
+import type { TripPlaceMealRole } from "@along-the-way/contracts/trip-places";
+import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 
+import { planDayOrder } from "./day-order";
 import { orderByStraightLine, straightLineMeters, type GeoPoint } from "./day-route-order";
 
 export interface RoutePlace {
@@ -32,12 +35,19 @@ export interface DayRouteInput {
 export interface DayRouteTiming {
   dayStartMinute: number;
   fixedMinutes: number;
-  /** Every planned place's stay. */
-  stays: ReadonlyMap<string, { minutes: number; estimated: boolean }>;
+  /** Every planned place's stay and meal facts. */
+  places: ReadonlyMap<string, { stayMinutes: number; stayEstimated: boolean; type: PlaceType; mealRole: TripPlaceMealRole | null }>;
   /** The day load's straight-line move estimate for rounded metres. */
   moveMinutes(metres: number): number;
   /** The day's timeline frame (f5 §1.1). */
   frame: DayTimelineFrame;
+}
+
+/** The timeline's view of a planned place (f5 §1.1 stays; 1b 哪一餐). */
+export function timelineStop(place: RoutePlace, timing: DayRouteTiming): DayTimelineStop {
+  const facts = timing.places.get(place.id);
+  return { id: place.id, type: facts?.type ?? null, stayMinutes: facts?.stayMinutes ?? 0, mealRole: facts?.mealRole ?? null,
+    latitude: place.latitude, longitude: place.longitude };
 }
 
 function located(place: RoutePlace): place is RoutePlace & GeoPoint {
@@ -63,9 +73,10 @@ function displayedTotalMeters(
 }
 
 /**
- * The day as a route: located places in the requested order (or the shortest straight-line one),
- * places without coordinates after them in saved order, and each leg's rounded straight-line metres.
- * Lodging without coordinates is named but never measured, so it cannot stand in as (0, 0).
+ * The day as a route: located places in the requested order (or the suggested one: meals first, then
+ * distance, p9 §2; distance alone when the day cannot be timed), places without coordinates after
+ * them in saved order, and each leg's rounded straight-line metres. Lodging without coordinates is
+ * named but never measured, so it cannot stand in as (0, 0).
  */
 export function buildDayRoute(input: DayRouteInput): DayRouteDto {
   const { order, planned } = input;
@@ -80,27 +91,43 @@ export function buildDayRoute(input: DayRouteInput): DayRouteDto {
   const locatedCandidates = candidates.filter(located);
   const unlocated = planned.filter((place) => candidateIds.has(place.id) && !located(place));
   let orderedLocated = locatedCandidates;
+  let orderBasis: DayRouteOrderBasis | null = null;
+  let orderReason: DayRouteOrderReason | null = null;
+  const timing = input.timing;
   if (order === "suggested") {
-    const suggested = orderByStraightLine(locatedCandidates, morning, night)
-      .map((id) => plannedById.get(id)! as RoutePlace & GeoPoint);
-    // Compare exactly what the client displays: rounded known legs, with no end leg after an
-    // unlocated tail. This also protects heuristic days from a longer suggestion.
-    if (
-      displayedTotalMeters(suggested, morning, night, unlocated.length > 0)
-      <= displayedTotalMeters(locatedCandidates, morning, night, unlocated.length > 0)
-    ) {
-      orderedLocated = suggested;
+    // The saved order is the base (p9 §2.1): its located places, in order, give the ranks.
+    const planned = timing ? planDayOrder({
+      frame: timing.frame, stops: candidates.map((place) => timelineStop(place, timing)), transit: null,
+      base: locatedCandidates.map((place) => timelineStop(place, timing)),
+      ranks: new Map(locatedCandidates.map((place, index) => [place.id, index])),
+      start: morning, end: night, distanceOrder: orderByStraightLine,
+    }) : null;
+    if (planned?.orderedIds) {
+      orderedLocated = planned.orderedIds.map((id) => plannedById.get(id)! as RoutePlace & GeoPoint);
+    } else {
+      const suggested = orderByStraightLine(locatedCandidates, morning, night)
+        .map((id) => plannedById.get(id)! as RoutePlace & GeoPoint);
+      // Compare exactly what the client displays: rounded known legs, with no end leg after an
+      // unlocated tail. This also protects heuristic days from a longer suggestion.
+      if (
+        displayedTotalMeters(suggested, morning, night, unlocated.length > 0)
+        <= displayedTotalMeters(locatedCandidates, morning, night, unlocated.length > 0)
+      ) {
+        orderedLocated = suggested;
+      }
     }
+    // No timing at all is p9's no_frame; a day with nothing to order says nothing.
+    orderBasis = planned ? planned.orderBasis : "distance";
+    orderReason = planned ? planned.orderReason : "no_frame";
   }
   const orderedPlaces = [...orderedLocated, ...unlocated];
 
-  const timing = input.timing;
   const stops = orderedPlaces.map((place, index) => {
     const previous = index === 0 ? morning : orderedPlaces[index - 1]!;
     const metersFromPrevious = previous && located(previous) && located(place)
       ? Math.round(straightLineMeters(previous, place))
       : null;
-    const stay = timing?.stays.get(place.id);
+    const facts = timing?.places.get(place.id);
     return {
       tripPlaceId: place.id,
       name: place.name,
@@ -111,8 +138,8 @@ export function buildDayRoute(input: DayRouteInput): DayRouteDto {
       minutesFromPrevious: null,
       linesFromPrevious: [],
       estimatedMoveMinutesFromPrevious: timing && metersFromPrevious !== null ? timing.moveMinutes(metersFromPrevious) : null,
-      stayMinutes: stay?.minutes ?? null,
-      stayEstimated: stay?.estimated ?? false,
+      stayMinutes: facts?.stayMinutes ?? null,
+      stayEstimated: facts?.stayEstimated ?? false,
     };
   });
   const last = orderedPlaces.at(-1);
@@ -147,5 +174,7 @@ export function buildDayRoute(input: DayRouteInput): DayRouteDto {
     fixedMinutes: timing?.fixedMinutes ?? null,
     estimatedMoveMinutesToEnd: timing && metersToEnd !== null ? timing.moveMinutes(metersToEnd) : null,
     frame: timing?.frame ?? null,
+    orderBasis,
+    orderReason,
   };
 }

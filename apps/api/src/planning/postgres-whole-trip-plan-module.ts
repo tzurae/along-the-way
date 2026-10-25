@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { simulateDay } from "@along-the-way/contracts/day-timeline";
 import {
   parseWholeTripPlanPreviewInput,
   type ApplyWholeTripPlanResponse,
@@ -19,7 +18,6 @@ import {
   requireIdempotencyKey,
   requireScheduler,
 } from "../private-trips/postgres-private-trip-store";
-import { buildDayFrame } from "./day-frame";
 import {
   PLANNER_MAX_DAYS,
   PLANNER_MAX_FLEXIBLE_PLACES,
@@ -89,24 +87,14 @@ export class PostgresWholeTripPlanModule implements WholeTripPlanModule {
         throw new AppError("planner_input_too_large", INPUT_TOO_LARGE_MESSAGE, 422);
       }
       const estimates = snapshot.estimates;
-      const result = solveWholeTrip(snapshot.input);
+      // The solver yields the event loop between days (p9 §2.7); this transaction holds its connection meanwhile, as before.
+      const result = await solveWholeTrip(snapshot.input);
       if (result.status === "complete" && !validateWholeTripPlan(snapshot.input, result).valid) {
         throw new Error("Whole-trip solver produced an invalid complete result");
       }
-      // f5 1a: each day's timeline from the same rules as the day dialog, straight-line minutes only.
-      const snapshotDays = new Map(snapshot.input.days.map((day) => [day.id, day]));
-      const places = new Map([...snapshot.input.flexiblePlaces, ...snapshot.input.excludedPlaces].map((place) => [place.id, place]));
-      const withTimelines: PlannerResult = { ...result, days: result.days.map((day) => {
-        const snapshotDay = snapshotDays.get(day.dayId);
-        if (!snapshotDay) return day;
-        return { ...day, timeline: simulateDay(buildDayFrame(snapshotDay), day.orderedPlaceIds.flatMap((id) => {
-          const place = places.get(id);
-          return place ? [{ id, type: place.type, stayMinutes: place.estimate.visitMinutes, mealRole: place.mealRole,
-            latitude: place.coordinates?.latitude ?? null, longitude: place.coordinates?.longitude ?? null }] : [];
-        })) };
-      }) };
       const createdAt = this.now();
-      const payload: StoredProposal = { schemaVersion: 1, request, revisionInput: snapshot.revisionInput, estimates, result: withTimelines };
+      // Each day carries its timeline and how its order was chosen (f5 1a, p9 §2.8).
+      const payload: StoredProposal = { schemaVersion: 1, request, revisionInput: snapshot.revisionInput, estimates, result };
       const row = await transaction.insertInto("whole_trip_plan_proposals").values({
         id: randomUUID(),
         trip_id: tripId,

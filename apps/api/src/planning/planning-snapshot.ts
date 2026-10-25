@@ -122,7 +122,8 @@ export async function buildPlanningSnapshot(executor: DatabaseExecutor, tripId: 
   const estimates: PlannerFrozenEstimates = {};
   let aiPending = 0;
   const plannerPlaces = new Map<string, PlannerPlace>();
-  for (const place of selected) {
+  // `selected` is created_at, id ascending; the index orders a day's unpositioned stops newest first (p9 §2.1).
+  for (const [selectedIndex, place] of selected.entries()) {
     const row = place.row;
     const defaults = PLACE_ESTIMATE_DEFAULTS_V1[place.type];
     const profile = profiles.get(row.place_id);
@@ -145,7 +146,8 @@ export async function buildPlanningSnapshot(executor: DatabaseExecutor, tripId: 
     estimates[row.id] = estimate;
     const assignment = assignmentByPlace.get(row.id);
     plannerPlaces.set(row.id, { id: row.id, type: place.type, coordinates: place.coordinates, estimate, mealRole: row.meal_role,
-      votes: votesByPlace.get(row.id)?.length ?? 0, assignedDayId: assignment?.trip_day_id ?? null, position: assignment?.day_position ?? null });
+      votes: votesByPlace.get(row.id)?.length ?? 0, assignedDayId: assignment?.trip_day_id ?? null, position: assignment?.day_position ?? null,
+      selectedIndex });
   }
   const flexiblePlaces = selected.filter((place) => !place.scheduled && place.type !== "lodging" && place.type !== "airport").map((place) => plannerPlaces.get(place.row.id)!);
   const excludedPlaces = selected.filter((place) => !place.scheduled && (place.type === "lodging" || place.type === "airport")).map((place) => plannerPlaces.get(place.row.id)!);

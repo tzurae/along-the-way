@@ -100,7 +100,7 @@ export const wholeTripPlanner = {
       replan: "可調整所有地點的日期",
       replanDescription: "比較容易把全部地點排進去，也比較能平均每天負荷。",
       keep: "保留已排日期",
-      keepDescription: "已在某一天的地點不會換日；每天順序仍可重新縮短直線距離。",
+      keepDescription: "已在某一天的地點不會換日；每天的順序會先排吃飯時間，再看遠近。",
       recommended: "建議",
     },
     fixedNote: "航班、住宿、訂位和其他固定安排不會移動。若它們本身已超出設定，系統會停下來說明。",
@@ -114,7 +114,7 @@ export const wholeTripPlanner = {
     loadingSteps: [
       "讀取地點估算",
       "依每天上限分配日期",
-      "縮短每天的直線距離",
+      "每天先排吃飯時間，再排順路",
       "再次檢查每一天",
     ],
     previewTitle: "全部排行程草稿",

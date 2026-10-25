@@ -1,8 +1,16 @@
 import { parseDayTimelineFrame, type DayTimelineFrame } from "./day-timeline";
 import { isRecord } from "./type-guards";
 
-/** `current` is saved order, `suggested` minimizes travel cost, `custom` is member-arranged. */
+/** `current` is saved order, `suggested` is the meal-first suggestion (or travel cost when it cannot be timed), `custom` is member-arranged. */
 export type DayRouteOrder = "current" | "suggested" | "custom";
+
+/** How a suggested order was chosen (p9 §2.6): by meal times first, or by distance alone. */
+export type DayRouteOrderBasis = "meals" | "distance";
+/**
+ * exact: every order compared; many_places: meals fixed first, each segment by distance;
+ * long_leg: every order has a straight-line head/middle leg above 120 minutes; no_frame: the day cannot be timed.
+ */
+export type DayRouteOrderReason = "exact" | "many_places" | "long_leg" | "no_frame";
 
 export type TransitProvider = "navitime" | "google_routes";
 export type TransitNotice = "navitime_quota" | "navitime_unavailable" | "transit_quota" | "transit_unavailable";
@@ -89,6 +97,9 @@ export interface DayRouteDto {
   estimatedMoveMinutesToEnd: number | null;
   /** The day's timeline frame (window, start, end, fixed items, straight-line settings); null from an older API, then no timeline is drawn. */
   frame?: DayTimelineFrame | null;
+  /** How a `suggested` order was chosen; null for other orders and from an older API. */
+  orderBasis?: DayRouteOrderBasis | null;
+  orderReason?: DayRouteOrderReason | null;
 }
 
 export interface DayRouteResponse {
@@ -224,6 +235,10 @@ function route(value: unknown): DayRouteDto {
     fixedMinutes: nullableInteger(entry.fixedMinutes ?? null),
     estimatedMoveMinutesToEnd: nullableInteger(entry.estimatedMoveMinutesToEnd ?? null),
     frame: entry.frame == null ? null : parseDayTimelineFrame(entry.frame),
+    orderBasis: entry.orderBasis == null ? null : entry.orderBasis === "meals" || entry.orderBasis === "distance" ? entry.orderBasis : invalid(),
+    orderReason: entry.orderReason == null ? null
+      : entry.orderReason === "exact" || entry.orderReason === "many_places" || entry.orderReason === "long_leg" || entry.orderReason === "no_frame"
+        ? entry.orderReason : invalid(),
     transitMatrix: entry.transitMatrix === undefined ? [] : Array.isArray(entry.transitMatrix)
       ? entry.transitMatrix.map((value) => {
         const leg = record(value);

@@ -21,7 +21,10 @@ import {
   type DayRouteResponse,
   type DayRouteShapesResponse,
 } from "@along-the-way/contracts/day-plans";
-import { simulateDay, type DayTimeline, type DayTimelineRow } from "@along-the-way/contracts/day-timeline";
+import {
+  NO_DAY_MEAL_ROLES, resolveDayMeals, simulateDay, BREAKFAST_LATEST_MINUTE,
+  type DayMealRoles, type DayTimeline, type DayTimelineRow, type DayTimelineStop,
+} from "@along-the-way/contracts/day-timeline";
 import {
   parseTripPlaceListResponse,
   parseTripPlaceResponse,
@@ -55,7 +58,7 @@ import { saveDayAlternatives } from "./DayAlternatives";
 import { durationText, stayText } from "./day-return-time";
 import {
   anchorLabelText, earlyText, endText, freeTimeText, longLegText, MEAL_ROLE_NAMES, mealFloorText, mealGapText,
-  NO_WINDOW_TEXT, stopLabelText, tailText, TIMELINE_INTRO, timelineClock,
+  NO_WINDOW_TEXT, ORDER_BASIS_TITLE, ORDER_REASON_TEXT, stopLabelText, tailText, TIMELINE_INTRO, timelineClock,
 } from "./day-timeline-text";
 import { useDayOverrideOpener } from "./WholeTripPlanning";
 
@@ -108,13 +111,8 @@ interface PlaceFacts {
   mealRole: TripPlaceMealRole | null;
 }
 
-/**
- * The day's timeline for this order (f5 §1), or null when the API sent no frame (older server)
- * or the day has no stops. Transit minutes already in the route are used leg by leg; every other
- * leg is the shared straight-line estimate.
- */
-function routeTimeline(route: DayRouteDto | null, facts: ReadonlyMap<string, PlaceFacts>): DayTimeline | null {
-  if (!route?.frame) return null;
+/** The route's stops as the timeline sees them (type and 哪一餐 from the place list), plus its transit minutes leg by leg. */
+function timelineInput(route: DayRouteDto, facts: ReadonlyMap<string, PlaceFacts>) {
   const transit = new Map<string, number>();
   route.stops.forEach((stop, index) => {
     const from = index === 0 ? route.startsAt?.placeId : route.stops[index - 1]!.tripPlaceId;
@@ -122,10 +120,31 @@ function routeTimeline(route: DayRouteDto | null, facts: ReadonlyMap<string, Pla
   });
   const last = route.stops.at(-1);
   if (last && route.endsAt && route.minutesToEnd !== null) transit.set(`${last.tripPlaceId}:${route.endsAt.placeId}`, route.minutesToEnd);
-  return simulateDay(route.frame, route.stops.map((stop) => ({
-    id: stop.tripPlaceId, type: facts.get(stop.tripPlaceId)?.type ?? null, stayMinutes: stop.stayMinutes ?? 0,
-    mealRole: facts.get(stop.tripPlaceId)?.mealRole ?? null, latitude: stop.latitude, longitude: stop.longitude,
-  })), (from, to) => transit.get(`${from}:${to}`) ?? null);
+  return {
+    stops: route.stops.map((stop): DayTimelineStop => ({
+      id: stop.tripPlaceId, type: facts.get(stop.tripPlaceId)?.type ?? null, stayMinutes: stop.stayMinutes ?? 0,
+      mealRole: facts.get(stop.tripPlaceId)?.mealRole ?? null, latitude: stop.latitude, longitude: stop.longitude,
+    })),
+    transit: (from: string, to: string) => transit.get(`${from}:${to}`) ?? null,
+  };
+}
+
+/** δ, λ, β from the saved order (p9 §2.2): both columns are drawn with the same result. */
+function savedMealRoles(route: DayRouteDto | null, facts: ReadonlyMap<string, PlaceFacts>): DayMealRoles {
+  if (!route?.frame) return NO_DAY_MEAL_ROLES;
+  const { stops, transit } = timelineInput(route, facts);
+  return resolveDayMeals(route.frame, stops, stops, transit);
+}
+
+/**
+ * The day's timeline for this order (f5 §1), or null when the API sent no frame (older server)
+ * or the day has no stops. Transit minutes already in the route are used leg by leg; every other
+ * leg is the shared straight-line estimate.
+ */
+function routeTimeline(route: DayRouteDto | null, facts: ReadonlyMap<string, PlaceFacts>, roles: DayMealRoles): DayTimeline | null {
+  if (!route?.frame) return null;
+  const { stops, transit } = timelineInput(route, facts);
+  return simulateDay(route.frame, stops, transit, roles);
 }
 
 /** Names for every id a route's timeline can mention: stops, lodgings, fixed items and their points. */
@@ -172,7 +191,8 @@ function timelineMeal(timeline: DayTimeline | null, meal: "lunch" | "dinner") {
 /**
  * f5 §4: how the candidate compares with its baseline (the saved order, or, once places were taken
  * off the day, the saved order without them, so dropping a far place is never shown as a better
- * ordering). Travel under 5 minutes apart counts as the same; then each meal that moved.
+ * ordering). p9 §2.2.3 first: the breakfast stop β no longer first and before 10:30. Then travel
+ * under 5 minutes apart counts as the same; then each meal that moved.
  */
 function candidateDelta(
   baseline: DayRouteDto,
@@ -180,6 +200,7 @@ function candidateDelta(
   baselineTimeline: DayTimeline | null,
   candidateTimeline: DayTimeline | null,
   names: ReadonlyMap<string, string>,
+  breakfastStopId: string | null,
 ) {
   if (baseline.orderedTripPlaceIds.join("\u0000") === candidate.orderedTripPlaceIds.join("\u0000")) {
     return { tone: "same", text: "建議跟目前順序一樣" } as const;
@@ -187,9 +208,17 @@ function candidateDelta(
   const before = baselineTimeline?.kind === "rows" ? baselineTimeline.moveMinutes : null;
   const after = candidateTimeline?.kind === "rows" ? candidateTimeline.moveMinutes : null;
   const difference = before === null || after === null ? null : after - before;
-  const parts = [difference === null ? "部分路段無法估計，無法比較移動時間"
+  const parts: string[] = [];
+  if (breakfastStopId !== null && candidateTimeline?.kind === "rows") {
+    const stopRows = candidateTimeline.rows.filter((row) => row.kind === "stop");
+    const beta = stopRows.find((row) => row.stopId === breakfastStopId);
+    if (beta?.minute != null && (stopRows[0] !== beta || beta.minute >= BREAKFAST_LATEST_MINUTE)) {
+      parts.push(`早餐的${names.get(breakfastStopId) ?? "地點"}改到 ${timelineClock(beta.minute)}`);
+    }
+  }
+  parts.push(difference === null ? "部分路段無法估計，無法比較移動時間"
     : Math.abs(difference) < 5 ? "移動差不多"
-      : difference < 0 ? `移動少約 ${-difference} 分` : `移動多約 ${difference} 分`];
+      : difference < 0 ? `移動少約 ${-difference} 分` : `移動多約 ${difference} 分`);
   for (const meal of ["lunch", "dinner"] as const) {
     const was = timelineMeal(baselineTimeline, meal);
     const now = timelineMeal(candidateTimeline, meal);
@@ -734,13 +763,16 @@ export function DayPlanDialog({
   const candidate = routes.custom ?? routes.suggested ?? null;
   const transitSource = candidate && candidate.travelSource !== "straight_line" ? candidate : null;
   const transitCallsNeeded = routes.suggested?.transitCallsNeeded ?? candidate?.transitCallsNeeded ?? 0;
-  const suggestedLabel = "照順路排";
+  // p9 §8: the suggestion's title says how it was ordered; an older server sends no basis (distance).
+  const suggestedLabel = ORDER_BASIS_TITLE[routes.suggested?.orderBasis ?? "distance"];
   const placeFacts = useMemo(() => new Map(places.map((place): [string, PlaceFacts] => [place.id, { type: place.type, mealRole: place.mealRole ?? null }])), [places]);
   // f5 §3.1: the saved column is the whole saved order with this dialog's transit minutes;
   // the removal-adjusted baseline only feeds the comparison sentence.
   const savedRoute = saved && transitSource ? withTransitMatrix(saved, transitSource.transitMatrix, transitSource.transitProvider!) : saved;
-  const savedTimeline = routeTimeline(savedRoute, placeFacts);
-  const candidateTimeline = routeTimeline(candidate, placeFacts);
+  // p9 §2.2: δ, λ and β come from the saved order and apply to every order drawn in this dialog.
+  const mealRoles = savedMealRoles(savedRoute, placeFacts);
+  const savedTimeline = routeTimeline(savedRoute, placeFacts, mealRoles);
+  const candidateTimeline = routeTimeline(candidate, placeFacts, mealRoles);
   const providerName = candidate?.transitProvider === "google_routes" ? "Google" : "NAVITIME";
 
   function selectRouteTab(version: "saved" | "candidate", next: RouteView) {
@@ -1844,16 +1876,15 @@ export function DayPlanDialog({
       ? withTransitMatrix(rawBaseline, transitSource.transitMatrix, transitSource.transitProvider!) : rawBaseline;
     const comparisonPending = removedIds.length > 0 && baseline?.key !== baselineKey;
     const delta = comparedWith
-      ? candidateDelta(comparedWith, candidate, routeTimeline(comparedWith, placeFacts), candidateTimeline,
-        new Map([...routeNames(comparedWith), ...routeNames(candidate)]))
+      ? candidateDelta(comparedWith, candidate, routeTimeline(comparedWith, placeFacts, mealRoles), candidateTimeline,
+        new Map([...routeNames(comparedWith), ...routeNames(candidate)]), mealRoles.breakfastStopId)
       : null;
     const removedNames = removedIds.map((id) => saved.stops.find((stop) => stop.tripPlaceId === id)?.name ?? "地點");
     // Only places really off the candidate are written as 備案 on save (f5 §2.3).
     const movingToAlternatives = pendingAlternatives.filter((entry) => !candidate.orderedTripPlaceIds.includes(entry.id));
     const description = [
-      arranged ? "從目前順序調整；拖曳即可再改。"
-        // A long day's own sentence already says no meals are placed (f5 §1.4).
-        : candidateTimeline?.kind === "rows" && candidateTimeline.longLeg ? null : "建議順序還是照順路排，還沒考慮吃飯時間。",
+      // p9 §8 by reason; an older server (or a day with nothing to order) sends none and gets no explanation.
+      arranged ? "從目前順序調整；拖曳即可再改。" : candidate.orderReason ? ORDER_REASON_TEXT[candidate.orderReason] : null,
       candidate.travelSource !== "straight_line" ? "交通時間以當地 09:00 出發查詢。" : null,
     ].filter(Boolean).join("");
     return (

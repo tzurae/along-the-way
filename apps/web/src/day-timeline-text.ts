@@ -1,8 +1,19 @@
+import type { DayRouteOrderBasis, DayRouteOrderReason } from "@along-the-way/contracts/day-plans";
 import type { DayTimelineRow, DayTimelineStopLabel } from "@along-the-way/contracts/day-timeline";
 
 /** f5 §4: the only place the day dialog says the times are estimates. */
 export const TIMELINE_INTRO = "早餐 10:30 前、午餐 11:30–13:00、晚餐 17:30–19:00 入座。時間都是估計。";
 export const NO_WINDOW_TEXT = "這天固定行程之外，沒有可安排的時間。";
+
+/** p9 §8: the suggested order's title, by how it was chosen. */
+export const ORDER_BASIS_TITLE: Record<DayRouteOrderBasis, string> = { meals: "先排吃飯時間，再排順路", distance: "照順路排" };
+/** p9 §8: the suggested order's explanation; null on a long day, whose own 「這段很遠」 sentence says it all (f5 §1.4). */
+export const ORDER_REASON_TEXT: Record<DayRouteOrderReason, string | null> = {
+  exact: "先把吃飯的地方排進吃飯時間，同一段裡再看遠近。",
+  many_places: "這天地點比較多，吃飯時間是大略排的：先定好午餐、晚餐，前後各段再照順路排。想排得更細，可以把幾個地點移到別天。",
+  long_leg: null,
+  no_frame: "這天的出發住宿或有些項目的時間還沒確定，所以建議順序還是照順路排，還沒考慮吃飯時間。補齊以後再排一次，就會先排吃飯時間。",
+};
 
 const MEAL_NAMES = { breakfast: "早餐", lunch: "午餐", dinner: "晚餐" } as const;
 const MEAL_MINIMUM = { lunch: 60, dinner: 75 } as const;
