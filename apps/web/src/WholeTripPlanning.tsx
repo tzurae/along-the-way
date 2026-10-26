@@ -1,5 +1,6 @@
 import {
   createContext,
+  Fragment,
   useCallback,
   useContext,
   useEffect,
@@ -30,6 +31,7 @@ import {
   type WholeTripPlanPreviewInput,
   type WholeTripPlanProposalDto,
 } from "@along-the-way/contracts/planning";
+import { parseMapsConfigResponse, type MapsConfigResponse } from "@along-the-way/contracts/maps";
 import {
   BedDouble,
   ChevronRight,
@@ -49,7 +51,8 @@ import {
 } from "@/components/ui/dialog";
 import { ApiRequestError } from "./api-error";
 import { notify } from "./AppToaster";
-import { NO_WINDOW_TEXT, ORDER_BASIS_TITLE, ORDER_REASON_TEXT, timelineRowText } from "./day-timeline-text";
+import { longLegText, NO_WINDOW_TEXT, ORDER_BASIS_TITLE, ORDER_REASON_TEXT, timelineRowText } from "./day-timeline-text";
+import { DraftLegRoute, type DraftLegPoint } from "./DraftLegRoute";
 import { useI18n, type Messages } from "./i18n";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import "./whole-trip-planner.css";
@@ -107,6 +110,8 @@ interface PlanningContextValue {
   inheritedSettings: ReadonlyMap<string, PlanningSettings>;
   /** Trip settings before flight-day reduction; the API checks override cross-fields against these. */
   tripSettings: PlanningSettings | null;
+  /** The Maps Embed key for a draft leg's 「看路線」; null until loaded, or when the server has none. */
+  mapsBrowserKey: string | null;
   overrideDayId: string | null;
   confirmDiscard: boolean;
   setScopeMode(value: "keep" | "replan"): void;
@@ -192,6 +197,15 @@ function displayError(reason: unknown, fallback: string) {
   return reason instanceof Error && reason.message ? reason.message : fallback;
 }
 
+/** The day's located points by endpoint id (lodging, fixed items' start and end, stops): the ids timeline legs name. */
+function routePoints(day: PlanningDayLoadDto) {
+  const points = new Map<string, DraftLegPoint>();
+  for (const node of day.route) {
+    for (const end of [node.start, node.end]) if (end.coordinates) points.set(end.id, end.coordinates);
+  }
+  return points;
+}
+
 export function WholeTripPlanningProvider({
   tripId,
   request,
@@ -223,6 +237,8 @@ export function WholeTripPlanningProvider({
   const [applying, setApplying] = useState(false);
   const [overrideDayId, setOverrideDayId] = useState<string | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [mapsBrowserKey, setMapsBrowserKey] = useState<string | null>(null);
+  const mapsConfigRequested = useRef(false);
   const generation = useRef(0);
   const loadingTimer = useRef<number | undefined>(undefined);
   const applyKeys = useRef(new Map<string, string>());
@@ -269,6 +285,18 @@ export function WholeTripPlanningProvider({
   useEffect(() => () => {
     clearInterval(loadingTimer.current);
   }, []);
+
+  // The browser key is the same for every draft: asked for when a draft is shown, until one request succeeds.
+  useEffect(() => {
+    if (!proposal || mapsConfigRequested.current) return;
+    mapsConfigRequested.current = true;
+    void request<MapsConfigResponse>("/api/maps/config", { parse: parseMapsConfigResponse })
+      .then((config) => setMapsBrowserKey(config.browserKey))
+      .catch(() => {
+        // Without a key only the Google Maps link shows; the next draft asks again.
+        mapsConfigRequested.current = false;
+      });
+  }, [proposal, request]);
 
   const createPreview = useCallback(async (explicitInput?: WholeTripPlanPreviewInput) => {
     const input = explicitInput ?? {
@@ -435,6 +463,7 @@ export function WholeTripPlanningProvider({
     days,
     inheritedSettings,
     tripSettings: settings?.resolved ?? null,
+    mapsBrowserKey,
     overrideDayId,
     confirmDiscard,
     setScopeMode,
@@ -475,6 +504,7 @@ export function WholeTripPlanningProvider({
     load,
     loadError,
     loadingStep,
+    mapsBrowserKey,
     onEditPlace,
     online,
     overrideDayId,
@@ -885,6 +915,7 @@ function PlannerDialog() {
     names,
     days,
     inheritedSettings,
+    mapsBrowserKey,
     setScopeMode,
     setUseAi,
     closePlanner,
@@ -1033,6 +1064,8 @@ function PlannerDialog() {
                 {proposal.result.days.map((resultDay, index) => {
                   const dayRef = days.find((day) => day.id === resultDay.dayId);
                   const day = resultDay.load;
+                  const points = routePoints(day);
+                  const nameOf = (id: string) => names.get(id) ?? "地點";
                   const invalid = day.status !== "valid";
                   const near = !invalid && day.utilisation >= .9;
                   const draftOverride = proposal.draftOverrides?.find((entry) => entry.dayId === resultDay.dayId);
@@ -1093,8 +1126,23 @@ function PlannerDialog() {
                         {resultDay.timeline?.kind === "rows" ? (
                           <ol className="whole-trip-day__timeline" aria-label={copy.timelineLabel}>
                             {resultDay.timeline.rows.map((row, rowIndex) => {
-                              const text = timelineRowText(row, (id) => names.get(id) ?? "地點");
-                              return text === null ? null : <li key={rowIndex}>{text}</li>;
+                              const text = timelineRowText(row, nameOf);
+                              if (text === null) return null;
+                              if (row.kind !== "leg" && row.kind !== "tail_unknown") return <li key={rowIndex}>{text}</li>;
+                              // Every leg between two located points, lodging included, can show Google's own route.
+                              const from = points.get(row.fromId);
+                              const to = points.get(row.toId);
+                              return (
+                                <Fragment key={rowIndex}>
+                                  <li>
+                                    {text}
+                                    {from && to ? (
+                                      <DraftLegRoute from={from} to={to} fromName={nameOf(row.fromId)} toName={nameOf(row.toId)} browserKey={mapsBrowserKey} />
+                                    ) : null}
+                                  </li>
+                                  {row.kind === "leg" && row.long ? <li>{longLegText(nameOf(row.fromId), nameOf(row.toId))}</li> : null}
+                                </Fragment>
+                              );
                             })}
                           </ol>
                         ) : null}

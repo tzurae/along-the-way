@@ -53,6 +53,7 @@
 .planning-override-footer button:focus-visible,
 .planning-impact-actions button:focus-visible,
 .whole-trip-inline-action:focus-visible,
+.whole-trip-leg-route__link:focus-visible,
 .whole-trip-dialog__footer button:focus-visible,
 .whole-trip-suggestion button:focus-visible {
   outline: 3px solid color-mix(in srgb, var(--ring) 42%, transparent);
@@ -220,6 +221,14 @@
 .whole-trip-day__route strong { font-size: 13px; }
 .whole-trip-day__route small { color: var(--muted-foreground); font-size: 11px; line-height: 1.35; text-align: right; }
 .whole-trip-day__timeline { display: grid; gap: 4px; margin: 0; list-style: none; padding: 0; font-size: 12px; line-height: 1.45; font-variant-numeric: tabular-nums; }
+.whole-trip-leg-route { display: grid; gap: 6px; margin-top: 4px; }
+.whole-trip-leg-route__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.whole-trip-leg-route__actions .whole-trip-inline-action { margin-left: 0; }
+.whole-trip-leg-route__link { display: inline-flex; min-height: 36px; align-items: center; gap: 4px; color: var(--accent-strong); font-size: 12px; font-weight: 750; text-decoration: underline; text-underline-offset: 3px; }
+.whole-trip-leg-route__link svg { width: 14px; height: 14px; }
+.whole-trip-leg-route__panel { display: grid; gap: 6px; }
+.whole-trip-leg-route__panel p { margin: 0; color: var(--muted-foreground); font-size: 11px; line-height: 1.45; }
+.whole-trip-leg-route__panel iframe { display: block; width: 100%; height: 320px; border: 0; border-radius: 10px; }
 .whole-trip-source { border-radius: 999px; background: color-mix(in srgb, var(--foreground) 7%, transparent); padding: 2px 6px; white-space: nowrap; }
 
 .whole-trip-unplaced { margin-top: 18px; border: 1px solid color-mix(in srgb, var(--destructive) 30%, var(--border)); border-radius: 15px; background: var(--card); }

@@ -582,7 +582,8 @@ Expand-only migration `045_transit_leg_cache.ts` 在既有 `044_trip_stop_replac
 沿用上述日程國家判定，只接受同一個已知國家；不硬編任何城市或額外國家清單。
 必須在 **server key 所屬的 Google Cloud project 啟用 Routes API**，並在該 key 的 API restrictions
 允許 Routes API；同一把 key 原有的 Places API (New) 權限保留。server key 不送瀏覽器；
-地圖仍用獨立的 `GOOGLE_MAPS_BROWSER_KEY` 與既有 Maps JavaScript API 額度。
+地圖仍用獨立的 `GOOGLE_MAPS_BROWSER_KEY` 與既有 Maps JavaScript API 額度；這把 key 也要開 Maps Embed API
+（草稿「看路線」用，免費、不限次數），HTTP referrer 限制照舊。
 
 分鐘用 `POST https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix`，
 field mask 為 `originIndex,destinationIndex,status,condition,duration`。

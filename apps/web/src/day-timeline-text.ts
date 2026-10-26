@@ -101,8 +101,9 @@ export function endText(row: Extract<DayTimelineRow, { kind: "end" }>, toName: s
 
 /**
  * One plain line per row, for read-only lists (whole-trip drafts); null: the row has no line. A leg
- * with a distance but no minutes (the long leg and everything after it, f5 §1.4) shows no minutes,
- * the same rule as the day dialog: the long leg is only its sentence, later legs are omitted.
+ * reads as the day dialog writes it, 「↓ 約 N 分・X 公里」; one with a distance but no minutes (the long
+ * leg and everything after it, f5 §1.4) shows only the distance. The long leg's 「這段很遠」 sentence
+ * is `longLegText`, the caller's own line after it.
  */
 export function timelineRowText(row: DayTimelineRow, nameOf: (id: string) => string): string | null {
   const at = (minute: number | null) => minute === null ? "" : `${timelineClock(minute)} `;
@@ -110,8 +111,11 @@ export function timelineRowText(row: DayTimelineRow, nameOf: (id: string) => str
     case "breakfast_before": return "早餐・出門前";
     case "start": return row.pointId === null ? "出發地點不明" : `${at(row.minute)}從${nameOf(row.pointId)}出發`;
     case "anchor": return `${at(row.minute)}${nameOf(row.anchorId)}　${anchorLabelText(row)}${row.earlyMinutes > 0 ? `　${earlyText(row.earlyMinutes, false) ?? ""}` : ""}`;
-    case "leg": return row.long ? longLegText(nameOf(row.fromId), nameOf(row.toId))
-      : row.minutes !== null ? `↓ 約 ${row.minutes} 分` : row.metres === null ? "↓ 無法估計" : null;
+    case "leg": {
+      const distance = row.metres === null ? null : row.metres < 1_000 ? `${row.metres} 公尺` : `${(row.metres / 1_000).toFixed(1)} 公里`;
+      if (row.minutes === null) return `↓ ${distance ?? "無法估計"}`;
+      return distance === null ? `↓ 約 ${row.minutes} 分` : `↓ 約 ${row.minutes} 分・${distance}`;
+    }
     case "free": return `${at(row.minute)}${freeTimeText(row.minutes)}`;
     case "stop": {
       const notes = [row.label ? stopLabelText(row.label) : null, earlyText(row.earlyMinutes, true)].filter(Boolean);
