@@ -52,7 +52,7 @@ import {
 import { ApiRequestError } from "./api-error";
 import { notify } from "./AppToaster";
 import { longLegText, NO_WINDOW_TEXT, ORDER_BASIS_TITLE, ORDER_REASON_TEXT, timelineRowText } from "./day-timeline-text";
-import { DraftLegRoute, type DraftLegPoint } from "./DraftLegRoute";
+import { DraftDayRoute, DraftLegRoute, type DraftLegPoint } from "./DraftLegRoute";
 import { useI18n, type Messages } from "./i18n";
 import { PlaceDetailSheet } from "./PlaceDetailSheet";
 import "./whole-trip-planner.css";
@@ -1092,6 +1092,8 @@ function PlannerDialog() {
                         <span className="planning-override-chip">{t.wholeTripPlanner.override.chip[previewShortcut]}</span>
                       </summary>
                       <div className="whole-trip-day__body">
+                        <DraftDayRoute route={day.route} timeline={resultDay.timeline} points={points}
+                          title={`${dateLabel(dayRef?.date ?? day.date ?? "", locale)} 整天路線`} browserKey={mapsBrowserKey} />
                         <ol className="whole-trip-day__route">
                           {day.route.map((node, routeIndex) => {
                             const estimate = proposal.estimates[node.id];
