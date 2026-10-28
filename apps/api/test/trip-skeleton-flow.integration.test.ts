@@ -2679,12 +2679,12 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
       });
       expect(skeleton.days.find((day) => day.id === second!.id)).toMatchObject({ alternativeTripPlaceIds: [], alternativesVersion: 1 });
       const places = parseTripPlaceListResponse(await (await app.request(`/api/trips/${trip.id}/trip-places`, { headers: { cookie } })).json()).tripPlaces;
-      // Backups stay off a day; an accepted AI place may remain selected while it is 待安排.
+      // Backups stay off a day; a 待安排 AI place saved as 備案 goes back to 口袋名單, so 全部排行程 no longer reads it.
       for (const id of [ramen.id, steak.id]) {
         expect(places.find((place) => place.id === id)).toMatchObject({ selectedForItinerary: false, assignedDayId: null });
       }
       expect(places.find((place) => place.id === pending.id)).toMatchObject({
-        selectedForItinerary: true,
+        selectedForItinerary: false,
         assignedDayId: null,
         scheduled: false,
       });
@@ -2885,7 +2885,9 @@ describe("trip skeleton through HTTP and PostgreSQL", () => {
         const downgraded = await migrator.migrateTo("016_travel_places");
         if (downgraded.error) throw downgraded.error;
         expect(await database.selectFrom("trip_places").selectAll().orderBy("id").execute())
-          .toEqual(placesAfter.map(({ selected_for_itinerary: _selected, unplaced_from_date: _unplaced, effort_level: _effort, ...place }) => place));
+          .toEqual(placesAfter.map(({
+            selected_for_itinerary: _selected, unplaced_from_date: _unplaced, effort_level: _effort, meal_role: _mealRole, ...place
+          }) => place));
         expect(await database.selectFrom("candidate_proposals").selectAll().orderBy("id").execute())
           .toEqual(proposalsAfter.map(({ reopened_at: _reopenedAt, ...proposal }) => proposal));
       } finally {
