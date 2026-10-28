@@ -9,7 +9,9 @@ import { conflictResolutionContext, normalizeEmail } from "./private-trips/postg
 import {
   DISCOVERY_REACH_MINUTES,
   DISCOVERY_REACH_MODES,
+  DISCOVERY_SCOPES,
   type DiscoveryReachInput,
+  type DiscoveryScope,
 } from "@along-the-way/contracts/discovery";
 import type {
   ConstraintInput,
@@ -316,6 +318,13 @@ function discoveryReachField(body: Record<string, unknown>): DiscoveryReachInput
     throw new AppError("validation_error", "reach must be { mode: walk|transit|taxi, maxMinutes: 5|10|15|null }");
   }
   return { mode: knownMode, maxMinutes: knownMinutes };
+}
+
+/** 調查's 範圍: nearby|city|region, required. */
+function discoveryScopeField(body: Record<string, unknown>): DiscoveryScope {
+  const scope = DISCOVERY_SCOPES.find((entry) => entry === body.scope);
+  if (!scope) throw new AppError("validation_error", "scope must be nearby|city|region");
+  return scope;
 }
 
 
@@ -1183,6 +1192,7 @@ export function createApp({
         idempotencyKey(context),
         {
           expectedBriefVersion: numberField(body, "expectedBriefVersion"),
+          scope: discoveryScopeField(body),
           near: discoveryNearField(body),
           reach: discoveryReachField(body),
         },

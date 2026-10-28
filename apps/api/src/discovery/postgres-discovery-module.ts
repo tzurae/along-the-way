@@ -495,12 +495,13 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
       },
     });
     // A replay reports the job the first request queued, not this retry's position: the job's own
-    // stored position while it is active; once it ended that position is gone, so none.
+    // stored position while it is active; once it ended that position is gone, so none. A city or
+    // region job has no center.
     const queuedCenter = async () => {
-      const active = await this.database.selectFrom("discovery_jobs").select("near")
+      const active = await this.database.selectFrom("discovery_jobs").select(["near", "scope"])
         .where("trip_id", "=", tripId).where("created_by", "=", userId)
         .where("status", "in", ["queued", "running"]).executeTakeFirst();
-      return active ? this.searchCenter(tripId, storedNear(active.near)) : null;
+      return active?.scope === "nearby" ? this.searchCenter(tripId, storedNear(active.near)) : null;
     };
     if (await replayed(this.database, userId, operation, key)) return workspace(await queuedCenter());
     await this.currentBrief(version, tripId);
@@ -513,9 +514,14 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     if (this.placeLookup.available === false || !this.placeDiscovery.available) {
       throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
     }
-    // Owner rule 2026-10-22: a search around the traveler always asks how they travel and for how
-    // long; the client shows the two choices, and this refuses a start that skipped them.
-    const center = await this.searchCenter(tripId, input.near);
+    // Owner rule 2026-10-28: 調查 first asks 範圍. Only a nearby search has a center, and it always
+    // asks how they travel and for how long (owner rule 2026-10-22); the client shows the choices,
+    // and this refuses a start that skipped them. City and region ignore any position sent.
+    const nearby = input.scope === "nearby";
+    const center = nearby ? await this.searchCenter(tripId, input.near) : null;
+    if (nearby && !center) {
+      throw new AppError("nearby_unavailable", "No current position or tonight's lodging to search near", 409);
+    }
     if (center && !input.reach) {
       throw new AppError("reach_required", "Choose how you get around and for how long before research", 409);
     }
@@ -532,9 +538,10 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         created_by: userId,
         client_ip: clientIp.slice(0, 64),
         // Kept only until the job ends (位置不存): succeed, fail and the stale sweep clear it.
-        near: input.near ? JSON.stringify({ latitude: input.near.latitude, longitude: input.near.longitude }) : null,
+        near: nearby && input.near ? JSON.stringify({ latitude: input.near.latitude, longitude: input.near.longitude }) : null,
         // Two enum values, not personal data: kept with the job like its brief version.
         reach: center && input.reach ? JSON.stringify({ mode: input.reach.mode, maxMinutes: input.reach.maxMinutes }) : null,
+        scope: input.scope,
         status: "queued",
         stages: JSON.stringify(emptyStages()),
       }).returning("id").executeTakeFirstOrThrow();
@@ -615,9 +622,10 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
     }
     const questionAnswers = clarificationQuestionAnswers(storedClarifyItems(clarification.items));
     const trip = await this.tripFacts(userId, tripId);
-    // The phone position the job row carries (cleared when the job ends), else tonight's lodging,
-    // with how far the member chose to go from it.
-    const located = await this.searchCenter(tripId, job.near);
+    // A nearby job searches around the phone position the job row carries (cleared when the job
+    // ends), else tonight's lodging, with how far the member chose to go from it. A city or region
+    // job has no center: it never falls back to the lodging.
+    const located = job.scope === "nearby" ? await this.searchCenter(tripId, job.near) : null;
     const center: DiscoverySearchCenter | null = located && job.reach
       ? { ...located, reach: { ...job.reach, radiusMeters: discoveryReachRadiusMeters(job.reach) } }
       : located;
@@ -653,6 +661,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         trip,
         questionAnswers,
         searchCenter: center,
+        dayTrips: job.scope === "region",
       });
       if (this.placeLookup.available === false || !this.placeDiscovery.available) {
         throw new AppError("provider_unavailable", "Google Places is unavailable; the existing shortlist is unchanged", 503);
@@ -691,6 +700,7 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         discovered: discovered.groups,
         outputLanguage: plan.outputLanguage,
         searchCenter: center,
+        dayTrips: job.scope === "region",
       });
       // Read after research, so a place added to the wishlist meanwhile is not proposed again.
       const wishlist = await wishlistPlaceIds();
@@ -922,7 +932,8 @@ export class PostgresDiscoveryModule implements DiscoveryModule {
         verifyMs,
         saveMs: Date.now() - stageStarted - planMs - discoverMs - researchMs - verifyMs,
         searches: plan.request.searchQueries.length,
-        // The kind of center and the chosen reach only; coordinates are never logged.
+        // The scope, the kind of center and the chosen reach only; coordinates are never logged.
+        scope: job.scope,
         searchCenter: center?.source ?? null,
         reachMode: center?.reach?.mode ?? null,
         reachMaxMinutes: center?.reach?.maxMinutes ?? null,

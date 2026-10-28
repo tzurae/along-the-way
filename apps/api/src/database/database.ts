@@ -8,6 +8,7 @@ import { Pool } from "pg";
 import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
 import type { TripPlaceMealRole } from "@along-the-way/contracts/trip-places";
 import type { TransitGeoJson } from "@along-the-way/contracts/day-plans";
+import type { DiscoveryScope } from "@along-the-way/contracts/discovery";
 import type {
   FeedbackStatus,
   FeedbackType,
@@ -303,6 +304,8 @@ export interface DiscoveryJobTable {
   near: unknown;
   /** DiscoveryReachInput ({ mode, maxMinutes }) the member chose; null without a search center. */
   reach: unknown;
+  /** DiscoveryScope the member chose; existing rows default to 'nearby' (migration 051). */
+  scope: Generated<DiscoveryScope>;
   status: "queued" | "running" | "succeeded" | "failed";
   stage: "plan" | "discover" | "research" | "verify" | "save" | "photos" | null;
   /** Record<stage, { state, startedAt, endedAt, counts? }> */

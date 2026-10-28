@@ -246,6 +246,14 @@ export interface DiscoverySearchCenterDto {
   position: DiscoveryNearInput | null;
 }
 
+/**
+ * 範圍, asked first in 調查 (owner rule 2026-10-28). nearby: around the search center, within the
+ * chosen reach. city: the whole trip destination, no center. region: the destination plus the
+ * towns travelers commonly visit as same-day trips from it, no center.
+ */
+export type DiscoveryScope = "nearby" | "city" | "region";
+export const DISCOVERY_SCOPES: readonly DiscoveryScope[] = ["nearby", "city", "region"];
+
 /** How the traveler gets around from the search center (調查 asks before research). */
 export type DiscoveryReachMode = "walk" | "transit" | "taxi";
 export const DISCOVERY_REACH_MODES: readonly DiscoveryReachMode[] = ["walk", "transit", "taxi"];
@@ -301,8 +309,10 @@ export interface AnswerDiscoveryClarificationInput {
 
 export interface StartDiscoveryResearchInput {
   expectedBriefVersion: number;
+  scope: DiscoveryScope;
+  /** Read only for scope nearby. */
   near?: DiscoveryNearInput | null;
-  /** Required whenever the server finds a search center (phone position or tonight's lodging). */
+  /** Required for scope nearby whenever the server finds a search center; ignored otherwise. */
   reach?: DiscoveryReachInput | null;
 }
 

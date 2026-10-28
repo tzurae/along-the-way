@@ -136,6 +136,7 @@ export class AppError extends Error {
       | "research_in_progress"
       | "clarification_incomplete"
       | "reach_required"
+      | "nearby_unavailable"
       | "research_limit_reached"
       | "voting_unavailable"
       | "invite_not_found"

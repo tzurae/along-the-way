@@ -858,11 +858,39 @@ Owner decision 2026-10-22: 「AI 建議先用手機目前定位（要授權）�
   (`discovery_run_timing` logs only `searchCenter: "device" | "lodging" | null`). The lodging
   center is recomputed from itinerary data and never stored.
 
+### 範圍 (migration 051)
+
+Owner decision 2026-10-28: 調查 first asks 範圍, so a trip-wide request (「我去京都準備待7天…推薦我一些地點」)
+is not treated as a nearby search.
+
+- Whenever the dialog shows the checklist (with or without a center), it shows one required chip
+  question first — 「這次要找哪個範圍？」: 「目前位置附近」 (device center) or 「住宿附近」 (lodging center),
+  「整個城市」, 「含近郊一日遊」 — even when the AI asks nothing, so 調查 always stops at the dialog
+  before research (重新調查 from the page opens the dialog first). Without a center 附近 is disabled
+  with 「沒有定位或今晚住宿，無法找附近」. The last pick is kept in `localStorage`
+  (`along-the-way:discovery-scope:{accountId}:{tripId}`, cleared on logout) and preselected next
+  time. The checklist prompt is unchanged: with a center it still must not ask where the traveler
+  is or stays; without one it may still ask about the area, as before.
+- `POST /discovery/research` requires `scope: "nearby" | "city" | "region"`; missing or anything
+  else is `400 validation_error`. `nearby` keeps the center rules above and below; `nearby` with no
+  center (no `near`, no lodging tonight) is `409 nearby_unavailable`. `city` and `region` ignore
+  `near` and `reach`, store neither, and have no center: the worker never falls back to tonight's
+  lodging, so there is no location bias, no distance and no radius filter, and the start response
+  (and a replay) reports `searchCenter: null`. When queuing research the web reads the phone
+  position and sends `near`/`reach` only for `nearby` (the checklist start still reads it, to label
+  or disable 附近), and shows the 「以…附近搜尋」 line only for a nearby search.
+- `region` tells the plan model to add the towns travelers commonly visit as same-day trips from
+  the trip's destination to `request.areas` and spread searches across them, and tells research
+  those towns are wanted. For `nearby` and `city` the prompts are unchanged.
+- `discovery_jobs.scope` (migration `051_discovery_job_scope`, expand-only `varchar(10) not null
+  default 'nearby'` with a CHECK) keeps the choice with the job; rows from before the migration
+  behave as nearby, as they did. `discovery_run_timing` logs `scope`.
+
 ### 交通方式・時間 (migration 048)
 
 Owner rule 2026-10-22: 「當用戶問附近要做什麼之類的要求時，一定要反問目前交通工具，然後時間是 5 分鐘以內、6–10 分鐘、15 分鐘以內，或以上都可以。」
 
-- Whenever 調查 has a search center (device or lodging), the dialog shows two required chip
+- When 範圍 is 附近 and 調查 has a search center (device or lodging), the dialog shows two required chip
   questions above the AI checklist — 交通方式「步行・大眾運輸・計程車／開車」 and 時間「5 分鐘以內・6–10
   分鐘・15 分鐘以內・都可以」 — even when the AI asks nothing. They are fixed UI, not model
   questions; the checklist model is told never to ask about transport, travel time or distance when
@@ -872,7 +900,7 @@ Owner rule 2026-10-22: 「當用戶問附近要做什麼之類的要求時，一
   reload, or a checklist another member started) it asks `POST /discovery/clarification` again (no
   model call for an existing checklist) and shows the chips before research.
 - `POST /discovery/research` takes `reach: { mode: "walk" | "transit" | "taxi", maxMinutes: 5 | 10 | 15 | null }`
-  (`null` = 都可以). Anything else is `400 validation_error`; a start with a center and no `reach` is
+  (`null` = 都可以). Anything else is `400 validation_error`; a nearby start with a center and no `reach` is
   `409 reach_required`. `discovery_jobs.reach` (expand-only nullable jsonb with a CHECK) keeps the
   two enum values with the job; they are not personal data, so they are not cleared at job end.
   `discovery_run_timing` logs `reachMode`, `reachMaxMinutes` and `droppedTooFar` (a count).

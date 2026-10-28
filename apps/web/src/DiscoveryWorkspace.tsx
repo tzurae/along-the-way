@@ -4,6 +4,7 @@ import { ArrowRight, Ban, CalendarCheck, CalendarPlus, Check, ChevronRight, Exte
 import {
   DISCOVERY_REACH_MINUTES,
   DISCOVERY_REACH_MODES,
+  DISCOVERY_SCOPES,
   discoveryReachEstimatedMinutes,
   parseDiscoveryWorkspaceResponse,
   parseScheduleDiscoveryProposalsResponse,
@@ -14,6 +15,7 @@ import {
   type DiscoveryJobDto,
   type DiscoveryNearInput,
   type DiscoveryReachInput,
+  type DiscoveryScope,
   type DiscoverySearchCenterDto,
   type DiscoveryWorkspaceDto,
   type ScheduleDiscoveryProposalsInput,
@@ -43,9 +45,9 @@ import { SchedulePlacesSheet } from "./SchedulePlacesSheet";
 import { SelectionBar } from "./SelectionBar";
 import { useScheduleToast } from "./ScheduleToast";
 import { assignPlacesToDay } from "./schedule-assignments";
-import { ClarifyChecklist, ReachChoices, ResearchBatch, ThinkingIndicator, clarifyAnswers, clarifyDrafts, clarifySummary, focusDiscoveryBatch, prefersReducedMotion, type ClarifyDraft, type ReachDraft } from "./DiscoveryInvestigate";
+import { ClarifyChecklist, ReachChoices, ResearchBatch, ScopeChoices, ThinkingIndicator, clarifyAnswers, clarifyDrafts, clarifySummary, focusDiscoveryBatch, prefersReducedMotion, type ClarifyDraft, type ReachDraft } from "./DiscoveryInvestigate";
 import { straightLineMeters } from "./bus-likely-leg";
-import { DISCOVERY_REACH_PREFIX } from "./today-snapshot";
+import { DISCOVERY_REACH_PREFIX, DISCOVERY_SCOPE_PREFIX } from "./today-snapshot";
 import { discoveryJobActive } from "./useDiscoveryJob";
 import "./pocket-discovery.css";
 
@@ -104,6 +106,17 @@ function storedReachDraft(storageKey: string): ReachDraft {
     // Storage blocked or a malformed value: nothing is preselected.
   }
   return { mode: null, time: null };
+}
+
+/** The 範圍 last picked on this device for this trip, preselected next time; none if unreadable. */
+function storedScope(storageKey: string): DiscoveryScope | null {
+  try {
+    const value = window.localStorage.getItem(storageKey);
+    return DISCOVERY_SCOPES.find((entry) => entry === value) ?? null;
+  } catch {
+    // Storage blocked: nothing is preselected.
+    return null;
+  }
 }
 
 
@@ -292,7 +305,9 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
    * to the brief version it asked about and the job it queued. Only start responses carry it, so
    * later reads keep this value; the lines below show it only while that checklist or job is the
    * one on screen. For a queued job it also keeps where that job's cards measure distance from
-   * (the position sent, or the lodging's; the phone position is never stored) and the reach chosen.
+   * (the position sent, or the lodging's; the phone position is never stored), the reach chosen
+   * and the job's 範圍 (null before a job is queued). A city or region job keeps the center the
+   * checklist knew, so 附近 stays available for the next 調查 of this brief.
    */
   const [searchCenter, setSearchCenter] = useState<{
     center: DiscoverySearchCenterDto | null;
@@ -300,6 +315,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
     jobId: string | null;
     origin: DiscoveryNearInput | null;
     reach: DiscoveryReachInput | null;
+    scope: DiscoveryScope | null;
   } | null>(null);
   const reachStorageKey = `${DISCOVERY_REACH_PREFIX}${accountId}:${trip.id}`;
   const [reachDraft, setReachDraft] = useState(() => storedReachDraft(reachStorageKey));
@@ -310,6 +326,16 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
     setReachDraft(next);
     try {
       window.localStorage.setItem(reachStorageKey, JSON.stringify(next));
+    } catch {
+      // Storage full or blocked: the choice still holds for this page view.
+    }
+  }
+  const scopeStorageKey = `${DISCOVERY_SCOPE_PREFIX}${accountId}:${trip.id}`;
+  const [scopeDraft, setScopeDraft] = useState(() => storedScope(scopeStorageKey));
+  function changeScope(next: DiscoveryScope) {
+    setScopeDraft(next);
+    try {
+      window.localStorage.setItem(scopeStorageKey, next);
     } catch {
       // Storage full or blocked: the choice still holds for this page view.
     }
@@ -508,9 +534,10 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
       if (shouldStartFreshRequest(error)) clearRetryKey(retryKeys.current, operation);
       // The checklist moved on (another member answered, or a newer brief): re-read it; drafts stay.
       if (operation === "answer" && error instanceof ApiRequestError && error.status === 409) void refresh();
-      // The server found a center this page did not know of (say, tonight's lodging): forget the
-      // known center so the next 調查 asks the server again and shows 交通方式・時間.
-      if (operation === "research" && error instanceof ApiRequestError && error.code === "reach_required") setSearchCenter(null);
+      // The server found a center this page did not know of (say, tonight's lodging), or none for
+      // 附近: forget the known center so the next 調查 asks the server again and shows the choices.
+      if (operation === "research" && error instanceof ApiRequestError
+        && (error.code === "reach_required" || error.code === "nearby_unavailable")) setSearchCenter(null);
       notify("error", operation.startsWith("reject:")
         && error instanceof ApiRequestError
         && (error.code === "forbidden" || error.status === 403)
@@ -519,7 +546,9 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
           ? t.errors.clarifyIncomplete
           : error instanceof ApiRequestError && error.code === "reach_required"
             ? t.errors.reachRequired
-            : errorMessage(error, t.errors.failed));
+            : error instanceof ApiRequestError && error.code === "nearby_unavailable"
+              ? t.errors.nearbyUnavailable
+              : errorMessage(error, t.errors.failed));
     } finally {
       setPending(null);
     }
@@ -555,6 +584,8 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
       let center = known ? known.center : undefined;
       // 交通方式・時間 were on screen for this center; otherwise they must be shown first.
       const reachAsked = Boolean(known?.center);
+      // 範圍 is on screen in the first-run form or the open dialog; 重新調查 from the page opens it.
+      const scopeShown = !workspace.latestRun || researchSettingsOpen;
       if (!clarification) {
         const near = await currentNear();
         const asked = await mutate("clarify", `/api/trips/${trip.id}/discovery/clarification`, {
@@ -563,16 +594,13 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
         }, "find");
         if (asked) {
           center = asked.searchCenter;
-          setSearchCenter({ center, briefVersion: brief.version, jobId: null, origin: null, reach: null });
+          setSearchCenter({ center, briefVersion: brief.version, jobId: null, origin: null, reach: null, scope: null });
         }
         setBriefOpen(false);
-        // With questions, or a center whose 交通方式・時間 must be asked (owner rule 2026-10-22),
-        // the member answers first in the dialog (also when 重新調查 started this from the page);
-        // with neither, research starts right away.
-        if (asked?.clarification?.status !== "ready" || center) {
-          if (asked?.clarification) setResearchSettingsOpen(true);
-          return;
-        }
+        // 範圍 is always asked first (owner rule 2026-10-28), so the member answers in the dialog
+        // (also when 重新調查 started this from the page) before research starts.
+        if (asked?.clarification) setResearchSettingsOpen(true);
+        return;
       } else if (clarification.status !== "ready" || clarifySummary(clarification, drafts).changed) {
         const answered = await mutate("answer", `/api/trips/${trip.id}/discovery/clarification/answers`, {
           expectedVersion: clarification.version,
@@ -591,37 +619,51 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
           return;
         }
       }
-      const near = await currentNear();
-      // The server centers on this position when one is sent, else on tonight's lodging. A center
-      // the dialog did not ask 交通方式・時間 for stops here and shows them first.
-      if (near && center?.source !== "device") center = { source: "device", label: null, position: null };
-      else if (!near && center === undefined) {
-        // Unknown center: the clarification start reports it without drafting the checklist again.
-        const asked = await mutate("clarify", `/api/trips/${trip.id}/discovery/clarification`, {
-          expectedBriefVersion: brief.version,
-        }, "find");
-        if (!asked) return;
-        center = asked.searchCenter;
-      }
-      if (center && (!reachAsked || !reachInput)) {
-        setSearchCenter({ center, briefVersion: brief.version, jobId: null, origin: null, reach: null });
+      const nearby = scopeDraft === "nearby";
+      if (!scopeShown || !scopeDraft) {
         setResearchSettingsOpen(true);
         return;
       }
-      const reach = center ? reachInput : null;
+      // Only 附近 searches around a position; 整個城市 and 含近郊一日遊 never read or send one.
+      const near = nearby ? await currentNear() : null;
+      if (nearby) {
+        // The server centers on this position when one is sent, else on tonight's lodging. A center
+        // the dialog did not ask 交通方式・時間 for stops here and shows them first.
+        if (near && center?.source !== "device") center = { source: "device", label: null, position: null };
+        else if (!near && center === undefined) {
+          // Unknown center: the clarification start reports it without drafting the checklist again.
+          const asked = await mutate("clarify", `/api/trips/${trip.id}/discovery/clarification`, {
+            expectedBriefVersion: brief.version,
+          }, "find");
+          if (!asked) return;
+          center = asked.searchCenter;
+        }
+        // 附近 without a center (its chip turns disabled) or without 交通方式・時間 shown for it.
+        if (!center || !reachAsked || !reachInput) {
+          setSearchCenter({ center: center ?? null, briefVersion: brief.version, jobId: null, origin: null, reach: null, scope: null });
+          setResearchSettingsOpen(true);
+          return;
+        }
+      }
+      const reach = nearby ? reachInput : null;
       const started = await mutate("research", `/api/trips/${trip.id}/discovery/research`, {
         expectedBriefVersion: brief.version,
+        scope: scopeDraft,
         ...(near ? { near } : {}),
         ...(reach ? { reach } : {}),
       }, "find");
       if (!started) return;
       const startedCenter = started.searchCenter;
-      setSearchCenter({
-        center: startedCenter,
+      // A city or region job keeps the center the checklist knew, so 附近 stays as it was for the
+      // next 調查 of this brief; while that center is unknown, the next 附近 asks the server again.
+      const keptCenter = nearby ? startedCenter : center;
+      setSearchCenter(keptCenter === undefined ? null : {
+        center: keptCenter,
         briefVersion: brief.version,
         jobId: started.latestJob?.id ?? null,
         origin: startedCenter?.source === "device" ? near : startedCenter?.position ?? null,
         reach: startedCenter ? reach : null,
+        scope: scopeDraft,
       });
       onJobStarted(started.latestJob);
       // The dialog closes at once; the batch at the top of the list carries the progress from here.
@@ -1264,14 +1306,23 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
   const summary = clarification ? clarifySummary(clarification, drafts) : null;
   const thinking = pending === "save-brief" || pending === "clarify" ? t.clarify.askingThinking
     : pending === "answer" ? t.clarify.reviewingThinking : null;
-  // 交通方式・時間 show with the checklist whenever this brief's search has a center; both required.
-  const reachShown = Boolean(clarification && searchCenter?.center && searchCenter.briefVersion === clarification.briefVersion);
+  // The center this checklist's brief version knows of: null for none, undefined while unknown
+  // (after a reload, or a checklist another member started; 調查 asks the server first).
+  const checklistCenter = clarification && searchCenter?.briefVersion === clarification.briefVersion
+    ? searchCenter.center : undefined;
+  // 附近 picked earlier counts as unanswered once this brief is known to have no center.
+  const scopeChoice = scopeDraft === "nearby" && checklistCenter === null ? null : scopeDraft;
+  // 範圍 shows with the checklist (owner rule 2026-10-28); 交通方式・時間 too when 附近 has a
+  // center (owner rule 2026-10-22). All required.
+  const reachShown = Boolean(clarification && scopeChoice === "nearby" && checklistCenter);
+  const scopeTotal = clarification ? 1 : 0;
+  const scopeAnswered = clarification && scopeChoice ? 1 : 0;
   const reachTotal = reachShown ? 2 : 0;
   const reachAnswered = reachShown ? Number(reachDraft.mode !== null) + Number(reachDraft.time !== null) : 0;
-  const requiredTotal = (summary?.requiredTotal ?? 0) + reachTotal;
-  const requiredAnswered = (summary?.requiredAnswered ?? 0) + reachAnswered;
+  const requiredTotal = (summary?.requiredTotal ?? 0) + scopeTotal + reachTotal;
+  const requiredAnswered = (summary?.requiredAnswered ?? 0) + scopeAnswered + reachAnswered;
   const requiredLeft = requiredTotal - requiredAnswered;
-  const statusText = !clarification || (clarification.items.length === 0 && !reachShown) ? null
+  const statusText = !clarification ? null
     : summary && summary.askBack > 0 ? t.clarify.askBack(summary.askBack)
       : requiredTotal > 0 && requiredLeft > 0 ? t.clarify.progress(requiredAnswered, requiredTotal)
         : t.clarify.costNote;
@@ -1293,7 +1344,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
       {investigateLabel}
     </button>
   );
-  const briefCollapsed = clarification !== null && (clarification.items.length > 0 || reachShown) && !briefOpen;
+  const briefCollapsed = clarification !== null && !briefOpen;
   const searchCenterLine = !searchCenter?.center ? null
     : searchCenter.center.source === "device" ? t.searchCenter.device : t.searchCenter.lodging(searchCenter.center.label);
   return (
@@ -1418,7 +1469,17 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
                   </dl>
                 </section>
               ) : null}
-              {searchCenterLine && clarification?.briefVersion === searchCenter?.briefVersion ? (
+              {clarification ? (
+                <ScopeChoices
+                  scope={scopeChoice}
+                  nearby={checklistCenter === undefined ? "lodging" : checklistCenter?.source ?? null}
+                  readOnly={busy}
+                  onChange={changeScope}
+                  t={t.scope}
+                  required={t.clarify.required}
+                />
+              ) : null}
+              {searchCenterLine && scopeChoice === "nearby" && clarification?.briefVersion === searchCenter?.briefVersion ? (
                 <p className="pd-field-help pd-search-center"><MapPin aria-hidden="true" />{searchCenterLine}</p>
               ) : null}
               {reachShown ? (
@@ -1440,7 +1501,7 @@ export function DiscoveryWorkspace({ trip, accountId, request, photoRevision = 0
             <ResearchBatch
               job={batchJob}
               failureReason={discoveryRunFailureReason(batchJob.errorCode, t)}
-              searchCenterLine={searchCenter?.jobId === batchJob.id ? searchCenterLine : null}
+              searchCenterLine={searchCenter?.jobId === batchJob.id && searchCenter.scope === "nearby" ? searchCenterLine : null}
               busy={busy || pending !== null}
               canRetry={Boolean(briefDraft.trim())}
               onDismiss={() => setDismissedJobId(batchJob.id)}
