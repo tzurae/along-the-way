@@ -1190,12 +1190,16 @@
 
 .route-version-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
   border-bottom: 1px solid var(--border);
   padding: 16px 18px;
 }
+
+/* The title keeps its own width; the comparison beside it shrinks, then drops below it. */
+.route-version-heading > div:first-child { flex: none; }
 
 .route-version-heading h3 {
   font-family: var(--font-display);
@@ -1210,12 +1214,14 @@
   font-size: 12px;
 }
 
-/* Straight-line totals beside each column's title: the original in grey, the candidate colored by
-   whether it is shorter (green) or longer (red), flashing briefly whenever the number changes. */
-.route-total { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+/* Beside the candidate's title: transit minutes and the comparison with the saved order, colored by
+   whether it travels less (green) or more (red); a changed total flashes briefly. */
+.route-total { display: flex; flex: 1 1 14rem; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
 .route-total-basis { flex-basis: 100%; color: var(--muted-foreground); font-size: 11px; text-align: right; }
 .route-total-value,
 .route-total-delta { border-radius: 999px; padding: 4px 10px; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* The comparison sentence (f5 §4) can be long: it wraps instead of overflowing the column. */
+.route-total-delta { min-width: 0; border-radius: 12px; line-height: 1.45; text-wrap: pretty; white-space: normal; }
 .route-total-value { font-weight: 800; }
 .route-total-value[data-tone="original"],
 .route-total-value[data-tone="same"],
@@ -1276,11 +1282,9 @@
 .route-remove-button { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; min-height: 44px; padding: 0 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-foreground); font-size: 11px; font-weight: 650; }
 .route-remove-button:hover:not(:disabled) { color: var(--load-packed); border-color: currentColor; }
 .route-reset { margin: 8px 16px 0; }
-/* Candidate timing: when this order gets back to the night's lodging, and each stop's stay. */
-.route-return { display: flex; flex-wrap: wrap; align-items: center; gap: 0 12px; border-bottom: 1px solid var(--border); padding: 6px 16px; }
-.route-return-line { margin: 0; padding-block: 8px; color: var(--foreground); font-size: 15px; line-height: 1.45; font-variant-numeric: tabular-nums; text-wrap: balance; }
-.route-return-line strong { font-weight: 750; }
-.route-return-line span { color: var(--muted-foreground); font-size: 12px; font-weight: 600; }
+/* Timeline (f5 1a): each stop's estimated time, and the free-time / meal note rows between stops. */
+.route-stop-time { color: var(--foreground); font-size: 13px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.route-timeline-note .route-leg-text { color: var(--foreground); font-variant-numeric: tabular-nums; }
 .route-stay-text,
 .route-stay-button { display: inline-flex; align-items: center; gap: 5px; margin: 0; color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; }
 .route-stay-text { min-height: 24px; }
@@ -1304,6 +1308,14 @@
 .route-stay-input input:focus-visible,
 .route-stay-save:focus-visible { outline: 2px solid var(--color-focus, var(--ring)); outline-offset: 2px; }
 .route-stay-error { flex-basis: 100%; margin: 0; color: var(--destructive); font-size: 12px; line-height: 1.45; }
+/* 哪一餐 (f5 1b): the state button shares the stay button's look; its choices open in place like the stay editor. */
+.route-meal-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.route-meal-legend { flex-basis: 100%; color: var(--foreground); font-size: 12px; font-weight: 700; }
+.route-meal-saved { color: var(--primary); font-size: 12px; font-weight: 700; }
+.route-meal-options { display: flex; flex-wrap: wrap; align-items: center; gap: 0 14px; }
+.route-meal-options .route-link-button[aria-pressed="true"] { color: var(--primary); text-decoration: none; }
+.route-stop-meta .route-link-button { min-height: 24px; }
+.route-pending-alternative { display: flex; flex-wrap: wrap; align-items: center; gap: 0 10px; }
 .route-transit-action {
   display: flex;
   width: calc(100% - 32px);

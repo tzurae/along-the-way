@@ -17,7 +17,7 @@ export const collaboration = {
   replanDay: "這天的時間或地點安排已由其他成員更新，尚未儲存這份順序。請按「重新排」取得最新安排，確認後再儲存。",
   fields: {
     name: "名稱", type: "類型", address: "地址", latitude: "緯度", longitude: "經度", timeZone: "時區",
-    sourceUrl: "來源連結", notes: "共同備註", durationMinutes: "停留分鐘", effortLevel: "體力", budgetAmountMinor: "預算最小單位", budgetCurrency: "預算幣別",
+    sourceUrl: "來源連結", notes: "共同備註", durationMinutes: "停留分鐘", effortLevel: "體力", mealRole: "哪一餐", budgetAmountMinor: "預算最小單位", budgetCurrency: "預算幣別",
     pacePreset: "節奏", targetPlacesPerDay: "每天希望地點", maxPlacesPerDay: "每天最多地點",
     dayStart: "出門時間", dayEnd: "回住宿時間", maxEffortPerDay: "每日體力上限",
     mealReserveMinutes: "用餐預留", restMinutes: "另外休息", slackPercent: "保留餘裕",
@@ -34,5 +34,5 @@ export const collaboration = {
     lockedAt: "鎖定時間", start: "開始", end: "結束", constraints: "限制", status: "狀態", minimumBufferMinutes: "最少緩衝分鐘",
     bookedBy: "訂房人", ticketInfo: "票券資料", confirmationNotes: "確認備註",
   } as Record<string, string>,
-  values: { flight: "航班", lodging: "住宿", activity: "活動", restaurant: "餐廳", airport: "機場", station: "車站", other: "其他", transport: "交通", start: "開始", end: "結束", confirmed: "已確認", unknown: "未確認", conflicted: "有衝突", walking: "步行", transit: "大眾運輸", driving: "開車", confirm: "確認", reject: "拒絕" } as Record<string, string>,
+  values: { flight: "航班", lodging: "住宿", activity: "活動", restaurant: "餐廳", airport: "機場", station: "車站", other: "其他", transport: "交通", start: "開始", end: "結束", confirmed: "已確認", unknown: "未確認", conflicted: "有衝突", walking: "步行", transit: "大眾運輸", driving: "開車", confirm: "確認", reject: "拒絕", breakfast: "早餐", lunch: "午餐", dinner: "晚餐", none: "不算一餐" } as Record<string, string>,
 };

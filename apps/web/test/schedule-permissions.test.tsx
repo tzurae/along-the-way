@@ -82,7 +82,7 @@ describe("owner-only schedule surfaces", () => {
 
     expect(await screen.findByText(ownerOnly)).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole("button", { name: "儲存為第 1 天的安排" })).not.toBeInTheDocument());
-    expect(screen.getByRole("tab", { name: /依直線距離排/ })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /照順路排/ })).toBeInTheDocument();
 
     rerender(<DayPlanDialog {...props} canArrange />);
     expect(await screen.findByRole("button", { name: "儲存為第 1 天的安排" })).toBeInTheDocument();

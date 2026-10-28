@@ -416,17 +416,44 @@ is the [place-details/photo specification](docs/superpowers/specs/2026-10-09-pla
 「幫我排順路」會先產生草稿，只有按下儲存才改動行程。開啟 dialog **不呼叫任何交通供應商**。
 日本日程右側先讀七天內的 NAVITIME 逐段快取，足夠時依交通時間排序，不足時先顯示直線建議；
 已知非日本日程且有 server key 時使用 Google Routes，但沒有快取，所以開啟時一律先顯示直線建議。
-左側「已儲存」一直只有直線距離，不顯示交通分鐘，也不查詢或畫出任何供應商的路線。
-不計算營業時間等待、行程容量、行李可行性或實際到站時間表。
+左側「已儲存」每段只顯示距離，不查詢或畫出任何供應商的路線。
+不計算營業時間等待、行程容量或行李可行性。
 
-右側候選欄最上方顯示一行「09:00 出門・約 21:30 回到住宿」（沒有當晚住宿時是「約 21:30 結束最後一站」，
-過了午夜是「隔天 00:40」）。算法是 出門時間＋當天固定安排分鐘＋每站停留＋每段移動；每段移動優先用
-dialog 裡已有的 NAVITIME／Google 分鐘，沒有才用直線估計，兩者都沒有時仍顯示「約」並加「（部分路段無法估計）」。
-停留不是成員填的、或有一段用直線估計時，時間後面標「（停留時間是估計）」／「（移動是估計）」／「（停留、移動是估計）」。
+兩欄都畫同一套時間軸（`packages/contracts/src/day-timeline.ts` 的 `simulateDay`；route 回應的 `frame`
+帶規劃窗、起點、終點、窗內固定安排和直線估分參數，舊 API 沒有 `frame` 就不畫）。左欄用已儲存順序
+（套上 dialog 裡已有的交通分鐘），右欄用候選順序。時間軸從規劃窗開始（出門時間、落地 +60 分、起飛 −120 分），
+依序加每段移動、每站停留、等入座和固定安排；每段移動優先用 dialog 裡已有的 NAVITIME／Google 分鐘，
+沒有才用直線估計，進出固定安排的路段一律直線估計，缺座標的路段寫「無法估計」，之後不畫時刻。
+三餐照「早餐 10:30 前、午餐 11:30–13:00、晚餐 17:30–19:00 入座」：10:30–15:00 之間到的第一家餐廳標
+「午餐・系統判斷」，16:30–19:00 到、又是最後一站的餐廳標「晚餐・系統判斷」，晚到加「晚了約 N 分」；
+沒有時插「午餐／晚餐・還沒選地方」空格。從住宿出發、10:30 前出門的日子，第一站是 10:30 前到的咖啡店或
+餐廳時標「可當早餐」，否則第一列是「早餐・出門前」。頭段或中段直線估計超過 120 分是長途日：只寫一句
+「這段很遠…這天先不排三餐」，後面不畫時刻；尾段超過 120 分只寫「要多久系統算不準」，終點是航班時加
+「HH:MM 起飛，HH:MM 前要到機場」。最後一列是「約 HH:MM 回到住宿」，dialog 最上面寫一次「時間都是估計」。
+
+成員可以標「哪一餐」（`trip_places.meal_role`，migration 050：`breakfast`／`lunch`／`dinner`／`none`，
+null＝自動判斷；`PATCH …/planning` 的 `mealRole` 跟 `effortLevel` 一樣三態：沒送不改、null 清掉、有值設定；
+`TripPlaceDto.mealRole`）。標了的站就是那一餐，不管類型和位置，標籤只寫「午餐」（沒有「系統判斷」），
+停留至少 60／75 分，早到一小時內等入座；標午餐但 10:30 前到寫「午餐・太早」，標晚餐、不是最後一站、16:30 前到寫
+「晚餐・太早」；標晚餐又是最後一站的店不管多早到都等到 17:30。好幾站標晚餐時，只有順序裡最後一家是晚餐，其他當一般站。
+`none` 永遠不算一餐，也不標「可當早餐」「也是餐廳」。長途日有標的站在名字旁寫那一餐，不寫時刻。
+右欄可編輯的列有一顆「哪一餐？」按鈕（顯示目前狀態），按下原地展開「早餐｜午餐｜晚餐｜不算一餐｜改回自動判斷」，
+選了馬上用同一支 planning API 寫入，列上寫「已存，全家都會看到」，之後只重抓 `current` 和 cached `suggested`，
+拖過的順序不動。午餐已經有了、沒標的餐廳那列寫「也是餐廳」加［當晚餐］［移到備案］：「當晚餐」等於選晚餐；
+「移到備案」先把它拿出候選順序、底下寫「儲存後會放進備案」，按儲存才寫入：先 `PUT …/arrangement`，再重讀
+skeleton 取這天的備案清單和版本，`PUT …/days/:dayId/alternatives` 送 `[...原清單去掉它, 它]`。
+server 在 `updateDayAlternatives` 同一個交易裡，把清單裡沒排進任何一天、也沒有固定安排、還是「已選」的地點改回
+口袋名單（`selected_for_itinerary = false`），所以「全部排行程」不會再讀到它；之後任何一次存這天的備案都一樣。
+地點詳情的編輯表單多一組「這裡算哪一餐」單選加「改用自動判斷」，摘要寫「哪一餐：午餐・你填的」或「自動判斷」。
+建議順序先排吃飯時間，再排順路（右欄標題「先排吃飯時間，再排順路」；見下面「建議順序怎麼挑」）；候選欄底下比較移動分鐘和午餐、晚餐的時間或店家，
+早餐店被移走時先寫「早餐的 {店名} 改到 {HH:MM}」。
 拖曳或移除地點後隨新的 custom 回應即時重算，不呼叫交通供應商。每站顯示「停留約 1 小時 30 分」（成員填的不加「約」），
-車站與機場不顯示停留。可安排行程的人按停留文字可直接改（15–720 分鐘，沿用地點的
+車站與機場不顯示停留；被當成午餐／晚餐、停留低於 60／75 分的站，時間軸用下限並加「吃飯至少抓 60 分」。
+可安排行程的人按停留文字可直接改（15–720 分鐘，沿用地點的
 `PATCH /api/trips/:tripId/trip-places/:tripPlaceId/planning`，其他規劃欄位原樣送回），存好後只用 `custom` 重讀
-route，不付費查詢；有權限時旁邊另有「調整這天時間」開啟這天的設定。
+route，不付費查詢；有權限時時間軸最後一列另有「調整這天時間」開啟這天的設定。
+「全部排行程」草稿的每一天也用同一個 `simulateDay`（直線分鐘）算出 `timeline` 存進草稿，展開那天時顯示；
+舊草稿沒有 `timeline` 就不顯示。
 「安排」分頁的每日區塊不再顯示地點／體力／估計總時數負荷條與「超出這天設定」；「全部排行程」仍照原本的負荷檢查。
 
 `POST /api/trips/:tripId/days/:dayId/route` accepts:
@@ -467,9 +494,18 @@ NAVITIME 只讀既有快取；Google 可在同一個開啟中的 dialog 套用�
 只有明確送出 `suggested`＋`transit: "fetch"`，才會向 RapidAPI
 `navitime-route-totalnavi.p.rapidapi.com/route_transit` 補查起點住宿→每站、每站→其他站、
 每站→終點住宿的有向交通時間。每段一律用**當地當天 09:00** 出發，這是排序近似，
-不是依前一站停留時間推進的時刻表。最多 7 站採完整排列求最短總分鐘數；
-超過 7 站採 nearest-neighbour + 有向 2-opt，結果不比已儲存順序更慢。
-Google 也沿用這個有向分鐘排序；沒有可用交通供應商的日程保留直線演算法（最多 8 站完整搜尋）。
+不是依前一站停留時間推進的時刻表。沒有可用交通供應商的日程用直線分鐘；兩種分鐘都走同一套「建議順序怎麼挑」。
+
+**建議順序怎麼挑**（`apps/api/src/planning/day-order.ts` 的 `planDayOrder`；單天「幫我排順路」和「全部排行程」每一天都用它）：
+先把吃飯的地方排進吃飯時間，同一段裡再看遠近。δ（標成晚餐的店，或已存順序最後一站、在 16:30–19:00 到的沒標餐廳）固定在最後一站、等到 17:30 入座；
+已存順序最後一站是沒標的餐廳但不是晚餐時，照樣固定在最後一站（10:30–15:00 到就是「午餐・系統判斷」，其他時段當一般站）；
+早餐店（標成早餐，或已存第一站、10:30 前到的咖啡店／餐廳）被移走要扣一分。
+每種順序用 `simulateDay` 算分：趕不上固定安排的次數、三餐偏離時段的分數、移動分鐘、跟已存順序對調的組數；
+用餐分數一樣時，移動在最少的 10 分以內都算平手，先比對調數再比移動。
+可排的地點 9 個以內（而且在每天 20,000 步、每個狀態 32 個標籤的預算內）會精確比較每一種順序（說明寫「先把吃飯的地方排進吃飯時間…」）；
+自動認午餐的日子通常 6–7 個地點就會改成大略排：先定好早餐、午餐、晚餐的位置，前後各段再照順路排（說明寫「這天地點比較多…」）。
+建議一律用同一套分數跟已存順序比，不會比已存順序差；每一種順序的頭段或中段都超過 120 分（長途日）或讀不到時間軸骨架時，才退回照順路排（右欄標題「照順路排」）。
+「全部排行程」的每一天只接受負荷仍然符合設定的順序，草稿裡每一天寫出它是怎麼排的；policy version 升到 `whole-trip-planner-v3`，舊草稿套用時會被判成過期。
 
 設有座標站數為 `n`，有座標起／終住宿各以 `s`、`e`（0 或 1）表示，
 完整矩陣的 ID 配對上限是 **`n(n−1) + n·s + n·e`**；相同 ID 的自我路段為 0 分鐘、不發請求。
@@ -546,7 +582,8 @@ Expand-only migration `045_transit_leg_cache.ts` 在既有 `044_trip_stop_replac
 沿用上述日程國家判定，只接受同一個已知國家；不硬編任何城市或額外國家清單。
 必須在 **server key 所屬的 Google Cloud project 啟用 Routes API**，並在該 key 的 API restrictions
 允許 Routes API；同一把 key 原有的 Places API (New) 權限保留。server key 不送瀏覽器；
-地圖仍用獨立的 `GOOGLE_MAPS_BROWSER_KEY` 與既有 Maps JavaScript API 額度。
+地圖仍用獨立的 `GOOGLE_MAPS_BROWSER_KEY` 與既有 Maps JavaScript API 額度；這把 key 也要開 Maps Embed API
+（草稿「看路線」用，免費、不限次數），HTTP referrer 限制照舊。
 
 分鐘用 `POST https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix`，
 field mask 為 `originIndex,destinationIndex,status,condition,duration`。
@@ -821,11 +858,39 @@ Owner decision 2026-10-22: 「AI 建議先用手機目前定位（要授權）�
   (`discovery_run_timing` logs only `searchCenter: "device" | "lodging" | null`). The lodging
   center is recomputed from itinerary data and never stored.
 
+### 範圍 (migration 051)
+
+Owner decision 2026-10-28: 調查 first asks 範圍, so a trip-wide request (「我去京都準備待7天…推薦我一些地點」)
+is not treated as a nearby search.
+
+- Whenever the dialog shows the checklist (with or without a center), it shows one required chip
+  question first — 「這次要找哪個範圍？」: 「目前位置附近」 (device center) or 「住宿附近」 (lodging center),
+  「整個城市」, 「含近郊一日遊」 — even when the AI asks nothing, so 調查 always stops at the dialog
+  before research (重新調查 from the page opens the dialog first). Without a center 附近 is disabled
+  with 「沒有定位或今晚住宿，無法找附近」. The last pick is kept in `localStorage`
+  (`along-the-way:discovery-scope:{accountId}:{tripId}`, cleared on logout) and preselected next
+  time. The checklist prompt is unchanged: with a center it still must not ask where the traveler
+  is or stays; without one it may still ask about the area, as before.
+- `POST /discovery/research` requires `scope: "nearby" | "city" | "region"`; missing or anything
+  else is `400 validation_error`. `nearby` keeps the center rules above and below; `nearby` with no
+  center (no `near`, no lodging tonight) is `409 nearby_unavailable`. `city` and `region` ignore
+  `near` and `reach`, store neither, and have no center: the worker never falls back to tonight's
+  lodging, so there is no location bias, no distance and no radius filter, and the start response
+  (and a replay) reports `searchCenter: null`. When queuing research the web reads the phone
+  position and sends `near`/`reach` only for `nearby` (the checklist start still reads it, to label
+  or disable 附近), and shows the 「以…附近搜尋」 line only for a nearby search.
+- `region` tells the plan model to add the towns travelers commonly visit as same-day trips from
+  the trip's destination to `request.areas` and spread searches across them, and tells research
+  those towns are wanted. For `nearby` and `city` the prompts are unchanged.
+- `discovery_jobs.scope` (migration `051_discovery_job_scope`, expand-only `varchar(10) not null
+  default 'nearby'` with a CHECK) keeps the choice with the job; rows from before the migration
+  behave as nearby, as they did. `discovery_run_timing` logs `scope`.
+
 ### 交通方式・時間 (migration 048)
 
 Owner rule 2026-10-22: 「當用戶問附近要做什麼之類的要求時，一定要反問目前交通工具，然後時間是 5 分鐘以內、6–10 分鐘、15 分鐘以內，或以上都可以。」
 
-- Whenever 調查 has a search center (device or lodging), the dialog shows two required chip
+- When 範圍 is 附近 and 調查 has a search center (device or lodging), the dialog shows two required chip
   questions above the AI checklist — 交通方式「步行・大眾運輸・計程車／開車」 and 時間「5 分鐘以內・6–10
   分鐘・15 分鐘以內・都可以」 — even when the AI asks nothing. They are fixed UI, not model
   questions; the checklist model is told never to ask about transport, travel time or distance when
@@ -835,7 +900,7 @@ Owner rule 2026-10-22: 「當用戶問附近要做什麼之類的要求時，一
   reload, or a checklist another member started) it asks `POST /discovery/clarification` again (no
   model call for an existing checklist) and shows the chips before research.
 - `POST /discovery/research` takes `reach: { mode: "walk" | "transit" | "taxi", maxMinutes: 5 | 10 | 15 | null }`
-  (`null` = 都可以). Anything else is `400 validation_error`; a start with a center and no `reach` is
+  (`null` = 都可以). Anything else is `400 validation_error`; a nearby start with a center and no `reach` is
   `409 reach_required`. `discovery_jobs.reach` (expand-only nullable jsonb with a CHECK) keeps the
   two enum values with the job; they are not personal data, so they are not cleared at job end.
   `discovery_run_timing` logs `reachMode`, `reachMaxMinutes` and `droppedTooFar` (a count).

@@ -1,6 +1,6 @@
 # 全旅程容量規劃器
 
-契約：GitHub `tzurae/along-the-way#158`。這是容量檢查與分日，不是時間表。所有移動數字都是直線距離估算；不產生抵達時間，不查付費路線，也不使用營業時間。政策版本由 contracts 的 `PLANNING_POLICY_VERSION = "whole-trip-planner-v2"` 單一定義。
+契約：GitHub `tzurae/along-the-way#158`。這是容量檢查與分日，不是時間表。所有移動數字都是直線距離估算；不查付費路線，也不使用營業時間。每天的順序在最後一步先排吃飯時間（第 8 步），而草稿的每一天帶一份直線估算的時間軸（`timeline`），只給畫面看、不進 validator。政策版本由 contracts 的 `PLANNING_POLICY_VERSION = "whole-trip-planner-v3"` 單一定義（v2 → v3：每天的順序改成先排吃飯時間，三餐 P3＋P2）。
 
 **2026-10-19 owner 決定：拿掉「每日直線距離上限」與「單段直線距離上限」**（沒有人知道自己一天能走幾公里）。設定、每日調整、總覽、原因與放寬建議都不再有公里上限；排程只剩 count、effort、budget 三個 hard check。距離仍換算成移動分鐘進 budget，所以跑太遠會因估計總時數超標而排不進去。DB 的 `max_daily_straight_km`／`max_hop_straight_km` 欄位依 owner 決定暫時保留不讀，日後再用 migration 移除。
 
@@ -60,7 +60,7 @@ utilisation 是 count、effort、load/budget 三個 hard ratio 的最大值。`U
 5. Repair 先重新插入 unplaced，再用深度最多 2 的 ejection chains。可以移出一個或同時兩個 movable 地點，插入未排地點，再把移出的地點放到別天。只有整個 queue 放回且所有日有效才比較最終 objective；不要求中間狀態改善平衡。keep 與 pinned 不得被 eject。
 6. 接著做跨日 relocate/swap。swap 移除後的中間狀態不拿來當最後可行性，兩邊放回後才比較。
 7. 主 order 之外再跑 3 個固定 alternative，保留找到的最佳結果。
-8. 最後每個 day 只跑一次 `orderByStraightLine`：中段 ≤8 是 exhaustive，>8 是 nearest-neighbour + capped 2-opt。使用同一 integer matrix，固定錨點只提供前／後 boundary。重排後再驗；若總距離較短卻讓 rounded travel 超出 budget，就保留之前已有效的順序。最後獨立 validator 再重算整個結果。
+8. 最後每個 day 依序呼叫一次 `planDayOrder`（`apps/api/src/planning/day-order.ts`，三餐 P2）：先用同一 integer matrix 換算的直線分鐘跑 `simulateDay` 的規則，再在「負荷仍為 valid」的順序裡挑三餐分數最好的（趕不上固定安排 → 三餐偏離時段 → 移動分鐘，移動在最少的 10 分內算平手，再比跟原有位置對調的組數）；可排的地點 ≤ 9 且每天 20,000 步內是精確搜尋（`exact`），否則先定早／午／晚餐的位置、各段再照順路排（`many_places`）。solver 交來的那天順序一定是候選之一，所以結果不會比它差。排不出時間軸的日子（有未解析的固定項目、缺座標、每一種順序都有 >120 分的直線頭／中段）照舊只跑一次 `orderByStraightLine`（中段 ≤8 exhaustive，>8 nearest-neighbour + capped 2-opt），重排後再驗，超出 budget 就保留之前已有效的順序，並標 `distance`／`no_frame` 或 `long_leg`。每做完一天讓出一次 event loop（`solveWholeTrip` 因此是 async）。最後獨立 validator 再重算整個結果；validator 不看順序的挑法，只重算負荷。
 
 | Named constant | 值與意義 |
 |---|---|
@@ -139,7 +139,7 @@ repair 的原子 move：從 D1 移出 A，插入 E，D1 暫時是 C+E=120；A �
 - preview 使用 repeatable-read snapshot，只新增 proposal，不改 itinerary/settings，也不 enqueue AI。proposal 存 30 分鐘；existing account limiter 是每帳號每分鐘 10 次 preview。
 - apply 先鎖 trip，再檢查 scheduler，接著鎖 idempotency/proposal。canonical provider identities 以穩定順序 `FOR SHARE`，避免跨 trip facts refresh 插進 revision/寫入之間。
 - apply 先以 saved-only、`useAi:false`、不帶 frozen 的 snapshot 比 revision。這樣新 selected place 沒有舊 frozen 值時，會先正確得到 `plan_stale`，而不是誤判 estimate validation error。revision 相符後保存 drafts，再一律用同一份 frozen estimates 重建實際 caps 的 snapshot 做 independent validation。
-- revision 排除背景 AI publication，包含 member estimates、votes、分類、resolved facts/coordinates/timezones、items、lodging、day/date、assignments/order、settings/override versions 與 policy。preview 直接保存 snapshot estimates，含固定項目可能引用但不在 trip 日期內的地點。
+- revision 排除背景 AI publication，包含 member estimates、`meal_role`（哪一餐，migration 050）、votes、分類、resolved facts/coordinates/timezones、items、lodging、day/date、assignments/order、settings/override versions 與 policy。preview 直接保存 snapshot estimates，含固定項目可能引用但不在 trip 日期內的地點。
 - bulk writer 以 desired-days 為 assignment source，維護 positions、selection history、versions、actor/time；fixed-selected 不寫，pinned 只改原日順序；保留 scheduled guard。
 - 舊／新／order-only days 使用既有 migration 020 assignment trigger bump version。只有一個 `whole_trip_plan.applied` aggregate event，related ids 含 affected days + changed places；draft saves 不另外發事件。
 - **bulk write 後、commit 前**，在同一 transaction 用同一 builder 與 frozen estimates 再建 snapshot、再跑 validator；若不一致就是 internal error，全部 rollback。這是 revision/constructor 以外的最後安全網。

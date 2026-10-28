@@ -9,6 +9,7 @@ import {
   type TransitGeoJson,
   type TransitProvider,
 } from "@along-the-way/contracts/day-plans";
+import { estimatedMoveMinutes } from "@along-the-way/contracts/day-timeline";
 import type { TripPlaceDto } from "@along-the-way/contracts/trip-places";
 import type { TripSkeletonDto } from "@along-the-way/contracts/trip-skeleton";
 import type { Kysely, Transaction } from "kysely";
@@ -26,8 +27,10 @@ import {
 } from "../private-trips/postgres-private-trip-store";
 import type { TripPlaceModule } from "../trip-places/trip-place-module";
 import type { TripSkeletonModule } from "../trip-skeleton/trip-skeleton-module";
-import { computePlanningWindow, estimatedMoveMinutes } from "./day-load";
-import { buildDayRoute, type DayRouteInput, type DayRouteTiming, type RoutePlace } from "./day-route";
+import { computePlanningWindow } from "./day-load";
+import { planDayOrder } from "./day-order";
+import { buildDayFrame } from "./day-frame";
+import { buildDayRoute, timelineStop, type DayRouteInput, type DayRouteTiming, type RoutePlace } from "./day-route";
 import { orderByCost, routeLength, type GeoPoint } from "./day-route-order";
 import { NavitimeError, type NavitimeProvider } from "./navitime-provider";
 import type { GoogleRoutesProvider } from "./google-routes-provider";
@@ -276,15 +279,21 @@ export class PostgresDayPlanModule implements DayPlanModule {
       timing = {
         dayStartMinute: Temporal.PlainDate.from(planningDay.date).until(start.toPlainDate()).days * 1440 + start.hour * 60 + start.minute,
         fixedMinutes: planningWindow.fixedOccupancyMinutes,
-        stays: new Map(planned.map((place) => {
+        places: new Map(planned.map((place) => {
+          const facts = { type: place.type, mealRole: place.mealRole ?? null };
           // Stations and airports are transfer points, not visits.
-          if (place.type === "station" || place.type === "airport") return [place.id, { minutes: 0, estimated: false }];
+          if (place.type === "station" || place.type === "airport") return [place.id, { ...facts, stayMinutes: 0, stayEstimated: false }];
           const estimate = snapshot.estimates[place.id];
           return [place.id, estimate
-            ? { minutes: estimate.visitMinutes, estimated: estimate.visitSource !== "member" }
-            : { minutes: place.durationMinutes ?? PLACE_ESTIMATE_DEFAULTS_V1[place.type].visitMinutes, estimated: place.durationMinutes === null }];
+            ? { ...facts, stayMinutes: estimate.visitMinutes, stayEstimated: estimate.visitSource !== "member" }
+            : { ...facts, stayMinutes: place.durationMinutes ?? PLACE_ESTIMATE_DEFAULTS_V1[place.type].visitMinutes, stayEstimated: place.durationMinutes === null }];
         })),
         moveMinutes: (metres) => estimatedMoveMinutes(metres, caps),
+        // Fixed items and points are named here: the dialog has no itinerary of its own.
+        frame: buildDayFrame(planningDay, new Map([
+          ...skeleton.places.map((place) => [place.id, place.name] as const),
+          ...skeleton.items.map((item) => [item.id, item.title] as const),
+        ])),
       };
     }
     const routeInput: DayRouteInput = {
@@ -316,8 +325,10 @@ export class PostgresDayPlanModule implements DayPlanModule {
 
   async route(userId: string, tripId: string, dayId: string, request: CreateDayRouteInput): Promise<DayRouteDto> {
     const { input, transitProvider, timeZone } = await this.routeInput(userId, tripId, dayId, request, true);
-    const fallback = { ...buildDayRoute(input), transitProvider, routeShapesAvailable: transitProvider !== null };
-    if (!transitProvider || input.order === "current") return fallback;
+    // Built only where it is returned: a suggested route runs the order search, and only once per request (p9 §2.8).
+    let built: DayRouteDto | undefined;
+    const fallback = () => built ??= { ...buildDayRoute(input), transitProvider, routeShapesAvailable: transitProvider !== null };
+    if (!transitProvider || input.order === "current") return fallback();
     const selected = input.order === "custom" ? new Set(input.orderedIds) : null;
     const stops = input.planned.filter((place) => !selected || selected.has(place.id)).filter(located);
     const start = input.morningLodging?.place;
@@ -362,7 +373,7 @@ export class PostgresDayPlanModule implements DayPlanModule {
             409, undefined, undefined, undefined, undefined, googlePairs.length,
           );
         }
-        if (request.transit !== "fetch") return { ...fallback, transitCallsNeeded: googlePairs.length };
+        if (request.transit !== "fetch") return { ...fallback(), transitCallsNeeded: googlePairs.length };
         matrix = googlePairs.length > 0 ? await this.googleRoutes!.matrix(googlePairs, input.date, timeZone) : [];
         matrix.push(...matrixSnapshot()); // Only zero-minute self legs; Google never reads or writes the DB cache.
       } else {
@@ -378,11 +389,11 @@ export class PostgresDayPlanModule implements DayPlanModule {
         if (input.order === "custom") {
           const matrix = matrixSnapshot();
           return matrix.length > 0
-            ? withTransitMatrix({ ...fallback, transitCacheDays: allCached ? TRANSIT_CACHE_DAYS : null }, matrix, transitProvider)
-            : fallback;
+            ? withTransitMatrix({ ...fallback(), transitCacheDays: allCached ? TRANSIT_CACHE_DAYS : null }, matrix, transitProvider)
+            : fallback();
         }
         if (!allCached && request.transit !== "fetch") {
-          return { ...fallback, transitCallsNeeded: missing.size, transitMatrix: matrixSnapshot() };
+          return { ...fallback(), transitCallsNeeded: missing.size, transitMatrix: matrixSnapshot() };
         }
         if (!allCached) {
           await mapTransitLegs([...missing], async ([key, { from, to }], signal) => {
@@ -397,24 +408,37 @@ export class PostgresDayPlanModule implements DayPlanModule {
       }
       const costs = new Map(matrix.map((leg) => [`${leg.fromId}:${leg.toId}`, leg.minutes]));
       const cost = (from: GeoPoint, to: GeoPoint) => costs.get(`${from.id}:${to.id}`)!;
-      const suggestedIds = orderByCost(stops, morning, night, cost, 7, true);
       const byId = new Map(stops.map((stop) => [stop.id, stop]));
-      const suggested = suggestedIds.map((id) => byId.get(id)!);
-      const chosen = routeLength(suggested, morning, night, cost) <= routeLength(stops, morning, night, cost)
-        ? suggested : stops;
+      // Meals first with the matrix minutes (p9 §2.8); the saved order is the base and the ranks.
+      const timing = input.timing;
+      const planned = timing ? planDayOrder({
+        frame: timing.frame, stops: input.planned.map((place) => timelineStop(place, timing)),
+        transit: (from, to) => costs.get(`${from}:${to}`) ?? null,
+        base: stops.map((place) => timelineStop(place, timing)),
+        ranks: new Map(stops.map((place, index) => [place.id, index])),
+        start: morning, end: night, distanceOrder: (points, from, to) => orderByCost(points, from, to, cost, 7, true),
+      }) : null;
+      let chosen: GeoPoint[];
+      if (planned?.orderedIds) {
+        chosen = planned.orderedIds.map((id) => byId.get(id)!);
+      } else {
+        const suggested = orderByCost(stops, morning, night, cost, 7, true).map((id) => byId.get(id)!);
+        chosen = routeLength(suggested, morning, night, cost) <= routeLength(stops, morning, night, cost) ? suggested : stops;
+      }
       const route = buildDayRoute({
         ...input, order: "custom",
         orderedIds: [...chosen.map((stop) => stop.id), ...input.planned.filter((place) => !located(place)).map((place) => place.id)],
       });
       return withTransitMatrix({
         ...route, order: "suggested", routeShapesAvailable: true, transitProvider,
+        orderBasis: planned ? planned.orderBasis : "distance", orderReason: planned ? planned.orderReason : "no_frame",
         transitCallsNeeded: googlePairs.length,
         transitCacheDays: allCached ? TRANSIT_CACHE_DAYS : null,
       }, matrix, transitProvider);
     } catch (error) {
       if (error instanceof AppError && error.code === "transit_calls_changed") throw error;
       return {
-        ...fallback, transitCallsNeeded: transitProvider === "google_routes" ? googlePairs.length
+        ...fallback(), transitCallsNeeded: transitProvider === "google_routes" ? googlePairs.length
           : input.order === "suggested" ? missing.size : 0,
         transitMatrix: transitProvider === "google_routes" ? [] : matrixSnapshot(),
         travelNotice: transitProvider === "google_routes"

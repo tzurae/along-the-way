@@ -122,7 +122,8 @@ export async function buildPlanningSnapshot(executor: DatabaseExecutor, tripId: 
   const estimates: PlannerFrozenEstimates = {};
   let aiPending = 0;
   const plannerPlaces = new Map<string, PlannerPlace>();
-  for (const place of selected) {
+  // `selected` is created_at, id ascending; the index orders a day's unpositioned stops newest first (p9 §2.1).
+  for (const [selectedIndex, place] of selected.entries()) {
     const row = place.row;
     const defaults = PLACE_ESTIMATE_DEFAULTS_V1[place.type];
     const profile = profiles.get(row.place_id);
@@ -144,8 +145,9 @@ export async function buildPlanningSnapshot(executor: DatabaseExecutor, tripId: 
       && place.type !== "lodging" && place.type !== "airport") aiPending += 1;
     estimates[row.id] = estimate;
     const assignment = assignmentByPlace.get(row.id);
-    plannerPlaces.set(row.id, { id: row.id, type: place.type, coordinates: place.coordinates, estimate,
-      votes: votesByPlace.get(row.id)?.length ?? 0, assignedDayId: assignment?.trip_day_id ?? null, position: assignment?.day_position ?? null });
+    plannerPlaces.set(row.id, { id: row.id, type: place.type, coordinates: place.coordinates, estimate, mealRole: row.meal_role,
+      votes: votesByPlace.get(row.id)?.length ?? 0, assignedDayId: assignment?.trip_day_id ?? null, position: assignment?.day_position ?? null,
+      selectedIndex });
   }
   const flexiblePlaces = selected.filter((place) => !place.scheduled && place.type !== "lodging" && place.type !== "airport").map((place) => plannerPlaces.get(place.row.id)!);
   const excludedPlaces = selected.filter((place) => !place.scheduled && (place.type === "lodging" || place.type === "airport")).map((place) => plannerPlaces.get(place.row.id)!);
@@ -219,9 +221,12 @@ export async function buildPlanningSnapshot(executor: DatabaseExecutor, tripId: 
       }
       if (unresolved) unresolvedItemIds.push(item.id);
       if (start && Number.isFinite(startMinute)) {
-        const localStart = Temporal.Instant.fromEpochMilliseconds(startMinute * 60_000).toZonedDateTimeISO(timeZone);
-        const localDayDifference = plainDate.until(localStart.toPlainDate()).days;
-        anchors.push({ id: item.id, startMinute, localStartMinute: localDayDifference * 1440 + localStart.hour * 60 + localStart.minute,
+        const localMinute = (epochMinute: number) => {
+          const local = Temporal.Instant.fromEpochMilliseconds(epochMinute * 60_000).toZonedDateTimeISO(timeZone);
+          return plainDate.until(local.toPlainDate()).days * 1440 + local.hour * 60 + local.minute;
+        };
+        anchors.push({ id: item.id, startMinute, localStartMinute: localMinute(startMinute),
+          localEndMinute: Number.isFinite(endMinute) ? localMinute(endMinute) : NaN, itemType: item.item_type,
           start: endpointPoint(start), end: endpointPoint(end ?? start) });
       }
       if (!unresolved) occupancy.push({ id: item.id, startMinute, endMinute });
@@ -258,7 +263,7 @@ export async function buildPlanningSnapshot(executor: DatabaseExecutor, tripId: 
     const row = place.row;
     const assignment = assignmentByPlace.get(row.id);
     entities[row.id] = { selected: row.selected_for_itinerary, scheduled: place.scheduled, type: place.type, coordinates: place.coordinates,
-      timeZone: place.timeZone, memberVisitMinutes: row.duration_minutes, memberEffortLevel: row.effort_level,
+      timeZone: place.timeZone, memberVisitMinutes: row.duration_minutes, memberEffortLevel: row.effort_level, mealRole: row.meal_role,
       votes: votesByPlace.get(row.id) ?? [], assignment: assignment ? { dayId: assignment.trip_day_id, position: assignment.day_position } : null,
       legacyPlaceId: row.legacy_place_id, identityId: row.place_id };
   }

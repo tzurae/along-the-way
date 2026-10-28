@@ -279,7 +279,7 @@ describe("day-plan map overlays", () => {
     act(() => mapLoad.resolve());
 
     await waitFor(() => expect(map.fitBounds).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole("tab", { name: "依直線距離排" }));
+    fireEvent.click(screen.getByRole("tab", { name: "照順路排" }));
     await waitFor(() => expect(map.fitBounds).toHaveBeenCalledTimes(2));
   });
 });

@@ -10,6 +10,14 @@ export type TripPlaceStatus =
   | "scheduled";
 export type IntakeMethod = "google-maps-url" | "search" | "manual";
 
+/** 哪一餐 (f5 §1.2): the meal a place is marked as, "none" for never a meal; null leaves it to the automatic rule. */
+export const TRIP_PLACE_MEAL_ROLES = ["breakfast", "lunch", "dinner", "none"] as const;
+export type TripPlaceMealRole = (typeof TRIP_PLACE_MEAL_ROLES)[number];
+
+export function isTripPlaceMealRole(value: unknown): value is TripPlaceMealRole {
+  return typeof value === "string" && (TRIP_PLACE_MEAL_ROLES as readonly string[]).includes(value);
+}
+
 export interface ProviderPlaceCandidateDto {
   provider: "google";
   providerPlaceId: string;
@@ -132,6 +140,8 @@ export interface TripPlaceDto {
   durationMinutes: number | null;
   /** Historical responses without this field are read as null. */
   effortLevel: number | null;
+  /** Historical responses without this field are read as null. Optional only so objects built before it existed still type-check. */
+  mealRole?: TripPlaceMealRole | null;
   assignedDayId: string | null;
   /** Applied order within the assigned day; null until a route order is applied. */
   dayPosition: number | null;
@@ -206,13 +216,15 @@ export type CreateTripPlaceInput =
   | CreateProviderTripPlaceInput;
 
 /**
- * Existing planning fields treat omission as null. effortLevel is tri-state:
- * omitted preserves, null clears, and an integer from 1 through 5 sets it.
+ * Existing planning fields treat omission as null. effortLevel and mealRole are tri-state:
+ * omitted preserves, null clears, and a value sets it (effortLevel: an integer from 1 through 5;
+ * mealRole: breakfast, lunch, dinner or none).
  */
 export interface UpdateTripPlacePlanningInput {
   expectedVersion: number;
   durationMinutes?: number | null;
   effortLevel?: number | null;
+  mealRole?: TripPlaceMealRole | null;
   budgetAmountMinor?: number | null;
   budgetCurrency?: string | null;
   notes?: string | null;
@@ -486,6 +498,7 @@ function tripPlace(value: unknown): TripPlaceDto {
     effortLevel: row.effortLevel == null ? null
       : typeof row.effortLevel === "number" && Number.isInteger(row.effortLevel) && row.effortLevel >= 1 && row.effortLevel <= 5
         ? row.effortLevel : invalid(),
+    mealRole: row.mealRole == null ? null : isTripPlaceMealRole(row.mealRole) ? row.mealRole : invalid(),
     assignedDayId,
     dayPosition: nullableInteger(row.dayPosition),
     replacedStop: row.replacedStop == null ? null : stopReplacement(row.replacedStop),

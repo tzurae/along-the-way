@@ -188,6 +188,8 @@ export interface DiscoveryModel {
     questionAnswers: DiscoveryQuestionAnswer[];
     /** Absent or null: no center, search the brief's areas as before. */
     searchCenter?: DiscoverySearchCenter | null;
+    /** 範圍 region: also plan the destination's common same-day-trip towns. Absent: false. */
+    dayTrips?: boolean;
   }): Promise<DiscoveryPlanResult>;
   research(input: {
     brief: StructuredDiscoveryBrief;
@@ -198,6 +200,8 @@ export interface DiscoveryModel {
     discovered: DiscoveredPlaceGroup[];
     outputLanguage: string;
     searchCenter?: DiscoverySearchCenter | null;
+    /** 範圍 region: the plan's areas include day-trip towns the traveler wants. Absent: false. */
+    dayTrips?: boolean;
   }): Promise<DiscoveryResearchResult>;
   /** Worker: at most five questions whose answers materially change the recommendations. */
   clarify(input: {

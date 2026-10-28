@@ -45,6 +45,9 @@ const validRouteResponse = {
     dayStartMinute: 540,
     fixedMinutes: 0,
     estimatedMoveMinutesToEnd: 7,
+    frame: null,
+    orderBasis: "distance",
+    orderReason: "no_frame",
   },
 } as const;
 
@@ -54,10 +57,10 @@ describe("parseDayRouteResponse", () => {
   });
 
   it("reads a route from an API without timing fields as unknown timing", () => {
-    const { dayStartMinute: _start, fixedMinutes: _fixed, estimatedMoveMinutesToEnd: _end, ...older } = validRouteResponse.route;
+    const { dayStartMinute: _start, fixedMinutes: _fixed, estimatedMoveMinutesToEnd: _end, frame: _frame, orderBasis: _basis, orderReason: _reason, ...older } = validRouteResponse.route;
     const { estimatedMoveMinutesFromPrevious: _move, stayMinutes: _stay, stayEstimated: _estimated, ...olderStop } = validRouteResponse.route.stops[0];
     const { route } = parseDayRouteResponse({ route: { ...older, stops: [olderStop] } });
-    expect(route).toMatchObject({ dayStartMinute: null, fixedMinutes: null, estimatedMoveMinutesToEnd: null });
+    expect(route).toMatchObject({ dayStartMinute: null, fixedMinutes: null, estimatedMoveMinutesToEnd: null, frame: null, orderBasis: null, orderReason: null });
     expect(route.stops[0]).toMatchObject({ estimatedMoveMinutesFromPrevious: null, stayMinutes: null, stayEstimated: false });
   });
 

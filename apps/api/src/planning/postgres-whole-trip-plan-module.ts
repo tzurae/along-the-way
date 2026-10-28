@@ -87,11 +87,13 @@ export class PostgresWholeTripPlanModule implements WholeTripPlanModule {
         throw new AppError("planner_input_too_large", INPUT_TOO_LARGE_MESSAGE, 422);
       }
       const estimates = snapshot.estimates;
-      const result = solveWholeTrip(snapshot.input);
+      // The solver yields the event loop between days (p9 §2.7); this transaction holds its connection meanwhile, as before.
+      const result = await solveWholeTrip(snapshot.input);
       if (result.status === "complete" && !validateWholeTripPlan(snapshot.input, result).valid) {
         throw new Error("Whole-trip solver produced an invalid complete result");
       }
       const createdAt = this.now();
+      // Each day carries its timeline and how its order was chosen (f5 1a, p9 §2.8).
       const payload: StoredProposal = { schemaVersion: 1, request, revisionInput: snapshot.revisionInput, estimates, result };
       const row = await transaction.insertInto("whole_trip_plan_proposals").values({
         id: randomUUID(),

@@ -8,6 +8,8 @@ const PLACE_FILTER_PREFIX = "along-the-way:place-filters:";
 const ONBOARDING_PREFIX = "along-the-way:trip-onboarding:";
 /** 調查's last 交通方式・時間 per account and trip (DiscoveryWorkspace). */
 export const DISCOVERY_REACH_PREFIX = "along-the-way:discovery-reach:";
+/** 調查's last 範圍 per account and trip (DiscoveryWorkspace). */
+export const DISCOVERY_SCOPE_PREFIX = "along-the-way:discovery-scope:";
 export const TODAY_SIGNED_OUT_STORAGE_KEY = "along-the-way:locally-signed-out";
 export const PENDING_SERVER_LOGOUT_STORAGE_KEY = "along-the-way:pending-server-logout";
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -281,6 +283,7 @@ export class TodaySnapshotStore {
           || key.startsWith(`${PLACE_FILTER_PREFIX}${accountId}:`)
           || key.startsWith(`${ONBOARDING_PREFIX}${accountId}:`)
           || key.startsWith(`${DISCOVERY_REACH_PREFIX}${accountId}:`)
+          || key.startsWith(`${DISCOVERY_SCOPE_PREFIX}${accountId}:`)
           || legacyFilterParts.length === 2
         ) this.storage.removeItem(key);
       }
