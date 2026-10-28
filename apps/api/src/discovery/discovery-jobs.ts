@@ -5,6 +5,7 @@ import {
   type DiscoveryJobDto,
   type DiscoveryNearInput,
   type DiscoveryReachInput,
+  type DiscoveryScope,
   type DiscoveryStage,
   type DiscoveryStageState,
 } from "@along-the-way/contracts/discovery";
@@ -27,6 +28,8 @@ export interface ClaimedDiscoveryJob {
   near: DiscoveryNearInput | null;
   /** How and how far the member chose to go from the center; null when none was asked. */
   reach: DiscoveryReachInput | null;
+  /** 範圍: only a nearby job has a search center. */
+  scope: DiscoveryScope;
 }
 
 /** A stored position, or null for anything else (no position, or a malformed row). */
@@ -154,7 +157,7 @@ export async function sweepStaleDiscoveryJobs(database: Kysely<AlongTheWayDataba
 export async function claimNextDiscoveryJob(database: Kysely<AlongTheWayDatabase>, now: Date): Promise<ClaimedDiscoveryJob | null> {
   return database.transaction().execute(async (transaction) => {
     const job = await transaction.selectFrom("discovery_jobs")
-      .select(["id", "trip_id", "brief_version", "created_by", "client_ip", "near", "reach"])
+      .select(["id", "trip_id", "brief_version", "created_by", "client_ip", "near", "reach", "scope"])
       .where("status", "=", "queued")
       .orderBy("created_at")
       .limit(1)
@@ -174,6 +177,7 @@ export async function claimNextDiscoveryJob(database: Kysely<AlongTheWayDatabase
       clientIp: job.client_ip ?? "unknown",
       near: storedNear(job.near),
       reach: storedReach(job.reach),
+      scope: job.scope,
     };
   });
 }

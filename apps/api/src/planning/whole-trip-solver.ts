@@ -1,13 +1,17 @@
+import { resolveDayMeals, simulateDay, type DayTimelineStop } from "@along-the-way/contracts/day-timeline";
+
+import { buildDayFrame } from "./day-frame";
 import {
   clockMinutes, comparePlannerIds, computePlanningWindow, createDayLoadEvaluator, createPlannerDistanceMatrix,
   formatClockMinutes, hasPlannerCoordinates, middleSegmentEndpoints, utilisationBand,
   type PlannerDayLoadEvaluator, type PlannerDistanceMatrix,
 } from "./day-load";
+import { planDayOrder, type DayOrderResult } from "./day-order";
 import { orderByStraightLine, type GeoPoint } from "./day-route-order";
 import {
   PLANNER_MAX_DAYS, PLANNER_MAX_FLEXIBLE_PLACES,
   type PlannerBlockingCheck, type PlannerConflict, type PlannerDayLoad, type PlannerDaySnapshot,
-  type PlannerEffectiveCaps, type PlannerEndpoint, type PlannerInput, type PlannerPlace, type PlannerResult, type PlannerSuggestion,
+  type PlannerEffectiveCaps, type PlannerEndpoint, type PlannerInput, type PlannerOutputDay, type PlannerPlace, type PlannerResult, type PlannerSuggestion,
 } from "./planner-model";
 import { validateWholeTripPlan } from "./whole-trip-validator";
 
@@ -362,15 +366,82 @@ function reorderDay(context: Context, index: number, middle: readonly PlannerPla
   return { middle: reordered, load: context.evaluate[index]!(reordered) };
 }
 
-function finalReorder(context: Context, state: State) {
+function timelineStop(place: PlannerPlace): DayTimelineStop {
+  return { id: place.id, type: place.type, stayMinutes: place.estimate.visitMinutes, mealRole: place.mealRole,
+    latitude: place.coordinates?.latitude ?? null, longitude: place.coordinates?.longitude ?? null };
+}
+
+/**
+ * p9 §2.1 base order of a day: its original located places (also those a draft moved away),
+ * positioned ones by position, the rest newest first (created_at desc, id desc), as the day dialog lists them.
+ */
+function baseOrder(context: Context, day: PlannerDaySnapshot) {
+  return [...context.input.flexiblePlaces, ...context.input.excludedPlaces]
+    .filter((place) => place.assignedDayId === day.id && hasPlannerCoordinates(place.coordinates))
+    .sort((left, right) => {
+      if (left.position !== null && right.position !== null) return left.position - right.position || comparePlannerIds(left.id, right.id);
+      if (left.position !== null) return -1;
+      if (right.position !== null) return 1;
+      return right.selectedIndex - left.selectedIndex;
+    });
+}
+
+/**
+ * p9 §2.8: each day in turn is ordered meals first by `planDayOrder`; only a valid load is accepted,
+ * so the solver's order (always valid) stays unless something scores better. Days it cannot time
+ * keep today's distance reorder. The event loop is yielded after every day (p9 §2.7).
+ */
+async function finalReorder(context: Context, state: State) {
   let result = state;
+  const days: Pick<PlannerOutputDay, "orderBasis" | "orderReason" | "timeline">[] = [];
   for (let index = 0; index < context.days.length; index += 1) {
-    const reordered = reorderDay(context, index, result.middle[index]!);
-    // A shorter total route can have a longer single hop or greater rounded travel time.
-    // In that case keep the last valid order, then validate it again independently below.
-    if (reordered && reordered.load.status === "valid") result = withDay(result, index, reordered.middle, reordered.load);
+    const day = context.days[index]!;
+    const middle = result.middle[index]!;
+    const frame = buildDayFrame(day);
+    const original = baseOrder(context, day);
+    const base = original.map(timelineStop);
+    // Ranks: positioned original places by position; every other place shares the rank after them (p9 §2.1).
+    const ranks = new Map(original.filter((place) => place.position !== null).map((place, rank) => [place.id, rank]));
+    const byId = new Map(middle.map((place) => [place.id, place]));
+    const endpoints = context.endpoints[index]!;
+    let planned: DayOrderResult | null = null;
+    if (middle.length > 0 && middle.every((place) => hasPlannerCoordinates(place.coordinates))
+      && (!endpoints.start || hasPlannerCoordinates(endpoints.start.coordinates))
+      && (!endpoints.end || hasPlannerCoordinates(endpoints.end.coordinates))) {
+      const asEndpoint = (point: GeoPoint): PlannerEndpoint => ({ id: point.id, coordinates: { latitude: point.latitude, longitude: point.longitude } });
+      planned = planDayOrder({
+        frame, stops: middle.map(timelineStop), transit: null, base, ranks,
+        start: endpoints.start ? { id: endpoints.start.id, ...endpoints.start.coordinates! } : null,
+        end: endpoints.end ? { id: endpoints.end.id, ...endpoints.end.coordinates! } : null,
+        distanceOrder: (stops, start, end) => orderByStraightLine(stops, start, end, (from, to) => context.distance(asEndpoint(from), asEndpoint(to))!),
+        accept: (orderedIds) => context.evaluate[index]!(orderedIds.map((id) => byId.get(id)!)).status === "valid",
+      });
+    }
+    if (planned?.orderedIds) {
+      const reordered = planned.orderedIds.map((id) => byId.get(id)!);
+      result = withDay(result, index, reordered, context.evaluate[index]!(reordered));
+    } else {
+      const reordered = reorderDay(context, index, middle);
+      // A shorter total route can have a longer single hop or greater rounded travel time.
+      // In that case keep the last valid order, then validate it again independently below.
+      if (reordered && reordered.load.status === "valid") result = withDay(result, index, reordered.middle, reordered.load);
+    }
+    // f5 1a: the draft's timeline from the same rules as the day dialog, straight-line minutes only.
+    const stops = result.middle[index]!.map(timelineStop);
+    // A day with nothing to order (empty, no window) says nothing about its basis; one that could not be
+    // timed (missing coordinates) is p9's no_frame.
+    const basis = planned
+      ? (planned.orderBasis && planned.orderReason ? { orderBasis: planned.orderBasis, orderReason: planned.orderReason } : {})
+      : middle.length > 0 ? { orderBasis: "distance" as const, orderReason: "no_frame" as const } : {};
+    days.push({
+      ...basis,
+      timeline: simulateDay(frame, stops, null, planned?.roles ?? resolveDayMeals(frame, base, stops, null, ranks)),
+    });
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setImmediate(resolve);
+    await promise;
   }
-  return result;
+  return { state: result, days };
 }
 
 function reasonsForPlace(context: Context, state: State, place: PlannerPlace) {
@@ -501,7 +572,8 @@ function suggestionsForPlaces(context: Context, state: State, unplaced: readonly
   return suggestions.sort(compareSuggestions).slice(0, MAX_PLANNER_SUGGESTIONS);
 }
 
-export function solveWholeTrip(input: PlannerInput): PlannerResult {
+/** Async only for the per-day yield in `finalReorder` (p9 §2.7); the computation order never changes. */
+export async function solveWholeTrip(input: PlannerInput): Promise<PlannerResult> {
   if (input.days.length > PLANNER_MAX_DAYS || input.flexiblePlaces.length > PLANNER_MAX_FLEXIBLE_PLACES) {
     throw new Error("planner_input_too_large");
   }
@@ -525,12 +597,15 @@ export function solveWholeTrip(input: PlannerInput): PlannerResult {
     const candidate = improve(context, construct(context, baseline, places), places);
     if (compareStates(context, candidate, best) < 0) best = candidate;
   }
-  best = finalReorder(context, best);
+  const reordered = await finalReorder(context, best);
+  best = reordered.state;
   const assigned = placedIds(context, best);
   const unplaced = input.flexiblePlaces.filter((place) => !assigned.has(place.id)).sort((left, right) => comparePlannerIds(left.id, right.id));
   const result: PlannerResult = {
     status: unplaced.length === 0 ? "complete" : proofs.length > 0 ? "proven_infeasible" : "search_incomplete",
-    days: days.map((day, index) => ({ dayId: day.id, orderedPlaceIds: best.middle[index]!.map((place) => place.id), load: best.loads[index]! })),
+    days: days.map((day, index) => ({
+      dayId: day.id, orderedPlaceIds: best.middle[index]!.map((place) => place.id), load: best.loads[index]!, ...reordered.days[index]!,
+    })),
     conflicts: unplaced.length === 0 ? [] : proofs,
     unplaced: unplaced.map((place) => ({ placeId: place.id, reasons: reasonsForPlace(context, best, place) })),
     excludedPlaceIds, suggestions: suggestionsForPlaces(context, best, unplaced),

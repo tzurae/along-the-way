@@ -19,6 +19,7 @@ import {
   parseProviderCandidatesResponse,
   parseTripPlaceListResponse,
   parseTripPlaceResponse,
+  TRIP_PLACE_MEAL_ROLES,
   type ProviderPlaceCandidateDto,
   type ProviderPlaceSearchResultDto,
   type TripPlaceDto,
@@ -457,7 +458,7 @@ export function AddPlacePanel({
   );
 }
 
-type PlanningInput = Pick<UpdateTripPlacePlanningInput, "durationMinutes" | "effortLevel" | "budgetAmountMinor" | "budgetCurrency" | "notes">;
+type PlanningInput = Pick<UpdateTripPlacePlanningInput, "durationMinutes" | "effortLevel" | "mealRole" | "budgetAmountMinor" | "budgetCurrency" | "notes">;
 
 const DEFAULT_ESTIMATE_BY_TYPE: Record<PlaceType, { visitMinutes: number; effortLevel: number }> = {
   activity: { visitMinutes: 120, effortLevel: 3 },
@@ -477,6 +478,7 @@ function planningValues(place: TripPlaceDto): PlanningInput {
   return {
     durationMinutes: place.durationMinutes,
     effortLevel: place.effortLevel,
+    mealRole: place.mealRole ?? null,
     budgetAmountMinor: place.budgetAmountMinor,
     budgetCurrency: place.budgetCurrency,
     notes: place.notes,
@@ -522,6 +524,7 @@ function PlanningEditors({ tripId, place, estimate, estimatesAvailable, availabl
       ...draft,
       durationMinutes: draft.durationMinutes ?? null,
       effortLevel: draft.effortLevel ?? null,
+      mealRole: draft.mealRole ?? null,
       notes: draft.notes?.trim() || null,
     };
     const operation = `planning:${place.id}`;
@@ -637,6 +640,17 @@ function PlanningEditors({ tripId, place, estimate, estimatesAvailable, availabl
             </div>
             {draft.effortLevel !== null ? <button type="button" className="pd-planning-clear" onClick={() => setDraft({ ...draft, effortLevel: null })}>{t.planning.clearValue}</button> : null}
           </fieldset>
+          <fieldset className="pd-effort-field">
+            <legend>{t.planning.mealRole}</legend>
+            <p>{t.planning.mealRoleHelp}</p>
+            <div className="pd-effort-options">
+              {TRIP_PLACE_MEAL_ROLES.map((role) => <label key={role} data-selected={draft.mealRole === role || undefined}>
+                <input type="radio" name={`meal-role-${place.id}`} value={role} checked={draft.mealRole === role} onChange={() => setDraft({ ...draft, mealRole: role })} />
+                <span>{t.planning.mealRoleLabels[role]}</span>
+              </label>)}
+            </div>
+            {draft.mealRole != null ? <button type="button" className="pd-planning-clear" onClick={() => setDraft({ ...draft, mealRole: null })}>{t.planning.mealRoleAuto}</button> : null}
+          </fieldset>
           <label className="pd-planning-field">
             <span>{t.planning.reasonLabel}</span>
             <textarea value={draft.notes ?? ""} maxLength={200} rows={3} placeholder={t.add.reasonPlaceholder} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} />
@@ -655,6 +669,7 @@ function PlanningEditors({ tripId, place, estimate, estimatesAvailable, availabl
         <dl>
           <div><dt>{t.planning.durationMinutes}</dt><dd>{t.planning.estimateValue(visitMinutes, visitSourceLabel)}</dd></div>
           <div><dt>{t.planning.effortLevel}</dt><dd>{t.planning.effortValue(effortLevel, effortSourceLabel)}</dd></div>
+          <div><dt>{t.planning.mealRoleSummary}</dt><dd>{base.input.mealRole ? t.planning.mealRoleValue(t.planning.mealRoleLabels[base.input.mealRole], t.planning.sources.member) : t.planning.mealRoleAutoValue}</dd></div>
         </dl>
         {estimatesStale ? <p className="pd-reason-copy pd-muted" role="status">{t.planning.estimatesUnavailable}</p> : null}
         <p className={base.input.notes ? "pd-reason-copy" : "pd-reason-copy pd-muted"}>{base.input.notes ?? t.workspace.noReasonDetail}</p>

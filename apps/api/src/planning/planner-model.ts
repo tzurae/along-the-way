@@ -1,5 +1,8 @@
+import type { DayRouteOrderBasis, DayRouteOrderReason } from "@along-the-way/contracts/day-plans";
+import type { DayTimeline } from "@along-the-way/contracts/day-timeline";
 import type { PlanningOverride, PlanningSettings } from "@along-the-way/contracts/planning";
-import type { PlaceType } from "@along-the-way/contracts/trip-skeleton";
+import type { TripPlaceMealRole } from "@along-the-way/contracts/trip-places";
+import type { ItineraryItemType, PlaceType } from "@along-the-way/contracts/trip-skeleton";
 
 export const PLANNER_MAX_DAYS = 30;
 export const PLANNER_MAX_FLEXIBLE_PLACES = 150;
@@ -25,9 +28,13 @@ export interface PlannerPlace {
   type: PlaceType;
   coordinates: PlannerCoordinates | null;
   estimate: PlannerEstimate;
+  /** 哪一餐 (f5 §2.1): the member's mark; null leaves the meal to the timeline's automatic rule. */
+  mealRole: TripPlaceMealRole | null;
   votes: number;
   assignedDayId: string | null;
   position: number | null;
+  /** Index among the trip's selected places (created_at, id ascending): unpositioned stops of a day are ordered newest first by it (p9 §2.1). */
+  selectedIndex: number;
 }
 
 export interface PlannerEndpoint {
@@ -40,6 +47,9 @@ export interface PlannerAnchor {
   id: string;
   startMinute: number;
   localStartMinute: number;
+  /** Local minutes after the day's midnight, like localStartMinute; NaN when the end is unresolved. */
+  localEndMinute: number;
+  itemType: ItineraryItemType;
   start: PlannerEndpoint;
   end: PlannerEndpoint;
 }
@@ -141,6 +151,11 @@ export interface PlannerOutputDay {
   /** Only the middle segment: flexible plus pinned, never fixed-selected. */
   orderedPlaceIds: string[];
   load: PlannerDayLoad;
+  /** Straight-line timeline stored with a draft (f5 1a); absent on older drafts, null for a day without stops. */
+  timeline?: DayTimeline | null;
+  /** How this day's order was chosen (p9 §2.6); absent on drafts written before P2. */
+  orderBasis?: DayRouteOrderBasis;
+  orderReason?: DayRouteOrderReason;
 }
 
 export type PlannerConflictCode = "fixed_baseline_over_cap" | "baseline_unverifiable"

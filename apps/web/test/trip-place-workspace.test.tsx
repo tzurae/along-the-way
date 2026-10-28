@@ -520,13 +520,14 @@ it("renders unsafe wishlist and duplicate source URLs as text instead of externa
   expect(detail.querySelector('a[href^="javascript:"], a[href^="data:"]')).toBeNull();
 });
 
-it("keeps the reason, duration and budget when only the effort is changed", async () => {
+it("keeps the reason, duration, budget and meal when only the effort is changed", async () => {
   const current = {
     ...place(unscheduledId, "哲學之道", false),
     durationMinutes: 75,
     budgetAmountMinor: 3200,
     budgetCurrency: "JPY",
     notes: "想看櫻花",
+    mealRole: "lunch" as const,
   };
   let savedPayload: Record<string, unknown> | null = null;
   const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
@@ -556,6 +557,7 @@ it("keeps the reason, duration and budget when only the effort is changed", asyn
   await waitFor(() => expect(savedPayload).toEqual({
     durationMinutes: 75,
     effortLevel: 4,
+    mealRole: "lunch",
     budgetAmountMinor: 3200,
     budgetCurrency: "JPY",
     notes: "想看櫻花",

@@ -374,6 +374,8 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
       }),
     });
     const center = searchCenterFacts(input.searchCenter);
+    // dayTrips only adds a developer sentence; the user message stays as before.
+    const { dayTrips, ...modelInput } = input;
     const response = await this.request(
       "trip_discovery_plan",
       schema,
@@ -390,6 +392,9 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
             "Return an empty unresolvedQuestions list: the traveler already answered a clarification checklist before research.",
             "questionAnswers are the traveler's answers to that checklist. Apply each non-null answer. A null answer was explicitly skipped or left uncertain: keep it unknown and do not assume an answer.",
             `Write every structuredBrief, unresolvedQuestions, and request text in Traditional Chinese as used in Taiwan (${APP_LANGUAGE}), whatever language the brief is written in, except localLanguage and the search query text.`,
+            ...(dayTrips ? [
+              "The traveler also wants day trips: include in request.areas the towns travelers commonly visit as same-day trips from the trip's destination, and spread searches across them.",
+            ] : []),
             ...(center ? [
               `searchCenter is where the traveler is (${center.is}). Unless the brief names other places or areas to search, the traveler wants places ${center.nearby} of searchCenter: call that area exactly \"${NEARBY_AREA}\" in areas and structuredBrief.areas, and write the searches for it as a concrete kind of place, dish, or feature without any city, district, or place name in the query text (for example \"お好み焼き\", \"湯豆腐\", \"おばんざい 居酒屋\"), because every Google Maps search is biased toward searchCenter and a place name in the text overrides that bias. This replaces the rule to name the city for those searches only; searches for places or areas the brief names keep their city. The plan is saved and shown to every trip member, so never write searchCenter's coordinates, neighborhood, or any place you infer from it anywhere in the answer.`,
             ] : []),
@@ -398,7 +403,7 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
         },
         {
           role: "user",
-          content: withSearchCenter(input),
+          content: withSearchCenter(modelInput),
         },
       ],
     );
@@ -487,6 +492,8 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
       },
     });
     const center = searchCenterFacts(input.searchCenter);
+    // dayTrips only adds a developer sentence; the user message stays as before.
+    const { dayTrips, ...modelInput } = input;
     const response = await this.request(
       "trip_place_research",
       schema,
@@ -513,6 +520,9 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
             "tradeoffs are short sentences of practical care for this party, each restating its pageFact, with the same citation rules.",
             "Do not invent opening hours, price, route time, accessibility, or availability; put missing critical facts in unknowns.",
             "Write every recommendation sentence, matchedNeeds entry, tradeoff sentence, and unknowns entry in outputLanguage, translating facts from sources in other languages; when outputLanguage is zh-TW, write Traditional Chinese as used in Taiwan and never copy Japanese sentences or kana, except a place's own name.",
+            ...(dayTrips ? [
+              "The traveler also wants day trips: request.areas includes towns travelers commonly visit as same-day trips from the trip's destination, and places in those towns are wanted.",
+            ] : []),
             ...(center ? [
               center.limitMeters !== null
                 ? `searchCenter is where the traveler is (${center.is}), and each discovered entry's distancesMeters[n] is placeIds[n]'s straight-line distance from it in meters (null: unknown). The traveler goes ${center.travel} and asked: ${center.rule}. Pick only places ${center.nearby}, that is distancesMeters at most ${center.limitMeters}; every place farther away is removed after research, so never pick one, even one the brief names. Every text you write is saved and shown to all trip members: never mention searchCenter, its distance, or where the traveler is, and never state a walking time or distance unless a cited page states it.`
@@ -521,7 +531,7 @@ export class OpenAiResponsesDiscoveryModel implements DiscoveryModel {
             `Return at most ${MAX_RESEARCHED} candidates and only the required schema.`,
           ].join(" "),
         },
-        { role: "user", content: withSearchCenter(input) },
+        { role: "user", content: withSearchCenter(modelInput) },
       ],
       { webSearch: true, timeoutMs: 150_000, maxOutputTokens: 25_000 },
     );

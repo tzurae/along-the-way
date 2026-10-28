@@ -9,6 +9,7 @@ export const discovery = {
     ownerOnly: "只有旅程建立者可以請 AI 找地點。",
     clarifyIncomplete: "還有必填的問題沒有通過檢查，請先補完再按「調查」。",
     reachRequired: "搜尋中心有變動，請再按一次，選好交通方式和時間後開始。",
+    nearbyUnavailable: "找不到你的位置或今晚住宿，請再按一次，改選其他範圍後開始。",
   },
   services: {
     openAi: "AI 服務金鑰與模型",
@@ -44,6 +45,16 @@ export const discovery = {
   searchCenter: {
     device: "以你目前位置附近搜尋",
     lodging: (name: string | null) => name ? `以今晚住宿「${name}」附近搜尋` : "以今晚住宿附近搜尋",
+  },
+  /** 調查 always asks this first (owner rule 2026-10-28); nearby then also asks 交通方式・時間. */
+  scope: {
+    label: "範圍",
+    question: "這次要找哪個範圍？",
+    nearbyDevice: "目前位置附近",
+    nearbyLodging: "住宿附近",
+    city: "整個城市",
+    region: "含近郊一日遊",
+    nearbyUnavailable: "沒有定位或今晚住宿，無法找附近",
   },
   /** 調查 near a center always asks these two first (owner rule 2026-10-22). */
   reach: {

@@ -109,6 +109,8 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   for (const restore of restorers.splice(0).reverse()) restore();
+  // 調查 remembers 範圍 and 交通方式・時間 per trip; each test starts with none picked.
+  window.localStorage.clear();
 });
 
 function replaceProperty(target: object, key: string, value: unknown) {
@@ -459,7 +461,8 @@ function discovery(overrides: Record<string, unknown>) {
   } };
 }
 
-it("walks 調查 step by step: questions first, required answers, then research handed to the trip shell", async () => {
+it("walks 調查 step by step: questions and 範圍 first, required answers, then research handed to the trip shell", async () => {
+  const getCurrentPosition = stubPhonePosition({ latitude: 35.003456, longitude: 135.768912 });
   const calls: Array<{ path: string; method: string; body: unknown }> = [];
   const queued = job({ status: "queued", stage: null, stages: stages([], null) });
   const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
@@ -468,9 +471,9 @@ it("walks 調查 step by step: questions first, required answers, then research 
     let value: unknown;
     if (path.endsWith("/discovery") && method === "GET") value = discovery({});
     else if (path.endsWith("/trip-places")) value = { tripPlaces: [] };
-    else if (path.endsWith("/discovery/clarification") && method === "POST") value = discovery({ clarification: checklist("asking", null, 1) });
+    else if (path.endsWith("/discovery/clarification") && method === "POST") value = discovery({ clarification: checklist("asking", null, 1), searchCenter: { source: "device", label: null } });
     else if (path.endsWith("/discovery/clarification/answers") && method === "PUT") value = discovery({ clarification: checklist("ready", "想", 2) });
-    else if (path.endsWith("/discovery/research") && method === "POST") value = discovery({ clarification: checklist("ready", "想", 2), latestJob: queued });
+    else if (path.endsWith("/discovery/research") && method === "POST") value = discovery({ clarification: checklist("ready", "想", 2), latestJob: queued, searchCenter: null });
     else throw new Error(`Unexpected request: ${method} ${path}`);
     return (init?.parse ? init.parse(value) : value) as T;
   };
@@ -478,12 +481,16 @@ it("walks 調查 step by step: questions first, required answers, then research 
   render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} job={null} onJobStarted={onJobStarted} />);
 
   fireEvent.click(await screen.findByRole("button", { name: "下一步：讓 AI 先問幾題" }));
-  // The required question blocks research until it is answered.
-  const blocked = await screen.findByRole("button", { name: "還有 1 題必填" });
+  // The required question and 範圍 block research until both are answered.
+  const blocked = await screen.findByRole("button", { name: "還有 2 題必填" });
   expect(blocked).toBeDisabled();
   expect(calls.map((call) => call.path.split("/discovery")[1])).toEqual(["/clarification"]);
 
   fireEvent.click(screen.getByRole("radio", { name: "想" }));
+  expect(screen.getByRole("button", { name: "還有 1 題必填" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("radio", { name: "整個城市" }));
+  // 交通方式・時間 are asked only for 附近.
+  expect(screen.queryByRole("radio", { name: "步行" })).toBeNull();
   fireEvent.click(await screen.findByRole("button", { name: "開始找地點" }));
 
   await waitFor(() => expect(onJobStarted).toHaveBeenCalledWith(expect.objectContaining({ id: queued.id, status: "queued" })));
@@ -493,7 +500,10 @@ it("walks 調查 step by step: questions first, required answers, then research 
     ["POST", "/research"],
   ]);
   expect(calls[1]!.body).toEqual({ expectedVersion: 1, answers: [{ id: "q1", answer: "想" }] });
-  expect(calls[2]!.body).toEqual({ expectedBriefVersion: 1 });
+  // 整個城市 neither reads nor sends the phone position, and sends no 交通方式・時間.
+  expect(calls[2]!.body).toEqual({ expectedBriefVersion: 1, scope: "city" });
+  expect(getCurrentPosition).toHaveBeenCalledTimes(1);
+  expect(screen.queryByText(/附近搜尋/)).toBeNull();
 });
 
 it("shows a running job's current stage at the top, then the places that run found, marked new", async () => {
@@ -544,10 +554,10 @@ function stubPhonePosition(outcome: { latitude: number; longitude: number } | "d
 }
 
 /**
- * 調查 with no questions: one click asks for the checklist; with a search center the dialog then
- * asks 交通方式・時間 (these chip labels) before 開始找地點 queues research, without one research queues at once.
+ * 調查 with no questions: one click asks for the checklist and opens the dialog, which then asks
+ * 範圍 (and 交通方式・時間 for 附近). `start` picks these chip labels in order, then 開始找地點 queues research.
  */
-async function investigateWithCenter(searchCenter: unknown, reach?: { mode: string; time: string }) {
+async function investigateWithCenter(searchCenter: unknown) {
   const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
   const queued = job({ status: "queued", stage: null, stages: stages([], null) });
   const request = async <T,>(path: string, init?: PlaceDetailRequestOptions): Promise<T> => {
@@ -564,24 +574,29 @@ async function investigateWithCenter(searchCenter: unknown, reach?: { mode: stri
   const onJobStarted = vi.fn();
   render(<DiscoveryWorkspace accountId="account" trip={trip} request={request} placesRevision={0} onPlacesChanged={vi.fn()} job={null} onJobStarted={onJobStarted} />);
   fireEvent.click(await screen.findByRole("button", { name: "下一步：讓 AI 先問幾題" }));
-  if (reach) {
-    fireEvent.click(await screen.findByRole("radio", { name: reach.mode }));
-    fireEvent.click(screen.getByRole("radio", { name: reach.time }));
-    fireEvent.click(await screen.findByRole("button", { name: "開始找地點" }));
-  }
-  await waitFor(() => expect(onJobStarted).toHaveBeenCalledWith(expect.objectContaining({ id: queued.id })));
-  return calls;
+  // Even with nothing left for the AI to ask, 調查 stops at the dialog for 範圍.
+  expect(await screen.findByRole("button", { name: "還有 1 題必填" })).toBeDisabled();
+  expect(calls.map((call) => call.path)).toEqual(["/clarification"]);
+  return {
+    async start(choices: string[]) {
+      for (const choice of choices) fireEvent.click(await screen.findByRole("radio", { name: choice }));
+      fireEvent.click(await screen.findByRole("button", { name: "開始找地點" }));
+      await waitFor(() => expect(onJobStarted).toHaveBeenCalledWith(expect.objectContaining({ id: queued.id })));
+      return calls;
+    },
+  };
 }
 
 it("sends the phone position rounded to 3 decimals with both 調查 starts and says it searched near you", async () => {
   const getCurrentPosition = stubPhonePosition({ latitude: 35.003456, longitude: 135.768912 });
 
-  const calls = await investigateWithCenter({ source: "device", label: null }, { mode: "步行", time: "5 分鐘以內" });
+  const investigate = await investigateWithCenter({ source: "device", label: null });
+  const calls = await investigate.start(["目前位置附近", "步行", "5 分鐘以內"]);
 
   const near = { latitude: 35.003, longitude: 135.769 };
   expect(calls).toEqual([
     { path: "/clarification", body: { expectedBriefVersion: 1, near } },
-    { path: "/research", body: { expectedBriefVersion: 1, near, reach: { mode: "walk", maxMinutes: 5 } } },
+    { path: "/research", body: { expectedBriefVersion: 1, scope: "nearby", near, reach: { mode: "walk", maxMinutes: 5 } } },
   ]);
   expect(getCurrentPosition).toHaveBeenCalledTimes(2);
   expect(getCurrentPosition.mock.calls[0]![2]).toEqual({ enableHighAccuracy: false, timeout: 8_000, maximumAge: 600_000 });
@@ -591,22 +606,27 @@ it("sends the phone position rounded to 3 decimals with both 調查 starts and s
 it("sends no position when the traveler denies it, and names tonight's lodging the server used", async () => {
   stubPhonePosition("denied");
 
-  const calls = await investigateWithCenter({ source: "lodging", label: "京都車站飯店" }, { mode: "大眾運輸", time: "都可以" });
+  const investigate = await investigateWithCenter({ source: "lodging", label: "京都車站飯店" });
+  const calls = await investigate.start(["住宿附近", "大眾運輸", "都可以"]);
 
   expect(calls.map((call) => call.body)).toEqual([
     { expectedBriefVersion: 1 },
-    { expectedBriefVersion: 1, reach: { mode: "transit", maxMinutes: null } },
+    { expectedBriefVersion: 1, scope: "nearby", reach: { mode: "transit", maxMinutes: null } },
   ]);
   expect((await screen.findAllByText("以今晚住宿「京都車站飯店」附近搜尋")).length).toBeGreaterThan(0);
   expect(screen.queryByText("以你目前位置附近搜尋")).toBeNull();
 });
 
-it("never asks for the position outside a secure page and shows no center line when the server had none", async () => {
+it("never asks for the position outside a secure page, offers no 附近 without a center, and shows no center line", async () => {
   const getCurrentPosition = stubPhonePosition({ latitude: 35, longitude: 135.7 }, false);
 
-  const calls = await investigateWithCenter(null);
+  const investigate = await investigateWithCenter(null);
+  const nearby = screen.getByRole("radio", { name: "住宿附近" });
+  expect(nearby).toBeDisabled();
+  expect(nearby.closest('[role="radiogroup"]')).toHaveAccessibleDescription("沒有定位或今晚住宿，無法找附近");
+  const calls = await investigate.start(["含近郊一日遊"]);
 
   expect(getCurrentPosition).not.toHaveBeenCalled();
-  expect(calls.map((call) => call.body)).toEqual([{ expectedBriefVersion: 1 }, { expectedBriefVersion: 1 }]);
+  expect(calls.map((call) => call.body)).toEqual([{ expectedBriefVersion: 1 }, { expectedBriefVersion: 1, scope: "region" }]);
   expect(screen.queryByText(/附近搜尋/)).toBeNull();
 });

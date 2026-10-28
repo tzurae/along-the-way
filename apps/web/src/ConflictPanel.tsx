@@ -39,7 +39,7 @@ function flatten(value: unknown, prefix = "", result: Record<string, unknown> = 
 }
 
 // These paths are enums in the mutation contracts; all other values are member text.
-const enumField = /^(?:type|decision|endpoints\.\d+\.role|constraints\.\d+\.(?:type|status))$/;
+const enumField = /^(?:type|decision|mealRole|endpoints\.\d+\.role|constraints\.\d+\.(?:type|status))$/;
 
 export function ConflictPanel<T>({ conflict, busy, onAccept, onReapply, onEdit, formatValue }: {
   conflict: VersionConflict<T>;

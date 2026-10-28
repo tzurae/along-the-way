@@ -4,12 +4,15 @@ import { Check, MapPin, Pencil, RotateCw, X } from "lucide-react";
 import {
   DISCOVERY_REACH_MINUTES,
   DISCOVERY_REACH_MODES,
+  DISCOVERY_SCOPES,
   DISCOVERY_STAGES,
   type DiscoveryClarificationDto,
   type DiscoveryClarifyItemDto,
   type DiscoveryJobDto,
   type DiscoveryReachMinutes,
   type DiscoveryReachMode,
+  type DiscoveryScope,
+  type DiscoverySearchCenterDto,
   type DiscoveryStage,
 } from "@along-the-way/contracts/discovery";
 import type { Messages } from "./i18n";
@@ -230,6 +233,62 @@ export function ClarifyChecklist({ clarification, drafts, readOnly, onChange, t 
             t={t}
           />
         ))}
+      </ol>
+    </section>
+  );
+}
+
+/**
+ * 範圍, the first question 調查 asks itself (owner rule 2026-10-28), fixed chips like
+ * ReachChoices. Required. 附近 needs a center: without one it cannot be picked.
+ */
+export function ScopeChoices({ scope, nearby, readOnly, onChange, t, required }: {
+  /** null: not picked yet (or 附近 picked earlier but no center now). */
+  scope: DiscoveryScope | null;
+  /** The center 附近 searches around; null when there is none, so 附近 is unavailable. */
+  nearby: DiscoverySearchCenterDto["source"] | null;
+  readOnly: boolean;
+  onChange(scope: DiscoveryScope): void;
+  t: DiscoveryCopy["scope"];
+  /** The 「必填」 pill text. */
+  required: string;
+}) {
+  const labels: Record<DiscoveryScope, string> = {
+    nearby: nearby === "device" ? t.nearbyDevice : t.nearbyLodging,
+    city: t.city,
+    region: t.region,
+  };
+  return (
+    <section className="pd-clarify" aria-label={t.label}>
+      <h3 className="pd-clarify-title">{t.label}</h3>
+      <ol className="pd-clarify-list">
+        <li className="pd-clarify-item" data-clarify-item="scope">
+          <div className="pd-clarify-head">
+            <span id="scope" className="pd-clarify-text">{t.question}</span>
+            <span className="pd-clarify-pill" data-kind="required">{required}</span>
+          </div>
+          <div className="pd-options" role="radiogroup" aria-labelledby="scope" aria-describedby={nearby ? undefined : "scope-nearby-unavailable"}>
+            {DISCOVERY_SCOPES.map((option) => {
+              const unavailable = option === "nearby" && !nearby;
+              return (
+                <label key={option} className="pd-option" data-checked={scope === option || undefined}>
+                  <input
+                    type="radio"
+                    name="scope"
+                    checked={scope === option}
+                    disabled={unavailable}
+                    aria-disabled={readOnly || undefined}
+                    onChange={() => {
+                      if (!readOnly && !unavailable) onChange(option);
+                    }}
+                  />
+                  {labels[option]}
+                </label>
+              );
+            })}
+          </div>
+          {nearby ? null : <p id="scope-nearby-unavailable" className="pd-clarify-why">{t.nearbyUnavailable}</p>}
+        </li>
       </ol>
     </section>
   );
